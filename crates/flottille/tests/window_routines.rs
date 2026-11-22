@@ -886,3 +886,219 @@ fn the_routines_tab_has_its_place_in_the_history(cx: &mut TestAppContext) {
         present(cx, "routine-Tickets to review")
     });
 }
+
+// The list a result gives (#1124).
+
+const LISTING: &str = "List the tickets with their sentences";
+const TRACKER: &str = "https://tracker.example/ABC-12";
+
+/// The fake agent ends its turn with `items`.
+fn listing(user: &User, items: Value) {
+    user.fake_script(json!({"turns": [
+        {"when": LISTING, "do": [
+            {"mcp": {"tool": "routine_result", "arguments":
+                {"summary": "Tickets to review", "items": items}}}]},
+    ]}));
+}
+
+fn item(id: &str, title: &str) -> Value {
+    json!({"id": id, "title": title})
+}
+
+/// The window on the result page of the routine's last run.
+fn open_result<'a>(
+    user: &User,
+    name: &str,
+    run: &Value,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = open_routine(user, name, cx);
+    let row = format!("routine-run-{}", run["id"]);
+    until(&shell, cx, "the run is listed", |cx| present(cx, &row));
+    click(cx, &row);
+    until(&shell, cx, "the result page shows", |cx| {
+        present(cx, "result-report")
+    });
+    (shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_routine_ends_with_items_shown_as_rows(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Tickets to review", LISTING, json!({}));
+    listing(
+        &user,
+        json!([
+            {"id": "ABC-12", "title": "Login fails", "link": TRACKER,
+             "text": "Reported twice this week.", "tags": ["blocks 3", "urgent"],
+             "group": "Blocking"},
+            {"id": "ABC-30", "title": "Slow start", "group": "Later"},
+            {"id": "ABC-14", "title": "Typo in the footer", "group": "Blocking"},
+        ]),
+    );
+    let run = run_now(&user, "Tickets to review");
+
+    let (shell, cx) = open_routine(&user, "Tickets to review", cx);
+    let opened: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> = Arc::default();
+    let given = opened.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            given.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    let row = format!("routine-run-{}", run["id"]);
+    until(&shell, cx, "the run is listed", |cx| present(cx, &row));
+    click(cx, &row);
+    until(&shell, cx, "the items show", |cx| {
+        present(cx, "result-item-ABC-12")
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "result-item-ABC-12").as_deref(),
+        Some("Login fails"),
+        "the title"
+    );
+    assert_eq!(
+        label(cx, "result-item-ABC-12-line").as_deref(),
+        Some("Reported twice this week."),
+        "the sentence under it"
+    );
+    // The first run has nothing to compare with: every item is new, and the chips follow it.
+    assert_eq!(
+        label(cx, "result-item-ABC-12-tag-0").as_deref(),
+        Some("New")
+    );
+    assert_eq!(
+        label(cx, "result-item-ABC-12-tag-1").as_deref(),
+        Some("blocks 3")
+    );
+    assert_eq!(
+        label(cx, "result-item-ABC-12-tag-2").as_deref(),
+        Some("urgent")
+    );
+    for group in ["Blocking", "Later"] {
+        assert_eq!(
+            label(cx, &format!("result-group-{group}-title")).as_deref(),
+            Some(group),
+            "a heading for {group}"
+        );
+    }
+    assert!(present(cx, "result-item-ABC-14") && present(cx, "result-item-ABC-30"));
+    // The link opens with the system's handler, as it is.
+    click(cx, "result-item-ABC-12");
+    assert_eq!(*opened.lock().unwrap(), [std::path::PathBuf::from(TRACKER)]);
+    click(cx, "result-item-ABC-30");
+    assert_eq!(opened.lock().unwrap().len(), 1, "no link, nothing opens");
+}
+
+#[gpui_kit::test]
+fn items_new_since_the_last_run_are_marked(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Tickets to review", LISTING, json!({}));
+    listing(&user, json!([item("ABC-1", "One"), item("ABC-2", "Two")]));
+    run_now(&user, "Tickets to review");
+    listing(&user, json!([item("ABC-2", "Two"), item("ABC-3", "Three")]));
+    let run = run_now(&user, "Tickets to review");
+
+    let (shell, cx) = open_result(&user, "Tickets to review", &run, cx);
+    until(&shell, cx, "the items show", |cx| {
+        present(cx, "result-item-ABC-3")
+    });
+    settle(cx);
+
+    assert_eq!(label(cx, "result-item-ABC-3-tag-0").as_deref(), Some("New"));
+    assert!(present(cx, "result-item-ABC-2"));
+    assert!(
+        !present(cx, "result-item-ABC-2-tag-0"),
+        "seen at the last run: not marked"
+    );
+}
+
+#[gpui_kit::test]
+fn items_that_left_are_said_once(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Tickets to review", LISTING, json!({}));
+    listing(
+        &user,
+        json!([item("ABC-377", "Old bug"), item("ABC-1", "One")]),
+    );
+    run_now(&user, "Tickets to review");
+    listing(&user, json!([item("ABC-1", "One")]));
+    let second = run_now(&user, "Tickets to review");
+    listing(&user, json!([item("ABC-1", "One")]));
+    let third = run_now(&user, "Tickets to review");
+
+    let (shell, cx) = open_result(&user, "Tickets to review", &second, cx);
+    until(&shell, cx, "the items show", |cx| {
+        present(cx, "result-item-ABC-1")
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "result-left").as_deref(),
+        Some("Left since the last run: ABC-377"),
+        "said at the foot"
+    );
+
+    // The run after it compares with this one alone: nothing is said again.
+    click(cx, "routines-back-to-routine");
+    let row = format!("routine-run-{}", third["id"]);
+    until(&shell, cx, "the third run is listed", |cx| {
+        present(cx, &row)
+    });
+    click(cx, &row);
+    until(&shell, cx, "the items show", |cx| {
+        present(cx, "result-item-ABC-1")
+    });
+    settle(cx);
+    assert!(!present(cx, "result-left"), "said once");
+}
+
+#[gpui_kit::test]
+fn the_form_chooses_to_ring_only_when_something_is_new(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = open_form(&user, cx);
+    let form = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .project_page()
+            .unwrap()
+            .read(cx)
+            .routines()
+            .read(cx)
+            .form()
+            .clone()
+    });
+    cx.update(|window, cx| {
+        form.update(cx, |form, cx| {
+            form.name_field()
+                .clone()
+                .update(cx, |f, cx| f.set_value("Tickets to review", window, cx));
+            form.prompt_field()
+                .clone()
+                .update(cx, |f, cx| f.set_value(LISTING, window, cx));
+            form.hour_field()
+                .clone()
+                .update(cx, |f, cx| f.set_value("08:30", window, cx));
+        })
+    });
+    settle(cx);
+    click(cx, "routine-days");
+    click(cx, "routine-days-weekdays");
+    // The choice is below the fold of a form in a window this high: a taller one shows it.
+    cx.simulate_resize(size(px(1280.), px(2600.)));
+    settle(cx);
+    click(cx, "routine-rings-choice-new");
+    click(cx, "routine-save");
+    until(&shell, cx, "the routine is kept", |_| {
+        user.call("routine.list", json!({"project": "app"}))
+            .unwrap()["routines"]
+            .as_array()
+            .is_some_and(|all| all.len() == 1)
+    });
+    let kept = user
+        .call("routine.list", json!({"project": "app"}))
+        .unwrap()["routines"][0]
+        .clone();
+    assert_eq!(kept["rings"], "new", "{kept}");
+}
