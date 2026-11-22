@@ -568,12 +568,28 @@ async fn judged(
     };
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
-    let classed = crate::travelled::classed(daemon, &found, &asked, sender)?;
-    let mut says = words(kind, &asked, sender);
-    says.splice(
-        1..1,
-        crate::travelled::words(&found, &asked, sender, &classed),
-    );
+    let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    let name_of = |key: &str| {
+        members
+            .members()
+            .iter()
+            .find(|member| {
+                member
+                    .machine
+                    .as_ref()
+                    .is_some_and(|k| hex(k.as_bytes()) == key)
+            })
+            .map(|member| member.name.clone())
+    };
+    let said = |found: &crate::travelled::Found| {
+        let mut says = words(kind, &asked, sender);
+        says.splice(
+            1..1,
+            crate::travelled::words(found, &asked, (sender, &machine), name_of, &classed),
+        );
+        says
+    };
+    let says = said(&found);
     let judgement = match mode {
         GateMode::Full => None,
         GateMode::Ask => None,
@@ -595,9 +611,10 @@ async fn judged(
             .as_ref()
             .is_some_and(|judged| judged.verdict == "allow");
     let state = if accepted { "accepted" } else { "held" };
-    // A project to make is recognised again first, two launches of it at once making it once;
-    // it is made only once the launch is recorded.
+    // The project is recognised again first, two launches of a new one at once making it once;
+    // it is made only once the launch is recorded. The words kept are said of it as it is now.
     let (found, _making) = crate::travelled::again(daemon, found, &asked, here).await?;
+    let says = said(&found);
     let (name, made) = match &found {
         crate::travelled::Found::Here(project) => (project.name.clone(), false),
         crate::travelled::Found::Made { name, .. } => (name.clone(), true),
@@ -621,6 +638,7 @@ async fn judged(
             "says": says,
             "reasons": classed.reasons,
             "base": classed.base,
+            "classed": classed.text,
             "judgement": judgement,
             "made": made,
         }),
@@ -644,12 +662,18 @@ async fn judged(
     }
     // Its project's settings are laid only once the launch is allowed: now, or at the user's
     // answer.
-    let prepared = crate::travelled::made(daemon, &found, &asked, sender).and_then(|()| {
+    let prepared = crate::travelled::made(daemon, &found, &asked, &record.machine).and_then(|()| {
         if !accepted {
             return Ok(());
         }
         let came = serde_json::to_value(&asked).unwrap_or_default();
-        crate::travelled::take_settings(daemon, &name, &came, sender)
+        crate::travelled::take_settings(
+            daemon,
+            &name,
+            &came,
+            &record.machine,
+            classed.text.as_deref(),
+        )
     });
     if let Err(why) = prepared {
         let _ = daemon.write(|store| {
@@ -1033,27 +1057,12 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     let Some(agent) = launch.agent.clone() else {
         return;
     };
-    // Its project's settings first, which its setup follows: a launch whose settings cannot be
-    // used here is refused, saying why.
-    let mut allowed = allowed;
-    if allowed {
-        let from = launch.asked["from"].as_str().unwrap_or("another machine");
-        if let Err(why) =
-            crate::travelled::take_settings(daemon, &launch.project, &launch.asked["asked"], from)
-        {
-            eprintln!(
-                "flottille daemon: launch {} is refused: {why}",
-                launch.launch
-            );
-            allowed = false;
-        }
-    }
     let state = match allowed {
         true => "started",
         false => "refused",
     };
-    // Only the launch's state is written, and only while it is held: its workspace is read as it
-    // is now, never as `launch` was read.
+    // Settled first, and only while it is held: a launch whose agent ended meanwhile
+    // (`cancelled`) lays nothing. Its workspace is read as it is now, never as `launch` was read.
     let settled = match daemon.write(|store| {
         store
             .settle_launch(&launch.machine, &launch.launch, state)
@@ -1064,7 +1073,6 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
             launch.workspace_id = workspace_id;
             true
         }
-        // Settled meanwhile: its agent ended (`cancelled`).
         Ok(None) => false,
         Err(why) => {
             eprintln!(
@@ -1076,6 +1084,36 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     };
     if !settled {
         return;
+    }
+    // Then its project's settings, which its setup follows, laid only on the project the user
+    // allowed them for: a launch whose settings cannot be used here, or whose project changed
+    // since, is refused, saying why.
+    let mut allowed = allowed;
+    if allowed
+        && let Err(why) = crate::travelled::take_settings(
+            daemon,
+            &launch.project,
+            &launch.asked["asked"],
+            &launch.machine,
+            launch.asked["classed"].as_str(),
+        )
+    {
+        eprintln!(
+            "flottille daemon: launch {} is refused: {why}",
+            launch.launch
+        );
+        allowed = false;
+        launch.state = "refused".into();
+        if let Err(error) = daemon.write(|store| {
+            store
+                .refuse_started_launch(&launch.machine, &launch.launch)
+                .map(|()| ((), None))
+        }) {
+            eprintln!(
+                "flottille daemon: launch {}: its refusal cannot be kept: {error}",
+                launch.launch
+            );
+        }
     }
     let outcome = match allowed {
         true => "done",

@@ -77,16 +77,18 @@ fn there_folder(server: &Machine, name: &str) -> PathBuf {
 #[test]
 fn a_launch_to_a_machine_without_the_project_makes_it_there_from_the_bundle() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    no_branch_prefix(&pc);
     signed_in_there(&pc);
     assert!(names(&server).is_empty());
 
     let session = led_there(&pc, &server, "Finish the export");
 
-    // The project made in the folder for projects from other machines, marked as made from pc.
+    // The project made in the folder for projects from other machines, marked as made from pc,
+    // by its machine's key.
     let made = project(&server, "app");
     let folder = there_folder(&server, "app");
     assert_eq!(made["folder"], folder.to_str().unwrap(), "{made:#}");
-    assert_eq!(made["from_machine"], "pc", "{made:#}");
+    assert_eq!(made["from_machine"], pc.this()["key"], "{made:#}");
     assert_eq!(session["project"], "app");
     // Its repository cloned from the bundle: pc's commits are there.
     let log = server.git(&folder, &["log", "--format=%s", "--all"]);
@@ -237,6 +239,7 @@ fn nothing_is_cloned_from_a_remote_and_no_file_is_copied() {
     );
     // An ignored file of the caller's: it stays there.
     std::fs::write(pc.folder().join(".env"), "TOKEN=kept-here\n").unwrap();
+    no_branch_prefix(&pc);
     signed_in_there(&pc);
 
     let session = led_there(&pc, &server, "No remote");
@@ -423,7 +426,7 @@ fn another_machine_never_takes_over_a_project_made_for_one() {
     assert_eq!(session["project"], "app", "{session:#}");
     let kept = project(&server, "app");
     assert_eq!(kept["rules"], "Pc's.", "{kept:#}");
-    assert_eq!(kept["from_machine"], "pc", "{kept:#}");
+    assert_eq!(kept["from_machine"], pc.this()["key"], "{kept:#}");
     assert!(
         kept.get("tasks")
             .is_none_or(|tasks| tasks.get("hello").is_none()),
@@ -447,6 +450,8 @@ fn two_launches_of_a_new_project_at_once_both_start() {
     // Two machines, each sending one thing at a time: their launches meet in the making.
     let laptop = laptop(&hub, &pc, &server);
     laptop.register("");
+    no_branch_prefix(&pc);
+    no_branch_prefix(&laptop);
     signed_in_there(&pc);
     signed_in_there(&laptop);
     let (_first, one) = pc.root("auto");
@@ -474,4 +479,210 @@ fn two_launches_of_a_new_project_at_once_both_start() {
     assert_eq!(titled(&server, "One")["project"], "app");
     assert_eq!(titled(&server, "Two")["project"], "app");
     assert_eq!(names(&server), ["app"]);
+}
+
+/// `machine`'s project `app` with no branch prefix of its own: the one a project made for it
+/// takes, so that its first launch sets no convention there.
+fn no_branch_prefix(machine: &Machine) {
+    let file = machine.user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("branch_prefix = \"\"\n", "")).unwrap();
+    machine.user.call("project.list", json!({})).unwrap();
+}
+
+/// The server's project `app`, as its user edits its file by hand: `line` added at its top.
+fn edited_by_hand(server: &Machine, line: &str) {
+    let file = server.user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{line}\n{text}")).unwrap();
+    server.user.call("project.list", json!({})).unwrap();
+}
+
+#[test]
+fn the_user_s_change_while_a_launch_is_held_is_kept() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    pc.register("rules = \"Small commits.\"\n");
+    signed_in_there(&pc);
+    let first = held_there(&pc, &server, "auto", "First");
+    approved(&server, &first);
+    eventually("the first settings laid", || {
+        project(&server, "app")["rules"] == "Small commits."
+    });
+
+    // A harmless change of the rules, held for the user as rules are.
+    pc.register("rules = \"Tiny commits.\"\n");
+    let second = held_there(&pc, &server, "auto", "Second");
+    // Meanwhile the user adds a never entry by hand, and turns on asking before a task runs.
+    edited_by_hand(&server, "never = [[\"git\", \"push\"]]");
+    let edited = project(&server, "app");
+    assert_eq!(edited["never"], json!([["git", "push"]]), "{edited:#}");
+    approved(&server, &second);
+    crate::remote_launch::a_while();
+
+    // What the user approved did not say it empties the never list: it is not laid.
+    let kept = project(&server, "app");
+    assert_eq!(kept["never"], json!([["git", "push"]]), "{kept:#}");
+    assert_eq!(kept["rules"], "Small commits.", "{kept:#}");
+    assert!(
+        server.log().contains("changed here since"),
+        "the launch does not say why: {}",
+        server.log()
+    );
+}
+
+#[test]
+fn a_convention_change_in_auto_goes_to_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    no_branch_prefix(&pc);
+    signed_in_there(&pc);
+    led_there(&pc, &server, "First");
+    let judged = server.user.judge_received().len();
+
+    // The caller's branch prefix is now its own: no agent's tool writes it, the user decides.
+    pc.register("");
+    let request = held_there(&pc, &server, "auto", "Second");
+
+    assert_eq!(request["class"], "base", "{request:#}");
+    let card = request.to_string();
+    assert!(card.contains("branch prefix"), "{card}");
+    assert_eq!(
+        server.user.judge_received().len(),
+        judged,
+        "the judge was asked of a convention change"
+    );
+}
+
+/// A launch of `app` as pc's daemon would send it, with `settings`, sent with `key`, pc's own:
+/// the server's answer.
+fn forged_with_settings(
+    key: &Path,
+    server: &Machine,
+    launch: &str,
+    settings: Value,
+) -> Result<Value, String> {
+    let mut asked = crate::remote_launch::launch_ask(launch, "root1");
+    asked.mode = "auto".into();
+    asked.settings = Some(settings);
+    crate::remote_launch::sent_with(
+        key,
+        server,
+        vec![flottille_link::MachineMessage::Launch(Box::new(asked))],
+    )
+    .remove(0)
+}
+
+#[test]
+fn a_repository_added_by_a_launch_goes_to_the_user_and_is_named() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    no_branch_prefix(&pc);
+    signed_in_there(&pc);
+    led_there(&pc, &server, "First");
+    let key = pc.stand_in();
+
+    // pc's settings, with a repository the project here lacks.
+    let answer = forged_with_settings(
+        &key,
+        &server,
+        "l-added",
+        json!({"repositories": [{"path": ".", "base": ["main"]}, {"path": "foo", "base": ["main"]}]}),
+    )
+    .unwrap();
+
+    // In Auto the judge would allow it: a repository added is the user's to decide.
+    assert_eq!(answer["state"], "held", "{answer:#}");
+    assert!(
+        server
+            .user
+            .judge_received()
+            .iter()
+            .all(|judged| !judged.to_string().contains("foo")),
+        "the judge was asked of a repository added"
+    );
+    assert!(
+        project(&server, "app")["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|repository| repository["path"] != "foo"),
+        "a held launch added a repository"
+    );
+}
+
+#[test]
+fn a_repository_a_launch_adds_through_a_link_out_of_the_project_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    no_branch_prefix(&pc);
+    signed_in_there(&pc);
+    led_there(&pc, &server, "First");
+    // One of the user's own repositories, and a link to it in the project made for pc, as a
+    // link committed in its repository would be.
+    let real = server.user.path("elsewhere/real");
+    server.user.git_init(&real);
+    std::os::unix::fs::symlink(&real, there_folder(&server, "app").join("foo")).unwrap();
+    let key = pc.stand_in();
+
+    let answer = forged_with_settings(
+        &key,
+        &server,
+        "l-link",
+        json!({"repositories": [{"path": ".", "base": ["main"]}, {"path": "foo", "base": ["main"]}]}),
+    );
+
+    let why = answer.expect_err("a repository leading out of the project was taken");
+    assert!(why.contains("foo"), "{why}");
+    assert!(why.contains("outside the project folder"), "{why}");
+}
+
+#[test]
+fn a_renamed_member_cannot_lay_settings_on_another_machine_s_project() {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    pc.register("rules = \"Pc's.\"\n");
+    signed_in_there(&pc);
+    let from_pc = held_there(&pc, &server, "auto", "From pc");
+    approved(&server, &from_pc);
+    eventually("pc's settings laid", || {
+        project(&server, "app")["rules"] == "Pc's."
+    });
+    let made = project(&server, "app");
+    assert_eq!(made["from_machine"], pc.this()["key"], "{made:#}");
+
+    // A third machine takes pc's name: pc renamed, then the laptop given its old name.
+    let laptop = laptop(&hub, &pc, &server);
+    laptop.register("rules = \"Laptop's.\"\n");
+    for (member, to) in [("pc", "desk"), ("laptop", "pc")] {
+        let renamed = pc.user.run(&["remote", "rename", member, to]);
+        assert!(
+            renamed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&renamed.stderr)
+        );
+    }
+    eventually("the server sees the new names", || {
+        let machines = server.user.call("remote.machines", json!({})).unwrap();
+        machines["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "desk")
+    });
+    // The links follow the new member list: each machine sees the other again.
+    server.wait_for("pc");
+    laptop.wait_for("server");
+    signed_in_there(&laptop);
+
+    let (_root, mcp) = laptop.root("auto");
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Taken over",
+            "brief": "Taken over, whole."}),
+    ));
+    // Whatever waits for the user there, the user allows.
+    for request in server.requests() {
+        approved(&server, &request);
+    }
+    crate::remote_launch::a_while();
+
+    let kept = project(&server, "app");
+    assert_eq!(kept["rules"], "Pc's.", "{kept:#}");
+    assert_eq!(kept["from_machine"], made["from_machine"], "{kept:#}");
 }
