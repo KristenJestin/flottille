@@ -608,7 +608,10 @@ fn last_items(last: &Run) -> String {
         .collect();
     format!(
         "<{LAST_ITEMS}>\n{}\n</{LAST_ITEMS}>",
-        deliveries::escape(&lines.join("\n")).replace('<', "&lt;")
+        // The full-width brackets too: a model reads `＜/routine-last-items＞` as the end of it.
+        deliveries::escape(&lines.join("\n"))
+            .replace(['<', '＜'], "&lt;")
+            .replace('＞', "&gt;")
     )
 }
 
