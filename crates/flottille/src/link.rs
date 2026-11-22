@@ -2633,6 +2633,25 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_machine_removed_stays_removed_when_the_peers_file_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 2);
+        remote.peers();
+        assert!(remote.trusted(&keys[1]).is_some());
+
+        // A folder that cannot be written (full or read-only disk): the file keeps the old list.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        remote.trust_machines(vec![("machine-0".to_owned(), keys[0])]);
+        let kept: Vec<PublicKey> = remote.peers().machines.iter().map(|p| p.key).collect();
+        let trusted = remote.trusted(&keys[1]).is_some();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(kept, vec![keys[0]], "the machine removed is back by the file");
+        assert!(!trusted, "the machine removed is trusted again");
+    }
+
     /// Whether `remote` would let a link go on within `within`.
     async fn released(remote: &Remote, within: Duration) -> bool {
         tokio::time::timeout(within, remote.hub_heard())
