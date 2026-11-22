@@ -485,26 +485,10 @@ impl Core {
         if text.trim().is_empty() && pictures.is_empty() {
             return Err(MobileError::new("the message is empty"));
         }
-        let mut params = json!({"agent": agent, "message": text});
-        let words = params.clone();
-        if !pictures.is_empty() {
-            use base64::Engine;
-            params["images"] = pictures
-                .iter()
-                .map(|picture| {
-                    json!({"mime": picture.mime,
-                        "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
-                })
-                .collect();
-        }
+        let words = json!({"agent": agent, "message": text});
         let inner = self.inner.clone();
         self.inner
-            .on(async move {
-                if pictures.is_empty() || flottille_link::fits("agent.send", &params) {
-                    return inner.call(&machine, "agent.send", params).await.map(drop);
-                }
-                inner.send_in_chunks(&machine, words, &pictures).await
-            })
+            .on(async move { inner.send_message(&machine, words, &pictures).await })
             .await
     }
 
@@ -810,21 +794,17 @@ impl Inner {
             .map_err(|error| MobileError::new(error.to_string()))
     }
 
-    /// The message `words` to `machine`, its pictures sent first in chunks, each a signed request
-    /// of its own, then the message naming their upload (`docs/remote.md`, "Pictures sent to
-    /// another machine"): what the runner refuses says which picture and why.
-    async fn send_in_chunks(
+    /// The message `words` to `machine` with its `pictures`: inline when, signed, it fits one frame
+    /// of the link, else the pictures sent first in chunks, each a signed request of its own, then
+    /// the message naming their upload (`docs/remote.md`, "Pictures sent to another machine"). It
+    /// is judged from the pictures' sizes, and one is encoded only as it goes: a phone never holds
+    /// 20 large pictures encoded at once. What the runner refuses says which picture and why.
+    async fn send_message(
         &self,
         machine: &str,
         mut words: Value,
         pictures: &[Picture],
     ) -> Result<(), MobileError> {
-        // The words still travel in one frame: when they cannot, nothing is sent.
-        if !flottille_link::fits("agent.send", &words) {
-            return Err(MobileError::new(TOO_BIG));
-        }
-        let link = self.link_of(machine)?;
-        let upload = flottille_link::upload_name().map_err(MobileError::new)?;
         let files: Vec<flottille_link::Attached> = pictures
             .iter()
             .map(|picture| flottille_link::Attached::Picture {
@@ -832,6 +812,25 @@ impl Inner {
                 bytes: &picture.data,
             })
             .collect();
+        if files.is_empty() || flottille_link::fits_with("agent.send", &words, &files) {
+            if !files.is_empty() {
+                use base64::Engine;
+                words["images"] = pictures
+                    .iter()
+                    .map(|picture| {
+                        json!({"mime": picture.mime,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
+                    })
+                    .collect();
+            }
+            return self.call(machine, "agent.send", words).await.map(drop);
+        }
+        // The words still travel in one frame: when they cannot, nothing is sent.
+        if !flottille_link::fits("agent.send", &words) {
+            return Err(MobileError::new(TOO_BIG));
+        }
+        let link = self.link_of(machine)?;
+        let upload = flottille_link::upload_name().map_err(MobileError::new)?;
         for chunk in flottille_link::upload_chunks(&upload, &files) {
             self.call_on(machine, &link, "agent.upload", chunk).await?;
         }
