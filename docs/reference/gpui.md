@@ -271,9 +271,10 @@ the wrong code first).
 13. **Tabs by subject; a part gets a tab of its own when it fits.** A tab holds one subject,
     the one the user goes to on its own, with several sections of its own: Machines (Remote:
     whether it is on, the hub, the devices, the addresses) is one,
-    and Usage and Notifications will be. Settings has six tabs (Agents, Approvals, Features,
-    Vault, Machines, General), Usage later; a project's settings have six (Repositories,
-    Workspaces, Tasks, Instructions, Features, Vault); the project page has Work, Pull requests,
+    Notifications (what rings, the sound, the quiet hours) is another, and Usage will be.
+    Settings has seven tabs (Agents, Approvals, Features, Vault, Machines, General,
+    Notifications), Usage later; a project's settings have seven (Repositories, Workspaces,
+    Tasks, Instructions, Features, Vault, Notifications); the project page has Work, Pull requests,
     Tickets, Specs while it is on, Progress for a project with a tracker, and Routines in every
     project, after Progress (#1123). The limit is the mess, not a number: the
     tabs stay few enough to read at a glance, and when they are no longer the structure is
