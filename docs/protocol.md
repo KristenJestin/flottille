@@ -802,8 +802,12 @@ at all), and downloads or applies nothing unless asked.
   sessions a restart stops, `[{"id", "title", "project"}]` (each root whose agent or one of its
   sub-agents has a process, whatever its state), oldest first. The download's progress is told at
   most once a second.
-- `update.set {check}` writes `updates.toml` (`"automatically"` checks at once) and answers as
-  `update.show`.
+- `update.set {check?, channel?}` (at least one) writes `updates.toml` (`check: "automatically"`
+  checks at once) and/or remembers the channel, `"stable"` or `"beta"` (what `--channel` keeps, an
+  alpha's branch forgotten; checked at once, whatever `check` says), and answers as `update.show`.
+  An alpha, an rc or a next is refused: `flottille update --channel alpha --branch <name>` chooses
+  an alpha. `update.show` says `channel` and `branch`, and `ahead_of`, the channel's latest build
+  when this one is newer than it (a beta kept above the latest stable).
 - `update.check` checks once now, whatever `check` says.
 - `update.download` downloads the latest build and stages it beside the binary; it answers at once
   and says the rest in `update.changed`.

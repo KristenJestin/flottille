@@ -41,7 +41,7 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
     Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
     GitOffer, GitPlace, GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message,
-    Received, Secret, Share, SharedEntry, Streamed, Traffic, UNKNOWN_MESSAGE,
+    Received, RepositoryIdentity, Secret, Share, SharedEntry, Streamed, Traffic, UNKNOWN_MESSAGE,
 };
 pub use members::{
     Action, Change, ChangeHash, Colour, Icon, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member,

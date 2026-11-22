@@ -9,6 +9,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -69,6 +71,7 @@ import org.flottille.core.Ask
 import org.flottille.core.Child
 import org.flottille.core.Conversation
 import org.flottille.core.Entry
+import org.flottille.core.OpenedTunnel
 import org.flottille.core.MachineState
 import org.flottille.core.Phone
 import org.flottille.core.PhoneException
@@ -140,6 +143,7 @@ fun SessionPage(
     onCarried: () -> Unit,
     onToast: (String) -> Unit,
     onBack: () -> Unit,
+    tunnels: TunnelHost = TunnelHost.None,
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -194,9 +198,63 @@ fun SessionPage(
         }
     }
 
+    // A run's page in the app, or handed to the user's browser: through a tunnel when the address is
+    // the machine's own, as it is when it is a page of the web.
+    var browsing by remember(key) { mutableStateOf<OpenedTunnel?>(null) }
+    var shownBrowsing by remember { mutableStateOf(browsing) }
+    if (browsing != null) shownBrowsing = browsing
+    // The in-app browser's tunnel lives with its panel: it closes with it, however the panel goes
+    // (Close, Back, or the page itself leaving). Another app of the phone can reach a tunnel's
+    // listener, so none stays open for a page nobody looks at.
+    DisposableEffect(browsing?.tunnel?.tunnel) {
+        val tunnel = browsing?.tunnel?.tunnel
+        onDispose {
+            if (tunnel != null) {
+                try {
+                    phone.closeTunnel(tunnel)
+                } catch (gone: PhoneException) {
+                    // Ended already: the view says why.
+                }
+            }
+        }
+    }
+    val busy = remember(key) { mutableStateListOf<String>() }
+    val opening = Opening(
+        readOnly = readOnly,
+        busy = busy.toSet(),
+        isLocal = phone::isLocal,
+        open = { slot, run, url, inBrowser ->
+            if (!phone.isLocal(url)) {
+                tunnels.browse(url)
+            } else {
+                busy += slot
+                scope.launch {
+                    try {
+                        val opened = phone.openAddress(key.machine, run, url, inBrowser)
+                        if (inBrowser) tunnels.keepForBrowser(opened) else browsing = opened
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (refused: PhoneException) {
+                        onToast("Not opened: ${refused.why}")
+                    } finally {
+                        busy -= slot
+                    }
+                }
+            }
+        },
+        close = { tunnel ->
+            try {
+                phone.closeTunnel(tunnel)
+            } catch (refused: PhoneException) {
+                onToast(refused.why)
+            }
+        },
+    )
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(palette.bg).testTag("page")) {
             Header(page, key, readOnly, onBack)
+            if (page != null) RunsSection(page.runs, view.tunnels.filter { it.machine == key.machine }, opening)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (page == null) {
                     Label(
@@ -205,7 +263,7 @@ fun SessionPage(
                         modifier = Modifier.padding(Space.Lg),
                     )
                 } else {
-                    ConversationList(phone, key, page, onOlder = {
+                    ConversationList(phone, key, page, opening, onOlder = {
                         scope.launch {
                             try {
                                 phone.older(key.machine, key.agent)
@@ -319,6 +377,20 @@ fun SessionPage(
             },
             onCancel = { askingFull = false },
         )
+        AnimatedVisibility(
+            visible = browsing != null,
+            enter = slideInVertically(Motion.spec(Motion.PANEL)) { it / 8 } + fadeIn(Motion.spec(Motion.PANEL)),
+            exit = slideOutVertically(Motion.spec(Motion.PANEL)) { it / 8 } + fadeOut(Motion.spec(Motion.PANEL)),
+        ) {
+            shownBrowsing?.let { opened ->
+                TunnelBrowser(
+                    opened = opened,
+                    ended = view.tunnelsEnded.lastOrNull { it.tunnel == opened.tunnel.tunnel }?.reason,
+                    onOutside = tunnels::browse,
+                    onClose = { browsing = null },
+                )
+            }
+        }
     }
 }
 
@@ -345,7 +417,7 @@ private fun Header(page: Conversation?, key: SessionKey, readOnly: Boolean, onBa
 }
 
 @Composable
-private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, onOlder: () -> Unit) {
+private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, opening: Opening, onOlder: () -> Unit) {
     val state = rememberLazyListState()
     val lines = toLines(page.entries)
     // What was there when the page opened is simply there; what arrives after unfolds and fades in.
@@ -376,7 +448,11 @@ private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, 
             // The tag is on what unfolds: the line's own size is what grows.
             Unfold(animated, move.testTag("line:${line.key}")) {
                 when (line) {
-                    is Block.Message -> MessageView(phone, key, line.entry)
+                    is Block.Message -> if (line.entry.kind == "link") {
+                        LinkCard(line.entry.seq, line.entry.text, line.entry.link, opening)
+                    } else {
+                        MessageView(phone, key, line.entry)
+                    }
                     is Block.Steps -> StepsView(line.steps, open = line.key in unfolded) {
                         if (line.key in unfolded) unfolded -= line.key else unfolded += line.key
                     }

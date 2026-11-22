@@ -206,6 +206,27 @@ pub struct LaunchAsk {
     pub branch: String,
     /// The repositories of the caller's place, by their paths in the project.
     pub repositories: Vec<String>,
+    /// Each repository of the place as the receiver recognises it among its own projects,
+    /// whatever their names and folders (`docs/remote.md`, "Which project").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<RepositoryIdentity>,
+    /// The project's settings that travel, as its file writes them
+    /// (`flottille_core::project::TRAVELLING`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
+}
+
+/// What a repository is, whatever its folder: its root commits, and its remote's URL when it has
+/// one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryIdentity {
+    /// Its path in the project.
+    pub path: String,
+    /// The commits of its branch with no parent.
+    pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// The `git` messages: what the receiver has, a bundle offered, its bytes, the workspace made of
