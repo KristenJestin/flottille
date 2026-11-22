@@ -2065,3 +2065,190 @@ async fn a_change_the_hub_withheld_is_said_in_words() {
     assert_eq!(lied_to.list, two.pc_device.list);
     served.stop().await;
 }
+
+/// A man in the middle between devices and the hub at `hub`, as one on the path to an `http://`
+/// hub is: it passes every line on, what the hub says rewritten by `rewrite`; every line the hub
+/// said is kept in the second value, as the hub said it.
+async fn in_the_middle(
+    hub: SocketAddr,
+    rewrite: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>,
+) -> (SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = said.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((device, _)) = listener.accept().await else {
+                return;
+            };
+            let upstream = tokio::net::TcpStream::connect(hub).await.unwrap();
+            let (mut device_read, mut device_write) = device.into_split();
+            let (hub_read, mut hub_write) = upstream.into_split();
+            let (rewrite, kept) = (rewrite.clone(), kept.clone());
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(hub_read);
+                let mut line = String::new();
+                while lines.read_line(&mut line).await.is_ok_and(|read| read > 0) {
+                    kept.lock().unwrap().push(line.clone());
+                    if device_write
+                        .write_all(rewrite(&line).as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    line.clear();
+                }
+            });
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut device_read, &mut hub_write).await;
+            });
+        }
+    });
+    (address, said)
+}
+
+/// The hub's answer to the handshake, `{"welcome": …}` or `{"refused": …}`, replaced by `forged`.
+fn answered_with(forged: String) -> std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> {
+    std::sync::Arc::new(move |line: &str| {
+        if line.starts_with(r#"{"welcome""#) || line.starts_with(r#"{"refused":{"#) {
+            format!("{forged}\n")
+        } else {
+            line.to_owned()
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_the_hub_did_not_sign_is_not_a_verdict() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let pc = device_key(1);
+    let pc_machine = place.machine("pc");
+    let (pc_device, _session) = pair_device(&served, &pc, &pc_machine, "pc", Role::Runner)
+        .await
+        .unwrap();
+
+    // A refusal the hub signed, for a stranger's session: what a man in the middle can catch.
+    let (watched, said) = in_the_middle(served.address(), std::sync::Arc::new(str::to_owned)).await;
+    let stranger = Device {
+        url: url(watched),
+        ..stranger_at(&served, &device_key(7))
+    };
+    let refused = stranger
+        .connect(&place.machine("stranger"), &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ControlError::NotMember { .. }),
+        "{refused}"
+    );
+    let caught = said
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|line| line.starts_with(r#"{"refused":{"#))
+        .cloned()
+        .expect("the hub refused the stranger")
+        .trim_end()
+        .to_owned();
+
+    // Said to a member, in place of its welcome: unsigned, signed for another session, or signed
+    // and changed. None is the hub's verdict on this device: none says it was removed or reset.
+    let forged = [
+        r#"{"refused":{"reason":"this device is not one of the members","reset":false}}"#
+            .to_owned(),
+        r#"{"refused":{"reason":"this hub's member list was reset","reset":true}}"#.to_owned(),
+        caught.clone(),
+        caught.replace(r#""reset":false"#, r#""reset":true"#),
+    ];
+    for forged in forged {
+        let (middle, _) = in_the_middle(served.address(), answered_with(forged.clone())).await;
+        let lied_to = Device {
+            url: url(middle),
+            ..pc_device.clone()
+        };
+        let refused = lied_to
+            .connect(&pc_machine, &hello(), &Tls::System)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, ControlError::Unreachable { .. }),
+            "{forged}: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("could not be reached"),
+            "{forged}: {refused}"
+        );
+        assert_eq!(lied_to.list, pc_device.list);
+    }
+
+    // The hub itself, reached on the path the man in the middle left, still welcomes the device.
+    let (clear, _) = in_the_middle(served.address(), std::sync::Arc::new(str::to_owned)).await;
+    Device {
+        url: url(clear),
+        ..pc_device.clone()
+    }
+    .connect(&pc_machine, &hello(), &Tls::System)
+    .await
+    .unwrap();
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signed_refusal_sets_forgotten() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let (_device, _session) = pair_device(
+        &served,
+        &device_key(1),
+        &place.machine("pc"),
+        "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap();
+    let (middle, said) = in_the_middle(served.address(), std::sync::Arc::new(str::to_owned)).await;
+
+    // A device the hub does not know: refused, signed, as a verdict a client forgets the hub for.
+    let stranger = Device {
+        url: url(middle),
+        ..stranger_at(&served, &device_key(7))
+    };
+    let refused = stranger
+        .connect(&place.machine("stranger"), &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ControlError::NotMember { .. }),
+        "{refused}"
+    );
+
+    // A device that pinned a list the hub's does not start with: told it was reset, signed.
+    let reset = device_key(8);
+    let other = Device {
+        url: url(middle),
+        list: MemberList::start("elsewhere", &reset).unwrap(),
+        ..stranger_at(&served, &reset)
+    };
+    let refused = other
+        .connect(&place.machine("elsewhere"), &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, ControlError::Reset), "{refused}");
+
+    // Both said with the hub's signature over the session.
+    let said = said.lock().unwrap();
+    let refusals: Vec<&String> = said
+        .iter()
+        .filter(|line| line.starts_with(r#"{"refused":{"#))
+        .collect();
+    assert_eq!(refusals.len(), 2, "{said:?}");
+    for refusal in refusals {
+        assert!(refusal.contains(r#""proof":""#), "{refusal}");
+    }
+    drop(said);
+    served.stop().await;
+}
