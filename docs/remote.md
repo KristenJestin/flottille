@@ -735,11 +735,25 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
 ### One list of every machine
 
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
-  project: a project registered on several machines under the same name is one group. Sessions
+  project: a project that several machines have is one group, whatever its name there (the next
+  bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. There is no machine
   switcher: the machines' states (online, offline since, needs an update) are in Settings,
   Machines.
+- **The same project.** Two projects are the same when the remotes of their repositories are the
+  same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
+  `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
+  `.git`, the host in lower case, the case of the path kept), and a project of several
+  repositories matches when all of them match. A repository with no remote, or at a path of the
+  machine, says nothing: its project matches none. Each runner tells the machines it links to its
+  projects by those remotes in the same message as its sessions (`projects` of the `sessions`
+  message, `remote.sessions`), and the copy kept for a machine that is off holds them too, so
+  that its projects stay in the sidebar, greyed. A machine whose list came before projects were
+  listed has none: its sessions' project names are matched by name, as before. The remote's
+  address is the only thing of a repository that travels in this list: no credential (a user or a
+  password in the address is dropped), no path of the machine. The window draws one row for a
+  project the machines share, with a mark for each (`docs/design.md` §10).
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
   changes (a session that starts, ends, is written to, answers or asks). The window reads it from

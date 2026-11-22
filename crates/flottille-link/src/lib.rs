@@ -54,7 +54,7 @@ pub use request::{
     Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
     runs_agents,
 };
-pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
+pub use sessions::{LightProject, LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
 pub use upload::{Attached, UPLOAD_CHUNK, fits, fits_with, upload_chunks, upload_name};

@@ -1058,7 +1058,63 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .collect();
     sessions.sort_by(|a, b| b.exchanged_at.cmp(&a.exchanged_at).then(a.id.cmp(&b.id)));
     sessions.truncate(flottille_link::MOST_SESSIONS);
-    flottille_link::SessionList { sessions }
+    flottille_link::SessionList {
+        sessions,
+        projects: projects_of(daemon),
+    }
+}
+
+/// This machine's projects as a list shows them: each one's name and the remotes of its
+/// repositories, normalised, so that another machine can tell it holds the same project
+/// (`docs/remote.md`, "One list of every machine"). A repository with no remote says nothing, and
+/// its project then matches none. It runs `git remote get-url` for each repository: called on a
+/// blocking thread.
+fn projects_of(daemon: &Daemon) -> Vec<flottille_link::LightProject> {
+    let mut projects: Vec<flottille_link::LightProject> = crate::projects::all(daemon)
+        .into_iter()
+        .map(|project| {
+            let remotes: Vec<Option<String>> = project
+                .repositories
+                .iter()
+                .map(|repository| {
+                    let folder = match repository.path.as_str() {
+                        "." => project.folder.clone(),
+                        path => project.folder.join(path),
+                    };
+                    repository_url(&folder, &repository.remote)
+                })
+                .collect();
+            flottille_link::LightProject {
+                name: shown_text(&project.name, 64),
+                remotes: flottille_core::remote_key::project_key(
+                    remotes.iter().map(Option::as_deref),
+                )
+                .unwrap_or_default(),
+            }
+        })
+        .collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    projects.truncate(flottille_link::MOST_PROJECTS);
+    projects
+}
+
+/// The address the remote `remote` of the repository in `folder` leads to, when it has one; never
+/// read for a folder that is not its own repository (git would answer for the one around it).
+fn repository_url(folder: &Path, remote: &str) -> Option<String> {
+    if !folder.join(".git").exists() {
+        return None;
+    }
+    let output = crate::git::blocking(
+        crate::git::own(),
+        folder,
+        &["remote", "get-url", "--end-of-options", remote],
+    )
+    .output()
+    .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// `text` as another machine may show it: its first `most` characters, without a control
@@ -1510,12 +1566,18 @@ impl Remote {
                         ))
                     });
                 }
-                json!({"name": name, "sessions": list["sessions"], "at": at})
+                json!({
+                    "name": name,
+                    "sessions": list["sessions"],
+                    "projects": list["projects"],
+                    "at": at,
+                })
             })
             .collect();
-        let this = serde_json::to_value(sessions_of(daemon).sessions)
-            .map_err(|error| error.to_string())?;
-        Ok(json!({"this": this, "machines": machines}))
+        let here = sessions_of(daemon);
+        let this = serde_json::to_value(here.sessions).map_err(|error| error.to_string())?;
+        let projects = serde_json::to_value(here.projects).map_err(|error| error.to_string())?;
+        Ok(json!({"this": this, "projects": projects, "machines": machines}))
     }
 
     /// `remote.close`: keeps the user's close of a session of another machine (`agent.stop`,
