@@ -10,8 +10,11 @@
 //! then folds away (`presence`; the amount moves in place, at most once a second, and does not
 //! fade), the message of a failure or a refusal unfolds and folds away (`presence_of`), the
 //! What's new link's ink fades over `HOVER` (`hoverable`), the buttons are the kit's (their
-//! hover and press fade), the check's choice is the kit's `Segmented`, and the restart is asked
-//! in the one confirmation dialog (`Confirm`).
+//! hover and press fade), the check's choice and the channel's (Stable or Beta, acting at once)
+//! are the kit's `Segmented`, which slides its highlight; a channel the command line chose (an
+//! alpha) is a line with two buttons that fades into the choice when one is taken (`changing`),
+//! the sentence of a build newer than its channel fades in the state line like any state, and
+//! the restart is asked in the one confirmation dialog (`Confirm`).
 
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
@@ -46,10 +49,15 @@ pub struct Shown {
     pub commit: Option<String>,
     /// The channel the daemon checks, the one `flottille update` would take.
     pub channel: String,
+    /// The branch of an alpha channel.
+    pub branch: Option<String>,
     /// Whether the daemon checks on its own (`updates.toml`'s `check`).
     pub automatically: bool,
     /// The channel's latest build, when it is newer than this one.
     pub latest: Option<String>,
+    /// The channel's latest build, when this build is newer than it (a beta kept above the
+    /// latest stable): it stays until a newer one is out.
+    pub ahead_of: Option<String>,
     /// Why the last check failed.
     pub failed: Option<String>,
     pub checking: bool,
@@ -75,8 +83,10 @@ impl Shown {
             build_channel: text("build_channel").unwrap_or_default(),
             commit: text("commit"),
             channel: text("channel").unwrap_or_default(),
+            branch: text("branch"),
             automatically: value["check"] != "never",
             latest: text("latest"),
+            ahead_of: text("ahead_of"),
             failed: text("failed"),
             checking: value["checking"] == true,
             staged: text("staged"),
@@ -127,7 +137,31 @@ impl Shown {
         if self.failed.is_some() {
             return "Could not check for an update".to_owned();
         }
+        if let Some(ahead) = &self.ahead_of {
+            return format!(
+                "This build is newer than {} {ahead}: it stays until a newer one is out",
+                self.channel
+            );
+        }
         "Up to date".to_owned()
+    }
+
+    /// The channel as the window says it: an alpha with its branch.
+    pub fn channel_line(&self) -> String {
+        match (self.channel.as_str(), &self.branch) {
+            ("alpha", Some(branch)) => format!("alpha · {branch}"),
+            _ => self.channel.clone(),
+        }
+    }
+
+    /// Which of the two choices of the window the channel is: none for an alpha, an rc or a next,
+    /// which the command line chose.
+    pub fn choice(&self) -> Option<usize> {
+        match self.channel.as_str() {
+            "stable" => Some(0),
+            "beta" => Some(1),
+            _ => None,
+        }
     }
 
     /// The amount a download has read, beside its bar: `69.7 MB of 93.1 MB`, or the bytes alone
@@ -322,7 +356,7 @@ impl VersionSection {
                     "update.download" => "The update was not downloaded",
                     "update.cancel" => "The download was not cancelled",
                     "update.restart" => "Flottille did not restart",
-                    "update.set" => "The check was not changed",
+                    "update.set" => "The update settings were not changed",
                     _ => "Flottille did not check for an update",
                 };
                 toast(Toast::failure(what).detail(why), cx);
@@ -342,6 +376,11 @@ impl VersionSection {
 
     pub fn cancel_download(&mut self, cx: &mut Context<Self>) {
         self.ask("update.cancel", json!({}), cx);
+    }
+
+    /// Chooses the channel, stable or beta: the daemon remembers it and checks it at once.
+    pub fn set_channel(&mut self, channel: &'static str, cx: &mut Context<Self>) {
+        self.ask("update.set", json!({"channel": channel}), cx);
     }
 
     pub fn set_automatically(&mut self, automatically: bool, cx: &mut Context<Self>) {
@@ -489,6 +528,68 @@ impl VersionSection {
 }
 
 impl VersionSection {
+    /// The value of the Channel row: Stable or Beta as a choice that acts at once, as Appearance
+    /// and Check for updates do; a channel the command line chose (an alpha with its branch)
+    /// is said, with a way back to either. The swap between the two fades.
+    fn channel_choice(&self, shown: &Shown, cx: &mut Context<Self>) -> AnyElement {
+        let this = cx.entity().downgrade();
+        let busy = self.asking;
+        match shown.choice() {
+            Some(chosen) => changing("version-channel-value", "choice", move |_| {
+                Segmented::new(
+                    "version-channel",
+                    "Update channel",
+                    [("stable", "Stable"), ("beta", "Beta")],
+                    chosen,
+                )
+                .disabled(busy)
+                .on_choose(move |index, _, cx| {
+                    let channel = if index == 0 { "stable" } else { "beta" };
+                    this.update(cx, |this, cx| this.set_channel(channel, cx))
+                        .ok();
+                })
+                .into_any_element()
+            })
+            .into_any_element(),
+            None => {
+                let line = SharedString::from(shown.channel_line());
+                let (stable, beta) = (this.clone(), this);
+                changing("version-channel-value", line.clone(), move |_| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space::MD)
+                        .child(
+                            div()
+                                .id("version-channel-other")
+                                .aria_label(line.clone())
+                                .child(line)
+                                .test_support(),
+                        )
+                        .child(
+                            Button::secondary("version-channel-stable", "Use Stable")
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    stable
+                                        .update(cx, |this, cx| this.set_channel("stable", cx))
+                                        .ok();
+                                }),
+                        )
+                        .child(
+                            Button::secondary("version-channel-beta", "Use Beta")
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    beta.update(cx, |this, cx| this.set_channel("beta", cx))
+                                        .ok();
+                                }),
+                        )
+                        .into_any_element()
+                })
+                .into_any_element()
+            }
+        }
+    }
+
     /// The row of a download: its bar, the amount received in the quiet ink, and Cancel, in the
     /// column of the other values. Drawn from the download last shown, so that it keeps its
     /// content while it folds away.
@@ -595,6 +696,7 @@ impl Render for VersionSection {
                 .disabled(busy || shown.checking)
                 .on_click(cx.listener(|this, _, _, cx| this.check_now(cx))),
         );
+        let channel = self.channel_choice(&shown, cx);
         let check = Segmented::new(
             "version-check",
             "Check for updates",
@@ -620,9 +722,9 @@ impl Render for VersionSection {
             .border_color(p.line)
             .child(Self::line("version-this", "This build", this_build, cx))
             .child(div().pt(space::SM).child(Self::line(
-                "version-channel",
+                "version-channel-line",
                 "Channel",
-                SharedString::from(shown.channel.clone()).into_any_element(),
+                channel,
                 cx,
             )))
             .child(
