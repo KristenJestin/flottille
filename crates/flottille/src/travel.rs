@@ -1084,4 +1084,36 @@ mod tests {
         assert_eq!(size, bytes.len() as u64);
         assert_eq!(sha256, hex(&Sha256::digest(&bytes)));
     }
+
+    #[test]
+    fn a_folder_on_the_way_that_is_a_link_out_of_the_project_is_not_made_through() {
+        let folders = tempfile::tempdir().unwrap();
+        let root = folders.path().join("app");
+        let outside = folders.path().join("elsewhere");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+
+        let refused = folders_inside(&root, "sub/lib").unwrap_err();
+
+        assert!(refused.contains("sub"), "{refused}");
+        // Nothing was made through the link.
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_link_that_stays_inside_the_project_is_refused_as_a_link() {
+        let folders = tempfile::tempdir().unwrap();
+        let root = folders.path().join("app");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("sub")).unwrap();
+
+        let refused = folders_inside(&root, "sub/lib").unwrap_err();
+
+        // It does not lead out, and the message does not say it does: following it is what
+        // reopens the race, so nothing is made through it.
+        assert!(refused.contains("sub is a link"), "{refused}");
+        assert!(!refused.contains("outside"), "{refused}");
+        assert_eq!(std::fs::read_dir(root.join("real")).unwrap().count(), 0);
+    }
 }

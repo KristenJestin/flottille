@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Git, GitFetch, GitOffer, GitPlace, Hello, Link, MachineMessage, Message, PublicKey, Traffic,
+    Git, GitFetch, GitOffer, GitPlace, GitRepository, Hello, Link, MachineMessage, Message,
+    PublicKey, Traffic,
 };
 use serde_json::{Value, json};
 
@@ -872,4 +873,80 @@ fn a_new_repository_s_code_is_refused_through_a_link_planted_before_it_comes() {
     assert!(refused.contains("outside the project folder"), "{refused}");
     // Nothing was made through the link.
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+#[test]
+fn a_repository_received_before_is_not_received_into_through_a_link_planted_since() {
+    let (_hub, pc, server) = pc_and_server();
+    pc.register_with(&["sub/lib"], "");
+    let repo = pc.folder().join("sub/lib");
+    pc.user.git_init(&repo);
+    pc.git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    commit(&pc, &repo, "x.txt", "lib\n");
+    server.register_with(&["sub/lib"], "");
+    pc.travel("server", "l1", json!({})).unwrap();
+    assert!(server.folder().join("sub/lib/.git").exists());
+
+    // The folder `sub` is turned into a link to a copy out of the project, as someone writing
+    // into the project may do before the next code comes.
+    let copy = server.user.path("elsewhere/sub");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::rename(server.folder().join("sub"), &copy).unwrap();
+    std::os::unix::fs::symlink(&copy, server.folder().join("sub")).unwrap();
+    let before = server.git(&copy.join("lib"), &["for-each-ref"]);
+    commit(&pc, &repo, "y.txt", "more\n");
+
+    let (_, refused) = pc.travel("server", "l2", json!({})).unwrap_err();
+
+    assert!(refused.contains("outside the project folder"), "{refused}");
+    // Nothing was fetched into the copy.
+    assert_eq!(server.git(&copy.join("lib"), &["for-each-ref"]), before);
+}
+
+#[test]
+fn a_link_that_stays_inside_the_project_is_refused_as_a_link_when_the_code_comes() {
+    let (_hub, pc, server) = pc_and_server();
+    pc.register_with(&["sub/lib"], "");
+    let repo = pc.folder().join("sub/lib");
+    pc.user.git_init(&repo);
+    pc.git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    commit(&pc, &repo, "x.txt", "lib\n");
+    server.register_with(&["sub/lib"], "");
+    // `sub` leads to a folder of the project itself, which a repository's path may do.
+    let real = server.folder().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, server.folder().join("sub")).unwrap();
+
+    let (_, refused) = pc.travel("server", "l1", json!({})).unwrap_err();
+
+    assert!(refused.contains("sub is a link"), "{refused}");
+    assert!(!refused.contains("outside"), "{refused}");
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+}
+
+#[test]
+fn the_commits_of_a_repository_behind_a_link_out_of_the_project_are_not_listed() {
+    let (_hub, pc, server) = pc_and_server();
+    server.register_with(&["sub/lib"], "");
+    let outside = server.user.path("elsewhere");
+    let lib = outside.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    server.user.git_init(&lib);
+    commit(&server, &lib, "secret.txt", "s\n");
+    std::fs::create_dir_all(server.folder()).unwrap();
+    std::os::unix::fs::symlink(&outside, server.folder().join("sub")).unwrap();
+    let key = pc.stand_in();
+
+    let refused = sent_with(
+        &key,
+        &server,
+        Git::Has(GitRepository {
+            project: "app".into(),
+            repository: "sub/lib".into(),
+            launch: None,
+        }),
+    )
+    .unwrap_err();
+
+    assert!(refused.contains("outside the project folder"), "{refused}");
 }
