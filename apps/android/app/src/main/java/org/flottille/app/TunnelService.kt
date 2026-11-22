@@ -86,7 +86,9 @@ class SystemTunnelHost(
     }
 
     override fun browse(url: String) {
-        launch(url)
+        // Only a page of the web: an address of another scheme (`intent:`, `market:`, `file:`…) would
+        // start another app on the word of a run's page or an agent's link.
+        if (isWebAddress(url)) launch(url)
     }
 
     private companion object {

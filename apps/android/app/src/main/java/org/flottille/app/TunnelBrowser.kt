@@ -1,7 +1,9 @@
 package org.flottille.app
 
 import android.annotation.SuppressLint
+import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
+import android.webkit.WebStorage
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -80,20 +83,7 @@ fun TunnelBrowser(
                     settings.allowFileAccess = false
                     settings.allowContentAccess = false
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                    webViewClient = object : WebViewClient() {
-                        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                            if (request.isForMainFrame) failed = error.description.toString()
-                        }
-
-                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                            val uri = request.url
-                            val host = uri.host.orEmpty()
-                            val here = (host == "localhost" || host == "127.0.0.1" || host.endsWith(".localhost")) &&
-                                uri.port == opened.tunnel.localPort
-                            if (!here) onOutside(uri.toString())
-                            return !here
-                        }
-                    }
+                    webViewClient = TunnelWebViewClient(opened.tunnel.localPort, onOutside) { failed = it }
                     loadUrl(opened.url)
                     web[0] = this
                 }
@@ -101,7 +91,54 @@ fun TunnelBrowser(
             onRelease = {
                 it.stopLoading()
                 it.destroy()
+                // The tunnel closes with the panel: nothing of its page stays for the next one, whose
+                // origin (`localhost`, whatever the port) the cookies and the storage do not tell apart.
+                clearTunnelSite()
             },
         )
     }
+    // A tunnel that ended on its own leaves the page up, to say so: its site goes with it.
+    LaunchedEffect(ended != null) { if (ended != null) clearTunnelSite() }
+}
+
+/**
+ * Forgets what the pages of tunnels stored in the web view: cookies and web storage are shared by
+ * every `localhost` page whatever its port, so a run's page would hand them to the next run's.
+ */
+internal fun clearTunnelSite() {
+    CookieManager.getInstance().removeAllCookies(null)
+    CookieManager.getInstance().flush()
+    WebStorage.getInstance().deleteAllData()
+}
+
+/**
+ * What the in-app web view does with a navigation. The tunnel's own origin loads. Anything else is
+ * never loaded here, and is handed to the user's browser only when it is an `http(s)` address the
+ * main frame goes to because the user acted (a tap): a page cannot start another app with a
+ * `intent:` or `market:` address, nor open one by itself, nor from a frame.
+ */
+internal class TunnelWebViewClient(
+    private val localPort: Int,
+    private val onOutside: (String) -> Unit,
+    private val onFailed: (String) -> Unit,
+) : WebViewClient() {
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+        if (request.isForMainFrame) onFailed(error.description.toString())
+    }
+
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+        val uri = request.url
+        val host = uri.host.orEmpty()
+        val here = (host == "localhost" || host == "127.0.0.1" || host.endsWith(".localhost")) &&
+            uri.port == localPort
+        if (here) return false
+        if (request.isForMainFrame && request.hasGesture() && isWebAddress(uri.toString())) onOutside(uri.toString())
+        return true
+    }
+}
+
+/** Whether [url] is an `http` or `https` address: the only ones the user's browser is handed. */
+fun isWebAddress(url: String): Boolean {
+    val scheme = android.net.Uri.parse(url).scheme?.lowercase()
+    return scheme == "http" || scheme == "https"
 }

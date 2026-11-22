@@ -1,5 +1,6 @@
 package org.flottille.app
 
+import android.webkit.CookieManager
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
@@ -19,6 +20,7 @@ import org.flottille.core.Project
 import org.flottille.core.Run
 import org.flottille.core.SessionRow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -120,6 +122,31 @@ class TunnelPageTest {
         // The listener of a tunnel is reachable by any app of the phone: it does not outlive its page.
         assertEquals(listOf("t1"), phone.closedTunnels)
         rule.onNodeWithTag("tunnel:r1").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_cookies_of_a_page_go_when_its_panel_closes() {
+        val phone = phone()
+        start(phone)
+        rule.onNodeWithTag("run-open:r1").performClick()
+        rule.waitForIdle()
+        CookieManager.getInstance().setCookie("http://localhost:41001/", "session=abc")
+        assertEquals("session=abc", CookieManager.getInstance().getCookie("http://localhost:41001/"))
+        rule.onNodeWithTag("browser-close").performClick()
+        rule.waitForIdle()
+        assertNull(CookieManager.getInstance().getCookie("http://localhost:41001/"))
+    }
+
+    @Test
+    fun the_cookies_of_a_page_go_when_its_tunnel_ends() {
+        val phone = phone()
+        start(phone)
+        rule.onNodeWithTag("run-open:r1").performClick()
+        rule.waitForIdle()
+        CookieManager.getInstance().setCookie("http://localhost:41001/", "session=abc")
+        phone.tunnelEnds("t1", "run r1 ended")
+        rule.waitForIdle()
+        assertNull(CookieManager.getInstance().getCookie("http://localhost:41001/"))
     }
 
     @Test
