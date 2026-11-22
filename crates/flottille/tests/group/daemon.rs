@@ -37,6 +37,8 @@ mod families;
 mod images;
 #[path = "../no_leftovers.rs"]
 mod no_leftovers;
+#[path = "../notification_settings.rs"]
+mod notification_settings;
 #[path = "../notifications.rs"]
 mod notifications;
 #[path = "../programs.rs"]
