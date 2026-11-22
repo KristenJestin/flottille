@@ -2069,20 +2069,18 @@ fn ask_alone(
     connected(connect)?.ask_within(method, params, bound)
 }
 
-/// `method` with `params`, whose pictures and pasted texts `files` are, as [`ask_alone`] asks it;
+/// `method` with `words` and the pictures and pasted texts `files`, as [`ask_alone`] asks it;
 /// when, signed for another machine, it would not fit one frame of the link, its files go first in
 /// chunks (`agent.upload`) and the message names their upload (`docs/remote.md`, "Pictures sent
 /// to another machine"). A chunk refused is the message's refusal: it says which picture and why.
+/// It is judged from the files' sizes, and a file is encoded only as it goes.
 fn ask_with_files(
     connect: &Connect,
     method: &str,
-    mut params: Value,
+    mut words: Value,
     (images, texts): (&[Picture], &[Pasted]),
     bound: Duration,
 ) -> Result<Result<Value, String>, String> {
-    if (images.is_empty() && texts.is_empty()) || flottille_link::fits(method, &params) {
-        return ask_alone(connect, method, params, bound);
-    }
     let files: Vec<flottille_link::Attached> = images
         .iter()
         .map(|picture| flottille_link::Attached::Picture {
@@ -2095,6 +2093,19 @@ fn ask_with_files(
                 .map(|pasted| flottille_link::Attached::Text(&pasted.text)),
         )
         .collect();
+    if files.is_empty() || flottille_link::fits_with(method, &words, &files) {
+        words["images"] = images.iter().map(Picture::to_json).collect();
+        if !texts.is_empty() {
+            words["texts"] = texts.iter().map(Pasted::to_json).collect();
+        }
+        return ask_alone(connect, method, words, bound);
+    }
+    // The words still travel in one frame: when they cannot, nothing is sent.
+    if !flottille_link::fits(method, &words) {
+        return Ok(Err(
+            "this message is too big for the link: its words take 1 MiB at most".to_owned(),
+        ));
+    }
     let upload = flottille_link::upload_name()?;
     let mut conn = connected(connect)?;
     for chunk in flottille_link::upload_chunks(&upload, &files) {
@@ -2103,12 +2114,8 @@ fn ask_with_files(
             refused => return refused,
         }
     }
-    if let Some(params) = params.as_object_mut() {
-        params.remove("images");
-        params.remove("texts");
-    }
-    params["upload"] = json!(upload);
-    conn.ask_within(method, params, bound)
+    words["upload"] = json!(upload);
+    conn.ask_within(method, words, bound)
 }
 
 /// What the user does to a command, and what the daemon answered.
@@ -2173,14 +2180,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             match ask_with_files(
                 connect,
                 "agent.start",
-                start_params(
-                    &project,
-                    workspace.as_deref(),
-                    &pick,
-                    &message,
-                    (&images, &texts),
-                    &mode,
-                ),
+                start_params(&project, workspace.as_deref(), &pick, &message, &mode),
                 (&images, &texts),
                 bounds.quick,
             ) {
@@ -3227,11 +3227,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             texts,
             compact,
         } => {
-            let mut params = json!({"agent": session, "message": message,
-                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()});
-            if !texts.is_empty() {
-                params["texts"] = texts.iter().map(Pasted::to_json).collect();
-            }
+            let mut params = json!({"agent": session, "message": message});
             if let Some(compact) = compact {
                 params["compact"] = json!(compact);
             }
@@ -3660,11 +3656,10 @@ fn start_params(
     workspace: Option<&str>,
     pick: &Pick,
     message: &str,
-    (images, texts): (&[Picture], &[Pasted]),
     mode: &str,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
-    let mut params = json!({
+    json!({
         "project": project,
         "workspace": workspace,
         "provider": pick.provider,
@@ -3672,12 +3667,7 @@ fn start_params(
         "effort": pick.effort,
         "gate_mode": mode,
         "message": message,
-        "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
-    });
-    if !texts.is_empty() {
-        params["texts"] = texts.iter().map(Pasted::to_json).collect();
-    }
-    params
+    })
 }
 
 fn started_outcome(project: &str, started: &Value) -> Outcome {
@@ -4118,6 +4108,30 @@ mod tests {
                 .all(|request| request["method"] != "agent.send"),
             "the message is never sent"
         );
+    }
+
+    #[test]
+    fn words_that_do_not_fit_a_frame_are_refused_before_any_chunk() {
+        let (connect, asked) = recording(None);
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        let mut command = reply_with(vec![photo(1_200_000)]);
+        if let Command::Reply { message, .. } = &mut command {
+            *message = "w".repeat(2 * 1024 * 1024);
+        }
+        actions.send(command);
+
+        let Some(Outcome::Replied { answer, .. }) = next(&mut updates, Duration::from_secs(10))
+        else {
+            panic!("no answer");
+        };
+        assert!(
+            answer
+                .err()
+                .unwrap()
+                .contains("its words take 1 MiB at most")
+        );
+        assert!(asked.lock().unwrap().is_empty(), "no chunk was sent");
     }
 
     #[test]
