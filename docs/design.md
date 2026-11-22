@@ -744,7 +744,7 @@ methods"; `flottille routine`, `docs/cli.md`).
     with no new item is kept in its history and rings nothing.
   - **The next run remembers.** The session of a run is given the last result's items, ids and
     titles, as data after every word of Flottille's (`<routine-last-items>`, which no title can
-    close), so that the prompt can ask "what changed since yesterday".
+    close), the first 100 items and each title cut at 120 characters, so that the prompt can ask "what changed since yesterday".
 
 ## 6. Projects and workspaces
 

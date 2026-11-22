@@ -412,6 +412,27 @@ fn the_next_run_is_given_the_last_items() {
 }
 
 #[test]
+fn the_next_run_is_given_a_short_list_of_short_titles() {
+    let user = user();
+    project(&user);
+    add(&user, "Tickets to review", json!({}));
+    let many: Vec<Value> = (0..150)
+        .map(|n| item(&format!("ID-{n}"), &"t".repeat(200)))
+        .collect();
+    listing(&user, json!(many));
+    run_once(&user, "Tickets to review");
+    run_once(&user, "Tickets to review");
+
+    let second = user.received_requests("session/prompt")[1]["params"]["prompt"].to_string();
+    assert!(second.contains("ID-99"), "the first hundred are given");
+    assert!(!second.contains("ID-100"), "no more than a hundred");
+    assert!(
+        second.contains(&"t".repeat(120)) && !second.contains(&"t".repeat(121)),
+        "a title is cut at 120 characters"
+    );
+}
+
+#[test]
 fn routine_result_is_offered_to_routine_sessions_only() {
     let user = user();
     project(&user);

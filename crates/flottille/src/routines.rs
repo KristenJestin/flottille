@@ -590,12 +590,21 @@ fn told(routine: &Routine, last: Option<&Run>, trigger: Option<&str>) -> String 
 /// The name of the block that gives a run its last run's items, which no item can close.
 const LAST_ITEMS: &str = "routine-last-items";
 
+/// How many of the last run's items, and how long a title of them, go back into the next prompt:
+/// a result may list more, and the prompt is the agent's context.
+const LAST_ITEMS_GIVEN: usize = 100;
+const LAST_TITLE_CHARS: usize = 120;
+
 /// The items of the last run, ids and titles, as data.
 fn last_items(last: &Run) -> String {
     let lines: Vec<String> = last
         .items
         .iter()
-        .map(|item| format!("{}: {}", item.id, item.title))
+        .take(LAST_ITEMS_GIVEN)
+        .map(|item| {
+            let title: String = item.title.chars().take(LAST_TITLE_CHARS).collect();
+            format!("{}: {title}", item.id)
+        })
         .collect();
     format!(
         "<{LAST_ITEMS}>\n{}\n</{LAST_ITEMS}>",
