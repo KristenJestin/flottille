@@ -1393,13 +1393,14 @@ on a real phone, by hand, and reported.
   dialog opens them one after the other, and a folder that is a repository itself is picked; a
   folder that only holds repositories (not one itself) is opened, not picked. It is `drive`, as
   adding is.
-- **The choosers name each machine with its icon, its role and its state** (#1182): the machine
-  chosen is drawn as its icon in its colour before its name (`server in teal` is its label, for the
-  ones who do not see colours), and each row of the list has the icon of the machine, its role and
-  state, the chosen one filled. The kit's lists draw a row's icon in their own ink and mark the chosen
-  row by its fill, with no check: the colour is the chooser's own mark, outside the list, and a kit
-  option for a tinted icon and a check is a follow-up. The choosers offer the runners only: a
-  controller holds no project.
+- **The choosers name each machine with its icon, its role and its state** (#1182): the kit draws
+  the icon of the machine chosen in its colour before its name on the chooser's button (`server in
+  teal` is the colour's word, for the ones who do not see colours), and each row of the list has the
+  machine's icon in its colour, its role and state, with a check on the chosen one that moves over
+  `PANEL` (the kit's tinted option, `MenuItem::tint` and `checked`; `Select` and `RadioChoices` take
+  the same tint). Nothing is drawn beside the kit's chooser. A chooser that stops having a choice
+  (the project is on one machine only, the last runner is gone) folds away with its words. The
+  choosers offer the runners only: a controller holds no project.
 - **The composer's machine picker lists the machines that have the project** (#1182): the runners
   that offered it over their link, or whose light list of sessions names it (kept while a machine is
   off, which offers nothing). One that is off is greyed and says `offline since 22:14`; it is not
