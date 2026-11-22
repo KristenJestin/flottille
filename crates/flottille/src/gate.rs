@@ -7170,7 +7170,8 @@ mod tests {
         fixture.root = main.clone();
         fixture.grant.place.root = main.clone();
         fixture.grant.place.repositories = vec![(".".into(), main)];
-        assert_eq!(fixture.file("fs_write", "notes.md"), Verdict::Allow);
+        // Judged as a write in any project's main folder is, never refused as Flottille's.
+        assert!(to_judge(&fixture.file("fs_write", "notes.md")));
         // The folder that holds every such project is Flottille's.
         assert!(denied(&fixture.run("rm -r ../../projects")));
     }
