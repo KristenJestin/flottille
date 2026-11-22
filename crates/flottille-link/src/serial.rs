@@ -86,7 +86,8 @@ pub(crate) fn shown(text: &str, limit: usize) -> String {
 /// Whether `c` hides or turns text a reader sees: a format character (`invisible`), a line or
 /// paragraph separator (U+2028, U+2029), which no control check catches, or one of the characters
 /// that are no format character yet show nothing: variation selectors, Hangul fillers, the
-/// combining grapheme joiner and the blank braille pattern.
+/// combining grapheme joiner and the blank braille pattern. The text and emoji presentation
+/// selectors (U+FE0E, U+FE0F) are left out: they are part of the emoji people write (⚠️ ❤️).
 pub fn hidden(c: char) -> bool {
     const BLANK: &[(u32, u32)] = &[
         (0x034F, 0x034F),
@@ -94,7 +95,7 @@ pub fn hidden(c: char) -> bool {
         (0x2028, 0x2029),
         (0x2800, 0x2800),
         (0x3164, 0x3164),
-        (0xFE00, 0xFE0F),
+        (0xFE00, 0xFE0D),
         (0xFFA0, 0xFFA0),
         (0xE0100, 0xE01EF),
     ];
@@ -148,7 +149,7 @@ mod tests {
             '\u{202E}',
             '\u{2028}', // format, separator
             '\u{FE00}',
-            '\u{FE0F}',
+            '\u{FE0D}',
             '\u{E0100}',
             '\u{E01EF}', // variation selectors
             '\u{115F}',
@@ -160,7 +161,17 @@ mod tests {
         ] {
             assert!(hidden(c), "U+{:04X} shows something", u32::from(c));
         }
-        for c in ['a', ' ', 'é', '\u{FDFF}', '\u{E01F0}', '\u{2801}', '한'] {
+        for c in [
+            '\u{FE0E}',
+            '\u{FE0F}', // the text and emoji presentation selectors: ⚠️ ❤️
+            'a',
+            ' ',
+            'é',
+            '\u{FDFF}',
+            '\u{E01F0}',
+            '\u{2801}',
+            '한',
+        ] {
             assert!(!hidden(c), "U+{:04X} was hidden", u32::from(c));
         }
     }

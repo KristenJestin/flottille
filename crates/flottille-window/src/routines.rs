@@ -623,13 +623,28 @@ mod tests {
         // A remote daemon built before the daemon refused them may still send one.
         let run = Run::of(&json!({
             "id": 1, "outcome": "failed", "summary": "done \u{202E}gnp.exe",
-            "why": "no\u{2066}pe", "body": "# Title\n\u{2067}text\u{FE0F}",
+            "why": "no\u{2066}pe", "body": "# Title\n\u{2067}text\u{FE0D}",
         }))
         .unwrap();
         assert_eq!(run.summary.as_deref(), Some("done gnp.exe"));
         assert_eq!(run.why.as_deref(), Some("nope"));
         assert_eq!(run.body.as_deref(), Some("# Title\ntext"));
         assert_eq!(run.said(), "Failed: nope");
+    }
+
+    #[test]
+    fn an_emoji_keeps_its_presentation_selector() {
+        let said = "\u{26A0}\u{FE0F} 2 failing \u{2764}\u{FE0F} \u{2714}\u{FE0E}";
+        let run = Run::of(&json!({
+            "id": 1, "outcome": "something", "summary": said, "body": said,
+            "items": [{"id": "a", "title": said, "tags": [said], "group": said}],
+        }))
+        .unwrap();
+        assert_eq!(run.summary.as_deref(), Some(said));
+        assert_eq!(run.body.as_deref(), Some(said));
+        assert_eq!(run.items[0].title, said);
+        assert_eq!(run.items[0].tags, [said]);
+        assert_eq!(run.items[0].group.as_deref(), Some(said));
     }
 
     #[test]

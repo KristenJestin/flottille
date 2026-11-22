@@ -159,6 +159,23 @@ fn a_routine_ends_with_items_shown_as_rows() {
 }
 
 #[test]
+fn an_emoji_with_its_presentation_selector_is_no_hidden_character() {
+    let user = user();
+    project(&user);
+    add(&user, "Tickets to review", json!({}));
+    // ⚠️ ❤️ ✔️ ☀️ are a base and U+FE0F.
+    user.fake_script(answers(json!({
+        "summary": "\u{26A0}\u{FE0F} 2 failing",
+        "items": [{"id": "a", "title": "\u{2764}\u{FE0F} Login", "text": "\u{2714}\u{FE0E} done",
+                   "tags": ["\u{2600}\u{FE0F}"], "group": "\u{26A0}\u{FE0F} Blocking"}],
+    })));
+    let run = run_once(&user, "Tickets to review");
+    assert_eq!(run["outcome"], "something", "{run}");
+    assert_eq!(run["summary"], "\u{26A0}\u{FE0F} 2 failing");
+    assert_eq!(run["items"][0]["title"], "\u{2764}\u{FE0F} Login");
+}
+
+#[test]
 fn a_result_that_is_not_a_clean_list_is_refused() {
     let user = user();
     project(&user);
@@ -204,7 +221,7 @@ fn a_result_that_is_not_a_clean_list_is_refused() {
         ),
         (
             "a title with a variation selector",
-            json!([{"id": "a", "title": "A\u{FE0F}"}]),
+            json!([{"id": "a", "title": "A\u{FE0D}"}]),
         ),
         (
             "an id made of a Hangul filler",
