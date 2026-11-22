@@ -297,6 +297,65 @@ fn a_build_downloaded_from_the_window_waits_staged() {
 }
 
 #[test]
+fn cancel_stops_the_download_and_stages_nothing() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    newer_stable(&releases, &standing_for(programs.path(), NEWER));
+    let hold = releases.hold(&format!(
+        "/download/v{NEWER}/flottille-{NEWER}-x86_64-linux.tar.gz"
+    ));
+    let user = checking(&releases);
+    let binary = installed();
+    runs_from(&start_through(&user, &binary), &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+    user.call("update.download", json!({})).unwrap();
+    shown_until(&user, "the download to read some", |shown| {
+        shown["downloading"]["done"]
+            .as_u64()
+            .is_some_and(|done| done > 0)
+    });
+
+    let answer = user.call("update.cancel", json!({})).unwrap();
+
+    assert_eq!(answer["download_failed"], Value::Null, "{answer}");
+    let shown = shown_until(&user, "the download to stop", |shown| {
+        shown["downloading"] == Value::Null
+    });
+    assert_eq!(
+        shown["download_failed"],
+        Value::Null,
+        "a cancel is not a failure"
+    );
+    assert_eq!(shown["staged"], Value::Null);
+    assert_eq!(shown["latest"], NEWER, "the build can be downloaded again");
+    hold.release();
+    // Nothing is left beside the binary, not the staging, not what was being read.
+    let left: Vec<String> = std::fs::read_dir(binary.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["flottille"]);
+}
+
+#[test]
+fn cancel_with_no_download_changes_nothing() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    newer_stable(&releases, &standing_for(programs.path(), NEWER));
+    let user = checking(&releases);
+    let binary = installed();
+    runs_from(&start_through(&user, &binary), &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+
+    let answer = user.call("update.cancel", json!({})).unwrap();
+    assert_eq!(answer["downloading"], Value::Null);
+
+    // A cancel with nothing to cancel is not remembered: the next download runs through.
+    user.call("update.download", json!({})).unwrap();
+    shown_until(&user, "the download", |shown| shown["staged"] == NEWER);
+}
+
+#[test]
 fn flottille_update_stage_stages_while_the_daemon_runs() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();

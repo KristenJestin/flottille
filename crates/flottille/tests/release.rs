@@ -7,12 +7,12 @@ use crate::common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::User;
 use serde_json::json;
@@ -1500,52 +1500,111 @@ pub(crate) struct Releases {
     base: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     pub(crate) asked: Arc<Mutex<Vec<String>>>,
+    held: Held,
     /// Each release made is published a second after the previous one.
     published: AtomicUsize,
 }
 
+/// The paths whose download stops halfway, each until its [`Hold`] is let go.
+type Held = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// A download held halfway (`Releases::hold`): the server sends half of the body, then waits for
+/// this to be released, or dropped.
+pub(crate) struct Hold(Arc<AtomicBool>);
+
+impl Hold {
+    pub(crate) fn release(self) {}
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// How long a download held waits for its release at most: a test that forgot it does not hang.
+const HELD_AT_MOST: Duration = Duration::from_secs(60);
+
+fn answer(
+    mut stream: TcpStream,
+    served: &Mutex<HashMap<String, Vec<u8>>>,
+    noted: &Mutex<Vec<String>>,
+    held: &Mutex<HashMap<String, Arc<AtomicBool>>>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+            break;
+        }
+    }
+    let head = line.split_whitespace().next() == Some("HEAD");
+    let path = line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+    noted.lock().unwrap().push(path.clone());
+    let body = served.lock().unwrap().get(&path).cloned();
+    let hold = held.lock().unwrap().get(&path).cloned();
+    let _ = match body {
+        Some(body) => write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .and_then(|()| match (hold, head) {
+            (_, true) => Ok(()),
+            (Some(hold), false) => {
+                let (first, rest) = body.split_at(body.len() / 2);
+                stream.write_all(first)?;
+                stream.flush()?;
+                let until = Instant::now() + HELD_AT_MOST;
+                while !hold.load(Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                stream.write_all(rest)
+            }
+            (None, false) => stream.write_all(&body),
+        }),
+        None => write!(
+            stream,
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    };
+}
+
 impl Releases {
+    /// The download at `path` stops halfway until the hold returned is released or dropped.
+    pub(crate) fn hold(&self, path: &str) -> Hold {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.held
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), flag.clone());
+        Hold(flag)
+    }
+
     pub(crate) fn serve() -> Releases {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
         let asked: Arc<Mutex<Vec<String>>> = Arc::default();
-        let (served, noted) = (files.clone(), asked.clone());
+        let held: Held = Arc::default();
+        let (served, noted, waiting) = (files.clone(), asked.clone(), held.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
-                    continue;
-                }
-                loop {
-                    let mut header = String::new();
-                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
-                        break;
-                    }
-                }
-                let path = line.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                noted.lock().unwrap().push(path.clone());
-                let body = served.lock().unwrap().get(&path).cloned();
-                let _ = match body {
-                    Some(body) => write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .and_then(|()| stream.write_all(&body)),
-                    None => write!(
-                        stream,
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    ),
-                };
+                let Ok(stream) = stream else { continue };
+                let (served, noted, waiting) = (served.clone(), noted.clone(), waiting.clone());
+                // One thread for each request: a download held halfway blocks only itself.
+                std::thread::spawn(move || answer(stream, &served, &noted, &waiting));
             }
         });
         Releases {
             base,
             files,
             asked,
+            held,
             published: AtomicUsize::new(0),
         }
     }

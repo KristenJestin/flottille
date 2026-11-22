@@ -61,7 +61,12 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ),
     (
         "update",
-        Window(&["update.check", "update.download", "update.restart"]),
+        Window(&[
+            "update.check",
+            "update.download",
+            "update.cancel",
+            "update.restart",
+        ]),
     ),
     ("changes", Window(&["whatsnew.show"])),
     // ── Remote ───────────────────────────────────────────────────────────────────────────────
