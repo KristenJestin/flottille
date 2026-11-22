@@ -716,3 +716,68 @@ fn a_video_of_another_machine_plays_in_the_user_s_player(cx: &mut TestAppContext
         std::fs::read(&copy).is_ok_and(|bytes| bytes == video)
     });
 }
+
+/// A tunnel to the server's `run` that the command line opened and holds: not the window's own.
+/// Its answer, and the process that keeps it open.
+fn opened_by_the_command_line(pc: &Machine, run: &str) -> (common::Spawned, Value) {
+    use std::io::BufRead;
+    let mut command = pc
+        .user
+        .command(&["--machine", "server", "tunnel", "open", run, "--json"]);
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = common::Spawned::new(command);
+    let stdout = child.stdout.take().unwrap();
+    let mut first = String::new();
+    std::io::BufReader::new(stdout)
+        .read_line(&mut first)
+        .unwrap();
+    let answer = serde_json::from_str(&first).unwrap_or_else(|_| panic!("not JSON: {first}"));
+    (child, answer)
+}
+
+#[gpui_kit::test]
+fn the_tunnels_of_another_machine_are_listed(cx: &mut TestAppContext) {
+    let (_turn, machines) = machines();
+    let url = format!("http://127.0.0.1:{}", machines.port);
+    let run = web(&machines.server.user, &url, machines.port);
+    // A tunnel the window did not open: it is the daemon that knows it.
+    let (_held, answer) = opened_by_the_command_line(&machines.pc, &run);
+    let id = answer["tunnel"].as_str().unwrap().to_owned();
+    let local = answer["local_port"].as_u64().unwrap();
+
+    let (shell, cx, _opened) = window(&machines.pc, cx);
+    shell.update_in(cx, |s, window, cx| s.open(Selection::Services, window, cx));
+    // They are listed by machine, each with the address it opens on, and Close.
+    until(&shell, cx, "the tunnels are listed", |cx| {
+        present(cx, &format!("tunnels-row-{id}"))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, "tunnels-machine-server").as_deref(),
+        Some("server")
+    );
+    assert_eq!(
+        label(cx, &format!("tunnels-row-{id}")).as_deref(),
+        Some(format!("localhost:{local} → server").as_str())
+    );
+    assert_eq!(
+        label(cx, &format!("tunnels-row-{id}-close")).as_deref(),
+        Some("Close")
+    );
+
+    // Close ends it on the daemon, whoever opened it, and its row folds away.
+    click(&shell, cx, &format!("tunnels-row-{id}-close"));
+    until(&shell, cx, "the daemon closed the tunnel", |_| {
+        carried(&machines.pc).is_empty()
+    });
+    until(&shell, cx, "its row folds away", |cx| {
+        !present(cx, &format!("tunnels-row-{id}"))
+    });
+    settle(&shell, cx);
+    assert!(
+        !present(cx, "tunnels-machine-server"),
+        "nothing left to list"
+    );
+}

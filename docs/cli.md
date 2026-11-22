@@ -25,6 +25,11 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
 - The examples below use invented projects and paths.
+- **Each command has its place in the window**, except the few a script alone has a use for
+  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `mcp`): the
+  screen, dialog or menu entry that calls the same daemon method. The table is
+  `crates/flottille/tests/window_parity.rs`, and the test `every_cli_command_has_its_place_in_the_window`
+  refuses a command heading of this file that is in neither list.
 
 ## The `flot` name
 
@@ -137,6 +142,9 @@ ok   gh: 2.60.0 (/usr/bin/gh), signed in to github.com
 warn acli is not on PATH, and example.atlassian.net (shop: tracker) needs it: install it from https://developer.atlassian.com/cloud/acli/guides/install-acli/; the rest of Flottille works without it
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
+
+The window's **Settings › General › Check Flottille** shows the same checks (`provider.list`, `daemon.status`, `project.programs`), with *Check again*, and *Turn on* for a provider that is off.
+
 
 ### `flottille provider list [--json]`
 
