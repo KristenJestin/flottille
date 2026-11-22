@@ -1,6 +1,6 @@
 //! The hub's state and its rules (`docs/remote.md`, "The hub", "Pairing"), as a library its server
 //! (`server.rs`) calls: its key, the member list it stores, its pair mode, and what it knows of the
-//! members' devices, their presence and addresses.
+//! members' devices and their presence.
 //!
 //! The hub adds the devices: in pair mode (`open_pairing`, from `flottille-hub pair` on its host), a
 //! device that proves it holds the pair code's secret is paired, its entry signed with the hub's
@@ -19,8 +19,8 @@
 //! ```
 //!
 //! A `hub.json` of before pair mode may hold a `setup_code`: it is read, and dropped at the next
-//! write. The pair mode, the asks taken, the presence and the addresses are kept in memory: they
-//! last minutes, or are told again when a device connects.
+//! write. The pair mode, the asks taken and the presence are kept in memory: they last minutes, or
+//! are told again when a device connects.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -162,7 +162,6 @@ pub struct Hub<C: Clock = SystemClock> {
     ended: Option<(u64, PairEnd)>,
     pairings: u64,
     presence: Vec<(PublicKey, Presence)>,
-    addresses: Vec<(PublicKey, Vec<String>)>,
     /// The changes stored within the last hour, by their signer, with their time.
     recent: Vec<(PublicKey, u64)>,
 }
@@ -202,7 +201,6 @@ impl<C: Clock> Hub<C> {
             ended: None,
             pairings: 0,
             presence: Vec::new(),
-            addresses: Vec::new(),
             recent: Vec::new(),
         })
     }
@@ -557,24 +555,6 @@ impl<C: Clock> Hub<C> {
             .map(|(_, presence)| *presence)
     }
 
-    /// The addresses a member tells, kept in memory for the other members.
-    pub fn tell_addresses(
-        &mut self,
-        member: &PublicKey,
-        addresses: Vec<String>,
-    ) -> Result<(), HubError> {
-        self.member(member)?;
-        keep(&mut self.addresses, member, addresses);
-        Ok(())
-    }
-
-    pub fn addresses(&self, member: &PublicKey) -> Option<&[String]> {
-        self.addresses
-            .iter()
-            .find(|(key, _)| key == member)
-            .map(|(_, addresses)| addresses.as_slice())
-    }
-
     /// Checks `members` after the list the hub holds, writes it, then holds it: a list that does
     /// not check, or could not be written, is not taken.
     fn store_list(&mut self, members: MemberList) -> Result<(), HubError> {
@@ -582,7 +562,7 @@ impl<C: Clock> Hub<C> {
             .root()
             .ok_or_else(|| refused("the hub refuses an empty list"))?;
         let checked = members.check(&root, &self.key()).map_err(refuse_change)?;
-        // A member removed takes its presence, addresses and facts with it, and so does a machine
+        // A member removed takes its presence and facts with it, and so does a machine
         // no member declares any more.
         let member =
             |key: &PublicKey| checked.get(key).is_some() || checked.by_machine(key).is_some();
@@ -600,7 +580,6 @@ impl<C: Clock> Hub<C> {
         };
         write(&self.file, &stored)?;
         self.presence.retain(|(key, _)| member(key));
-        self.addresses.retain(|(key, _)| member(key));
         self.stored = stored;
         self.checked = Some(checked);
         Ok(())

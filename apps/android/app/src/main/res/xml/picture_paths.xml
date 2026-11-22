@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The camera writes one shot into the app's cache; the FileProvider gives that file to the camera
+     app alone, for the time of the shot. Nothing else is shared. -->
+<paths>
+    <cache-path name="pictures" path="pictures/" />
+</paths>

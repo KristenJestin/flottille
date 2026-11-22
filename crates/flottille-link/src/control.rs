@@ -1,5 +1,5 @@
 //! The control session every device keeps to its hub (`docs/remote.md`, "The hub",
-//! "Architecture"): the member list and its changes, the members' addresses and presence. Both
+//! "Architecture"): the member list and its changes, the members' presence. Both
 //! sides are here: the device's, and the handshake the hub answers with, so that the hub and a
 //! device cannot disagree on the wire.
 //!
@@ -19,7 +19,7 @@
 //! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
-//!                {"list": […]}, {"addresses": […]}, {"presence": […]}, {"facts": […]}
+//!                {"list": […]}, {"presence": […]}, {"facts": […]}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
 //!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
 //! and each way   {"keepalive": {}}
@@ -72,7 +72,7 @@ use crate::members::Signature;
 use crate::serial::{from_hex_text, invisible, shown, to_hex};
 use crate::{
     Change, ChangeHash, Hello, HubKey, ListError, MachineKey, MemberList, Members, NeedsUpdate,
-    PairCode, PairSecret, Proposed, PublicKey, choose,
+    PairCode, PairSecret, Proposed, PublicKey, choose_hub,
 };
 
 /// The port a hub listens on unless told otherwise.
@@ -88,7 +88,7 @@ const PAIR: &[u8] = b"flottille-hub-pair-v1\0";
 pub const LINE_LIMIT: usize = 4 << 20;
 /// The longest line of a handshake, either side's: some hundred bytes each.
 pub const HANDSHAKE_LIMIT: usize = 4 << 10;
-/// The longest ask the hub takes: a change, or the most addresses a machine tells.
+/// The longest ask the hub takes: a change.
 const ASK_LIMIT: usize = 64 << 10;
 /// The longest text of the hub's a device shows.
 const SHOWN: usize = 400;
@@ -262,6 +262,15 @@ pub enum ControlError {
         reason: String,
     },
     NeedsUpdate(NeedsUpdate),
+    /// The hub answered that this device is not one of its members (it was removed, or the hub
+    /// is another one): what a client offers to pair again for.
+    NotMember {
+        hub: String,
+        reason: String,
+    },
+    /// The hub took a change and sent back no list that holds it: it is told in words, and the
+    /// device's list is as it was.
+    Unconfirmed,
     /// The hub said something that is not the protocol, or the session ended.
     Lost {
         hub: String,
@@ -280,10 +289,16 @@ impl fmt::Display for ControlError {
                 "the hub at {hub} has another key than the one this device pinned"
             ),
             ControlError::Reset => ListError::Reset.fmt(f),
-            ControlError::Refused { hub, reason } => {
+            ControlError::Refused { hub, reason } | ControlError::NotMember { hub, reason } => {
                 write!(f, "the hub at {hub} refused: {reason}")
             }
             ControlError::NeedsUpdate(refusal) => refusal.fmt(f),
+            ControlError::Unconfirmed => write!(
+                f,
+                "The hub did not confirm this change in {} s: it may be busy, or it refused it. \
+                 Nothing was changed; try again once the hub answers.",
+                WAIT.as_secs()
+            ),
             ControlError::Lost { hub, why } => {
                 write!(f, "the session to the hub at {hub} ended: {why}")
             }
@@ -427,7 +442,9 @@ pub enum Ask {
     /// What this device says of itself: what it is (`computer`, `phone`) and its system
     /// (`linux`).
     About { device: String, system: String },
-    /// Every address this machine may be reached at now, in place of those told before.
+    /// The addresses a machine of the previous version tells, for the direct link removed on
+    /// 2026-11-21: answered and ignored, so that such a machine keeps its session while it waits
+    /// for its update. This version never asks it.
     Addresses { addresses: Vec<String> },
     /// Whether a client of this device is active, and when its last input was.
     Presence { active: bool, last_input: u64 },
@@ -439,13 +456,6 @@ pub struct Asked {
     pub id: u64,
     #[serde(flatten)]
     pub ask: Ask,
-}
-
-/// The addresses a member's machine told the hub.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Told {
-    pub key: PublicKey,
-    pub addresses: Vec<String>,
 }
 
 /// Whether a member's client is active, as it told the hub.
@@ -494,8 +504,10 @@ pub enum ToDevice {
     },
     /// The member list, whole, as the members signed it.
     List(MemberList),
-    /// The addresses every member's machine told, in place of those sent before.
-    Addresses(Vec<Told>),
+    /// The addresses of the members' machines, for the direct link removed on 2026-11-21: a hub
+    /// of before sends those its members told; this version's hub sends an empty list, once a
+    /// session, which a phone's core of before waits for before it links. Read and ignored.
+    Addresses(serde_json::Value),
     /// The presence of the members' clients, for a runner.
     Presence(Vec<PresenceOf>),
     /// What the hub knows of each member's device, in place of what it sent before.
@@ -623,6 +635,33 @@ struct Carried {
     online: watch::Sender<Vec<PublicKey>>,
 }
 
+/// Relay ports joined in memory as a hub joins its members' sessions, one for each of `keys`, which
+/// it stands for: a packet sent to a key goes to its port, said to be from the port's key, and
+/// each port sees every key online. For the tests of a link, which run no hub; the ports end when
+/// all of them are dropped.
+#[doc(hidden)]
+pub fn relays_in_memory(keys: &[PublicKey]) -> Vec<RelayPort> {
+    let (ports, carried): (Vec<RelayPort>, Vec<Carried>) =
+        keys.iter().map(|_| relay_ends()).unzip();
+    let incoming: Vec<_> = carried.iter().map(|ends| ends.incoming.clone()).collect();
+    for (from, ends) in keys.iter().zip(carried) {
+        ends.online.send_replace(keys.to_vec());
+        let (from, keys, incoming) = (*from.as_bytes(), keys.to_vec(), incoming.clone());
+        tokio::spawn(async move {
+            let Carried {
+                mut out, online, ..
+            } = ends;
+            while let Some((to, packet)) = out.recv().await {
+                if let Some(at) = keys.iter().position(|key| key.as_bytes() == &to) {
+                    let _ = incoming[at].try_send((from, packet));
+                }
+            }
+            drop(online);
+        });
+    }
+    ports
+}
+
 fn relay_ends() -> (RelayPort, Carried) {
     let (out, out_taken) = mpsc::channel(RELAY_WAITING);
     let (incoming_given, incoming) = mpsc::channel(RELAY_WAITING);
@@ -645,7 +684,6 @@ fn relay_ends() -> (RelayPort, Carried) {
 #[derive(Clone, Debug)]
 pub enum Pushed {
     List(MemberList),
-    Addresses(Vec<Told>),
     Presence(Vec<PresenceOf>),
     Facts(Vec<Facts>),
 }
@@ -769,40 +807,38 @@ impl Device {
         session.ask(Ask::Submit { change }).await?;
         self.sent_back(session, &hash)
             .await
-            .map_err(|why| ControlError::Refused {
-                hub: session.authority.clone(),
-                reason: format!("the hub withheld this change: {why}"),
+            .map_err(|why| match why {
+                None => ControlError::Unconfirmed,
+                Some(reason) => ControlError::Refused {
+                    hub: session.authority.clone(),
+                    reason,
+                },
             })
     }
 
-    /// Takes the lists `session` sends until one holds the change whose hash is `hash`; why not,
-    /// when one is refused or none comes in time.
+    /// Takes the lists `session` sends until one holds the change whose hash is `hash`; why not
+    /// when one is refused, `None` when none comes in time.
     async fn sent_back(
         &mut self,
         session: &mut Session,
         hash: &ChangeHash,
-    ) -> Result<Members, String> {
+    ) -> Result<Members, Option<String>> {
         let waited = tokio::time::timeout(WAIT, async {
             loop {
                 let Some(pushed) = session.next().await else {
-                    return Err(session.ended());
+                    return Err(Some(session.ended()));
                 };
                 let Pushed::List(list) = pushed else {
                     continue;
                 };
                 let holds = list.changes().iter().any(|change| change.hash() == *hash);
-                let members = self.take(list).map_err(|error| error.to_string())?;
+                let members = self.take(list).map_err(|error| Some(error.to_string()))?;
                 if holds {
                     return Ok(members);
                 }
             }
         });
-        waited.await.unwrap_or_else(|_| {
-            Err(format!(
-                "it sent back no list holding it in {} s",
-                WAIT.as_secs()
-            ))
-        })
+        waited.await.unwrap_or(Err(None))
     }
 
     /// A session to the hub this device pinned, opened by its machine. A hub that answers with
@@ -822,7 +858,7 @@ impl Device {
             Session::open(&url, Some(&self.hub), &machine.0, hello, tls, pinned, None).await?;
         match session.refused {
             Some((_, true)) => Err(ControlError::Reset),
-            Some((reason, false)) => Err(ControlError::Refused {
+            Some((reason, false)) => Err(ControlError::NotMember {
                 hub: url.host_shown(),
                 reason,
             }),
@@ -1035,6 +1071,15 @@ impl Session {
                 .await
                 .map_err(lost)?;
             if let Some(reason) = answer.get("refused").and_then(|refused| refused.as_str()) {
+                // A hub with no protocol in common says its own hello with its refusal: the
+                // device says what to update from both, in its own words.
+                if let Some(theirs) = answer
+                    .get("hello")
+                    .and_then(|hello| serde_json::from_value::<Hello>(hello.clone()).ok())
+                    && let Err(refusal) = choose_hub(hello, &theirs)
+                {
+                    return Err(ControlError::NeedsUpdate(refusal));
+                }
                 return Err(ControlError::Refused {
                     hub: authority.clone(),
                     reason: shown(reason, SHOWN),
@@ -1056,8 +1101,7 @@ impl Session {
                     "it did not prove it holds the key it showed".to_owned(),
                 ));
             }
-            let protocol = choose(hello, &theirs.hello, &format!("the hub at {authority}"))
-                .map_err(ControlError::NeedsUpdate)?;
+            let protocol = choose_hub(hello, &theirs.hello).map_err(ControlError::NeedsUpdate)?;
             let proof = sign(key, &proof_bytes(2, &theirs.hub, &theirs.nonce, &nonce));
             let transcript = Transcript {
                 hub: theirs.hub,
@@ -1363,7 +1407,7 @@ async fn drive(
                     }
                     Some(Ok(ToDevice::Facts(facts))) => { let _ = pushing.send(Pushed::Facts(facts)); }
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
-                    Some(Ok(ToDevice::Addresses(told))) => { let _ = pushing.send(Pushed::Addresses(told)); }
+                    Some(Ok(ToDevice::Addresses(_))) => {}
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
                     Some(Ok(ToDevice::Refused { reason, .. })) => {
                         break format!("it refused: {}", shown(&reason, SHOWN));
@@ -1613,15 +1657,19 @@ pub async fn arrive(
         let theirs: DeviceHello = read_frame(&mut reader, HANDSHAKE_LIMIT).await?;
         let nonce = Nonce32::new()?;
         let hub = key.public();
-        let protocol = match choose(hello, &theirs.hello, "this device") {
+        let protocol = match choose_hub(&theirs.hello, hello) {
             Ok(protocol) => protocol,
             Err(refusal) => {
+                // Said as the device reads it, with the hub's hello for it to say it itself.
                 let _ = write_line(
                     &mut writer,
-                    &serde_json::json!({"refused": refusal.to_string()}),
+                    &serde_json::json!({"refused": refusal.to_string(), "hello": hello}),
                 )
                 .await;
-                return Err(refusal.to_string());
+                return Err(format!(
+                    "a device that speaks protocol {} was refused: {refusal}",
+                    theirs.hello.protocols.iter().max().copied().unwrap_or(0)
+                ));
             }
         };
         let proof = sign(&key.0, &proof_bytes(1, &theirs.key, &theirs.nonce, &nonce));
@@ -1785,5 +1833,24 @@ mod tests {
         assert!(!verify(&signer, &proof_bytes(1, &other, &b, &a), &proof));
         assert!(!verify(&signer, &proof_bytes(1, &signer, &a, &b), &proof));
         assert!(proof_bytes(1, &other, &a, &b).starts_with(b"flottille-hub-session-v1\0"));
+    }
+
+    #[test]
+    fn the_addresses_of_the_previous_version_are_read_and_ignored() {
+        // A hub of the previous version tells its members' addresses: read, so that the session
+        // goes on, and nothing of it kept.
+        let told = format!(
+            r#"{{"addresses": [{{"key": "{}", "addresses": ["192.0.2.7:7447"]}}]}}"#,
+            "ab".repeat(32)
+        );
+        assert!(matches!(
+            serde_json::from_str::<ToDevice>(&told),
+            Ok(ToDevice::Addresses(_))
+        ));
+        // A machine of the previous version tells its own: still an ask the hub reads.
+        let asked: Asked =
+            serde_json::from_str(r#"{"id": 3, "kind": "addresses", "addresses": ["192.0.2.7"]}"#)
+                .unwrap();
+        assert!(matches!(asked.ask, Ask::Addresses { .. }));
     }
 }

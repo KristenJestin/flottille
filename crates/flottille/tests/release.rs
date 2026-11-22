@@ -7,12 +7,12 @@ use crate::common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::User;
 use serde_json::json;
@@ -28,15 +28,64 @@ fn tool(name: &str) -> PathBuf {
 /// A throwaway git repository, none of the machine's git settings.
 struct Repo {
     dir: tempfile::TempDir,
+    /// A `gh` standing for GitHub's API (`bin/gh`), and the descriptions of the pull requests it
+    /// knows (`prs/<number>`, and beside it the author's association and whether it can be read): the
+    /// changelog reads their `Note:` lines through it.
+    gh: tempfile::TempDir,
 }
 
 impl Repo {
     fn new() -> Repo {
         let repo = Repo {
             dir: tempfile::tempdir().unwrap(),
+            gh: tempfile::tempdir().unwrap(),
         };
         repo.git(&["init", "--quiet", "--initial-branch=main"]);
+        std::fs::create_dir_all(repo.gh.path().join("bin")).unwrap();
+        std::fs::create_dir_all(repo.gh.path().join("prs")).unwrap();
+        let gh = repo.gh.path().join("bin/gh");
+        // `gh api repos/{owner}/{repo}/pulls/<n> --jq <expression>`: the answer the changelog asks
+        // for (the author's association on a line, then the body), or a failure for a pull
+        // request marked unreadable. One known by neither is an empty description by an owner.
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$3\" = --jq ] || exit 2\n\
+             prs=$(dirname \"$0\")/../prs n=${2##*/}\n\
+             [ ! -e \"$prs/$n.unreadable\" ] || exit 1\n\
+             cat \"$prs/$n.association\" 2>/dev/null || echo OWNER\n\
+             cat \"$prs/$n\" 2>/dev/null || true\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         repo
+    }
+
+    /// The description of pull request `number`, as GitHub's API says it.
+    fn pr(&self, number: u32, body: &str) {
+        std::fs::write(self.gh.path().join(format!("prs/{number}")), body).unwrap();
+    }
+
+    /// Pull request `number` was written by someone who is `association` to the repository
+    /// (`OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, ...), as GitHub's API says it.
+    fn pr_by(&self, number: u32, association: &str) {
+        std::fs::write(
+            self.gh.path().join(format!("prs/{number}.association")),
+            format!("{association}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The API fails to read pull request `number`.
+    fn pr_unreadable(&self, number: u32) {
+        std::fs::write(self.gh.path().join(format!("prs/{number}.unreadable")), "").unwrap();
+    }
+
+    /// The environment that puts the fake `gh` first on the `PATH`.
+    fn with_gh<'a>(&self, command: &'a mut Command) -> &'a mut Command {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![self.gh.path().join("bin")];
+        paths.extend(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(paths).unwrap())
     }
 
     fn git_command(&self, args: &[&str]) -> Command {
@@ -147,11 +196,14 @@ impl Repo {
 
     /// `tools/changelog.sh` in this repository.
     fn changelog(&self, args: &[&str]) -> String {
-        let output = Command::new(tool("tools/changelog.sh"))
-            .args(args)
-            .current_dir(self.dir.path())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        let output = self
+            .with_gh(
+                Command::new(tool("tools/changelog.sh"))
+                    .args(args)
+                    .current_dir(self.dir.path())
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1"),
+            )
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -546,8 +598,8 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     assert_eq!(repo.next(&["stable", "--at", &released]), "0.1.2");
     assert_eq!(
         repo.changelog(&["--at", &released]),
-        "### Features\n\n- **tools**: cut long results (#350)\n\n\
-         ### Fixes\n\n- **store**: a lock (#351)\n"
+        "### All changes\n\n#### Features\n\n- **tools**: cut long results (#350)\n\n\
+         #### Fixes\n\n- **store**: a lock (#351)\n"
     );
     repo.tag("v0.1.2");
     repo.git(&["checkout", "--quiet", "dev"]);
@@ -564,7 +616,7 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     );
     assert_eq!(
         repo.changelog(&[]),
-        "### Other changes\n\n- **repo**: say more (#352)\n"
+        "### All changes\n\n#### Other changes\n\n- **repo**: say more (#352)\n"
     );
 }
 
@@ -584,8 +636,8 @@ fn a_second_fast_forward_release_counts_from_the_first() {
     assert_eq!(released, dev);
     assert_eq!(
         repo.changelog(&["v0.1.2..v0.1.3"]),
-        "### Fixes\n\n- **cli**: a flag (#360)\n\n\
-         ### Performance\n\n- **store**: fewer reads (#361)\n"
+        "### All changes\n\n#### Fixes\n\n- **cli**: a flag (#360)\n\n\
+         #### Performance\n\n- **store**: fewer reads (#361)\n"
     );
     repo.commit("feat(gui): another page (#362)");
     assert_eq!(repo.next(&["beta"]), "0.1.4-beta.1");
@@ -953,20 +1005,15 @@ fn the_changelog_groups_the_commits_by_type_with_their_pull_requests() {
     repo.commit("perf(store): fewer reads (#17)");
     repo.commit("Merge branch 'dev'");
 
-    let output = Command::new(tool("tools/changelog.sh"))
-        .current_dir(repo.dir.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{output:?}");
+    // No pull request says a note: the raw list is all there is, as it always was.
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "### Breaking changes\n\n- **store**: a new schema (#16)\n\n\
-         ### Features\n\n- **gui**: add a page (#14)\n- **store**: a new schema (#16)\n\n\
-         ### Fixes\n\n- **cli**: a typo (#13)\n\n\
-         ### Performance\n\n- **store**: fewer reads (#17)\n\n\
-         ### Other changes\n\n- **repo**: say more (#15)\n"
+        repo.changelog(&[]),
+        "### All changes\n\n\
+         #### Breaking changes\n\n- **store**: a new schema (#16)\n\n\
+         #### Features\n\n- **gui**: add a page (#14)\n- **store**: a new schema (#16)\n\n\
+         #### Fixes\n\n- **cli**: a typo (#13)\n\n\
+         #### Performance\n\n- **store**: fewer reads (#17)\n\n\
+         #### Other changes\n\n- **repo**: say more (#15)\n"
     );
 }
 
@@ -985,8 +1032,9 @@ fn the_changelog_of_a_stable_release_lists_the_dev_commits_between_the_two_marks
 
     assert_eq!(
         repo.changelog(&["--at", &dev]),
-        "### Features\n\n- **gui**: add a page (#14)\n\n\
-         ### Other changes\n\n- **repo**: say more (#15)\n"
+        "### All changes\n\n\
+         #### Features\n\n- **gui**: add a page (#14)\n\n\
+         #### Other changes\n\n- **repo**: say more (#15)\n"
     );
 }
 
@@ -1032,8 +1080,9 @@ fn two_releases_in_a_row_the_second_merges_its_version_is_the_next_and_its_chang
     assert_eq!(repo.next(&["stable", "--at", &dev]), "0.4.1");
     assert_eq!(
         repo.changelog(&["--at", &dev]),
-        "### Fixes\n\n- **cli**: a typo (#21)\n\n\
-         ### Other changes\n\n- **repo**: say more (#22)\n"
+        "### All changes\n\n\
+         #### Fixes\n\n- **cli**: a typo (#21)\n\n\
+         #### Other changes\n\n- **repo**: say more (#22)\n"
     );
 }
 
@@ -1048,7 +1097,275 @@ fn a_line_s_changelog_lists_its_commits_since_its_previous_tag() {
 
     assert_eq!(
         repo.changelog(&["--at", "HEAD", "--branch", "stable/0.3"]),
-        "### Fixes\n\n- **cli**: a typo (#14)\n"
+        "### All changes\n\n#### Fixes\n\n- **cli**: a typo (#14)\n"
+    );
+}
+
+// The notes of a release (#1178).
+
+#[test]
+fn a_note_line_becomes_the_entry() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("feat(gui): a page for the changes (#14)");
+    repo.pr(
+        14,
+        "I add a page for the changes.\r\n\r\nNote: Read what changed on a page of its own.\r\n\r\nTests: group_window_shell\r\n\r\nCloses #3",
+    );
+
+    // The sentence, the number beside it; the subject stays in the raw list.
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- Read what changed on a page of its own. (#14)\n\n\
+         ### All changes\n\n#### Features\n\n- **gui**: a page for the changes (#14)\n"
+    );
+}
+
+#[test]
+fn a_pull_request_without_a_note_is_only_in_the_raw_list() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("refactor(store): split a module (#21)");
+    repo.commit("feat(gui): a page for the changes (#22)");
+    repo.commit("fix(cli): a typo (#23)");
+    repo.commit("docs(repo): say more");
+    repo.pr(21, "I split a module.\n\nCloses #5");
+    repo.pr(22, "Note: Read what changed on a page of its own.");
+    repo.pr(23, "I fix a typo.");
+
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- Read what changed on a page of its own. (#22)\n\n\
+         ### All changes\n\n\
+         #### Features\n\n- **gui**: a page for the changes (#22)\n\n\
+         #### Fixes\n\n- **cli**: a typo (#23)\n\n\
+         #### Other changes\n\n- **store**: split a module (#21)\n- **repo**: say more\n"
+    );
+}
+
+#[test]
+fn a_note_from_an_outside_author_is_not_used() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("feat(gui): a page for the changes (#14)");
+    repo.commit("feat(gui): a second page (#15)");
+    // The description is read at release time, after the merge: whoever wrote the pull request
+    // can have changed it since. Only a maintainer's note is the release's.
+    repo.pr(14, "Note: Read what changed on a page of its own.");
+    repo.pr_by(14, "CONTRIBUTOR");
+    repo.pr(15, "Note: See the second page.");
+    repo.pr_by(15, "COLLABORATOR");
+
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- See the second page. (#15)\n\n\
+         ### All changes\n\n#### Features\n\n\
+         - **gui**: a page for the changes (#14)\n- **gui**: a second page (#15)\n"
+    );
+}
+
+#[test]
+fn a_pull_request_that_cannot_be_read_fails_the_changelog() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("fix(cli): a typo (#23)");
+    repo.pr_unreadable(23);
+
+    // A release built without its note cannot be edited afterwards: the build stops instead.
+    let output = repo
+        .with_gh(
+            Command::new(tool("tools/changelog.sh"))
+                .current_dir(repo.dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1"),
+        )
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("#23"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn notes_are_grouped_by_area_with_fixes_last() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    let commits = [
+        ("fix(gui): a link opens (#31)", "A link opens again."),
+        (
+            "feat(daemon): a quiet start (#32)",
+            "The daemon starts quietly.",
+        ),
+        (
+            "feat(hub): sign every action (#33)",
+            "Drive another machine, each action signed.",
+        ),
+        (
+            "feat(gui): a mark at the foot (#34)",
+            "See what is new from the sidebar.",
+        ),
+        (
+            "feat(sessions): resume a session (#35)",
+            "Resume a session where it stopped.",
+        ),
+        (
+            "feat(mcp): list the tools (#36)",
+            "Ask the tools an agent has.",
+        ),
+        (
+            "feat(git): follow a branch (#37)",
+            "Follow a branch from its project.",
+        ),
+        (
+            "feat(cli): remote on and off (#38)",
+            "Turn remote on from the command line.",
+        ),
+        (
+            "fix(store): a lock (#39)",
+            "A project can be removed while it is busy.",
+        ),
+        (
+            "feat(android): open a session (#40)",
+            "Open a session from the phone.",
+        ),
+        (
+            "perf(acp): fewer reads (#41)",
+            "Long conversations open faster.",
+        ),
+    ];
+    for (subject, note) in commits {
+        repo.commit(subject);
+        let number = subject.rsplit_once("(#").unwrap().1.trim_end_matches(')');
+        repo.pr(
+            number.parse().unwrap(),
+            &format!("Why.\n\nNote: {note}\n\nCloses #1"),
+        );
+    }
+
+    let changelog = repo.changelog(&[]);
+
+    // The areas in their order, the notes of each oldest first, the fixes last, then the raw list.
+    let notes = changelog.split("### All changes").next().unwrap();
+    assert_eq!(
+        notes,
+        "### Remote\n\n\
+         - Drive another machine, each action signed. (#33)\n\
+         - Turn remote on from the command line. (#38)\n\
+         - Open a session from the phone. (#40)\n\n\
+         ### Window\n\n- See what is new from the sidebar. (#34)\n\n\
+         ### Agents\n\n- Resume a session where it stopped. (#35)\n\
+         - Long conversations open faster. (#41)\n\n\
+         ### Tools\n\n- Ask the tools an agent has. (#36)\n\n\
+         ### Projects\n\n- Follow a branch from its project. (#37)\n\n\
+         ### Other\n\n- The daemon starts quietly. (#32)\n\n\
+         ### Fixed\n\n- A link opens again. (#31)\n- A project can be removed while it is busy. (#39)\n\n"
+    );
+    assert!(
+        changelog.contains("### All changes\n\n#### Features\n\n"),
+        "{changelog}"
+    );
+}
+
+#[test]
+fn the_token_is_given_to_the_step_that_reads_the_notes_only() {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // The build job: from its environment (the head's commit and branch) to its first step's run.
+    let build = workflow
+        .split("      HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n    outputs:")
+        .nth(1)
+        .expect("the build job");
+    let (job, steps) = build.split_once("    steps:").unwrap();
+    // The job's own environment reaches every step, the build scripts and the dependencies.
+    assert!(!job.contains("GH_TOKEN"), "{job}");
+    let (version, _) = steps
+        .split_once("name: The channel and the version")
+        .unwrap()
+        .1
+        .split_once("        run: |")
+        .unwrap();
+    assert!(
+        version.contains("GH_TOKEN: ${{ github.token }}"),
+        "{version}"
+    );
+}
+
+// The shape check asks for a note (#1178).
+
+/// What `.github/scripts/pr-note.sh` says of a pull request titled `title` that changes `changed`
+/// (one path per line), whose description is `body`: its workflow commands, on stdout.
+fn note_check(title: &str, changed: &[&str], body: &str) -> String {
+    let output = Command::new("bash")
+        .arg(tool(".github/scripts/pr-note.sh"))
+        .env("TITLE", title)
+        .env("BODY", body)
+        .env("CHANGED", changed.join("\n"))
+        .output()
+        .unwrap();
+    // A warning, never a failure: the pull request stays mergeable.
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn the_shape_check_warns_on_a_feature_without_a_note() {
+    let product = ["crates/flottille/src/daemon.rs", "docs/design.md"];
+    for title in ["feat(gui): a page", "fix(cli): a typo"] {
+        let said = note_check(title, &product, "I do it.\n\nCloses #1");
+        assert!(said.starts_with("::warning"), "{title}: {said}");
+        assert!(said.contains("Note:"), "{said}");
+    }
+    // A note, said at the start of its line, satisfies it.
+    assert_eq!(
+        note_check(
+            "feat(gui): a page",
+            &product,
+            "I do it.\n\nNote: Read what changed.\n\nCloses #1"
+        ),
+        ""
+    );
+    // Nothing the user can see: the type, or what the pull request touches, says so.
+    for title in [
+        "refactor(core): tidy",
+        "docs(repo): say more",
+        "ci(ci): faster",
+        "test(gui): more",
+    ] {
+        assert_eq!(note_check(title, &product, "Closes #1"), "", "{title}");
+    }
+    assert_eq!(
+        note_check(
+            "feat(repo): a tool",
+            &[
+                "tools/changelog.sh",
+                "crates/flottille-fake-gh/src/main.rs",
+                "crates/flottille/tests/a.rs"
+            ],
+            "Closes #1"
+        ),
+        ""
+    );
+    // The title is the author's: it is never said inside a workflow command, where a newline or
+    // `%0A` in it would start another one.
+    let said = note_check(
+        "feat(gui): a page%0A::error::injected\r",
+        &product,
+        "Closes #1",
+    );
+    assert!(said.starts_with("::warning"), "{said}");
+    assert!(!said.contains("injected"), "{said}");
+    // The workflow runs it, and its step cannot fail the check.
+    let workflow = std::fs::read_to_string(tool(".github/workflows/pull-request.yml")).unwrap();
+    assert!(
+        workflow.contains(".github/scripts/pr-note.sh"),
+        "{workflow}"
     );
 }
 
@@ -1183,52 +1500,111 @@ pub(crate) struct Releases {
     base: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     pub(crate) asked: Arc<Mutex<Vec<String>>>,
+    held: Held,
     /// Each release made is published a second after the previous one.
     published: AtomicUsize,
 }
 
+/// The paths whose download stops halfway, each until its [`Hold`] is let go.
+type Held = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// A download held halfway (`Releases::hold`): the server sends half of the body, then waits for
+/// this to be released, or dropped.
+pub(crate) struct Hold(Arc<AtomicBool>);
+
+impl Hold {
+    pub(crate) fn release(self) {}
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// How long a download held waits for its release at most: a test that forgot it does not hang.
+const HELD_AT_MOST: Duration = Duration::from_secs(60);
+
+fn answer(
+    mut stream: TcpStream,
+    served: &Mutex<HashMap<String, Vec<u8>>>,
+    noted: &Mutex<Vec<String>>,
+    held: &Mutex<HashMap<String, Arc<AtomicBool>>>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+            break;
+        }
+    }
+    let head = line.split_whitespace().next() == Some("HEAD");
+    let path = line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+    noted.lock().unwrap().push(path.clone());
+    let body = served.lock().unwrap().get(&path).cloned();
+    let hold = held.lock().unwrap().get(&path).cloned();
+    let _ = match body {
+        Some(body) => write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .and_then(|()| match (hold, head) {
+            (_, true) => Ok(()),
+            (Some(hold), false) => {
+                let (first, rest) = body.split_at(body.len() / 2);
+                stream.write_all(first)?;
+                stream.flush()?;
+                let until = Instant::now() + HELD_AT_MOST;
+                while !hold.load(Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                stream.write_all(rest)
+            }
+            (None, false) => stream.write_all(&body),
+        }),
+        None => write!(
+            stream,
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    };
+}
+
 impl Releases {
+    /// The download at `path` stops halfway until the hold returned is released or dropped.
+    pub(crate) fn hold(&self, path: &str) -> Hold {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.held
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), flag.clone());
+        Hold(flag)
+    }
+
     pub(crate) fn serve() -> Releases {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
         let asked: Arc<Mutex<Vec<String>>> = Arc::default();
-        let (served, noted) = (files.clone(), asked.clone());
+        let held: Held = Arc::default();
+        let (served, noted, waiting) = (files.clone(), asked.clone(), held.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_err() {
-                    continue;
-                }
-                loop {
-                    let mut header = String::new();
-                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
-                        break;
-                    }
-                }
-                let path = line.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                noted.lock().unwrap().push(path.clone());
-                let body = served.lock().unwrap().get(&path).cloned();
-                let _ = match body {
-                    Some(body) => write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .and_then(|()| stream.write_all(&body)),
-                    None => write!(
-                        stream,
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    ),
-                };
+                let Ok(stream) = stream else { continue };
+                let (served, noted, waiting) = (served.clone(), noted.clone(), waiting.clone());
+                // One thread for each request: a download held halfway blocks only itself.
+                std::thread::spawn(move || answer(stream, &served, &noted, &waiting));
             }
         });
         Releases {
             base,
             files,
             asked,
+            held,
             published: AtomicUsize::new(0),
         }
     }
@@ -2876,18 +3252,21 @@ fn version_step_with(
     std::fs::write(&outputs, "").unwrap();
     let script = temp.path().join("version.sh");
     std::fs::write(&script, step_script(".github/workflows/ci.yml", "version")).unwrap();
-    let output = Command::new("bash")
-        .args(["--noprofile", "--norc", "-eo", "pipefail"])
-        .arg(&script)
-        .current_dir(clone.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GITHUB_REF_NAME", name)
-        .env("GITHUB_REF_TYPE", kind)
-        .env("GITHUB_SHA", sha)
-        .env("GITHUB_OUTPUT", &outputs)
-        .env("RUNNER_TEMP", temp.path())
-        .envs(more.iter().copied())
+    let output = repo
+        .with_gh(
+            Command::new("bash")
+                .args(["--noprofile", "--norc", "-eo", "pipefail"])
+                .arg(&script)
+                .current_dir(clone.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GITHUB_REF_NAME", name)
+                .env("GITHUB_REF_TYPE", kind)
+                .env("GITHUB_SHA", sha)
+                .env("GITHUB_OUTPUT", &outputs)
+                .env("RUNNER_TEMP", temp.path())
+                .envs(more.iter().copied()),
+        )
         .output()
         .unwrap();
     (
@@ -2938,7 +3317,10 @@ fn the_pushes_of_a_line_are_published_as_its_rcs() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(outputs, "channel=rc\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n");
-    assert_eq!(changelog, "### Fixes\n\n- **store**: a lock (#13)\n");
+    assert_eq!(
+        changelog,
+        "### All changes\n\n#### Fixes\n\n- **store**: a lock (#13)\n"
+    );
 }
 
 /// The line `stable/0.3` at 0.3.1, then a fix whose rc was published and that
@@ -2962,7 +3344,10 @@ fn a_line_s_tag_is_built_as_its_stable_release_with_the_line_s_changelog() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(outputs, "channel=stable\nversion=0.3.2\ntag=v0.3.2\n");
-    assert_eq!(changelog, "### Fixes\n\n- **cli**: a typo (#14)\n");
+    assert_eq!(
+        changelog,
+        "### All changes\n\n#### Fixes\n\n- **cli**: a typo (#14)\n"
+    );
 }
 
 #[test]
@@ -5674,4 +6059,489 @@ fn verify_and_the_partitions_both_put_the_flaky_tests_in_their_summary() {
         "{}",
         ci_job("verify")
     );
+}
+
+// The release's APK, the Android tests offline and the betas' clean-up (#1196).
+
+/// The `if:` of the first job or step in `text`, the way GitHub reads it: on one line, or folded
+/// (`>-`) over the lines indented under it.
+fn condition_of(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("if:"))
+        .unwrap_or_else(|| panic!("no condition in {text}"));
+    let indent = lines[at].len() - lines[at].trim_start().len();
+    let first = lines[at].trim_start()["if:".len()..].trim();
+    let mut expression = if first == ">-" {
+        String::new()
+    } else {
+        first.to_owned()
+    };
+    for line in &lines[at + 1..] {
+        if line.trim().is_empty() || line.len() - line.trim_start().len() <= indent {
+            break;
+        }
+        expression.push(' ');
+        expression.push_str(line.trim());
+    }
+    expression
+        .trim()
+        .trim_start_matches("${{")
+        .trim_end_matches("}}")
+        .trim()
+        .to_owned()
+}
+
+/// Whether `expression` holds for `context`, with the operators `ci.yml` uses: `!`, `==`, `!=`,
+/// `&&`, `||`, parentheses, quoted strings, `cancelled()` and `always()`. A name the context does
+/// not give fails the test: a condition that reads something new says so here.
+fn holds(expression: &str, context: &[(&str, &str)]) -> bool {
+    #[derive(Debug, PartialEq, Clone)]
+    enum Token {
+        Open,
+        Close,
+        Not,
+        Equal,
+        Different,
+        And,
+        Or,
+        Text(String),
+        Name(String),
+    }
+    let chars: Vec<char> = expression.chars().collect();
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let two: String = chars[at..].iter().take(2).collect();
+        match chars[at] {
+            ' ' => at += 1,
+            '(' => {
+                tokens.push(Token::Open);
+                at += 1;
+            }
+            ')' => {
+                tokens.push(Token::Close);
+                at += 1;
+            }
+            '\'' => {
+                let end = at + 1 + chars[at + 1..].iter().position(|c| *c == '\'').unwrap();
+                tokens.push(Token::Text(chars[at + 1..end].iter().collect()));
+                at = end + 1;
+            }
+            _ if two == "==" => {
+                tokens.push(Token::Equal);
+                at += 2;
+            }
+            _ if two == "!=" => {
+                tokens.push(Token::Different);
+                at += 2;
+            }
+            _ if two == "&&" => {
+                tokens.push(Token::And);
+                at += 2;
+            }
+            _ if two == "||" => {
+                tokens.push(Token::Or);
+                at += 2;
+            }
+            '!' => {
+                tokens.push(Token::Not);
+                at += 1;
+            }
+            c if c.is_alphanumeric() || "._-".contains(c) => {
+                let end = at
+                    + chars[at..]
+                        .iter()
+                        .take_while(|c| c.is_alphanumeric() || "._-".contains(**c))
+                        .count();
+                let mut name: String = chars[at..end].iter().collect();
+                at = end;
+                if chars[at..].starts_with(&['(', ')']) {
+                    name.push_str("()");
+                    at += 2;
+                }
+                tokens.push(Token::Name(name));
+            }
+            c => panic!("{c:?} in {expression}"),
+        }
+    }
+
+    // or := and ("||" and)*, and := not ("&&" not)*, not := "!" not | compare,
+    // compare := atom (("==" | "!=") atom)?, atom := "(" or ")" | text | name.
+    struct Parser<'a> {
+        tokens: Vec<Token>,
+        at: usize,
+        context: &'a [(&'a str, &'a str)],
+    }
+    impl Parser<'_> {
+        fn eat(&mut self, token: &Token) -> bool {
+            let found = self.tokens.get(self.at) == Some(token);
+            self.at += usize::from(found);
+            found
+        }
+        fn truthy(value: &str) -> bool {
+            !matches!(value, "" | "false" | "0")
+        }
+        fn or(&mut self) -> bool {
+            let mut value = self.and();
+            while self.eat(&Token::Or) {
+                let next = self.and();
+                value = value || next;
+            }
+            value
+        }
+        fn and(&mut self) -> bool {
+            let mut value = self.not();
+            while self.eat(&Token::And) {
+                let next = self.not();
+                value = value && next;
+            }
+            value
+        }
+        fn not(&mut self) -> bool {
+            if self.eat(&Token::Not) {
+                return !self.not();
+            }
+            let left = self.atom();
+            if self.eat(&Token::Equal) {
+                return left == self.atom();
+            }
+            if self.eat(&Token::Different) {
+                return left != self.atom();
+            }
+            Self::truthy(&left)
+        }
+        fn atom(&mut self) -> String {
+            if self.eat(&Token::Open) {
+                let value = self.or();
+                assert!(self.eat(&Token::Close), "a closing parenthesis");
+                return value.to_string();
+            }
+            match self.tokens.get(self.at).cloned() {
+                Some(Token::Text(text)) => {
+                    self.at += 1;
+                    text
+                }
+                Some(Token::Name(name)) => {
+                    self.at += 1;
+                    match name.as_str() {
+                        "cancelled()" => "false".into(),
+                        "always()" => "true".into(),
+                        _ => self
+                            .context
+                            .iter()
+                            .find(|(key, _)| *key == name)
+                            .unwrap_or_else(|| panic!("the condition reads {name}"))
+                            .1
+                            .to_owned(),
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    let mut parser = Parser {
+        tokens,
+        at: 0,
+        context,
+    };
+    let value = parser.or();
+    assert_eq!(parser.at, parser.tokens.len(), "{expression}");
+    value
+}
+
+/// The text of the step of `job` named `name`: from its `- name:` line to the next step's.
+fn step_of(job: &str, name: &str) -> String {
+    let lines: Vec<&str> = job.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| *l == format!("      - name: {name}"))
+        .unwrap_or_else(|| panic!("no step {name}"));
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with("      - "))
+        .map_or(lines.len(), |at| start + 1 + at);
+    lines[start..end].join("\n")
+}
+
+#[test]
+fn android_sign_runs_on_a_push_and_on_a_release_build_of_main_only() {
+    // A release build of main is `Release`'s workflow_dispatch of ci.yml on main: a commit main
+    // holds is always a released commit of dev. A run started by hand on any other ref, a stable
+    // line's tag included, a pull request's run, and a build that failed reach no key.
+    let runs = [
+        ("push", "refs/heads/main", true),
+        ("push", "refs/heads/dev", true),
+        ("push", "refs/heads/stable/0.4", true),
+        ("workflow_dispatch", "refs/heads/main", true),
+        ("workflow_dispatch", "refs/heads/dev", false),
+        ("workflow_dispatch", "refs/heads/fix/1-a", false),
+        ("workflow_dispatch", "refs/heads/next/0.5", false),
+        ("workflow_dispatch", "refs/heads/stable/0.4", false),
+        ("workflow_dispatch", "refs/tags/v0.4.1", false),
+        ("pull_request", "refs/pull/7/merge", false),
+    ];
+    let sign = condition_of(&ci_job("android-sign"));
+    let attach = condition_of(&step_of(&ci_job("publish"), "The signed APK"));
+    for (event, git_ref, signs) in runs {
+        let context = [
+            ("github.event_name", event),
+            ("github.ref", git_ref),
+            ("needs.android.result", "success"),
+        ];
+        assert_eq!(
+            holds(&sign, &context),
+            signs,
+            "android-sign: {event} {git_ref}"
+        );
+        // `publish` attaches the signed APK on the very runs that signed it, no others.
+        assert_eq!(
+            holds(&attach, &context),
+            signs,
+            "publish: {event} {git_ref}"
+        );
+    }
+    for result in ["failure", "skipped", "cancelled"] {
+        let context = [
+            ("github.event_name", "push"),
+            ("github.ref", "refs/heads/main"),
+            ("needs.android.result", result),
+        ];
+        assert!(!holds(&sign, &context), "android {result}");
+    }
+}
+
+/// Every file under `dir`, folders walked.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+#[test]
+fn the_android_tests_never_fetch_at_test_time() {
+    let gradle = std::fs::read_to_string(tool("apps/android/app/build.gradle.kts")).unwrap();
+    // The jars Robolectric loads are a Gradle dependency, resolved to a folder by a task of their
+    // own, and every test task is told to read that folder and to fetch nothing.
+    assert!(
+        gradle.contains("org.robolectric:android-all-instrumented:"),
+        "the jars are a dependency: {gradle}"
+    );
+    assert!(
+        gradle.contains("\"robolectric.offline\", \"true\""),
+        "{gradle}"
+    );
+    assert!(
+        gradle.contains("\"robolectric.dependency.dir\""),
+        "{gradle}"
+    );
+    assert!(
+        gradle.contains("dependsOn(fetchRobolectricJars)"),
+        "a test never runs before its jars are there: {gradle}"
+    );
+
+    // One jar per SDK a test can run on: the SDKs the tests name (`@Config(sdk = [..])`) and the
+    // app's `targetSdk`, which Robolectric asks for too (the first run of this job found 35's
+    // missing: every test failed with "Path is not a file"). The version of each is the one
+    // Robolectric 4.14.1's `DefaultSdkProvider` names for it.
+    let jar = |sdk: u32| match sdk {
+        34 => "14-robolectric-10818077-i7",
+        35 => "15-robolectric-12650502-i7",
+        other => panic!("SDK {other}: add its Robolectric version to this test"),
+    };
+    let mut sdks = std::collections::BTreeSet::new();
+    let target = gradle
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("targetSdk = "))
+        .expect("a targetSdk");
+    sdks.insert(target.trim().parse::<u32>().unwrap());
+    let tests = tool("apps/android/app/src/test");
+    for entry in files_under(&tests) {
+        let text = std::fs::read_to_string(&entry).unwrap_or_default();
+        for list in text.split("sdk = [").skip(1) {
+            let list = &list[..list.find(']').unwrap()];
+            sdks.extend(list.split(',').map(|n| n.trim().parse::<u32>().unwrap()));
+        }
+    }
+    for sdk in sdks {
+        assert!(
+            gradle.contains(&format!("\"{}\"", jar(sdk))),
+            "the jar of SDK {sdk} is a dependency: {gradle}"
+        );
+    }
+    // Each in a configuration of its own: in one, Gradle keeps the newest version of the module
+    // and drops the others (the second run of this job found only SDK 35's jar in the folder).
+    assert!(gradle.contains("detachedConfiguration("), "{gradle}");
+    assert!(!gradle.contains("robolectricJars("), "{gradle}");
+
+    // The job fetches them in a step of their own, before the tests, which may retry; the tests
+    // are not run with the network's help.
+    let script = std::fs::read_to_string(tool("apps/android/ci.sh")).unwrap();
+    let fetch = script
+        .find(":app:fetchRobolectricJars")
+        .expect("ci.sh fetches the jars");
+    let tests = script
+        .find(":app:testDebugUnitTest")
+        .expect("ci.sh runs the unit tests");
+    assert!(fetch < tests, "the jars before the tests: {script}");
+    assert!(
+        script[..fetch].contains("for attempt in"),
+        "a network hiccup is retried: {script}"
+    );
+    assert!(
+        script[..fetch].contains("the Robolectric jars"),
+        "the step says what it does: {script}"
+    );
+    assert!(
+        ci_job("android").contains("apps/android/ci.sh"),
+        "the job runs it"
+    );
+}
+
+/// The `prune` step of `beta-cleanup.yml`, run against `FAKE_RELEASES_GH`, with no pause between
+/// two deletions: the other settings of the workflow (`env`) are the ones the tests below read.
+fn prune(fake: &Fake) -> Output {
+    fake.run(
+        &step_script(".github/workflows/beta-cleanup.yml", "prune"),
+        &[
+            ("GH_TOKEN", "unused"),
+            ("KEEP", &prune_setting("KEEP")),
+            ("MAX_DELETIONS", &prune_setting("MAX_DELETIONS")),
+            ("PAUSE", "0"),
+        ],
+    )
+}
+
+/// The value of an `env` entry of the pruning step, as the workflow says it.
+fn prune_setting(name: &str) -> String {
+    let text = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
+    let prefix = format!("{name}: ");
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(&prefix).map(str::to_owned))
+        .unwrap_or_else(|| panic!("beta-cleanup.yml sets no {name}"))
+}
+
+#[test]
+fn the_betas_of_a_version_keep_the_last_ten() {
+    let fake = Fake::new();
+    let mut state: Vec<String> = (1..=14).map(|n| format!("v0.4.0-beta.{n}")).collect();
+    // Another version: eleven, and only the oldest goes.
+    state.extend((1..=11).map(|n| format!("v0.5.0-beta.{n}")));
+    // Few of a version: kept. Never a stable release, a release candidate, a next build or an alpha,
+    // however many.
+    state.extend((1..=3).map(|n| format!("v0.3.0-beta.{n}")));
+    state.extend((1..=12).map(|n| format!("v0.4.1-rc.{n}")));
+    state.extend((1..=12).map(|n| format!("v0.6.0-next.{n}")));
+    state.extend((1..=12).map(|n| format!("v0.4.0-alpha.feat-a.{n}")));
+    state.extend(["v0.4.0".into(), "v0.3.0".into(), "v0.4.1".into()]);
+    let before = state.clone();
+    fake.state(&state.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let output = prune(&fake);
+
+    assert!(output.status.success(), "{output:?}");
+    let kept = fake.tags();
+    // 1..=4 of 0.4.0 are gone (2 and 10 are not ordered as text), and 0.5.0's first.
+    let gone: Vec<String> = before
+        .iter()
+        .filter(|tag| !kept.contains(tag))
+        .cloned()
+        .collect();
+    let expected: Vec<String> = (1..=4)
+        .map(|n| format!("v0.4.0-beta.{n}"))
+        .chain(["v0.5.0-beta.1".to_owned()])
+        .collect();
+    assert_eq!(gone, expected, "kept: {kept:?}");
+    // Their tags go with them.
+    let log = fake.log();
+    let deletes: Vec<&str> = log
+        .lines()
+        .filter(|l| l.starts_with("release delete"))
+        .collect();
+    assert_eq!(deletes.len(), expected.len(), "{log}");
+    for line in deletes {
+        assert!(
+            line.contains("--cleanup-tag") && line.contains("--yes"),
+            "{line}"
+        );
+    }
+
+    // Run again, nothing more goes.
+    let again = prune(&fake);
+    assert!(again.status.success(), "{again:?}");
+    assert_eq!(fake.tags(), kept);
+}
+
+#[test]
+fn the_pruning_of_the_betas_never_touches_a_release_run() {
+    let ci = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // In a workflow of its own, not a job of `ci`: its failure, or its cancellation by a
+    // concurrency group, would fail or cancel the push run `verified-on-dev` reads, and `main`
+    // would run the whole verification again.
+    assert!(
+        !ci.contains("prune") && !ci.contains("--cleanup-tag"),
+        "ci.yml prunes nothing (it deletes its own failed draft, and only that)"
+    );
+    let workflow = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
+    let triggers = &workflow[..workflow.find("\npermissions:").expect("permissions")];
+    // On a schedule and by hand: a release made with the workflow's token starts no `release`
+    // run, and nothing here runs on a push or a pull request.
+    assert!(
+        triggers.contains("schedule:") && triggers.contains("workflow_dispatch:"),
+        "{triggers}"
+    );
+    for event in ["push:", "pull_request", "workflow_run:", "release:"] {
+        assert!(!triggers.contains(event), "{event} in {triggers}");
+    }
+    // Least privilege: it deletes releases and their tags, and nothing else.
+    assert!(
+        workflow.contains("permissions:\n  contents: write\n"),
+        "{workflow}"
+    );
+    assert!(!workflow.contains("actions/"), "no action, no checkout");
+    assert!(!workflow.contains("secrets."), "{workflow}");
+    // Nothing of the event reaches a command.
+    let script = step_script(".github/workflows/beta-cleanup.yml", "prune");
+    assert!(!script.contains("${{"), "{script}");
+    // One at a time, none cancelled half-way.
+    assert!(workflow.contains("concurrency:"), "{workflow}");
+    assert!(workflow.contains("cancel-in-progress: false"), "{workflow}");
+    // The betas' tags only: a release candidate, a release or an alpha is never listed.
+    assert!(script.contains("-beta\\."), "{script}");
+}
+
+#[test]
+fn the_pruning_deletes_a_few_betas_per_run_with_a_pause_between_calls() {
+    let fake = Fake::new();
+    // The pile of today: far more than a run may delete (GitHub's secondary rate limit).
+    let state: Vec<String> = (1..=80).map(|n| format!("v0.2.0-beta.{n}")).collect();
+    fake.state(&state.iter().map(String::as_str).collect::<Vec<_>>());
+    let per_run: usize = prune_setting("MAX_DELETIONS").parse().expect("a number");
+    assert_eq!(per_run, 30, "the issue says thirty");
+
+    // 70 are older than the last ten: thirty go, then thirty, then ten, then nothing.
+    let mut gone = 0;
+    for (run, expected) in [(1, 30), (2, 30), (3, 10), (4, 0)] {
+        let output = prune(&fake);
+        assert!(output.status.success(), "run {run}: {output:?}");
+        let now = state.len() - fake.tags().len();
+        assert_eq!(now - gone, expected, "run {run}");
+        gone = now;
+    }
+    let expected: Vec<String> = (71..=80).map(|n| format!("v0.2.0-beta.{n}")).collect();
+    assert_eq!(fake.tags(), expected);
+
+    // A pause between two calls, as the workflow says it, never none.
+    let script = step_script(".github/workflows/beta-cleanup.yml", "prune");
+    assert!(script.contains("sleep \"$PAUSE\""), "{script}");
+    let pause: u32 = prune_setting("PAUSE").parse().expect("a number");
+    assert!(pause >= 1, "a pause of {pause} s");
 }

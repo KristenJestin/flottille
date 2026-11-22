@@ -161,6 +161,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `update.set` | drive |
 | `update.check` | drive |
 | `update.download` | local |
+| `update.cancel` | local |
 | `update.restart` | local |
 | `whatsnew.show` | read |
 | `whatsnew.seen` | drive |
@@ -222,8 +223,6 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
 | `remote.machines` | read |
-| `remote.address.add` | drive |
-| `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
 | `remote.sessions` | read |
@@ -814,30 +813,38 @@ at all), and downloads or applies nothing unless asked.
 - `update.check` checks once now, whatever `check` says.
 - `update.download` downloads the latest build and stages it beside the binary; it answers at once
   and says the rest in `update.changed`.
+- `update.cancel` stops the download that runs, leaving nothing staged, and answers as
+  `update.show`; a cancelled download is not a failure (`download_failed` stays empty). With no
+  download running it changes nothing.
 - `update.restart {when}`: `"now"` stops the daemon (its agents stop, and are resumed as after
   any restart) and starts it again from its binary, which applies the build staged; `"idle"` does
   it once no agent runs. `nothing-staged` when no build is staged.
 
-Each change emits `update.changed` with what `update.show` answers. `update.download` and
-`update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
+Each change emits `update.changed` with what `update.show` answers. `update.download`,
+`update.cancel` and `update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
 them: no tool of an agent does.
 
 ### The what's new methods
 
 What changed since the version the user last ran (`docs/releases.md`, "What's new").
 
-- `whatsnew.show {since?}` answers `{"version", "since", "seen", "fetching", "failed", "groups"}`:
-  this build's version; the version that ran before it, which the changes are counted from (null
-  when nothing is new: the first version run, the same one again, a step back); whether the page
-  was opened since this build runs; whether the notes are being read; why they could not be read
-  (null otherwise); and the changes, `[{"key", "title", "scopes": [{"scope", "changes": [{"text",
-  "pr", "url"}]}]}]`, or null while the notes were not read. The groups are the changelog's
-  (`breaking`, `features`, `fixes`, `performance`, `other`) in its order, those with something in
-  them; the scopes alphabetical, the changes without one (`scope` null) last; each change once
-  however many releases list it, the oldest first within a scope; `pr` and `url` null when the
-  line names no pull request. With `since`, the changes are counted from that version instead,
-  read now from the releases whatever `check` says and not kept (`unavailable` when they cannot be
-  read, `invalid-params` when `since` is no version).
+- `whatsnew.show {since?}` answers `{"version", "since", "seen", "fetching", "failed", "groups",
+  "highlights", "all"}`: this build's version; the version that ran before it, which the changes
+  are counted from (null when nothing is new: the first version run, the same one again, a step
+  back); whether the page was opened since this build runs; whether the notes are being read; why
+  they could not be read (null otherwise); and, null while the notes were not read, the notes
+  `groups`, `[{"key", "title", "changes": [{"text", "pr", "url"}]}]`, the `highlights` (lines
+  written by hand for a release, none for a beta), and `all`, the raw list of subjects,
+  `[{"key", "title", "scopes": [{"scope", "changes": [{"text", "pr", "url"}]}]}]`. The notes are
+  those of `tools/changelog.sh`'s areas (`remote`, `window`, `agents`, `tools`, `projects`,
+  `other`, then `fixed`), those with a note; `all` has the changelog's types (`breaking`,
+  `features`, `fixes`, `performance`, `other`), the scopes alphabetical and the lines without one
+  (`scope` null) last. Each line is once however many releases list it, the oldest first; `pr`
+  and `url` are null when the line names no pull request. The body of a release made before the
+  notes has only its subjects: each is a note of `other`, with a capital and no scope. With
+  `since`, the changes are counted from that version instead, read now from the releases whatever
+  `check` says and not kept (`unavailable` when they cannot be read, `invalid-params` when `since`
+  is no version).
 - `whatsnew.seen` records that the page was opened, for good: the window's mark goes.
 - `whatsnew.fetch` reads the notes the daemon lacks now, whatever `check` says, and answers as
   `whatsnew.show`; the rest comes in `whatsnew.changed`.
@@ -933,7 +940,8 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   it is turned on, by `extension.set {name: "connections", enabled: true}` (whose answer then has
   `given`, the names of the connections it pinned) or by `connection.edit {enabled: true}`; so is
   one whose sign-in (`connection.login`) ends well.
-- `connection.edit {name, …}` replaces the keys given (`null` removes one; a command drops the URL
+- `connection.edit {name, …}` replaces the keys given (`null` removes one, and so does an empty
+  `client_id`, which a client that cannot send a `null` uses; a command drops the URL
   and the other way round). An edit of the command, the URL, `env`, `headers` or `only` is pinned
   again as `connection.add` pins, the settings of the actions that did not change kept, with
   `given` in the answer; but not when the connection is cut off (its diff is read first) or off,
@@ -1358,42 +1366,33 @@ The link to the user's other machines (`docs/remote.md`, "Architecture", "The tr
 remote on (Settings, Machines, or `flottille remote on`, which write `[remote] on = true` in
 `daemon.toml`). With it off, each is `refused` (`remote is off: turn it on in Settings, Machines,
 or with flottille remote on`), but `remote.settings` and `remote.configure`; with a link that could
-not listen, `unavailable`, with the reason. No method answers a private key.
+not start, `unavailable`, with the reason. No method answers a private key. Every link goes through
+the hub: nothing listens, and no method takes or answers an address of a machine (the direct link
+was removed on 2026-11-21).
 
-- `remote.settings` (local) answers `{"on", "listen", "listening", "waits", "port", "problem",
-  "interfaces": [{"name", "address", "tailnet"}]}`: whether remote is on, where `daemon.toml` says
-  the link listens (`"100.64.0.7:7447"`, `null` for nowhere), where it listens now (`null` while
-  it listens nowhere or remote is off), whether a change of `listen` `waits` for the next start
-  (an agent ran when it was made), the port an address is given without one (7447), why `listen`
-  cannot be read when it cannot (`problem`), and the addresses of this machine's own interfaces
-  (IPv4, loopback and interfaces that are down left out), a Tailscale or WireGuard one first
-  (`tailnet`: an address of 100.64.0.0/10, or an interface named `tailscale*` or `wg*`).
-- `remote.configure {on?, listen?}` (local) changes either and answers `remote.settings`'. `listen`
-  is `nowhere`, `tailnet` (this machine's first tailnet address, `invalid-params` when it has
-  none) or an address, its port 7447 when it gives none. It writes `daemon.toml` itself, every
-  other key and comment kept, and takes the change without a restart: the link starts, stops, or
-  listens elsewhere. Closing a link cuts what it carries, so a new `listen` on a running link is
-  only written, and `waits` says so, while an agent runs. A change that cannot be taken (an
-  address no interface holds, a file that is not TOML) is `refused` and leaves the file as it was.
-  Turning remote off keeps the pairing with the hub and the keys; turned on again, the same hub.
+- `remote.settings` (local) answers `{"on"}`: whether remote is on.
+- `remote.configure {on?}` (local) turns it on or off and answers `remote.settings`'. It writes
+  `daemon.toml` itself, every other key and comment kept, and takes the change without a restart:
+  the link starts or stops. A file that is not TOML is `refused` and left as it was. A `listen`
+  given is not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing
+  with the hub and the keys; turned on again, the same hub.
 
-- `remote.machines` answers `{"this": {"name", "key", "fingerprint", "listening", "addresses": [{"address",
-  "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
-  "addresses"}]}`: this machine's member name (`null` until it is set up), its public key, the socket its link listens on (`null` until
-  `[remote] listen` is set), and its addresses,
-  `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
-  `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
+- `remote.machines` answers `{"this": {"name", "key", "fingerprint"}, "machines": [{"name",
+  "key", "fingerprint", "state", "since", "reason", "reached"}]}`: this machine's member name
+  (`null` until it is set up) and its public key; then each machine it trusts, its
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
-  `docs/remote.md`, "The version"), or `null`, `reached` where its live link goes or came from
-  (`{"address", "dialled"}`, `address` being `the hub` for a link through it, `dialled` saying
-  whether this machine dialled it; `null` while it is not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
+  `docs/remote.md`, "The version"), or `null`, and `reached` its live link (`{"address",
+  "dialled"}`, `address` being `the hub`, which every link goes through, `dialled` saying whether
+  this machine dialled it; `null` while it is not linked). `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
   hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
   `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net is
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
   again`), `refused` (the hub has another key than when this device joined, refused this device,
   or sent a member list that does not check: the sentence says which), `needs an update`, or
-  `none` before the first try. Once set up, the machines it trusts are the members' machines of
+  `none` before the first try; `forgotten` is `true` when the hub answered that it no longer knows
+  this machine (its list was reset, or it dropped this device: `state` is `reset` or `refused`) and
+  a client offers to pair again (`remote.pair {replace: true}`). Once set up, the machines it trusts are the members' machines of
   the list as last checked.
 
   Each machine, `this` included, also has its `role` in the list (`runner`, `controller`,
@@ -1407,12 +1406,6 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   `offered`: the names of the runners linked (this machine first) that would take a session of
   `project` on `agent` (any agent signed in, when none is named): the project there, the agent
   signed in, a slot free.
-- `remote.address.add {address}` declares an address of this machine: a host name or an IP
-  address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
-  It answers `this` as above, and is told at once to the machines linked to this one.
-  `invalid-params` for what is not an address; one declared already changes nothing.
-- `remote.address.remove {address}` removes one, answers and tells as `add` does; `not-found` when
-  it was not declared.
 - `remote.members` answers the member list as this machine last checked it: `{"hub", "root",
   "head", "this", "members": [{"name", "key", "fingerprint", "role", "icon", "colour", "added_by",
   "machine", "kind", "system", "version", "paired_at", "last_seen"}]}`, `head` the hash of its last
@@ -1453,7 +1446,7 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
   A member's addition is refused: a device is paired on the hub. It answers `remote.members` once
   the hub sent back a list that holds it and this machine checked it; `refused` with the hub's
-  sentence, or when the hub withheld it (`the hub withheld this change: …`).
+  sentence, or when the hub took it and sent back no list that holds it (`The hub did not confirm this change in 10 s: …`, said with what to do: nothing was changed, try again). Every refusal of a change says what happened and what to do, never the raw cause.
 - `remote.pair {code, proposed, replace?}` pairs this machine's device with the hub of `code`, what
   `flottille-hub pair` printed on the hub's host (`docs/remote.md`, "Pairing"); `proposed` is the
   card the user confirmed (`flottille_link::Proposed`: `{"key", "name", "role", "icon",

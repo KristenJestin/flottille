@@ -129,6 +129,8 @@ pub fn run(paths: &Paths) -> Result<()> {
             eprintln!("flottille daemon: {why}");
             crate::updates::refused_at_start(why);
         }
+        // An update that was applied leaves this behind it: the log says it, the window does not.
+        crate::update::Staged::Leftover(why) => eprintln!("flottille daemon: {why}"),
         crate::update::Staged::Applied(binary) => {
             eprintln!(
                 "flottille daemon: the build staged is applied: starting again from {}",

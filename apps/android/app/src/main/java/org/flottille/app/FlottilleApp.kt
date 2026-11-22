@@ -56,6 +56,7 @@ import org.flottille.app.ui.Space
 import org.flottille.app.ui.Type
 import org.flottille.core.Phone
 import org.flottille.core.PhoneException
+import org.flottille.core.Picture
 
 private enum class Tab(val label: String) {
     Sessions("Sessions"),
@@ -66,8 +67,8 @@ private enum class Tab(val label: String) {
  * The app (`docs/remote.md`, "The Android app"). A phone that joined no hub is asked to connect to
  * one; one that did lists its sessions (one list, every machine) and its machines, and has
  * Settings. The view is the core's, followed while the app is on screen; the screens compute
- * nothing of their own. Needs you, the session page and the notifications come with #826 and its
- * followers.
+ * nothing of their own. Tapping a session opens its page (`SessionPage`); Needs you and the
+ * notifications come with the issues after #826.
  */
 @Composable
 fun FlottilleApp(
@@ -77,6 +78,11 @@ fun FlottilleApp(
     now: () -> Long = { System.currentTimeMillis() },
     scanner: @Composable (onCode: (String) -> Unit) -> Unit = { CameraScanner(it) },
     onOpenSession: (machine: String, agent: String) -> Unit = { _, _ -> },
+    pictures: PictureSource = PictureSource.None,
+    shared: List<Picture> = emptyList(),
+    sharedNote: String? = null,
+    onSharedPlaced: () -> Unit = {},
+    open: SessionKey? = null,
 ) {
     FlottilleTheme {
         val palette = LocalPalette.current
@@ -88,6 +94,14 @@ fun FlottilleApp(
         var tab by rememberSaveable { mutableStateOf(Tab.Sessions) }
         var settings by rememberSaveable { mutableStateOf(false) }
         var toast by remember { mutableStateOf<String?>(null) }
+        // The session page on screen: one entry point, by machine and session id, for the list and
+        // for a notification that opens it.
+        var page by rememberSaveable(stateSaver = SessionKey.Saver) { mutableStateOf(open) }
+        var shownPage by remember { mutableStateOf(page) }
+        if (page != null) shownPage = page
+        LaunchedEffect(open) { if (open != null) page = open }
+        // Pictures shared to the app wait for the user to say where they go: never sent unasked.
+        var carried by remember(shared) { mutableStateOf(shared) }
         val scope = rememberCoroutineScope()
 
         // Connected while the app is on screen; the screens draw what the core says.
@@ -102,6 +116,8 @@ fun FlottilleApp(
                 settings = false
             }
         }
+        // What of a share could not be taken is said once, as the other results are.
+        LaunchedEffect(sharedNote) { if (sharedNote != null) toast = sharedNote }
         LaunchedEffect(toast) {
             if (toast != null) {
                 delay(TOAST_MILLIS)
@@ -128,8 +144,39 @@ fun FlottilleApp(
                     tab = tab,
                     onTab = { tab = it },
                     onSettings = { settings = true },
-                    onOpenSession = onOpenSession,
+                    onOpenSession = { machine, agent ->
+                        onOpenSession(machine, agent)
+                        page = SessionKey(machine, agent)
+                    },
+                    sharing = carried.isNotEmpty(),
+                    onDiscard = {
+                        carried = emptyList()
+                        onSharedPlaced()
+                    },
                 )
+                AnimatedVisibility(
+                    visible = page != null,
+                    enter = slideInHorizontally(Motion.spec(Motion.PANEL)) { it / 4 } + fadeIn(Motion.spec(Motion.PANEL)),
+                    exit = slideOutHorizontally(Motion.spec(Motion.PANEL)) { it / 4 } + fadeOut(Motion.spec(Motion.PANEL)),
+                ) {
+                    BackHandler { page = null }
+                    shownPage?.let { key ->
+                        SessionPage(
+                            phone = phone,
+                            view = view,
+                            key = key,
+                            zone = zone,
+                            pictures = pictures,
+                            carried = carried,
+                            onCarried = {
+                                carried = emptyList()
+                                onSharedPlaced()
+                            },
+                            onToast = { toast = it },
+                            onBack = { page = null },
+                        )
+                    }
+                }
                 AnimatedVisibility(
                     visible = settings,
                     enter = slideInHorizontally(Motion.spec(Motion.PANEL)) { it / 4 } + fadeIn(Motion.spec(Motion.PANEL)),
@@ -172,6 +219,8 @@ private fun Main(
     onTab: (Tab) -> Unit,
     onSettings: () -> Unit,
     onOpenSession: (String, String) -> Unit,
+    sharing: Boolean,
+    onDiscard: () -> Unit,
 ) {
     val palette = LocalPalette.current
     Column(Modifier.fillMaxSize()) {
@@ -181,6 +230,22 @@ private fun Main(
         ) {
             Label(tab.label, style = Type.Title, modifier = Modifier.weight(1f))
             FButton("Settings", onSettings, kind = ButtonKind.Ghost, modifier = Modifier.testTag("open-settings"))
+        }
+        // A picture shared to the app waits for the session it goes to.
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = Space.Lg),
+            horizontalArrangement = Arrangement.spacedBy(Space.Sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Message(
+                if (sharing) "Pick a session for the picture" else null,
+                modifier = Modifier.weight(1f),
+                tag = "share-banner",
+                failed = false,
+            )
+            AnimatedVisibility(sharing, enter = fadeIn(Motion.spec(Motion.ENTER)), exit = fadeOut(Motion.spec(Motion.HOVER))) {
+                FButton("Discard", onDiscard, kind = ButtonKind.Ghost, modifier = Modifier.testTag("share-discard"))
+            }
         }
         Box(Modifier.weight(1f)) {
             AnimatedContent(

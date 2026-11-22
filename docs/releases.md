@@ -157,13 +157,16 @@ and keeps it as the artefact `android-apk` (14 days), so a test on a phone insta
 **The build holds no key**: Gradle builds the release APK unsigned (no signing configuration reads
 the environment), and `apk.sh` signs a copy of it with a key made for the run, to install for a test
 (`flottille-<version>-debug-signed.apk`, never released). The release key signs in **`android-sign`**,
-a job of its own that runs on a `push` only (never a pull request's run, nor a run started by hand),
-in the environment `android-release`. It runs no third-party action and no script of the repository:
+a job of its own that runs on a `push`, and on the **release build of `main`** (the `Release`
+workflow starts ci.yml on `main` by `workflow_dispatch`, and a commit `main` holds is always a
+released commit of `dev`, so the release carries its APK as its beta did), never on a pull request's
+run, nor on a run started by hand on any other ref (a stable line's tag included: its release has
+no APK yet), in the environment `android-release`. It runs no third-party action and no script of the repository:
 it downloads the unsigned APK of the build job (`android-unsigned`), signs it with the runner's own
 `apksigner` in one step, the only one that holds the secrets (`--ks-pass env:…`, `--key-pass env:…`),
 and uploads `android-signed`. `publish` attaches that artefact to the GitHub release of its version,
-with the other artefacts, and only that one, and only in a push's run: never an APK of a pull
-request's run, whatever its file is called. A phone that holds a debug-signed build uninstalls it
+with the other artefacts, and only that one, and only in the runs that signed (a push, the release
+build of `main`): never an APK of a pull request's run, whatever its file is called. A phone that holds a debug-signed build uninstalls it
 before the release's.
 
 **What the maintainer sets once** (repository settings, never in the repository; until then the
@@ -172,7 +175,8 @@ job signs nothing and says so in a notice, and the release carries no APK):
 1. *Settings → Environments → New environment*: `android-release`. Create it before the first push that follows
    the merge: a job that names an environment that does not exist creates it, with no protection.
 2. In it, *Deployment branches and tags → Selected branches and tags*, and add these four patterns:
-   `main`, `dev`, `stable/*`, `next/*` (the branches whose pushes run CI). No pull request's
+   `main`, `dev`, `stable/*`, `next/*` (the branches whose pushes run CI, and `main`, which the
+   release build runs on). No pull request's
    branch, no feature branch and no tag then reaches the environment's secrets.
 3. In it, *Environment secrets* (**not** the repository's secrets, which any branch's workflow
    can read): `ANDROID_KEYSTORE_BASE64` (the keystore file, base64), `ANDROID_KEYSTORE_PASSWORD`,
@@ -224,6 +228,14 @@ The jobs of the whole suite's run:
   its own checkout of the repository (`--workspace-remap .`, for the files the tests read). A
   partition compiles nothing.
 - **`doc-tests`** runs the doc tests once (nextest does not), beside the partitions.
+- **`android`** (`apps/android/ci.sh`, when the app or its core changes) builds the mobile core and
+  runs the app's unit tests and its instrumentation tests. **The unit tests never fetch**:
+  Robolectric would download the `android-all` jar of each SDK it runs on from Maven while the
+  tests run, and a hiccup of the network failed a build. The jar is a Gradle dependency
+  (`org.robolectric:android-all-instrumented`, in `apps/android/app/build.gradle.kts`), fetched
+  by `:app:fetchRobolectricJars`, a step of `ci.sh` of its own (tried three times) that runs before
+  any test, and every test task reads it from there with `robolectric.offline=true`: a test that
+  needs a jar it was not given fails, it never goes to the network.
 - **`verify`**, the required check, always concludes. On a push it fails unless `check`,
   `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check` and
   `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
@@ -257,8 +269,9 @@ cannot write, and a branch of another name never had an alpha):
   - **The notes**: the version, the channel and the commit, how to install it with the
     `install.sh` of that very commit, the system libraries the window needs (fontconfig, freetype,
     xkbcommon and xkbcommon-x11, wayland-client or libxcb, a Vulkan loader and driver), then the
-    changelog (`tools/changelog.sh`): the Angular commits counted, oldest first, grouped under
-    breaking changes, features, fixes, performance and other changes, each
+    changelog (`tools/changelog.sh`, "What's new" below): the notes of the pull requests, by
+    area, the fixes last, then under `### All changes` the Angular commits counted, oldest first,
+    grouped under breaking changes, features, fixes, performance and other changes, each
     `- **<scope>**: <subject>` with the pull request number its squash kept.
 - **`publish`**, once `verify` passed on the pushed commit (on `main`, here or on `dev`, see
   "Releasing"; for an alpha, on the pull request's own run, so that no alpha is published for a
@@ -287,6 +300,22 @@ cannot write, and a branch of another name never had an alpha):
   left as it is (run again, or a branch pushed over to the same number). A release left as a
   draft by a failed upload is deleted and made again. No alpha is pruned while its branch lives:
   they pile up, one per push, until the branch is deleted.
+
+  **The betas are pruned**: one is published per merge into `dev`, and GitHub counts them all.
+  **`.github/workflows/beta-cleanup.yml`**, a workflow of its own, keeps the **last ten betas of
+  each version** (`vX.Y.Z-beta.N`, by `N`) and deletes the older, each with its tag
+  (`gh release delete --cleanup-tag`). It is never a job of `ci.yml`: a failure (a deletion the
+  settings refuse) or a cancellation there would fail or cancel the push run of `dev`, which
+  `verified-on-dev` reads to let `main` skip its verification. It runs every six hours and by
+  hand (a release made with the workflow's token starts no `release` run, so there is none to
+  wait for), **deletes at most thirty betas per run, two seconds apart** (each is two writes, and
+  GitHub's secondary rate limit refuses a burst), so a pile drains over a few runs and a run with
+  nothing to delete is a listing. It holds the token that deletes releases and nothing else (no
+  checkout, no action, nothing of a branch), lists the pre-releases whose tag is
+  `v<X.Y.Z>-beta.<N>` and no other: **a release, its release candidates, a next build or an alpha
+  is never deleted by it** (the alphas are `alpha-cleanup.yml`'s). A beta a newer one has replaced
+  is no longer a build anyone installs: `install.sh` and `flottille update` read the newest, and a
+  version is counted from the commits, not from the tags, so pruning moves no number.
 
 ### The hub
 
@@ -430,17 +459,27 @@ into `next/*`, below): the `pre-commit` hook refuses a commit on them.
 
 ## GitHub settings
 
-The workflows cannot set these; the maintainer does, once, in the repository's settings:
+The workflows cannot set these; the maintainer does, once, in the repository's settings (rulesets,
+as applied today):
 
-- **`stable/*`**: pull requests required (with `verify` and `commit-messages`), squash only, no
-  force-push, no deletion (a line ends by being deleted by the maintainer).
+- **`main`**: force-push and deletion blocked. It moves forward by `Release` alone
+  (see "Releasing"), never by a pull request.
+- **`stable/*`**: pull requests required (with `verify`, `commit-messages` and `shape`), squash
+  only, no force-push, no deletion (a line ends by being deleted by the maintainer).
 - **`next/*`**: force-push and deletion blocked, **and nothing else**. Pull requests are not
   required there: `forward.yml` merges `dev` into it through the API, and requiring pull
   requests with a bypass for GitHub Actions would let every workflow holding `contents: write`
   write `next/*`. Its pull requests are reviewed as any other, by the maintainer; the forward
   ones are merged with a merge commit, the others by squash.
-- **Tags `v*`**: a ruleset that lets only the maintainer and the `Release` workflow (the
-  repository's GitHub Actions) create them, and nobody update or delete them.
+- **`dev`**: pull requests required (with `verify`, `commit-messages` and `shape`), squash only,
+  no force-push, no deletion.
+- **Tags `v*`, but the alphas' and the betas'**: a ruleset on `refs/tags/v*`, excluding
+  `refs/tags/v*-alpha.*` and `refs/tags/v*-beta.*`, that lets nobody update or delete them. The
+  exclusions are the tags the workflows delete: `alpha-cleanup.yml` deletes a branch's alphas,
+  and `beta-cleanup.yml` the betas beyond the last ten of a version (a stable release and a release
+  candidate stay protected). **Creating a tag is not restricted**: a personal repository cannot
+  give GitHub Actions a bypass, and the CI creates the betas' tags (and `Release` the lines').
+- **Bypass**: the repository's admin (the maintainer) only.
 - **Labels** `backport X.Y`, one per line kept.
 
 ## Installing
@@ -570,7 +609,10 @@ is the old one or the new one, never half of one.
   setting.
 - **The window says it**: the foot of the sidebar (`0.4.0-beta.124 is available`, then
   `Downloading…`, then `Ready to restart`; it opens the section) and Settings, General, **Version**: this build's version, channel and commit, the
-  channel checked, the state of the update and its actions.
+  channel checked, the state of the update and its actions. While it downloads, the Update row
+  shows a progress bar (the share received, `69.7 MB of 93.1 MB` beside it, an indeterminate
+  stripe when the server does not say the size) and **Cancel** (`update.cancel`: the download
+  stops and nothing is staged; it is no failure); done, the bar fills and folds away.
 - **Download** (or `flottille update --stage`): the daemon downloads the archive and its sum,
   checks the sum (a wrong one stages nothing), and unpacks it, from the bytes it checked, in a
   folder of its own beside the binary (`.flottille-update-<pid>-<n>`, which no agent may write),
@@ -602,8 +644,34 @@ is the old one or the new one, never half of one.
 
 ### What's new
 
-After an update, what changed since the version last run is a page of the window, never one that
-opens by itself: a page that opens at start is a nuisance.
+After an update, what the user can do now, since the version last run, is a page of the window,
+never one that opens by itself: a page that opens at start is a nuisance. The page says it in the
+user's words, not the developers': the squash subjects of the pull requests, grouped by scope, were
+unreadable to the one it is for.
+
+- **The note** is a line of a pull request's description, at the start of its line:
+  `Note: <one sentence, capitalised, what the user can do now>` (`Note: Drive another machine from
+  the window, each action signed.`). A fix says what no longer goes wrong (`Note: A device can be
+  removed while the hub is slow.`). It is short, concrete, with no crate, scope, protocol or pull
+  request number in it. A pull request with no `Note:` line (ci, refactor, test, docs, chore, or
+  invisible) is not on the page; its subject stays in the raw list. AGENTS.md and the pull request
+  template say it, and the `shape` check warns (never fails) when a `feat` or `fix` touching the
+  product (`crates/` but the fakes and tests, `apps/`) has none (`.github/scripts/pr-note.sh`).
+- **The body of a release** is built by `tools/changelog.sh` from the notes, read from the merged
+  `feat`, `fix` and `perf` pull requests through the API (`gh api`, by the number their squash
+  kept). A description can be edited after the merge, and a release's body cannot: only a note
+  written by a pull request whose author is the repository's OWNER, a MEMBER or a COLLABORATOR
+  (`author_association`) is read, any other pull request has no note (its subject stays in the raw
+  list); and one that cannot be read makes the script fail, so the build fails instead of
+  publishing a release without its notes. The groups are: `### Remote` (scopes `link`,
+  `hub`, `mobile`, `android`, and a change that speaks of remote), `### Window` (`gui`),
+  `### Agents` (`agents`, `acp`, `sessions`), `### Tools` (`tools`, `mcp`, `gate`), `### Projects`
+  (`workspace`, `git`, `store`), `### Other`, each line `- <the note> (#123)`, oldest first, then
+  `### Fixed` for every `fix`, and, after, `### All changes` with the raw list of subjects grouped
+  by type (`#### Features`, `- **scope**: text (#123)`). A version's **Highlights** (3 to 5 lines,
+  `### Highlights` then `- a line`, at the top) are written by hand into the body of its release,
+  none for a beta. A body made before the notes (`### Features`, then the subjects) is still
+  read: each subject is a note of Other, with a capital and no scope.
 
 - **The version last run is kept**, in `$XDG_STATE_HOME/flottille/whats-new.json` (Flottille's
   own memory, like the update channel; `~/.local/state/flottille/` without `XDG_STATE_HOME`): the
@@ -613,8 +681,7 @@ opens by itself: a page that opens at start is a nuisance.
   (`--force`) or the first start with no memory shows nothing new. A jump over several versions
   without opening the page counts from the first of them: the page shows the changes once, not
   beta by beta.
-- **The notes come from the release bodies** (`tools/changelog.sh`: `### Features`, then `- **scope**:
-  text (#123)`), of every release of the channel's kind between the two versions, as the update
+- **The notes come from the release bodies** (`tools/changelog.sh`, above), of every release of the channel's kind between the two versions, as the update
   of the window reads them (`notes`: the staged build keeps them in `staged.json`, `updated.json`
   once applied, and the daemon's next start takes them from there, so the page needs no network
   at start). A build installed by `install.sh` or `flottille update` has none: the daemon reads
@@ -626,20 +693,25 @@ opens by itself: a page that opens at start is a nuisance.
   update's place, says **What's new** with a dot. It appears and folds away with a fade, and is
   the only thing that happens: the page opens when the mark is clicked, and opening it records it
   for good (the dot and the mark go). Nothing else opens it.
-- **The page** is a page of the window, left by going elsewhere: **What's new since 0.4.0-beta.103**,
-  under it this build's version, channel and commit, then the changes, a group each (breaking
-  changes, features, fixes, performance, other changes), each a fold that opens and closes, the
-  changes under it by scope (the ones with no scope under General), each with its pull request's
-  number as a link opened by the system's handler. A change that several betas list is said once
-  per group; one that is both breaking and a feature, as the changelog says it, is in both.
+- **The page** is a page of the window, left by going elsewhere: **What's new in 0.4**, under it,
+  small, **since 0.4.0-beta.103** and this build's version, channel and commit, then, when the
+  release has them, its **Highlights**, then one section per area (Remote, Window, Agents, Tools,
+  Projects, Other, the fixes last as **Fixed**), each a heading with its count and its notes as the
+  rows of the kit's list: the sentence, the pull request's number as a quiet link at the end,
+  opened by the system's handler. A note that several betas say is said once. At the foot, **All
+  changes**, a fold closed by default, holds the raw list of subjects, by type and scope. The
+  sections enter one after another, the fold opens and closes, hover and press fade.
 - **Found again**: Settings, General, Version has a **What's new** line, **Since 0.4.0-beta.103**,
   for the last update's, as long as there is one.
-- `flottille changes [--since <version>]` prints the same list (`docs/cli.md`), and the daemon
+- `flottille changes [--since <version>]` prints the same areas (`docs/cli.md`), and the daemon
   answers `whatsnew.show` (`docs/protocol.md`).
 
 Defaults taken, to confirm: the mark goes once the page was opened (the page stays reachable from
 Settings); the notes are the first page of the releases (the 100 latest), as the update's; a
-failure to read them is not retried by itself, only by **Check again** or the next start.
+failure to read them is not retried by itself, only by **Check again** or the next start; the
+Highlights are written by hand into the release's body on GitHub, not in the release pull request
+(the script has no place to read them from there); only `feat`, `fix` and `perf` pull requests are
+asked for a note.
 
 ## For tests
 

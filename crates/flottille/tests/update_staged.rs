@@ -297,6 +297,65 @@ fn a_build_downloaded_from_the_window_waits_staged() {
 }
 
 #[test]
+fn cancel_stops_the_download_and_stages_nothing() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    newer_stable(&releases, &standing_for(programs.path(), NEWER));
+    let hold = releases.hold(&format!(
+        "/download/v{NEWER}/flottille-{NEWER}-x86_64-linux.tar.gz"
+    ));
+    let user = checking(&releases);
+    let binary = installed();
+    runs_from(&start_through(&user, &binary), &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+    user.call("update.download", json!({})).unwrap();
+    shown_until(&user, "the download to read some", |shown| {
+        shown["downloading"]["done"]
+            .as_u64()
+            .is_some_and(|done| done > 0)
+    });
+
+    let answer = user.call("update.cancel", json!({})).unwrap();
+
+    assert_eq!(answer["download_failed"], Value::Null, "{answer}");
+    let shown = shown_until(&user, "the download to stop", |shown| {
+        shown["downloading"] == Value::Null
+    });
+    assert_eq!(
+        shown["download_failed"],
+        Value::Null,
+        "a cancel is not a failure"
+    );
+    assert_eq!(shown["staged"], Value::Null);
+    assert_eq!(shown["latest"], NEWER, "the build can be downloaded again");
+    hold.release();
+    // Nothing is left beside the binary, not the staging, not what was being read.
+    let left: Vec<String> = std::fs::read_dir(binary.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["flottille"]);
+}
+
+#[test]
+fn cancel_with_no_download_changes_nothing() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    newer_stable(&releases, &standing_for(programs.path(), NEWER));
+    let user = checking(&releases);
+    let binary = installed();
+    runs_from(&start_through(&user, &binary), &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+
+    let answer = user.call("update.cancel", json!({})).unwrap();
+    assert_eq!(answer["downloading"], Value::Null);
+
+    // A cancel with nothing to cancel is not remembered: the next download runs through.
+    user.call("update.download", json!({})).unwrap();
+    shown_until(&user, "the download", |shown| shown["staged"] == NEWER);
+}
+
+#[test]
 fn flottille_update_stage_stages_while_the_daemon_runs() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
@@ -403,10 +462,6 @@ fn a_staged_build_with_a_wrong_sum_or_older_is_removed() {
     staged_by_hand(&binary, &older, "0.0.1", &sha256(&older));
     refused_at_start(&user, &binary, &before, "not newer");
 
-    let same = standing_for(programs.path(), &this_version());
-    staged_by_hand(&binary, &same, &this_version(), &sha256(&same));
-    refused_at_start(&user, &binary, &before, "not newer");
-
     // A partial staging: its binary is missing.
     staged_by_hand(&binary, &newer, NEWER, &sha256(&newer));
     std::fs::remove_file(staging(&binary).join("flottille")).unwrap();
@@ -423,6 +478,62 @@ fn a_staged_build_with_a_wrong_sum_or_older_is_removed() {
     std::os::unix::fs::symlink(&newer, staging(&binary).join("flottille")).unwrap();
     refused_at_start(&user, &binary, &before, "not a staged build");
     assert!(newer.is_file(), "the link's target is left alone");
+}
+
+#[test]
+fn a_staged_build_of_the_running_version_is_removed_quietly() {
+    let programs = tempfile::tempdir().unwrap();
+    let user = User::new();
+    let binary = installed();
+    let before = sha256(&binary);
+    let same = standing_for(programs.path(), &this_version());
+    staged_by_hand(&binary, &same, &this_version(), &sha256(&same));
+
+    start_through(&user, &binary);
+
+    // What was left is removed, the binary is as it was, and the window has nothing to say.
+    assert_eq!(sha256(&binary), before);
+    assert!(
+        std::fs::symlink_metadata(staging(&binary)).is_err(),
+        "the staging is removed"
+    );
+    let shown = user.call("update.show", json!({})).unwrap();
+    assert_eq!(shown["refused"], Value::Null, "{shown}");
+    // It is said in the daemon's log only.
+    let log = std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap_or_default();
+    assert!(log.contains("the version that runs: removed"), "{log}");
+    user.run(&["daemon", "stop"]);
+}
+
+#[test]
+fn an_old_process_never_stages_the_build_already_installed() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let applied = standing_for(programs.path(), NEWER);
+    newer_stable(&releases, &applied);
+    let user = checking(&releases);
+    let binary = installed();
+    runs_from(&start_through(&user, &binary), &binary);
+    shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
+    // The update is applied by another process while this daemon runs on its old binary: the
+    // file at the install path is the newer build now.
+    let moved = binary.with_file_name("flottille-applied");
+    std::fs::copy(&applied, &moved).unwrap();
+    std::fs::rename(&moved, &binary).unwrap();
+
+    user.call("update.download", json!({})).unwrap();
+
+    let shown = shown_until(&user, "the download", |shown| {
+        shown["downloading"] == Value::Null
+    });
+    assert_eq!(shown["staged"], Value::Null, "{shown}");
+    assert!(
+        std::fs::symlink_metadata(staging(&binary)).is_err(),
+        "nothing is staged beside the build that is installed"
+    );
+    // The command line stages nothing either.
+    let output = stage(&user, &binary);
+    assert!(!staging(&binary).exists(), "{output:?}");
 }
 
 #[test]

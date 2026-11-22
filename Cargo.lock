@@ -2501,8 +2501,10 @@ dependencies = [
 name = "flottille-mobile"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "flottille-hub",
  "flottille-link",
+ "flottille-protocol",
  "serde",
  "serde_json",
  "tempfile",
@@ -3095,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.2#d0cbbfb2ac87e1f53cd50d6b553324581af634c4"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.7#912c909d40aada0deca7b8ae0f86478dc61ac8af"
 dependencies = [
  "gpui-kit",
  "qrcodegen",

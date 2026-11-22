@@ -1,5 +1,5 @@
 //! The hub's state (`docs/remote.md`, "The hub", "Pairing"): its key, the member list it stores,
-//! its pair mode, what it knows of the devices, presence and addresses, in a temporary state
+//! its pair mode, what it knows of the devices and their presence, in a temporary state
 //! folder, with a clock the tests move.
 
 use std::cell::Cell;
@@ -605,7 +605,7 @@ fn the_hub_key_is_made_once() {
 }
 
 #[test]
-fn presence_and_addresses_are_kept_in_memory_for_members_only() {
+fn presence_is_kept_in_memory_for_members_only() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
@@ -617,21 +617,11 @@ fn presence_and_addresses_are_kept_in_memory_for_members_only() {
         last_input: START,
     };
     hub.tell_presence(&pc.public(), presence).unwrap();
-    hub.tell_addresses(&pc.public(), vec!["192.0.2.7:4433".to_owned()])
-        .unwrap();
     assert_eq!(hub.presence(&pc.public()), Some(presence));
-    assert_eq!(
-        hub.addresses(&pc.public()),
-        Some(&["192.0.2.7:4433".to_owned()][..])
-    );
 
     let not_member = format!("{} is not a member", stranger.public().fingerprint());
     assert_eq!(
         error(hub.tell_presence(&stranger.public(), presence)),
-        not_member
-    );
-    assert_eq!(
-        error(hub.tell_addresses(&stranger.public(), Vec::new())),
         not_member
     );
     assert_eq!(hub.presence(&stranger.public()), None);
@@ -639,7 +629,6 @@ fn presence_and_addresses_are_kept_in_memory_for_members_only() {
     drop(hub);
     let hub = open(&folder, &time);
     assert_eq!(hub.presence(&pc.public()), None);
-    assert_eq!(hub.addresses(&pc.public()), None);
 }
 
 #[test]

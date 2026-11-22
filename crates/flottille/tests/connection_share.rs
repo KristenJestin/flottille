@@ -626,29 +626,17 @@ fn share_message(request: Value, connection: Value, entries: &[Value]) -> Value 
 /// `frames` sent, one after the other, on a machine link opened with the machine key kept in
 /// `folder` to `to`: what each was answered.
 fn sent_as(folder: &Path, to: &Machine, frames: &[Value]) -> Vec<Result<(), String>> {
-    use flottille_link::{Endpoint, Hello, MachineKey, PublicKey, Traffic};
-    let machine_key = MachineKey::load_or_make(folder).unwrap();
+    use flottille_link::{PublicKey, Traffic};
     let key: PublicKey = serde_json::from_value(to.remote()["this"]["key"].clone()).unwrap();
-    let address: std::net::SocketAddr = to.remote()["this"]["listening"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let endpoint = remote::endpoint_of(folder).await;
         let link = tokio::time::timeout(
             remote::WAIT,
-            endpoint.connect(
-                key,
-                &[address],
-                Traffic::Machine,
-                &Hello::ours("0.4.1"),
-                "server",
-            ),
+            remote::dial(&endpoint, key, Traffic::Machine, "server"),
         )
         .await
         .unwrap()

@@ -66,20 +66,24 @@ impl Link {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
 
     use super::*;
     use crate::{Endpoint, Hello, MachineKey, Traffic};
 
-    /// A client link from one machine to another, both ends, on the loopback.
+    /// A client link from one machine to another, both ends, through relay ports joined as the
+    /// hub joins them.
     async fn linked() -> (tempfile::TempDir, Link, Link) {
         let state = tempfile::tempdir().unwrap();
-        let bind = |name: &str| {
+        let made = |name: &str| {
             let key = MachineKey::load_or_make(&state.path().join(name)).unwrap();
-            Endpoint::bind(&key, SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 0)).unwrap()
+            Endpoint::new(&key).unwrap()
         };
-        let (laptop, server) = (bind("laptop"), bind("server"));
+        let (laptop, server) = (made("laptop"), made("server"));
+        let ports = crate::relays_in_memory(&[laptop.key(), server.key()]);
+        for (endpoint, port) in [&laptop, &server].into_iter().zip(ports) {
+            endpoint.through(port);
+        }
         let ours = Hello::ours("0.4.1");
         let (endpoint, hello) = (server.clone(), ours.clone());
         let accepting = tokio::spawn(async move {
@@ -87,13 +91,7 @@ mod tests {
             accepting.handshake(&hello, "laptop").await.unwrap()
         });
         let link = laptop
-            .connect(
-                server.key(),
-                &server.addresses(),
-                Traffic::Client,
-                &ours,
-                "server",
-            )
+            .connect(server.key(), Traffic::Client, &ours, "server")
             .await
             .unwrap();
         (state, link, accepting.await.unwrap())

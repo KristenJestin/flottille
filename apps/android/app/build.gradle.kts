@@ -38,6 +38,33 @@ android {
     testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
+// Robolectric runs the app's screens on a real Android's classes, an `android-all` jar per SDK it
+// is asked for: the tests' (`@Config(sdk = [34])`: Android 14) and the app's `targetSdk` (35:
+// Android 15), which it asks for too. It fetches them from Maven while the tests run unless told
+// otherwise: a network hiccup then failed a build. The jars are resolved here, as Gradle
+// dependencies (cached, checked by Gradle like any other), copied to a folder by a task that every
+// test task waits for, and Robolectric is told to read that folder and fetch nothing. The versions
+// are the ones Robolectric 4.14.1 names for them (its `DefaultSdkProvider`); an SDK missing here
+// fails offline, naming the jar, never by fetching. Each jar has a configuration of its own: in
+// one, Gradle sees one module in two versions and keeps the newest only.
+val robolectricJarVersions = listOf("14-robolectric-10818077-i7", "15-robolectric-12650502-i7")
+val robolectricJarsDir: Provider<Directory> = layout.buildDirectory.dir("robolectric-jars")
+val fetchRobolectricJars by tasks.registering(Sync::class) {
+    robolectricJarVersions.forEach { version ->
+        from(
+            configurations.detachedConfiguration(
+                dependencies.create("org.robolectric:android-all-instrumented:$version"),
+            ),
+        )
+    }
+    into(robolectricJarsDir)
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(fetchRobolectricJars)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricJarsDir.get().asFile.absolutePath)
+}
+
 dependencies {
     implementation(project(":core"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

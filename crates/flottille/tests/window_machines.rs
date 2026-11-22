@@ -18,7 +18,7 @@ use flottille_link::Hello;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
-use flottille_window::machines::{Machine as Seen, Reached, how_it_failed};
+use flottille_window::machines::{Machine as Seen, how_it_failed};
 use flottille_window::machines_page::Removal;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
@@ -80,12 +80,25 @@ impl TestHub {
 
     /// The hub serves again from its folder, at the address it had: a host that is back.
     fn up(&mut self) {
+        self.up_as(Hello::ours("0.4.0"));
+    }
+
+    /// [`TestHub::up`], the build of the hub saying `hello`: an old one, say.
+    fn up_as(&mut self, hello: Hello) {
         let served = self.runtime.block_on(async {
             let hub = Hub::open(&self._folder.path().join("hub"), SystemClock).unwrap();
             let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();
-            flottille_hub::serve(hub, listener, None, Hello::ours("0.4.0")).unwrap()
+            flottille_hub::serve(hub, listener, None, hello).unwrap()
         });
         self.served = Some(served);
+    }
+
+    /// The hub's members are gone and it is up again, as a hub set up anew on the same host does
+    /// (`flottille-hub reset`): its key stays, its list starts over.
+    fn reset(&mut self) {
+        self.down();
+        std::fs::remove_file(self._folder.path().join("hub/hub.json")).unwrap();
+        self.up();
     }
 }
 
@@ -94,11 +107,11 @@ struct Machine {
 }
 
 impl Machine {
-    /// `user`'s machine, with remote on, its link on loopback.
+    /// `user`'s machine, with remote on: its links go through the hub.
     fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
-            "[remote]\non = true\nlisten = \"127.0.0.1:0\"\n",
+            "[remote]\non = true\n",
         )
         .unwrap();
         std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -131,38 +144,6 @@ impl Machine {
 
     fn log(&self) -> String {
         std::fs::read_to_string(self.user.path("state/flottille/daemon.log")).unwrap_or_default()
-    }
-
-    fn key(&self) -> String {
-        self.remote()["this"]["key"].as_str().unwrap().to_owned()
-    }
-
-    fn found(&self) -> Vec<String> {
-        self.remote()["this"]["addresses"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|address| address["how"] == "found")
-            .map(|address| address["address"].as_str().unwrap().to_owned())
-            .collect()
-    }
-
-    /// Trusts `other` as `name` with no hub: what the link of #811 does by hand.
-    fn trust(&self, name: &str, other: &Machine) {
-        self.trust_at(name, other, other.found());
-    }
-
-    /// [`Machine::trust`], knowing `other` at `addresses` only.
-    fn trust_at(&self, name: &str, other: &Machine, addresses: Vec<String>) {
-        let file = self.user.path("state/flottille/remote/peers.json");
-        let mut peers: Value = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_else(|| json!({"machines": []}));
-        peers["machines"].as_array_mut().unwrap().push(json!({
-            "name": name, "key": other.key(), "addresses": addresses,
-        }));
-        std::fs::write(file, peers.to_string()).unwrap();
     }
 
     fn wait_for(&self, name: &str, state: &str) {
@@ -653,13 +634,14 @@ fn remove_asks_once_and_removes_the_row(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_machine_that_needs_an_update_says_so_not_offline(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
     let pc = Machine::new();
     let server = Machine::of(User::new().with_env(
         "FLOTTILLE_TEST_LINK_HELLO",
         r#"{"flottille": "0.9.0", "protocols": [99]}"#,
     ));
-    pc.trust("server", &server);
-    server.trust("pc", &pc);
+    set_up(&hub, &pc);
+    pair(&hub, &server, "server", "runner");
     pc.wait_for("server", "needs an update");
 
     let (shell, cx) = window(&pc, cx);
@@ -776,16 +758,16 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     assert!(quiet.is_some(), "the page never came to rest");
 }
 
-/// The hub's card and the address line of a machine's row.
+/// The hub's card and the link line of a machine's row.
 const HUB_TITLE: &str = "hub-state";
 const HUB_TAG: &str = "hub-state-tag-0";
 const HUB_REASON: &str = "hub-reason";
 const HUB_DOWN: &str = "devices-hub-down-line";
 /// What waits for the hub while it does not answer: the state is the tag's to say.
-const WAITS: &str = "Changing the list waits for the hub.";
+const WAITS: &str = "Changes wait for the hub, which cannot be reached now:";
 
-fn address_line(name: &str) -> String {
-    format!("member-address-{name}")
+fn link_line(name: &str) -> String {
+    format!("member-link-{name}")
 }
 
 fn member_tag(name: &str) -> String {
@@ -838,67 +820,42 @@ fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn each_machine_says_the_address_it_is_reached_at_or_the_one_that_failed(cx: &mut TestAppContext) {
+fn each_machine_says_it_is_reached_through_the_hub_or_why_not(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
-    let at = server.found().remove(0);
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
-    let line = address_line("server");
-    until(&shell, cx, "the server's address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1"))
+    let line = link_line("server");
+    until(&shell, cx, "the server's link is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("the hub"))
     });
     settle(&shell, cx);
-    // Linked, it says where: the address pc dialled, or the host the link came from (its port is
-    // the one it dialled from, which tells nothing).
+    // Linked, through the hub, whichever side dialled.
     let said = label(cx, &line).unwrap();
-    assert!(
-        said == format!("Reached at {at}") || said == "Linked from 127.0.0.1",
-        "{said}"
-    );
+    assert_eq!(said, "Linked through the hub");
 
-    // Off, it says the address that was tried and how it failed: its tag says it is off.
+    // Off, it says why: its tag says it is off.
     assert!(server.user.run(&["daemon", "stop"]).status.success());
-    until(&shell, cx, "the failed address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains(&format!("tried {at} from pc")))
+    until(&shell, cx, "why is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("not connected to the hub"))
     });
     settle(&shell, cx);
-    let said = label(cx, &line).unwrap();
-    assert!(
-        said.starts_with("tried ") && !said.contains("is unreachable"),
-        "{said}"
-    );
     let tag = label(cx, &member_tag("server")).unwrap();
     assert!(tag.starts_with("offline since "), "{tag}");
 }
 
 #[test]
-fn a_link_the_other_machine_dialled_says_its_host_not_its_port() {
-    let linked = |address: &str, dialled: bool| Seen {
+fn a_live_link_says_it_goes_through_the_hub_and_no_address() {
+    let machine = |linked: bool| Seen {
         name: "server".to_owned(),
         fingerprint: String::new(),
         state: "online".to_owned(),
         since: None,
         reason: None,
         role: None,
-        reached: Some(Reached {
-            address: address.to_owned(),
-            dialled,
-        }),
-        addresses: Vec::new(),
+        linked,
     };
-    assert_eq!(
-        linked("127.0.0.1:54321", false).address_words(true),
-        "Linked from 127.0.0.1"
-    );
-    assert_eq!(
-        linked("[::1]:54321", false).address_words(true),
-        "Linked from ::1"
-    );
-    // The address this machine dialled is the one to dial again: with its port.
-    assert_eq!(
-        linked("127.0.0.1:7421", true).address_words(true),
-        "Reached at 127.0.0.1:7421"
-    );
+    assert_eq!(machine(true).link_words(), "Linked through the hub");
+    assert_eq!(machine(false).link_words(), "Not reached yet");
 }
 
 #[test]
@@ -937,42 +894,11 @@ fn changing_the_list_while_the_hub_is_unreachable_says_so(cx: &mut TestAppContex
     });
     settle(&shell, cx);
     // What waits is said once: the tag and the hub's reason say the state.
-    assert_eq!(label(cx, HUB_DOWN).as_deref(), Some(WAITS));
-}
-
-#[gpui_kit::test]
-fn a_machine_only_the_hub_could_tell_shows_its_last_known_address(cx: &mut TestAppContext) {
-    let (mut hub, pc, server) = pc_and_server(User::new());
-    let at = server.found().remove(0);
-    let (shell, cx) = window(&pc, cx);
-    machines_tab(&shell, cx);
-    let line = address_line("server");
-    until(&shell, cx, "the server's address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1"))
-    });
-    hub.down();
-    until(&shell, cx, "the hub's absence is said", |cx| {
-        present(cx, HUB_DOWN)
-    });
-
-    // The link ends: its reason does not name an address (the next try, 10 s later, will).
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    until(&shell, cx, "the last known address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("Last known address"))
-    });
-    let said = label(cx, &line).unwrap();
     assert!(
-        said.ends_with(&format!("Last known address {at}.")),
-        "{said}"
+        label(cx, HUB_DOWN).is_some_and(|said| said.starts_with(WAITS)),
+        "{:?}",
+        label(cx, HUB_DOWN)
     );
-
-    // Once the try names the address, it is said once, by the failure.
-    until(&shell, cx, "the failed try is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("tried "))
-    });
-    let said = label(cx, &line).unwrap();
-    assert!(!said.contains("Last known address"), "{said}");
-    assert_eq!(said.matches(&at).count(), 1, "{said}");
 }
 
 #[gpui_kit::test]
@@ -998,14 +924,13 @@ fn the_notice_leaves_when_the_hub_is_back(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_address_change_of_a_row_fades(cx: &mut TestAppContext) {
+fn the_link_change_of_a_row_fades(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
-    let at = server.found().remove(0);
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
-    let line = address_line("server");
-    until(&shell, cx, "the server's address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1"))
+    let line = link_line("server");
+    until(&shell, cx, "the server's link is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("the hub"))
     });
 
     // The link ends: the row's tag says it is off, and the line says why.
@@ -1015,15 +940,15 @@ fn the_address_change_of_a_row_fades(cx: &mut TestAppContext) {
     });
     settle(&shell, cx);
     let before = label(cx, &line).unwrap();
-    assert!(!before.contains("tried "), "{before}");
+    assert!(!before.contains("not connected to the hub"), "{before}");
     let rest = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
     assert!(rest.is_some(), "the page came to rest before the change");
 
-    // The next try, 10 s later, fails: only the line changes, the tag stays as it was, so what
-    // moves is the line, over HOVER from the last frame's text.
+    // The next try fails: only the line changes, the tag stays as it was, so what moves is the
+    // line, over HOVER from the last frame's text.
     let tag = label(cx, &member_tag("server")).unwrap();
     until(&shell, cx, "the address line changes", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains(&format!("tried {at} from pc")))
+        label(cx, &line).is_some_and(|said| said.contains("not connected to the hub"))
     });
     assert_eq!(label(cx, &member_tag("server")), Some(tag), "the tag stays");
     assert!(present(cx, &line), "the line fades, it is not swapped");
@@ -1327,13 +1252,13 @@ fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
     machines_tab(&shell, cx);
     // Its sections, and none of them in General.
     until(&shell, cx, "remote", |cx| present(cx, "remote"));
-    for section in ["hub", "devices", "addresses"] {
+    for section in ["hub", "devices"] {
         let title = format!("{section}-title");
         until(&shell, cx, section, |cx| present(cx, &title));
     }
     click(&shell, cx, "settings-tabs-general");
     settle(&shell, cx);
-    for section in ["devices-title", "addresses-title", "remote"] {
+    for section in ["devices-title", "remote"] {
         assert!(!present(cx, section), "{section} is not in General");
     }
 
@@ -1451,5 +1376,440 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
             pc.log()
         );
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+// ── #1177: the hub's truth, a device's look, where this machine listens ───────────────────────
+
+fn hub_state(machine: &Machine) -> Value {
+    machine.remote()["hub"].clone()
+}
+
+fn wait_for_hub(machine: &Machine, state: &str) {
+    let deadline = Instant::now() + WAIT;
+    while hub_state(machine)["state"] != state {
+        assert!(
+            Instant::now() < deadline,
+            "the hub is not {state}: {:#}\n{}",
+            hub_state(machine),
+            machine.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[gpui_kit::test]
+fn a_protocol_mismatch_says_the_hub_is_old_and_how_to_update_it(cx: &mut TestAppContext) {
+    let mut hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    // The hub is updated on its host to a build of before pair mode, or never was.
+    hub.down();
+    hub.up_as(Hello {
+        flottille: "0.1.0".to_owned(),
+        protocols: vec![1],
+    });
+    wait_for_hub(&pc, "needs an update");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the hub's reason is said", |cx| {
+        present(cx, "hub-reason")
+    });
+    settle(&shell, cx);
+    let said = label(cx, "hub-reason").unwrap();
+    // This machine says its own build, which the hub session always does: its version is not fixed.
+    assert!(
+        said.starts_with("The hub runs 0.1.0 (protocol 1), this machine ")
+            && said.ends_with(" (protocol 2): update the hub on its host."),
+        "{said}"
+    );
+    // The hub is the one to update, on its host: never `flottille update`, never "this machine"
+    // for the hub.
+    assert!(!said.contains("flottille update"), "{said}");
+}
+
+#[gpui_kit::test]
+fn a_machine_the_hub_no_longer_knows_says_so_and_offers_pair_again(cx: &mut TestAppContext) {
+    let mut hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-pc")
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, "devices-forgotten"), "the hub knows it");
+    assert!(!shell.read_with(cx, |s, cx| s.machines().read(cx).list_is_old()));
+
+    // A new hub on the same host: it has no member.
+    hub.reset();
+    until(&shell, cx, "the page says the hub forgot it", |cx| {
+        present(cx, "devices-forgotten")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, "devices-forgotten").as_deref(),
+        Some("The hub no longer knows this machine")
+    );
+    // The list kept is shown, greyed as old, and Pair again is the way out.
+    assert!(present(cx, "member-pc"));
+    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).list_is_old()));
+    assert!(present(cx, "pair-again"));
+    click(&shell, cx, "pair-again");
+    until(&shell, cx, "the pairing dialog opens", |cx| {
+        present(cx, "connect-code")
+    });
+    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).connect_is_open()));
+    // Not Connect to your hub: this machine was a member.
+    assert!(!present(cx, "connect-hub"));
+}
+
+#[gpui_kit::test]
+fn a_device_the_list_dropped_says_the_hub_no_longer_knows_it(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    assert!(
+        pc.user
+            .run(&["remote", "remove", "server"])
+            .status
+            .success()
+    );
+    wait_for_hub(&server, "refused");
+    let (shell, cx) = window(&server, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the page says the hub forgot it", |cx| {
+        present(cx, "devices-forgotten")
+    });
+    assert!(present(cx, "pair-again"));
+}
+
+#[gpui_kit::test]
+fn pairing_again_replaces_the_old_membership(cx: &mut TestAppContext) {
+    let mut hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let old_key = pc.members()[0]["key"].clone();
+    hub.reset();
+    wait_for_hub(&pc, "reset");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "Pair again is offered", |cx| {
+        present(cx, "pair-again")
+    });
+    click(&shell, cx, "pair-again");
+    until(&shell, cx, "the dialog opens", |cx| {
+        present(cx, "connect-code")
+    });
+    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).connect_replaces()));
+    let (code, name) = shell.read_with(cx, |s, cx| {
+        let section = s.machines().read(cx);
+        (
+            section.connect_code_field().unwrap().clone(),
+            section.connect_name_field().unwrap().clone(),
+        )
+    });
+    let pair_code = hub.code();
+    cx.update(|window, cx| {
+        code.update(cx, |f, cx| f.set_value(pair_code.clone(), window, cx));
+        name.update(cx, |f, cx| f.set_value("desk", window, cx));
+    });
+    click(&shell, cx, "connect-save");
+    until(&shell, cx, "the new membership is listed", |cx| {
+        present(cx, "member-desk") && !present(cx, "devices-forgotten")
+    });
+    // The old membership is replaced, not added to: one member of the new list.
+    let members = pc.members();
+    assert_eq!(members.len(), 1, "{members:#?}");
+    assert_eq!(members[0]["name"], "desk");
+    assert_ne!(members[0]["key"], Value::Null);
+    let _ = old_key;
+    assert!(!present(cx, "member-pc"));
+    assert!(!shell.read_with(cx, |s, cx| s.machines().read(cx).list_is_old()));
+}
+
+#[gpui_kit::test]
+fn changes_are_not_offered_while_the_hub_refuses(cx: &mut TestAppContext) {
+    let (mut hub, pc, _server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server")
+    });
+    settle(&shell, cx);
+    // The hub answers: every item is offered, none says it waits.
+    click(&shell, cx, "member-more-server");
+    for item in ["rename", "look", "remove"] {
+        assert!(
+            label(cx, &format!("member-{item}-server-detail")).is_none(),
+            "{item} is offered"
+        );
+    }
+    cx.simulate_keystrokes("escape");
+    settle(&shell, cx);
+
+    hub.down();
+    until(&shell, cx, "the section says changes wait", |cx| {
+        present(cx, "devices-hub-down-line")
+    });
+    settle(&shell, cx);
+    let said = label(cx, "devices-hub-down-line").unwrap();
+    assert!(
+        said.starts_with("Changes wait for the hub, which cannot be reached now: "),
+        "{said}"
+    );
+    // The ⋯ items are there, disabled, each with the reason in one line.
+    click(&shell, cx, "member-more-server");
+    for item in ["rename", "look", "remove"] {
+        let reason = label(cx, &format!("member-{item}-server-detail"));
+        assert!(
+            reason.is_some_and(|reason| reason.contains("hub")),
+            "{item} says why it waits"
+        );
+    }
+    // And a click on one asks nothing: no dialog.
+    click(&shell, cx, "member-rename-server");
+    assert!(!shell.read_with(cx, |s, cx| s.machines().read(cx).rename_is_open()));
+}
+
+#[gpui_kit::test]
+fn one_click_is_one_request_and_one_toast(cx: &mut TestAppContext) {
+    let (mut hub, pc, _server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server")
+    });
+    hub.down();
+    until(&shell, cx, "the hub's absence is said", |cx| {
+        present(cx, "devices-hub-down-line")
+    });
+    // The confirmation is asked from elsewhere (the toast of a new device): the request goes out
+    // and the button is busy until it is answered.
+    shell.update(cx, |shell, cx| {
+        shell.machines().update(cx, |section, cx| {
+            section.ask_removal(Removal::Member("server".to_owned()), cx)
+        })
+    });
+    settle(&shell, cx);
+    click(&shell, cx, "member-removal-action");
+    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).is_changing()));
+    // The hub never answers: the daemon says so after its bound, once.
+    let deadline = Instant::now() + WAIT;
+    while shell.read_with(cx, |s, cx| s.machines().read(cx).is_changing()) {
+        step(&shell, Duration::from_millis(16), cx);
+        assert!(Instant::now() < deadline, "the request never ended");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    settle(&shell, cx);
+    let failures: Vec<_> = toasts(&shell, cx)
+        .into_iter()
+        .filter(|title| title.contains("was not removed"))
+        .collect();
+    assert_eq!(failures, ["server was not removed"], "one toast, not two");
+    // Said in words, with what to do: never the raw cause.
+    let why = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|t| t.is_failure())
+            .and_then(|t| t.second_line().map(str::to_owned))
+    });
+    let why = why.expect("the toast says why");
+    assert!(why.contains("try again"), "{why}");
+    assert!(
+        !why.contains("withheld") && !why.contains("sent back no list"),
+        "{why}"
+    );
+}
+
+#[gpui_kit::test]
+fn removing_this_machine_says_it_leaves_the_hub(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server")
+    });
+    settle(&shell, cx);
+    // Another device: the links to it close, as ever.
+    click(&shell, cx, "member-more-server");
+    click(&shell, cx, "member-remove-server");
+    until(&shell, cx, "the confirmation is asked", |cx| {
+        present(cx, "member-removal-sentence")
+    });
+    let other = label(cx, "member-removal-sentence").unwrap();
+    assert!(!other.contains("this machine leaves"), "{other}");
+    click(&shell, cx, "member-removal-cancel");
+    settle(&shell, cx);
+    // This machine: it leaves the hub, and its links close.
+    click(&shell, cx, "member-more-pc");
+    click(&shell, cx, "member-remove-pc");
+    until(&shell, cx, "the confirmation is asked", |cx| {
+        label(cx, "member-removal-sentence").is_some_and(|said| said != other)
+    });
+    let this = label(cx, "member-removal-sentence").unwrap();
+    assert!(
+        this.contains("This machine leaves the hub and its links close"),
+        "{this}"
+    );
+}
+
+/// How a member's icon in its colour is said, from `remote.members`.
+fn look_words(member: &Value) -> String {
+    format!(
+        "{} in {}",
+        member["icon"].as_str().unwrap(),
+        member["colour"].as_str().unwrap()
+    )
+}
+
+#[gpui_kit::test]
+fn a_device_row_shows_its_icon_in_its_colour(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server")
+    });
+    settle(&shell, cx);
+    for (name, machine) in [("pc", &pc), ("server", &server)] {
+        let member = machine.member(name).unwrap();
+        assert_eq!(
+            label(cx, &format!("member-icon-{name}")),
+            Some(look_words(&member)),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_member_with_no_look_gets_the_defaults_of_its_key() {
+    // A member added before pair mode has no icon nor colour (`remote.members`: null).
+    let folder = key_folder();
+    let key = flottille_link::DeviceKey::load_or_make(&NoKeyring, folder.path()).unwrap();
+    let member = flottille_window::machines::Member {
+        name: "old".to_owned(),
+        key: json!(key.public()),
+        fingerprint: String::new(),
+        role: "runner".to_owned(),
+        added_by: String::new(),
+        machine: None,
+        icon: None,
+        colour: None,
+    };
+    let (icon, colour) = member.look();
+    assert_eq!(icon, "desktop");
+    assert_eq!(colour, flottille_link::Colour::of(&key.public()).word());
+}
+
+#[gpui_kit::test]
+fn change_look_sets_the_icon_and_colour(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server")
+    });
+    settle(&shell, cx);
+    click(&shell, cx, "member-more-server");
+    click(&shell, cx, "member-look-server");
+    until(&shell, cx, "the dialog opens", |cx| {
+        present(cx, "look-colour-teal")
+    });
+    // The five icons as a select, the eight colours as swatches.
+    for colour in flottille_link::Colour::ALL {
+        assert!(present(cx, &format!("look-colour-{}", colour.word())));
+    }
+    shell.update(cx, |shell, cx| {
+        shell
+            .machines()
+            .update(cx, |section, cx| section.choose_look_icon(3, cx))
+    });
+    // Another colour than the one the device has (its key proposed one of the eight).
+    let colour = match pc.member("server").unwrap()["colour"].as_str() {
+        Some("orange") => "blue",
+        _ => "orange",
+    };
+    click(&shell, cx, &format!("look-colour-{colour}"));
+    // A live preview of the row: the icon and colour chosen, before anything is saved.
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, "look-preview"),
+        Some(format!("phone in {colour}"))
+    );
+    assert_ne!(pc.member("server").unwrap()["colour"], colour);
+    click(&shell, cx, "member-look-save");
+    until(&shell, cx, "the row shows the new look", |cx| {
+        label(cx, "member-icon-server") == Some(format!("phone in {colour}"))
+    });
+    // A signed change, as `flottille remote icon` and `colour` make it.
+    let server = pc.member("server").unwrap();
+    assert_eq!(
+        (server["icon"].as_str(), server["colour"].as_str()),
+        (Some("phone"), Some(colour))
+    );
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "Changed the look of server")
+    );
+}
+
+#[gpui_kit::test]
+fn the_machine_of_a_session_in_the_sidebar_shows_its_look(cx: &mut TestAppContext) {
+    let server_user = User::with_fake_agent();
+    server_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let (_hub, pc, server) = pc_and_server(server_user);
+    let folder = server.user.path("work/harbor");
+    server.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "harbor\n").unwrap();
+    server.user.git(&folder, &["add", "README.md"]);
+    server
+        .user
+        .git(&folder, &["commit", "--quiet", "-m", "start"]);
+    server
+        .user
+        .call("project.add", json!({"folder": folder, "name": "harbor"}))
+        .unwrap();
+    let started = server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "harbor", "message": "Write the release notes"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (shell, cx) = window(&pc, cx);
+    let row = flottille_window::model::elsewhere_id("server", &id);
+    until(&shell, cx, "the server's session is listed", |cx| {
+        present(cx, &format!("session-machine-icon-{row}"))
+    });
+    assert_eq!(
+        label(cx, &format!("session-machine-icon-{row}")),
+        Some(look_words(&server.member("server").unwrap()))
+    );
+}
+
+#[gpui_kit::test]
+fn the_machines_page_shows_no_addresses(cx: &mut TestAppContext) {
+    // Every link goes through the hub: the page has no Addresses section and no place that asks
+    // where this machine listens. Its devices and its hub are there.
+    let (_hub, pc, _server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-pc") && present(cx, "hub-state")
+    });
+    settle(&shell, cx);
+    for id in [
+        "addresses",
+        "add-address",
+        "address-list",
+        "no-address-block",
+        "listen",
+        "listen-nowhere",
+        "listen-save",
+    ] {
+        assert!(!present(cx, id), "{id} is on the page");
     }
 }

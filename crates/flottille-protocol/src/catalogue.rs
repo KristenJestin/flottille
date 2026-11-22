@@ -64,6 +64,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("update.check", Drive),
     // They replace this machine's binary and restart its daemon: asked on the machine only.
     ("update.download", Local),
+    ("update.cancel", Local),
     ("update.restart", Local),
     ("whatsnew.show", Read),
     ("whatsnew.seen", Drive),
@@ -132,8 +133,6 @@ pub const METHODS: &[(&str, Class)] = &[
     ("vault.asks", Read),
     ("vault.ask_dismiss", Drive),
     ("remote.machines", Read),
-    ("remote.address.add", Drive),
-    ("remote.address.remove", Drive),
     ("remote.members", Read),
     ("remote.launches", Read),
     ("remote.sessions", Read),
@@ -143,8 +142,8 @@ pub const METHODS: &[(&str, Class)] = &[
     // As `remote.pair`: the declaration of this machine by the device that paired.
     ("remote.declare", Local),
     ("remote.close", Local),
-    // Whether remote is on and where this machine is reached, and its change: the machine's own
-    // user, never another machine's device (a link could turn the machine off from afar).
+    // Whether remote is on, and its change: the machine's own user, never another machine's
+    // device (a link could turn the machine off from afar).
     ("remote.settings", Local),
     ("remote.configure", Local),
     // It opens a port on the client's machine for a run's port on this one: a user's act.
@@ -311,6 +310,34 @@ mod tests {
         assert_eq!(class("agent.send"), Some(Drive));
         assert_eq!(class("approval.approve"), Some(Drive));
         assert_eq!(class("daemon.stop"), Some(Drive));
+    }
+
+    #[test]
+    fn what_a_session_page_writes_is_drive_and_what_it_reads_is_read() {
+        // A viewer's device may read a conversation, its tree, its pictures and its requests, and
+        // writes none of it: the machine refuses each write by this class (`docs/remote.md`, "Roles").
+        for method in [
+            "agent.send",
+            "agent.send_now",
+            "agent.answer",
+            "agent.cancel",
+            "agent.mode",
+            "approval.approve",
+            "approval.deny",
+        ] {
+            assert_eq!(class(method), Some(Drive), "{method}");
+        }
+        for method in [
+            "agent.show",
+            "agent.tree",
+            "agent.image",
+            "agent.file",
+            "agent.list",
+            "approval.list",
+            "events.watch",
+        ] {
+            assert_eq!(class(method), Some(Read), "{method}");
+        }
     }
 
     #[test]

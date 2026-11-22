@@ -207,7 +207,7 @@ fn the_release_key_is_reachable_by_the_signing_job_of_a_push_only() {
 }
 
 #[test]
-fn a_release_attaches_the_signed_artefact_of_a_push_run_only() {
+fn a_release_attaches_the_signed_artefact_of_a_signing_run_only() {
     let publish = job(".github/workflows/ci.yml", "publish");
     assert!(publish.contains("android-sign"), "{publish}");
     assert!(publish.contains("needs.android-sign.result"), "{publish}");
@@ -216,8 +216,11 @@ fn a_release_attaches_the_signed_artefact_of_a_push_run_only() {
         "no APK of a build job: {publish}"
     );
     let download = step(&publish, "The signed APK");
+    // On the runs that signed (`android_sign_runs_on_a_push_and_on_a_release_build_of_main_only`
+    // of release.rs holds the table): a push, and a release build of main.
     assert!(
-        download.contains("if: github.event_name == 'push'"),
+        download.contains("github.event_name == 'push'")
+            && download.contains("github.ref == 'refs/heads/main'"),
         "{download}"
     );
     assert!(download.contains("name: android-signed"), "{download}");

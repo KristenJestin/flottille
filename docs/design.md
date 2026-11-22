@@ -1340,13 +1340,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a hub and link to your other machines.")
   and **Turn on**; on, a **Remote** switch ("Turn it off and the links close; this machine stays paired with
   your hub."), whose off asks once, in the one confirmation dialog. The notice folds away and the
-  settings unfold, and back. The window offers no choice of address to listen on, on purpose: the
-  traffic between devices is to go through the hub, so a device needs none (`remote.md`, "Defaults
-  taken"); the daemon's `listen` stays, set from the command line. While this machine is in no hub,
+  settings unfold, and back. Nothing listens and no address is given: every link goes through the
+  hub (`remote.md`, decision 3). While this machine is in no hub,
   **Connect to your hub** opens its dialog (the code `flottille-hub pair` printed and the card this
   machine proposes, the refusal under its fields, a toast when it is done); a device is added on
-  the hub's host, never from a device. Then the hub's state, **Devices** (Rename is a dialog) and
-  **Addresses** (**New address** is a dialog);
+  the hub's host, never from a device. Then the hub's state and **Devices** (Rename is a dialog);
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, `started the session "<title>"` (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
@@ -1406,7 +1404,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root's turn and hands it this message next), Edit (takes it back into the composer, text and
   pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
   not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root (it carries 20 pictures at most; a refusal, of a picture or of a message, is a toast and never changes the composer's height; what appears in it unfolds and what leaves folds away), with the session's mode
-  (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
+  (an Ask, Auto or Full select with each mode's line, with a warning icon when Auto has no judge, its pill in the
   alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
   `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
@@ -1446,9 +1444,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, at the right of the name's line so that the second line has the whole row's width and is cut, with its whole text in a tooltip, only when it cannot fit; the session's own
   agent says only what it runs on, the others their name over their model, their effort (by name, `Sonnet 5.5 · medium`) and what they do; a review is one such row, `Review, round 1` over `3/4 checks · 2 findings`, with a chevron at its right end that folds its checks and its findings, unfolded while it runs and folded once it is done; the composer's bar does not say
-  it; under the composer's field, the provider is named and not changeable, and the model and
-  effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
-  and a dot on its picker says it until the agent took it, its menu saying when it applies,
+  it; under the composer's field, one picker says the provider (not changeable), the model and the
+  effort, the start composer's own: a change chosen while a turn runs waits for its end,
+  and a dot on the picker says it until the agent took it, saying when it applies,
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as its place's on the project page, with

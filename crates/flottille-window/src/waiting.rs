@@ -44,26 +44,7 @@ enum Held {
 /// How long a card the user was sent to stays lit.
 const POINTED: Duration = Duration::from_millis(1600);
 
-/// The reasons a call was held, each as a sentence of its own: the first letter in capital, a
-/// full stop at the end, a space between. The daemon gives them as fragments, which read as one
-/// run of words (a word doubled where one ends and the next begins) when only spaced.
-pub fn sentences<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
-    parts
-        .into_iter()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            let first = chars.next().map(|c| c.to_uppercase().collect::<String>());
-            let mut sentence = first.unwrap_or_default() + chars.as_str();
-            if !sentence.ends_with(['.', '!', '?']) {
-                sentence.push('.');
-            }
-            sentence
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+pub use flottille_protocol::words::sentences;
 
 pub struct Waiting {
     page: WeakEntity<SessionPage>,

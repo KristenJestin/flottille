@@ -176,7 +176,7 @@ pub fn run(
     }
     if stage {
         let binary = binary()?;
-        let staged = stage_from(&binary, &url, &|_, _| {})?;
+        let staged = stage_from(&binary, &url, &|_, _| {}, &|| false)?;
         println!(
             "{staged} is staged beside {}: applied at the next start of the daemon.",
             binary.display()
@@ -672,8 +672,13 @@ pub fn latest(paths: &Paths) -> Result<Option<Version>> {
 
 /// Downloads the channel's latest build, when it is newer than this one, and stages it beside
 /// the binary: what the window's Download does. `progress` is told the bytes read, and of how
-/// many when the server says it. The version staged.
-pub fn stage(paths: &Paths, progress: &dyn Fn(u64, Option<u64>)) -> Result<Version> {
+/// many when the server says it; `cancelled` is asked while it downloads, and the download stops
+/// when it says yes, with nothing staged. The version staged.
+pub fn stage(
+    paths: &Paths,
+    progress: &dyn Fn(u64, Option<u64>),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Version> {
     let (channel, branch) = followed(&remembered(paths), None, None);
     let url = archive_url(&channel, branch.as_deref())?;
     let this = Version::parse(VERSION)?;
@@ -682,13 +687,34 @@ pub fn stage(paths: &Paths, progress: &dyn Fn(u64, Option<u64>)) -> Result<Versi
         Some(new) => return Err(format!("{new} is not newer than this {this}").into()),
         None => return Err("the latest release holds no archive of Flottille".into()),
     }
-    stage_from(&binary()?, &url, progress)
+    stage_from(&binary()?, &url, progress, cancelled)
+}
+
+/// The version of the binary at `binary`, as its `--version` says it; none when it does not.
+fn installed_version(binary: &Path) -> Option<Version> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = crate::children::spawn_std(&mut command)
+        .ok()?
+        .wait_with_output()
+        .ok()?;
+    let said = String::from_utf8(output.stdout).ok()?;
+    Version::parse(said.split_whitespace().nth(1)?).ok()
 }
 
 /// Downloads the archive at `url` and its sum, checks the sum, and unpacks it into the staging of
 /// `binary`, with its manifest. Nothing that runs is touched; a wrong sum stages nothing, and
 /// nothing is left beside the binary but the staging.
-fn stage_from(binary: &Path, url: &str, progress: &dyn Fn(u64, Option<u64>)) -> Result<Version> {
+fn stage_from(
+    binary: &Path,
+    url: &str,
+    progress: &dyn Fn(u64, Option<u64>),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Version> {
     let name = url.rsplit('/').next().unwrap_or_default().to_owned();
     let version = version_of(&name).ok_or("the release holds no archive of Flottille")?;
     let staging = staging_of(binary);
@@ -696,11 +722,18 @@ fn stage_from(binary: &Path, url: &str, progress: &dyn Fn(u64, Option<u64>)) -> 
     if is_link(&staging) {
         return Err(not_followed(&staging));
     }
+    // What is staged is compared with the binary at the install path, not with this process: a
+    // process still on the version an update replaced would stage the build already installed.
+    if let Some(installed) = installed_version(binary)
+        && (version == installed || is_older(&version, &installed))
+    {
+        return Err(format!("{version} is not newer than the {installed} installed").into());
+    }
     let dir = binary.parent().ok_or("the binary has no folder")?;
     let work = tempfile_dir(dir)?;
     let staged = (|| -> Result<()> {
         let file = work.join(&name);
-        download(url, &file, progress)?;
+        download(url, &file, progress, cancelled)?;
         let published = String::from_utf8(fetch(&format!("{url}.sha256"))?)?;
         let sum = published.split_whitespace().next().unwrap_or_default();
         // Read once: what is unpacked and staged is what was checked.
@@ -779,8 +812,14 @@ fn forget_staged(binary: &Path) {
     }
 }
 
-/// The file at `url` into `to` with the user's `curl`, its progress told every 200 ms.
-fn download(url: &str, to: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<()> {
+/// The file at `url` into `to` with the user's `curl`, its progress told every 200 ms; `curl` is
+/// stopped, and the download fails, once `cancelled` says yes.
+fn download(
+    url: &str,
+    to: &Path,
+    progress: &dyn Fn(u64, Option<u64>),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
     let total = size_of(url);
     let mut child = crate::children::spawn_std(
         curl_command()
@@ -798,9 +837,17 @@ fn download(url: &str, to: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result
         if let Some(status) = child.try_wait()? {
             break status;
         }
+        if cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the download was cancelled".into());
+        }
         progress(read(), total);
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
+    if cancelled() {
+        return Err("the download was cancelled".into());
+    }
     if !status.success() {
         let mut said = String::new();
         if let Some(mut stderr) = child.stderr.take() {
@@ -880,6 +927,9 @@ pub enum Staged {
     Applied(PathBuf),
     /// What was staged was removed, for the reason said.
     Refused(String),
+    /// What was staged is the version that runs: what an update left behind it, removed without
+    /// a word to the window.
+    Leftover(String),
 }
 
 /// `$XDG_STATE_HOME/flottille/updated.json`: the last build applied, the version it replaced and
@@ -904,14 +954,16 @@ pub fn apply_staged(paths: &Paths) -> Staged {
         }
         Ok(meta) => meta,
     };
-    let refuse = |why: String| {
-        // A link is removed, never what it names.
-        let removed = if meta.is_dir() {
+    // A link is removed, never what it names.
+    let remove = || {
+        if meta.is_dir() {
             std::fs::remove_dir_all(&staging)
         } else {
             std::fs::remove_file(&staging)
-        };
-        let removed = match removed {
+        }
+    };
+    let refuse = |why: String| {
+        let removed = match remove() {
             Ok(()) => "removed".to_owned(),
             Err(error) => format!("not removed ({error})"),
         };
@@ -939,6 +991,18 @@ pub fn apply_staged(paths: &Paths) -> Staged {
     let this = Version::parse(VERSION);
     match (Version::parse(&manifest.version), &this) {
         (Ok(version), Ok(this)) if version != *this && !is_older(&version, this) => {}
+        (Ok(version), Ok(this)) if version == *this => {
+            return match remove() {
+                Ok(()) => Staged::Leftover(format!(
+                    "the build staged at {} is {this}, the version that runs: removed",
+                    staging.display()
+                )),
+                Err(error) => Staged::Refused(format!(
+                    "the build staged at {} is {this}, the version that runs, and was not removed ({error})",
+                    staging.display()
+                )),
+            };
+        }
         (_, Ok(this)) => {
             return refuse(format!(
                 "{} is not newer than this {this}",

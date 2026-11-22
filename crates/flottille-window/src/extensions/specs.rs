@@ -9,11 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 
 use gpui_design_system::{
-    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader,
-    RadioChoices, Section, Toast, changing, color, enter, hoverable, icon, palette, presence,
-    presence_of, space, toast, turning,
+    Button, Confirm, EmptyLine, Field, FilterChip, FilterChips, Icon, ListCard, ListRow, Listing,
+    Menu, Modal, PageHeader, RadioChoices, Section, Toast, changing, color, enter, hoverable, icon,
+    palette, presence, presence_of, space, toast, turning,
 };
-use gpui_kit::base::input::InputState;
+use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
@@ -25,7 +25,9 @@ use serde_json::{Value, json};
 
 use super::{Registry, Then as Asked};
 use crate::actions::Command;
+use crate::commands::problem_line;
 use crate::commands::{menu_of, perform_later, section_blocks, spaced, stack};
+use crate::items::ItemRow;
 use crate::project_settings::{field_frame, styled_input};
 use crate::shell::{Selection, Shell};
 
@@ -84,6 +86,19 @@ pub enum Then {
     Findings {
         spec: u64,
     },
+    /// `spec.write` of one section.
+    Wrote {
+        spec: u64,
+    },
+    /// `spec.link` or `spec.unlink` of a ticket.
+    Linked {
+        spec: u64,
+        link: bool,
+    },
+    /// `items.list` of the project: the tickets the picker offers.
+    Tickets {
+        spec: u64,
+    },
 }
 
 impl Then {
@@ -98,7 +113,10 @@ impl Then {
             | Then::Departures { spec }
             | Then::Develop { spec }
             | Then::Amendment { spec, .. }
-            | Then::Findings { spec } => Some(*spec),
+            | Then::Findings { spec }
+            | Then::Wrote { spec }
+            | Then::Linked { spec, .. }
+            | Then::Tickets { spec } => Some(*spec),
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => None,
         }
     }
@@ -289,6 +307,9 @@ pub(super) fn answered(
         | Then::Draft { .. }
         | Then::Ticket { .. }
         | Then::Departures { .. }
+        | Then::Wrote { .. }
+        | Then::Linked { .. }
+        | Then::Tickets { .. }
         | Then::Amendment { .. } => {
             if let Err(why) = answer {
                 toast(Toast::failure("The spec was not changed").detail(why), cx);
@@ -460,7 +481,12 @@ pub struct SpecsTab {
     idea: Entity<InputState>,
     /// The "⋯" menu of each spec's row, by its key.
     menus: HashMap<String, Entity<Menu>>,
+    /// The status the list is cut to (`flottille spec list --status`); all of them when none.
+    filter: Option<&'static str>,
 }
+
+/// The statuses of a spec, in the order of its life.
+const STATUSES: [&str; 5] = ["draft", "ready", "in_progress", "review", "done"];
 
 impl SpecsTab {
     pub fn new(
@@ -478,7 +504,40 @@ impl SpecsTab {
             new_open: false,
             idea,
             menus: HashMap::new(),
+            filter: None,
         }
+    }
+
+    /// The chips over the list: All, then each status some spec has (the one chosen stays), each
+    /// with its count. The one chosen, chosen again, goes back to all.
+    fn chips(&self, specs: &[Summary], cx: &mut Context<Self>) -> FilterChips {
+        let count = |status: &str| specs.iter().filter(|s| s.status == status).count();
+        let keys: Vec<&'static str> = STATUSES
+            .into_iter()
+            .filter(|status| count(status) > 0 || self.filter == Some(*status))
+            .collect();
+        let chosen = self
+            .filter
+            .and_then(|status| keys.iter().position(|key| *key == status))
+            .map_or(0, |at| at + 1);
+        let this = cx.weak_entity();
+        FilterChips::new(
+            "specs-filter",
+            "Filter the specs",
+            std::iter::once(FilterChip::new("all", "All", specs.len())).chain(
+                keys.iter()
+                    .map(|key| FilterChip::new(*key, status_said(key), count(key))),
+            ),
+            chosen,
+        )
+        .on_choose(move |index, _, cx| {
+            this.update(cx, |this, cx| {
+                let picked = index.checked_sub(1).and_then(|at| keys.get(at).copied());
+                this.filter = if picked == this.filter { None } else { picked };
+                cx.notify();
+            })
+            .ok();
+        })
     }
 
     /// A row's "⋯" menu: open the spec, or launch its development, which the daemon refuses
@@ -560,12 +619,14 @@ impl Render for SpecsTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let at = cx.background_executor().now();
         let reduce = cx.reduce_motion();
-        let specs = registry_of(&self.shell, cx)
+        let all = registry_of(&self.shell, cx)
             .map(|registry| registry.read(cx).specs().of(&self.project))
             .unwrap_or_default();
+        let chips = self.chips(&all, cx);
+        let shown = self.filter;
         self.list.sync(
-            specs
-                .into_iter()
+            all.into_iter()
+                .filter(|summary| shown.is_none_or(|status| summary.status == status))
                 .map(|summary| (format!("spec-{}", summary.spec), summary)),
             at,
             reduce,
@@ -628,8 +689,13 @@ impl Render for SpecsTab {
             ))
             .child(presence(
                 "project-specs-empty-block",
-                known && !present,
+                known && !present && shown.is_none(),
                 empty,
+            ))
+            .child(presence(
+                "project-specs-filter-block",
+                known && (present || shown.is_some()),
+                div().pb(space::MD).child(chips),
             ))
             .child(presence("project-specs-list-block", present, card))
             .child(self.new_modal(cx))
@@ -963,6 +1029,72 @@ impl Decided {
     }
 }
 
+/// A ticket's words in an element's id: `#5` is `5`.
+fn ticket_slug(ticket: &str) -> String {
+    ticket
+        .trim_start_matches('#')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// How a section is written.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    /// A text: the Problem, the notes, the departures.
+    Text,
+    /// A list of items, said as the daemon takes it.
+    List,
+}
+
+/// A section of a spec the page can edit.
+#[derive(Clone, Copy, Debug)]
+struct Section_ {
+    /// Its name for `spec.write`.
+    name: &'static str,
+    title: &'static str,
+    kind: Kind,
+    /// The keys of an item of a list, in the order they are said.
+    keys: &'static [&'static str],
+}
+
+const EDITABLE: &[Section_] = &[
+    Section_ {
+        name: "problem",
+        title: "Problem",
+        kind: Kind::Text,
+        keys: &[],
+    },
+    Section_ {
+        name: "behaviour",
+        title: "Expected behaviour",
+        kind: Kind::List,
+        keys: &["id", "text"],
+    },
+    Section_ {
+        name: "decisions",
+        title: "Decisions",
+        kind: Kind::List,
+        keys: &["id", "question", "decision", "set_aside"],
+    },
+    Section_ {
+        name: "out_of_scope",
+        title: "Out of scope",
+        kind: Kind::List,
+        keys: &["text", "reason", "ticket"],
+    },
+    Section_ {
+        name: "notes",
+        title: "What the agent found",
+        kind: Kind::Text,
+        keys: &[],
+    },
+];
+
+fn editable(name: &str) -> Option<&'static Section_> {
+    EDITABLE.iter().find(|section| section.name == name)
+}
+
 /// A spec as `spec.show` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spec {
@@ -991,6 +1123,8 @@ pub struct Spec {
     pub amendments: Vec<Amendment>,
     /// The items an accepted amendment changed or added, by identifier.
     pub decided: Vec<(String, Decided)>,
+    /// What the daemon said, whole: an editor opens a list section on it.
+    raw: Value,
 }
 
 impl Spec {
@@ -1093,6 +1227,36 @@ impl Spec {
                 .flat_map(|section| value[*section].as_array().into_iter().flatten())
                 .filter_map(|item| Some((text(&item["id"]), Decided::of(item)?)))
                 .collect(),
+            raw: value.clone(),
+        }
+    }
+
+    /// What the editor of `section` opens on: the text, or the list as the daemon takes it (an
+    /// item keeps its `id` to stay the same item; one with none is a new one).
+    fn editable(&self, section: &Section_) -> String {
+        match section.kind {
+            Kind::Text => self.raw[section.name]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            Kind::List => {
+                let keep = |item: &Value| -> Value {
+                    let mut kept = serde_json::Map::new();
+                    for key in section.keys {
+                        if let Some(value) = item.get(*key).filter(|v| !v.is_null()) {
+                            kept.insert((*key).to_owned(), value.clone());
+                        }
+                    }
+                    Value::Object(kept)
+                };
+                let items: Vec<Value> = self.raw[section.name]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(keep)
+                    .collect();
+                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_owned())
+            }
         }
     }
 
@@ -1176,6 +1340,22 @@ pub struct SpecPage {
     /// "Launch development" was asked, until the daemon answers.
     launching: bool,
     narrow: bool,
+    /// The editor of a section: its field once first opened, the section it is open on, what it
+    /// refused, and whether the daemon has the text.
+    editor: Option<Entity<TextareaState>>,
+    editing: Option<&'static str>,
+    edit_error: Option<SharedString>,
+    edit_saving: bool,
+    /// The picker of a ticket to link: its search once first opened, whether it is open, the
+    /// project's tickets once the daemon said them, and the tickets being linked or unlinked.
+    link_search: Option<Entity<InputState>>,
+    link_open: bool,
+    candidates: Option<Result<Vec<ItemRow>, String>>,
+    linking: Vec<String>,
+    /// The tickets it covers as drawn, and the "⋯" of each row.
+    ticket_rows: Listing<String>,
+    ticket_menus: HashMap<String, Entity<Menu>>,
+    _subscriptions: Vec<gpui_kit::Subscription>,
 }
 
 impl SpecPage {
@@ -1203,7 +1383,342 @@ impl SpecPage {
             writing: false,
             launching: false,
             narrow: false,
+            editor: None,
+            editing: None,
+            edit_error: None,
+            edit_saving: false,
+            link_search: None,
+            link_open: false,
+            candidates: None,
+            linking: Vec::new(),
+            ticket_rows: Listing::default(),
+            ticket_menus: HashMap::new(),
+            _subscriptions: Vec::new(),
         }
+    }
+
+    /// Whether the sections are edited: only a Draft is written, and one write at a time.
+    pub fn can_edit(&self) -> bool {
+        !self.edit_saving && self.shown().is_some_and(|spec| spec.status == "draft")
+    }
+
+    /// Edit on a section: the editor opens on what it says now.
+    pub fn open_edit(&mut self, name: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(section), Some(spec)) = (editable(name), self.shown().cloned()) else {
+            return;
+        };
+        if self.editor.is_none() {
+            let field = cx.new(|cx| {
+                let mut field = TextareaState::new(window, cx).auto_grow(8, 18);
+                gpui_design_system::follow_theme(&mut field, cx);
+                field
+            });
+            self._subscriptions
+                .push(cx.subscribe(&field, |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) && this.edit_error.take().is_some() {
+                        cx.notify();
+                    }
+                }));
+            self.editor = Some(field);
+        }
+        let text = spec.editable(section);
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |field, cx| field.set_value(&text, window, cx));
+            let focus = editor.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        self.editing = Some(name);
+        self.edit_error = None;
+        cx.notify();
+    }
+
+    fn close_edit(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
+        cx.notify();
+    }
+
+    /// Save: the section is written whole, as the command line writes it.
+    fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let (Some(name), Some(editor)) = (self.editing, self.editor.clone()) else {
+            return;
+        };
+        let Some(section) = editable(name) else {
+            return;
+        };
+        if self.edit_saving {
+            return;
+        }
+        let typed = editor.read(cx).value().to_string();
+        let content = match section.kind {
+            Kind::Text => Value::String(typed),
+            Kind::List => match serde_json::from_str::<Value>(&typed) {
+                Ok(list) if list.is_array() => list,
+                Ok(_) => {
+                    self.edit_error = Some("Say a list: items between [ and ].".into());
+                    return cx.notify();
+                }
+                Err(why) => {
+                    self.edit_error =
+                        Some(format!("That is not a list the spec can take: {why}").into());
+                    return cx.notify();
+                }
+            },
+        };
+        self.edit_saving = true;
+        self.edit_error = None;
+        ask(
+            &self.shell,
+            "spec.write",
+            json!({"spec": self.spec, "section": name, "content": content}),
+            Then::Wrote { spec: self.spec },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Link a ticket…: the picker opens, and the project's tickets are asked.
+    pub fn open_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.link_search.is_none() {
+            let search = cx.new(|cx| styled_input("Search the tickets", window, cx));
+            self._subscriptions
+                .push(cx.subscribe(&search, |_, _, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }));
+            self.link_search = Some(search);
+        }
+        if let Some(search) = &self.link_search {
+            search.update(cx, |field, cx| field.set_value("", window, cx));
+            let focus = search.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        self.link_open = true;
+        self.candidates = None;
+        ask(
+            &self.shell,
+            "items.list",
+            json!({"project": self.project}),
+            Then::Tickets { spec: self.spec },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn close_link(&mut self, cx: &mut Context<Self>) {
+        self.link_open = false;
+        cx.notify();
+    }
+
+    /// The "⋯" of the row of `ticket`: Unlink.
+    fn ticket_menu(&mut self, ticket: &str, cx: &mut Context<Self>) -> Entity<Menu> {
+        let this = cx.weak_entity();
+        let slug = ticket_slug(ticket);
+        let name = ticket.to_owned();
+        if let Some(menu) = self.ticket_menus.get(&slug) {
+            return menu.clone();
+        }
+        let id = ElementId::Name(format!("spec-ticket-row-{slug}-more").into());
+        let entry = format!("spec-ticket-row-{slug}-unlink");
+        let menu = cx.new(|cx| {
+            Menu::new(id, "More", cx).entry(entry, "Unlink", Some(Icon::Close), move |_, cx| {
+                this.update(cx, |this, cx| this.link(name.clone(), false, cx))
+                    .ok();
+            })
+        });
+        self.ticket_menus.insert(slug, menu.clone());
+        menu
+    }
+
+    /// The tickets the spec covers, each with its ⋯, and Link a ticket…
+    fn tickets_section(&mut self, spec: &Spec, cx: &mut Context<Self>) -> Section {
+        let p = palette(cx);
+        let drawn: Vec<(String, gpui_design_system::Placement, String)> = self
+            .ticket_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let mut list = ListCard::new("spec-tickets-list");
+        for (_, placement, ticket) in drawn {
+            let slug = ticket_slug(&ticket);
+            let menu = self.ticket_menu(&ticket, cx);
+            let row = ListRow::new(
+                ElementId::Name(format!("spec-ticket-row-{slug}").into()),
+                ticket.clone(),
+            )
+            .mono()
+            .leading(icon(Icon::File).size(px(14.)).text_color(p.faint))
+            .more(menu);
+            list = list.item(
+                ElementId::Name(format!("spec-ticket-item-{slug}").into()),
+                placement,
+                row,
+            );
+        }
+        let this = cx.weak_entity();
+        let link = Button::secondary("spec-link-ticket", "Link a ticket…")
+            .leading(Icon::Plus)
+            .disabled(spec.status != "draft")
+            .on_click(move |_, window, cx| {
+                this.update(cx, |this, cx| this.open_link(window, cx)).ok();
+            });
+        Section::new("spec-tickets", "Tickets")
+            .count(self.ticket_rows.len().to_string())
+            .sentence("The tickets this spec covers.")
+            .action(link)
+            .child(list)
+    }
+
+    /// The editor of a section: its text in a box, and what the daemon refused under it.
+    fn edit_modal(&self, cx: &mut Context<Self>) -> Modal {
+        let this = cx.weak_entity();
+        let section = self.editing.and_then(editable);
+        let title = section.map_or("Edit".to_owned(), |s| {
+            format!("Edit {}", s.title.to_lowercase())
+        });
+        let sentence = match section.map(|s| s.kind) {
+            Some(Kind::List) => {
+                "One entry per item, between [ and ]. Keep an item's id to keep the item; leave it out for a new one."
+            }
+            _ => "The section is written whole when you save.",
+        };
+        let p = palette(cx);
+        let editor = self.editor.clone();
+        let focusing = editor.clone();
+        let text = div()
+            .id("spec-edit-text")
+            .min_h(px(160.))
+            .px(space::MD)
+            .py(space::MD)
+            .rounded(px(10.))
+            .bg(p.field)
+            .border_1()
+            .border_color(p.line2)
+            .text_size(px(13.))
+            .line_height(px(20.))
+            .cursor_text()
+            .on_click(move |_, window, cx| {
+                if let Some(editor) = &focusing {
+                    let focus = editor.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                }
+            })
+            .children(editor)
+            .test_support();
+        let error = problem_line("spec-edit-error", self.edit_error.clone(), px(0.), cx);
+        Modal::new("spec-edit-modal", title)
+            .wide()
+            .sentence(sentence)
+            .open(self.editing.is_some())
+            .on_close({
+                let this = this.clone();
+                move |_, cx| {
+                    this.update(cx, |this, cx| this.close_edit(cx)).ok();
+                }
+            })
+            .action(
+                Button::primary("spec-edit-save", "Save")
+                    .disabled(self.edit_saving)
+                    .on_click(move |_, _, cx| {
+                        this.update(cx, |this, cx| this.save_edit(cx)).ok();
+                    }),
+            )
+            .child(Field::new("spec-edit-field", "Text", text))
+            .kept(error)
+    }
+
+    /// The picker of a ticket to link: a search among the project's tickets, those the spec
+    /// covers left out.
+    fn link_modal(&self, cx: &mut Context<Self>) -> Modal {
+        let this = cx.weak_entity();
+        let p = palette(cx);
+        let query = self
+            .link_search
+            .as_ref()
+            .map(|search| search.read(cx).value().to_string())
+            .unwrap_or_default();
+        let covered: Vec<String> = self.shown().map(|s| s.tickets.clone()).unwrap_or_default();
+        let mut list = ListCard::new("spec-link-list");
+        let mut count = 0;
+        let said = match &self.candidates {
+            None => Some("Reading the tickets…".to_owned()),
+            Some(Err(why)) => Some(format!("The tickets cannot be read: {why}")),
+            Some(Ok(rows)) => {
+                let mut found: Vec<(u32, &ItemRow)> = rows
+                    .iter()
+                    .filter(|row| !covered.contains(&row.label()))
+                    .filter_map(|row| {
+                        gpui_design_system::fuzzy::find(&query, &row.title, &row.label())
+                            .map(|found| (found.score, row))
+                    })
+                    .collect();
+                found.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+                for (_, row) in found {
+                    count += 1;
+                    let (slug, ticket) = (ticket_slug(&row.label()), row.label());
+                    let this = this.clone();
+                    list = list.row(
+                        ListRow::new(
+                            ElementId::Name(format!("spec-link-pick-{slug}").into()),
+                            row.title.clone(),
+                        )
+                        .line(ticket.clone())
+                        .on_click(move |_, _, cx| {
+                            let ticket = ticket.clone();
+                            this.update(cx, |this, cx| this.link(ticket, true, cx)).ok();
+                        }),
+                    );
+                }
+                (count == 0).then(|| "No ticket to link.".to_owned())
+            }
+        };
+        let search = self.link_search.clone();
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .children(search.map(|search| {
+                Field::new(
+                    "spec-link-search-field",
+                    "Search the tickets",
+                    field_frame("spec-link-search", &search, cx),
+                )
+            }))
+            .child(list)
+            .children(said.map(|said| {
+                div()
+                    .id("spec-link-said")
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(said))
+            }));
+        Modal::new("spec-link-modal", "Link a ticket")
+            .sentence("The spec covers the ticket you pick, as the ones it has.")
+            .open(self.link_open)
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| this.close_link(cx)).ok();
+            })
+            .child(body)
+    }
+
+    /// Covers `ticket` too (`link`), or no more.
+    fn link(&mut self, ticket: String, link: bool, cx: &mut Context<Self>) {
+        if self.linking.contains(&ticket) {
+            return;
+        }
+        self.linking.push(ticket.clone());
+        self.link_open = false;
+        ask(
+            &self.shell,
+            if link { "spec.link" } else { "spec.unlink" },
+            json!({"spec": self.spec, "ticket": ticket}),
+            Then::Linked {
+                spec: self.spec,
+                link,
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     pub fn spec(&self) -> u64 {
@@ -1441,6 +1956,56 @@ impl SpecPage {
                         cx,
                     ),
                 }
+                cx.notify();
+            }
+            Then::Wrote { .. } => {
+                self.edit_saving = false;
+                match answer {
+                    Ok(spec) => {
+                        self.shown = Some(Ok(Spec::of(&spec)));
+                        self.editing = None;
+                        toast(Toast::success("Section saved"), cx);
+                    }
+                    Err(why) => self.edit_error = Some(why.into()),
+                }
+                cx.notify();
+            }
+            Then::Linked { link, .. } => {
+                self.linking.clear();
+                match answer {
+                    Ok(spec) => {
+                        self.shown = Some(Ok(Spec::of(&spec)));
+                        toast(
+                            Toast::success(if link {
+                                "Ticket linked"
+                            } else {
+                                "Ticket unlinked"
+                            }),
+                            cx,
+                        );
+                    }
+                    Err(why) => toast(
+                        Toast::failure(if link {
+                            "The ticket was not linked"
+                        } else {
+                            "The ticket was not unlinked"
+                        })
+                        .detail(why),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            }
+            Then::Tickets { .. } => {
+                self.candidates = Some(answer.map(|listed| {
+                    listed["items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(ItemRow::of)
+                        .filter(|row| row.kind == "ticket")
+                        .collect()
+                }));
                 cx.notify();
             }
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => {}
@@ -2027,6 +2592,12 @@ impl Render for SpecPage {
             at,
             reduce,
         );
+        let covered = spec
+            .as_ref()
+            .map(|spec| spec.tickets.clone())
+            .unwrap_or_default();
+        self.ticket_rows
+            .sync(covered.into_iter().map(|t| (t.clone(), t)), at, reduce);
         let pending: Vec<Amendment> = spec
             .as_ref()
             .map(|spec| {
@@ -2270,8 +2841,20 @@ impl Render for SpecPage {
                         .space(space::MD),
                     ),
             );
+        let (editor_page, can_edit) = (cx.weak_entity(), self.can_edit());
+        let edit = move |name: &'static str, id: &'static str| {
+            let this = editor_page.clone();
+            Button::quiet(id, "Edit")
+                .leading(Icon::Edit)
+                .disabled(!can_edit)
+                .on_click(move |_, window, cx| {
+                    this.update(cx, |this, cx| this.open_edit(name, window, cx))
+                        .ok();
+                })
+        };
         let problem = Section::new("spec-problem", "Problem")
             .sentence("Why, in a few lines.")
+            .action(edit("problem", "spec-problem-edit"))
             .child(paragraph(
                 "spec-problem-text",
                 spec.as_ref().map_or("", |spec| spec.problem.as_str()),
@@ -2304,6 +2887,7 @@ impl Render for SpecPage {
         let behaviour = Section::new("spec-behaviour", "Expected behaviour")
             .count(behaviour_count.to_string())
             .sentence("Each one sentence that can be checked.")
+            .action(edit("behaviour", "spec-behaviour-edit"))
             .child(
                 stack(space::MD)
                     .child(
@@ -2469,6 +3053,7 @@ impl Render for SpecPage {
         let has_outside = !outside.is_empty();
         let outside = Section::new("spec-out-of-scope", "Out of scope")
             .sentence("What the spec leaves out, with its reason or the ticket that takes it.")
+            .action(edit("out_of_scope", "spec-out-of-scope-edit"))
             .child(block(outside));
         let verification: Vec<AnyElement> = spec
             .as_ref()
@@ -2489,6 +3074,7 @@ impl Render for SpecPage {
             .unwrap_or_default();
         let found = Section::new("spec-found", "What the agent found")
             .sentence("Read by you, not validated: its technical notes and how each C is verified.")
+            .action(edit("notes", "spec-notes-edit"))
             .child(
                 div()
                     .flex()
@@ -2653,6 +3239,9 @@ impl Render for SpecPage {
             ))),
             _ => None,
         };
+        let tickets = spec.as_ref().map(|spec| self.tickets_section(spec, cx));
+        let edit_modal = self.edit_modal(cx);
+        let link_modal = self.link_modal(cx);
         let key = |part: &str| ElementId::Name(format!("enter-spec-{}-{part}", self.spec).into());
         let read = spec.is_some();
         let column = div()
@@ -2731,7 +3320,8 @@ impl Render for SpecPage {
                                 .gap(space::XXL)
                                 .child(enter(key("problem"), 2, problem))
                                 .child(enter(key("behaviour"), 3, behaviour))
-                                .child(enter(key("decisions"), 4, decisions)),
+                                .child(enter(key("decisions"), 4, decisions))
+                                .children(tickets.map(|tickets| enter(key("tickets"), 5, tickets))),
                         )
                         .child(
                             presence(
@@ -2762,6 +3352,8 @@ impl Render for SpecPage {
             .child(column)
             .child(confirm)
             .child(overwrite_confirm)
+            .child(edit_modal)
+            .child(link_modal)
     }
 }
 

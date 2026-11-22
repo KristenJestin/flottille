@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_link::{DeviceKey, Endpoint, Hello, MachineKey, PublicKey, Request, Traffic};
+use flottille_link::{DeviceKey, PublicKey, Request, Traffic};
 use remote::{Machine, NoKeyring, WAIT, error_of, json_of, pair, pc_and_server, signed};
 use serde_json::{Value, json};
 
@@ -282,30 +282,19 @@ fn share_request_at(
     .unwrap()
 }
 
-/// `frames` sent, one after the other, on a machine link opened with `machine_key` to `to`: what
-/// each was answered.
-fn sent_as(machine_key: &MachineKey, to: &Machine, frames: &[Value]) -> Vec<Result<(), String>> {
+/// `frames` sent, one after the other, on a machine link opened through the hub with the machine
+/// key kept in `folder` to `to`: what each was answered.
+fn sent_as(folder: &std::path::Path, to: &Machine, frames: &[Value]) -> Vec<Result<(), String>> {
     let key: PublicKey = serde_json::from_value(to.remote()["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = to.remote()["this"]["listening"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let endpoint = Endpoint::dialler(machine_key).unwrap();
+        let endpoint = remote::endpoint_of(folder).await;
         let link = tokio::time::timeout(
             WAIT,
-            endpoint.connect(
-                key,
-                &[address],
-                Traffic::Machine,
-                &Hello::ours("0.4.1"),
-                "server",
-            ),
+            remote::dial(&endpoint, key, Traffic::Machine, "server"),
         )
         .await
         .unwrap()
@@ -331,7 +320,6 @@ fn a_machine_message_alone_cannot_share_an_entry() {
     // only what the test holds, as an agent that read it would hold it.
     assert!(pc.user.run(&["daemon", "stop"]).status.success());
     server.wait_for("pc", "offline");
-    let machine_key = MachineKey::load_or_make(&pc.folder()).unwrap();
     let apart = tempfile::tempdir().unwrap();
     let device = pc.device();
     let valid = share_request(&device, "pc", "vault.share", "tracker", "server");
@@ -373,7 +361,7 @@ fn a_machine_message_alone_cannot_share_an_entry() {
         share_message(valid.clone(), "tracker"),
         share_message(valid, "tracker"),
     ];
-    let answers = sent_as(&machine_key, &server, &frames);
+    let answers = sent_as(&pc.folder(), &server, &frames);
 
     let refusal = |at: usize| answers[at].clone().unwrap_err();
     assert_eq!(
@@ -616,11 +604,7 @@ fn a_viewer_s_share_is_refused_by_both_machines() {
     assert!(pc.user.run(&["daemon", "stop"]).status.success());
     server.wait_for("pc", "offline");
     let request = share_request(&phone.device(), "pc", "vault.share", "tracker", "server");
-    let answers = sent_as(
-        &MachineKey::load_or_make(&pc.folder()).unwrap(),
-        &server,
-        &[share_message(request, "tracker")],
-    );
+    let answers = sent_as(&pc.folder(), &server, &[share_message(request, "tracker")]);
     assert_eq!(
         answers[0].clone().unwrap_err(),
         "server refused: refused: phone may only view: a controller or a runner may call \
@@ -639,7 +623,7 @@ fn a_share_carried_by_a_viewer_s_machine_is_refused() {
     server.wait_for("phone", "offline");
 
     let answers = sent_as(
-        &MachineKey::load_or_make(&phone.folder()).unwrap(),
+        &phone.folder(),
         &server,
         &[share_message(request, "tracker")],
     );
@@ -692,11 +676,7 @@ fn a_share_older_than_its_window_is_refused_by_both_machines() {
     assert!(pc.user.run(&["daemon", "stop"]).status.success());
     server.wait_for("pc", "offline");
     let request = share_request_at(&device, "pc", "vault.share", "tracker", "server", old);
-    let answers = sent_as(
-        &MachineKey::load_or_make(&pc.folder()).unwrap(),
-        &server,
-        &[share_message(request, "tracker")],
-    );
+    let answers = sent_as(&pc.folder(), &server, &[share_message(request, "tracker")]);
     assert_eq!(
         answers[0].clone().unwrap_err(),
         "server refused: refused: this request is older than five minutes"

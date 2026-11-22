@@ -6,6 +6,7 @@
 //! and `test.travel_back` start what a launch will.
 
 use crate::common;
+use crate::remote;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -14,8 +15,7 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Endpoint, Git, GitFetch, GitOffer, GitPlace, Hello, Link, MachineKey, MachineMessage, Message,
-    PublicKey, Traffic,
+    Git, GitFetch, GitOffer, GitPlace, Hello, Link, MachineMessage, Message, PublicKey, Traffic,
 };
 use serde_json::{Value, json};
 
@@ -77,11 +77,11 @@ impl Machine {
         Machine::of(User::new().with_env("FLOTTILLE_TEST_TRAVEL", "1"))
     }
 
-    /// `user`'s machine, with remote on, its link on loopback.
+    /// `user`'s machine, with remote on: its links go through the hub.
     fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
-            "[remote]\non = true\nlisten = \"127.0.0.1:0\"\n",
+            "[remote]\non = true\n",
         )
         .unwrap();
         user.status();
@@ -96,26 +96,16 @@ impl Machine {
         serde_json::from_value(self.this()["key"].clone()).unwrap()
     }
 
-    fn addresses(&self) -> Vec<String> {
-        self.this()["addresses"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|address| address["address"].as_str().unwrap().to_owned())
-            .collect()
-    }
-
-    /// The key this machine's daemon holds, as a test that stands in for it reads it; its
-    /// daemon stopped, so that the other machines take a link of that key again.
-    fn stand_in(&self) -> MachineKey {
+    /// The key folder of this machine's daemon, as a test that stands in for it reads it; its
+    /// daemon stopped, so that the other machines take a link of that key again, and the hub a
+    /// session of it.
+    fn stand_in(&self) -> PathBuf {
         let stopped = self.user.run(&["daemon", "stop"]);
         assert!(stopped.status.success(), "{}", self.log());
-        self.machine_key()
-    }
-
-    /// The key this machine's daemon holds, as a test that stands in for it reads it.
-    fn machine_key(&self) -> MachineKey {
-        MachineKey::load_or_make(&self.user.path("state/flottille/remote")).unwrap()
+        // The others let its link go at their next round, once the hub says it is gone: the
+        // test's link of its key is not refused for that one.
+        std::thread::sleep(Duration::from_secs(2));
+        self.user.path("state/flottille/remote")
     }
 
     fn wait_for(&self, name: &str) {
@@ -225,29 +215,18 @@ fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) {
     );
 }
 
-/// A link to `to` dialled with `key`, as the daemon holding that key would dial it.
-async fn dial(key: &MachineKey, to: &Machine, to_key: PublicKey, addresses: &[SocketAddr]) -> Link {
-    let endpoint = Endpoint::dialler(key).unwrap();
+/// A link to `to` dialled through the hub with the key in the key folder `key`, as the daemon
+/// holding that key would dial it.
+async fn dial(key: &Path, to: &Machine, to_key: PublicKey) -> Link {
+    let endpoint = remote::endpoint_of(key).await;
     let deadline = Instant::now() + WAIT;
     loop {
-        let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
-        match endpoint
-            .connect(to_key, addresses, Traffic::Machine, &hello, "to")
-            .await
-        {
+        match remote::dial(&endpoint, to_key, Traffic::Machine, "to").await {
             Ok(link) => return link,
             Err(error) => assert!(Instant::now() < deadline, "{error}\n{}", to.log()),
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-}
-
-fn socket_addresses(machine: &Machine) -> Vec<SocketAddr> {
-    machine
-        .addresses()
-        .iter()
-        .map(|address| address.parse().unwrap())
-        .collect()
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -257,11 +236,11 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// What `machine` answers `git` sent on a link dialled with `key`.
-fn sent_with(key: &MachineKey, machine: &Machine, git: Git) -> Result<Value, String> {
-    let (to_key, addresses) = (machine.key(), socket_addresses(machine));
+/// What `machine` answers `git` sent on a link dialled with the key in the key folder `key`.
+fn sent_with(key: &Path, machine: &Machine, git: Git) -> Result<Value, String> {
+    let to_key = machine.key();
     runtime().block_on(async {
-        let link = dial(key, machine, to_key, &addresses).await;
+        let link = dial(key, machine, to_key).await;
         link.send(&Message::Machine(MachineMessage::Git(git)))
             .await
             .map_err(|error| error.to_string())
@@ -647,9 +626,9 @@ fn a_machine_the_launch_was_not_sent_to_brings_nothing_back_and_reads_no_bundle(
             std::thread::sleep(Duration::from_millis(50));
         }
         let key = laptop.stand_in();
-        let (pc_key, addresses) = (pc.key(), socket_addresses(&pc));
+        let pc_key = pc.key();
         let (fetched, back) = runtime().block_on(async {
-            let link = dial(&key, &pc, pc_key, &addresses).await;
+            let link = dial(&key, &pc, pc_key).await;
             let mut answers = link
                 .ask(&Message::Machine(MachineMessage::Git(Git::Fetch(
                     GitFetch {
@@ -686,24 +665,16 @@ fn a_machine_the_launch_was_not_sent_to_brings_nothing_back_and_reads_no_bundle(
 }
 
 #[test]
-fn a_viewer_s_machine_and_a_machine_of_no_member_can_neither_offer_nor_place_code() {
+fn a_viewer_s_machine_can_neither_offer_nor_place_code() {
     let (hub, _pc, server) = pc_and_server();
     let tablet = Machine::new();
     pair(&hub, &tablet, "tablet", "viewer");
     server.wait_for("tablet");
-    // A machine the server trusts, by its peers' file, that is no member's.
-    let folder = tempfile::tempdir().unwrap();
-    let stranger = MachineKey::load_or_make(&folder.path().join("stranger")).unwrap();
-    let file = server.user.path("state/flottille/remote/peers.json");
-    let mut peers: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    peers["machines"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name": "stranger", "key": stranger.public(), "addresses": []}));
-    std::fs::write(&file, peers.to_string()).unwrap();
     let workspaces = server.user.call("workspace.list", json!({})).unwrap();
 
-    for (key, name) in [(tablet.stand_in(), "tablet"), (stranger, "stranger")] {
+    // A machine of no member is no longer tried: the hub carries nothing of it.
+    {
+        let (key, name) = (tablet.stand_in(), "tablet");
         // A project the server does not have: what refuses it is who sends it, before the
         // project is looked for.
         let mut offered = offer("l1");
