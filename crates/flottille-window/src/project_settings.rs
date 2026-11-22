@@ -39,6 +39,7 @@ use crate::commands::{
 use crate::commit_checks::CommitChecks;
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
+use crate::notification_settings::NotificationSettings;
 use crate::programs::{ProgramChecks, ProgramState, ProgramValue, program_block};
 use crate::project::{only_at_root, repository_label};
 use crate::project_removal::ProjectRemoval;
@@ -85,13 +86,14 @@ pub fn field_frame(
 }
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 6] = [
+pub const SECTIONS: [(&str, &str); 7] = [
     ("repositories", "Repositories"),
     ("workspaces", "Workspaces"),
     ("tasks", "Tasks"),
     ("instructions", "Instructions"),
     ("features", "Features"),
     ("vault", "Vault"),
+    ("notifications", "Notifications"),
 ];
 
 /// What *Agents may open windows on my screen* says: what a run is given.
@@ -484,6 +486,8 @@ pub struct ProjectSettingsPage {
     setup: Entity<SetupSection>,
     /// Where its workspaces are made, above the setup that prepares them.
     workspaces: Entity<WorkspacesFolder>,
+    /// What rings in it, kind by kind (`notifications.set_settings`).
+    notifications: Entity<NotificationSettings>,
     /// The branch prefix as the file has it, empty for none; none until read.
     branch_prefix: Option<String>,
     /// Made when first drawn, since a text field needs a window.
@@ -517,6 +521,8 @@ impl ProjectSettingsPage {
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
         let setup = cx.new(|_| SetupSection::new(shell.clone(), name.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(shell.clone(), Some(name.clone())));
+        let notifications =
+            cx.new(|_| NotificationSettings::new(shell.clone(), Some(name.clone())));
         let repositories = cx.new(|_| ProjectRepositories::new(shell.clone(), name.clone()));
         let programs = cx.new(|_| ProgramChecks::new(shell.clone(), name.clone()));
         // Asked once the shell, which is making this page, is no longer being updated.
@@ -618,6 +624,7 @@ impl ProjectSettingsPage {
             tasks,
             setup,
             workspaces,
+            notifications,
             branch_prefix: None,
             prefix_field: None,
             windows: false,
@@ -659,6 +666,11 @@ impl ProjectSettingsPage {
 
     pub fn tasks(&self) -> &Entity<TasksSection> {
         &self.tasks
+    }
+
+    /// What rings in this project.
+    pub fn notifications(&self) -> &Entity<NotificationSettings> {
+        &self.notifications
     }
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
@@ -2617,7 +2629,7 @@ impl ProjectSettingsPage {
     }
 
     /// What each tab counts, once its list is read: the repositories and the tasks.
-    fn counts(&self, cx: &App) -> [Option<usize>; 6] {
+    fn counts(&self, cx: &App) -> [Option<usize>; 7] {
         [
             self.repositories
                 .read(cx)
@@ -2625,6 +2637,7 @@ impl ProjectSettingsPage {
                 .map(|read| read.listed.len()),
             None,
             self.tasks.read(cx).tasks().map(<[_]>::len),
+            None,
             None,
             None,
             None,
@@ -3050,6 +3063,15 @@ impl Render for ProjectSettingsPage {
                 ),
             ],
             "vault" => vec![("vault", self.vault_tab(cx))],
+            "notifications" => {
+                let this = self.notifications.downgrade();
+                let view = self.notifications.read(cx);
+                vec![(
+                    "notifications",
+                    crate::notification_settings::project_section(view, this, cx)
+                        .into_any_element(),
+                )]
+            }
             _ => vec![("features", self.features_tab(cx))],
         };
         let this = cx.entity().downgrade();

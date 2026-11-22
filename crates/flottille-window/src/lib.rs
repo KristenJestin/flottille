@@ -35,6 +35,7 @@ pub mod message_checks;
 pub mod modals;
 pub mod mode;
 pub mod model;
+pub mod notification_settings;
 pub mod open;
 pub mod page;
 pub mod picture_viewer;

@@ -595,9 +595,23 @@ pub struct Rang {
     /// The call and why it was held, uncut, when the daemon can say them whole: Allow is offered
     /// on it alone, what the user allows being what they read.
     pub whole: Option<String>,
+    /// How many notifications the quiet hours or Do not disturb held since the last that rang.
+    pub waited: usize,
 }
 
 impl Rang {
+    /// What the toast says under its title: the call whole when the daemon can say it, else the
+    /// excerpt, and what waited in the quiet.
+    pub fn detail(&self) -> Option<String> {
+        let said = self.whole.as_ref().unwrap_or(&self.excerpt);
+        let waited = (self.waited > 0).then(|| format!("{} new while quiet", self.waited));
+        match (said.is_empty(), waited) {
+            (true, waited) => waited,
+            (false, None) => Some(said.clone()),
+            (false, Some(waited)) => Some(format!("{said}\n{waited}")),
+        }
+    }
+
     pub fn of(event: &flottille_protocol::Event) -> Option<Rang> {
         if event.name != "notification.rang" || event.data["in"] != "window" {
             return None;
@@ -610,6 +624,7 @@ impl Rang {
             excerpt: data["excerpt"].as_str().unwrap_or_default().to_owned(),
             request: data["request"].as_u64(),
             whole: data["whole"].as_str().map(str::to_owned),
+            waited: data["waited"].as_u64().unwrap_or_default() as usize,
         })
     }
 }

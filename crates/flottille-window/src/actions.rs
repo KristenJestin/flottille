@@ -597,6 +597,12 @@ pub enum Command {
         place: Option<String>,
         path: Option<String>,
     },
+    /// What rings, and when (`notifications.settings`).
+    NotificationSettingsRead,
+    /// Changes it (`notifications.set_settings`): what the daemon takes, as it takes it.
+    NotificationSettingsSet {
+        params: Value,
+    },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
@@ -1248,6 +1254,11 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// What rings and when, as the daemon says it, after a read (`written` false) or a choice.
+    NotificationSettings {
+        written: bool,
+        shown: Result<crate::notification_settings::Shown, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -3043,6 +3054,26 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 project,
             }
         }
+        Command::NotificationSettingsRead => Outcome::NotificationSettings {
+            written: false,
+            shown: answer(ask_alone(
+                connect,
+                "notifications.settings",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|shown| crate::notification_settings::Shown::of(&shown)),
+        },
+        Command::NotificationSettingsSet { params } => Outcome::NotificationSettings {
+            written: true,
+            shown: answer(ask_alone(
+                connect,
+                "notifications.set_settings",
+                params,
+                bounds.quick,
+            ))
+            .map(|shown| crate::notification_settings::Shown::of(&shown)),
+        },
         Command::WorkspacesFolderSet {
             project,
             place,
