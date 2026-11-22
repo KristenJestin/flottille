@@ -92,8 +92,9 @@ pub struct Fields {
     /// read-only (the default: every write is refused), ask or auto
     #[arg(long, value_parser = ["read-only", "ask", "auto"])]
     mode: Option<String>,
-    /// Where its result rings: something (when it has something to say) or never
-    #[arg(long, value_parser = ["something", "never"])]
+    /// Where its result rings: something (when it has something to say), new (when its list has
+    /// an item the last run's had not) or never
+    #[arg(long, value_parser = ["something", "new", "never"])]
     rings: Option<String>,
     #[arg(long)]
     provider: Option<String>,
@@ -377,6 +378,14 @@ fn shown_text(shown: &Value) -> String {
             when(&run["due_at"]),
             outcome(run)
         ));
+        let items = run["items"].as_array().map_or(0, Vec::len);
+        if items > 0 {
+            let new = run["items"].as_array().map_or(0, |all| {
+                all.iter().filter(|item| item["new"] == true).count()
+            });
+            let left = run["left"].as_array().map_or(0, Vec::len);
+            out.push_str(&format!("\n  {items} items, {new} new, {left} left"));
+        }
     }
     out
 }

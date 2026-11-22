@@ -426,7 +426,8 @@ A run of a routine has its outcome: it ended with its result (`something`, `noth
 `goes_on`, its session going on), it was skipped (its last run still ran, it was missed too
 long ago, or its event was delivered to the last run's session still open), or it failed (its session ended without its result, or could not start). The
 notification centre makes a row of a run with something to say whose routine rings (`rings`
-`something`), and of a run that could not start; nothing else rings.
+`something`, or `new` when the run's `items` hold one marked `new`), and of a run that could not
+start; nothing else rings.
 
 | Field | |
 |---|---|

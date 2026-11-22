@@ -857,7 +857,10 @@ const SERVED: [Definition; 34] = [
             review`); nothing: true when there is nothing to say (`Nightly green: nothing to \
             do`), which does not ring the user; goes_on: true when your work goes on (a branch \
             opened, not done): your session then stays open. Call it once, as your last action; \
-            without goes_on your session ends with this turn.",
+            without goes_on your session ends with this turn. When the result is a list (tickets, \
+            pull requests, failing tests), give it as items, in the order the user should read \
+            them: the user sees which are new since the last run, and which left; the id must be \
+            stable from one run to the next (a ticket's key). Markdown beside them goes in body.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -865,7 +868,18 @@ const SERVED: [Definition; 34] = [
             json!({"type": "object", "properties": {
                 "summary": {"type": "string"},
                 "nothing": {"type": "boolean"},
-                "goes_on": {"type": "boolean"}
+                "goes_on": {"type": "boolean"},
+                "items": {"type": "array", "maxItems": 200, "items": {
+                    "type": "object", "properties": {
+                        "id": {"type": "string", "description": "Stable from one run to the next."},
+                        "title": {"type": "string"},
+                        "link": {"type": "string", "description": "A web address, http or https."},
+                        "text": {"type": "string", "description": "One sentence."},
+                        "tags": {"type": "array", "maxItems": 8, "items": {"type": "string"},
+                            "description": "Short labels: `blocks 3`, `urgent`."},
+                        "group": {"type": "string", "description": "A heading to list it under."}
+                    }, "required": ["id", "title"], "additionalProperties": false}},
+                "body": {"type": "string", "description": "Markdown shown beside the items."}
             }, "required": ["summary"], "additionalProperties": false})
         },
     },
