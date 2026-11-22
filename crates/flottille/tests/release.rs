@@ -6428,8 +6428,8 @@ fn the_pruning_of_the_betas_never_touches_a_release_run() {
     // concurrency group, would fail or cancel the push run `verified-on-dev` reads, and `main`
     // would run the whole verification again.
     assert!(
-        !ci.contains("prune-betas") && !ci.contains("release delete"),
-        "ci.yml prunes nothing"
+        !ci.contains("prune") && !ci.contains("--cleanup-tag"),
+        "ci.yml prunes nothing (it deletes its own failed draft, and only that)"
     );
     let workflow = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
     let triggers = &workflow[..workflow.find("\npermissions:").expect("permissions")];
