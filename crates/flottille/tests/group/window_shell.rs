@@ -55,6 +55,8 @@ mod window_pictures;
 mod window_programs;
 #[path = "../window_project_images.rs"]
 mod window_project_images;
+#[path = "../window_project_machines.rs"]
+mod window_project_machines;
 #[path = "../window_project_page.rs"]
 mod window_project_page;
 #[path = "../window_project_sessions.rs"]

@@ -1082,10 +1082,26 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
 - left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
-  machine of the user together (a project of the same name on several machines is one group; a
-  session of another machine carries that machine's name on its second line, `server`, greyed
-  with `server offline since 22:14` while it is off, `docs/remote.md`, "One list of every
-  machine"), sorted by
+  machine of the user together (a session of another machine carries that machine's name on its
+  second line, `server`, greyed with `server offline since 22:14` while it is off,
+  `docs/remote.md`, "One list of every machine"). **Each project row says where it lives**: with
+  another machine paired, a mark before its name for every machine that has it, the machine's
+  icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
+  included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
+  machine`. **A project several machines have is one row**: two projects are the same when the
+  remotes of their repositories are the same (normalised: scheme, user, port, `.git` and the
+  case of the host do not count; a project of several repositories matches when all of them
+  match), whatever their names; a repository with no remote matches none. Two projects of one
+  name but other repositories stay two rows, the second saying its machine in small at the end
+  of its row. A project that only machines that are off have is greyed and says `offline since
+  14:02` under its row, its ink fading as the machine goes and comes back. The Projects header's
+  "⋯" (offered once there is another machine) holds **Group by machine**, a switch: the list
+  becomes one foldable section per machine (its icon, its name and its state, `this machine` for
+  this one), each with the projects that machine has and its own sessions only, a project several
+  machines have under each of them; switched off, the one list comes back, and the rows move
+  between the two over the sidebar's motion. The choice and each section's fold are kept by the
+  daemon with the sidebar's folds (`window.get`, `sidebar`: `by_machine`, `machines`,
+  `on_machines`), so every window of the machine shows the same arrangement. Sessions are sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the

@@ -291,6 +291,39 @@ pub struct Lists {
     pub this: Vec<Listed>,
     /// Each other machine's, by its name.
     pub machines: Vec<(String, Vec<Listed>)>,
+    /// The projects of this machine, by the remotes of their repositories.
+    pub this_projects: Vec<Held>,
+    /// The projects of each other machine as it last listed them, kept while it is off; a machine
+    /// whose list came before projects were listed has none.
+    pub projects: Vec<(String, Vec<Held>)>,
+}
+
+/// A project of a machine, as its list says it (`remote.sessions`): its name there and its
+/// repositories' remotes, normalised. Two projects of two machines are the same one when their
+/// remotes are equal; one with none (a repository that has no remote) is the same as no other.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Held {
+    pub name: String,
+    pub remotes: Vec<String>,
+}
+
+impl Held {
+    fn all(value: &Value) -> Vec<Held> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|project| Held {
+                name: text(&project["name"]),
+                remotes: project["remotes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(text)
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 impl Hub {
@@ -788,6 +821,13 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 .into_iter()
                 .flatten()
                 .map(|list| (text(&list["name"]), Listed::all(&list["sessions"])))
+                .collect(),
+            this_projects: Held::all(&lists["projects"]),
+            projects: lists["machines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|list| (text(&list["name"]), Held::all(&list["projects"])))
                 .collect(),
         };
     }
