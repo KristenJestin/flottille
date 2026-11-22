@@ -257,8 +257,9 @@ cannot write, and a branch of another name never had an alpha):
   - **The notes**: the version, the channel and the commit, how to install it with the
     `install.sh` of that very commit, the system libraries the window needs (fontconfig, freetype,
     xkbcommon and xkbcommon-x11, wayland-client or libxcb, a Vulkan loader and driver), then the
-    changelog (`tools/changelog.sh`): the Angular commits counted, oldest first, grouped under
-    breaking changes, features, fixes, performance and other changes, each
+    changelog (`tools/changelog.sh`, "What's new" below): the notes of the pull requests, by
+    area, the fixes last, then under `### All changes` the Angular commits counted, oldest first,
+    grouped under breaking changes, features, fixes, performance and other changes, each
     `- **<scope>**: <subject>` with the pull request number its squash kept.
 - **`publish`**, once `verify` passed on the pushed commit (on `main`, here or on `dev`, see
   "Releasing"; for an alpha, on the pull request's own run, so that no alpha is published for a
@@ -602,8 +603,34 @@ is the old one or the new one, never half of one.
 
 ### What's new
 
-After an update, what changed since the version last run is a page of the window, never one that
-opens by itself: a page that opens at start is a nuisance.
+After an update, what the user can do now, since the version last run, is a page of the window,
+never one that opens by itself: a page that opens at start is a nuisance. The page says it in the
+user's words, not the developers': the squash subjects of the pull requests, grouped by scope, were
+unreadable to the one it is for.
+
+- **The note** is a line of a pull request's description, at the start of its line:
+  `Note: <one sentence, capitalised, what the user can do now>` (`Note: Drive another machine from
+  the window, each action signed.`). A fix says what no longer goes wrong (`Note: A device can be
+  removed while the hub is slow.`). It is short, concrete, with no crate, scope, protocol or pull
+  request number in it. A pull request with no `Note:` line (ci, refactor, test, docs, chore, or
+  invisible) is not on the page; its subject stays in the raw list. AGENTS.md and the pull request
+  template say it, and the `shape` check warns (never fails) when a `feat` or `fix` touching the
+  product (`crates/` but the fakes and tests, `apps/`) has none (`.github/scripts/pr-note.sh`).
+- **The body of a release** is built by `tools/changelog.sh` from the notes, read from the merged
+  `feat`, `fix` and `perf` pull requests through the API (`gh api`, by the number their squash
+  kept). A description can be edited after the merge, and a release's body cannot: only a note
+  written by a pull request whose author is the repository's OWNER, a MEMBER or a COLLABORATOR
+  (`author_association`) is read, any other pull request has no note (its subject stays in the raw
+  list); and one that cannot be read makes the script fail, so the build fails instead of
+  publishing a release without its notes. The groups are: `### Remote` (scopes `link`,
+  `hub`, `mobile`, `android`, and a change that speaks of remote), `### Window` (`gui`),
+  `### Agents` (`agents`, `acp`, `sessions`), `### Tools` (`tools`, `mcp`, `gate`), `### Projects`
+  (`workspace`, `git`, `store`), `### Other`, each line `- <the note> (#123)`, oldest first, then
+  `### Fixed` for every `fix`, and, after, `### All changes` with the raw list of subjects grouped
+  by type (`#### Features`, `- **scope**: text (#123)`). A version's **Highlights** (3 to 5 lines,
+  `### Highlights` then `- a line`, at the top) are written by hand into the body of its release,
+  none for a beta. A body made before the notes (`### Features`, then the subjects) is still
+  read: each subject is a note of Other, with a capital and no scope.
 
 - **The version last run is kept**, in `$XDG_STATE_HOME/flottille/whats-new.json` (Flottille's
   own memory, like the update channel; `~/.local/state/flottille/` without `XDG_STATE_HOME`): the
@@ -613,8 +640,7 @@ opens by itself: a page that opens at start is a nuisance.
   (`--force`) or the first start with no memory shows nothing new. A jump over several versions
   without opening the page counts from the first of them: the page shows the changes once, not
   beta by beta.
-- **The notes come from the release bodies** (`tools/changelog.sh`: `### Features`, then `- **scope**:
-  text (#123)`), of every release of the channel's kind between the two versions, as the update
+- **The notes come from the release bodies** (`tools/changelog.sh`, above), of every release of the channel's kind between the two versions, as the update
   of the window reads them (`notes`: the staged build keeps them in `staged.json`, `updated.json`
   once applied, and the daemon's next start takes them from there, so the page needs no network
   at start). A build installed by `install.sh` or `flottille update` has none: the daemon reads
@@ -626,20 +652,25 @@ opens by itself: a page that opens at start is a nuisance.
   update's place, says **What's new** with a dot. It appears and folds away with a fade, and is
   the only thing that happens: the page opens when the mark is clicked, and opening it records it
   for good (the dot and the mark go). Nothing else opens it.
-- **The page** is a page of the window, left by going elsewhere: **What's new since 0.4.0-beta.103**,
-  under it this build's version, channel and commit, then the changes, a group each (breaking
-  changes, features, fixes, performance, other changes), each a fold that opens and closes, the
-  changes under it by scope (the ones with no scope under General), each with its pull request's
-  number as a link opened by the system's handler. A change that several betas list is said once
-  per group; one that is both breaking and a feature, as the changelog says it, is in both.
+- **The page** is a page of the window, left by going elsewhere: **What's new in 0.4**, under it,
+  small, **since 0.4.0-beta.103** and this build's version, channel and commit, then, when the
+  release has them, its **Highlights**, then one section per area (Remote, Window, Agents, Tools,
+  Projects, Other, the fixes last as **Fixed**), each a heading with its count and its notes as the
+  rows of the kit's list: the sentence, the pull request's number as a quiet link at the end,
+  opened by the system's handler. A note that several betas say is said once. At the foot, **All
+  changes**, a fold closed by default, holds the raw list of subjects, by type and scope. The
+  sections enter one after another, the fold opens and closes, hover and press fade.
 - **Found again**: Settings, General, Version has a **What's new** line, **Since 0.4.0-beta.103**,
   for the last update's, as long as there is one.
-- `flottille changes [--since <version>]` prints the same list (`docs/cli.md`), and the daemon
+- `flottille changes [--since <version>]` prints the same areas (`docs/cli.md`), and the daemon
   answers `whatsnew.show` (`docs/protocol.md`).
 
 Defaults taken, to confirm: the mark goes once the page was opened (the page stays reachable from
 Settings); the notes are the first page of the releases (the 100 latest), as the update's; a
-failure to read them is not retried by itself, only by **Check again** or the next start.
+failure to read them is not retried by itself, only by **Check again** or the next start; the
+Highlights are written by hand into the release's body on GitHub, not in the release pull request
+(the script has no place to read them from there); only `feat`, `fix` and `perf` pull requests are
+asked for a note.
 
 ## For tests
 

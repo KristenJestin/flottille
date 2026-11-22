@@ -13,7 +13,10 @@ use std::os::unix::fs::DirBuilderExt as _;
 use common::User;
 use serde_json::{Value, json};
 
-const BODY: &str = "### Features\n\n- **gui**: the sidebar says what is new (#1101)\n- **cli**: changes prints it (#1102)\n\n### Fixes\n\n- **gui**: a link opens (#1103)";
+const BODY: &str = "### Window\n\n- See what is new from the sidebar. (#1101)\n\n### Other\n\n- Read what is new from the command line. (#1102)\n\n### Fixed\n\n- A link opens. (#1103)\n\n### All changes\n\n#### Features\n\n- **gui**: the sidebar says what is new (#1101)\n- **cli**: changes prints it (#1102)\n\n#### Fixes\n\n- **gui**: a link opens (#1103)";
+
+/// The body of a release made before the notes (#1178): the subjects, grouped by type.
+const OLD_BODY: &str = "### Features\n\n- **gui**: the sidebar says what is new (#1101)\n- **cli**: changes prints it (#1102)\n\n### Fixes\n\n- **gui**: a link opens (#1103)";
 
 /// The state the daemon of an older build left: it ran `version`, and nothing was new.
 fn ran(user: &User, version: &str) {
@@ -32,11 +35,16 @@ fn ran(user: &User, version: &str) {
 
 /// A server whose list of releases holds this build's, with `BODY` as its notes.
 fn releases_with_notes() -> Releases {
+    releases_saying(BODY)
+}
+
+/// A server whose list of releases holds this build's, with `body` as its notes.
+fn releases_saying(body: &str) -> Releases {
     let releases = Releases::serve();
     let list = json!([{
         "tag_name": format!("v{}", this_version()),
         "published_at": "2026-11-10T10:00:00Z",
-        "body": BODY,
+        "body": body,
         "assets": [],
     }]);
     releases.put(
@@ -77,20 +85,27 @@ fn a_build_installed_by_hand_gets_its_notes_at_its_first_start() {
     assert_eq!(shown["since"], "0.0.1");
     assert_eq!(shown["seen"], false);
     assert_eq!(shown["failed"], Value::Null);
+    // The areas of the notes, fixes last, each note with its pull request.
     let groups = shown["groups"].as_array().unwrap();
     assert_eq!(
         groups.iter().map(|g| g["key"].clone()).collect::<Vec<_>>(),
-        ["features", "fixes"]
+        ["window", "other", "fixed"]
     );
-    assert_eq!(groups[0]["title"], "Features");
-    // By scope: cli before gui.
-    let scopes = groups[0]["scopes"].as_array().unwrap();
-    assert_eq!(scopes[0]["scope"], "cli");
-    assert_eq!(scopes[0]["changes"][0]["text"], "changes prints it");
-    assert_eq!(scopes[0]["changes"][0]["pr"], 1102);
+    assert_eq!(groups[0]["title"], "Window");
+    let change = &groups[1]["changes"][0];
+    assert_eq!(change["text"], "Read what is new from the command line.");
+    assert_eq!(change["pr"], 1102);
     assert_eq!(
-        scopes[0]["changes"][0]["url"],
+        change["url"],
         "https://github.com/KristenJestin/flottille/pull/1102"
+    );
+    assert_eq!(shown["highlights"], json!([]));
+    // The raw list, as the changelog groups it, for the fold at the foot.
+    assert_eq!(shown["all"][0]["key"], "features");
+    assert_eq!(shown["all"][0]["scopes"][0]["scope"], "cli");
+    assert_eq!(
+        shown["all"][0]["scopes"][0]["changes"][0]["text"],
+        "changes prints it"
     );
     // Read once.
     let reads = asked(&releases)
@@ -122,8 +137,8 @@ fn an_update_from_the_window_keeps_its_notes_so_nothing_is_fetched() {
 
     assert_eq!(shown["since"], "0.0.1");
     assert_eq!(
-        shown["groups"][0]["scopes"][0]["changes"][0]["text"],
-        "changes prints it"
+        shown["groups"][0]["changes"][0]["text"],
+        "See what is new from the sidebar."
     );
     assert_eq!(asked(&releases), Vec::<String>::new());
 }
@@ -155,8 +170,10 @@ fn with_the_check_off_no_request_is_made_for_the_notes_until_asked() {
 }
 
 #[test]
-fn changes_prints_what_is_new_since_a_version() {
-    let releases = releases_with_notes();
+fn flottille_changes_prints_the_areas() {
+    let releases = releases_saying(&format!(
+        "### Highlights\n\n- Drive another machine from the window.\n\n{BODY}"
+    ));
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
 
     let output = user.run(&["changes", "--since", "0.0.1"]);
@@ -164,22 +181,70 @@ fn changes_prints_what_is_new_since_a_version() {
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(text.contains("What's new since 0.0.1"), "{text}");
+    // The areas, in the order of the page, each with its notes and their numbers; the raw list
+    // of subjects is not printed (`--json` has it).
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
-    for wanted in [
-        "Features",
-        "cli",
-        "- changes prints it (#1102)",
-        "gui",
-        "- the sidebar says what is new (#1101)",
-        "Fixes",
-        "- a link opens (#1103)",
-    ] {
-        assert!(lines.contains(&wanted), "{wanted:?} is missing from {text}");
-    }
+    let wanted = [
+        "Highlights",
+        "- Drive another machine from the window.",
+        "Window",
+        "- See what is new from the sidebar. (#1101)",
+        "Other",
+        "- Read what is new from the command line. (#1102)",
+        "Fixed",
+        "- A link opens. (#1103)",
+    ];
+    let at: Vec<usize> = wanted
+        .iter()
+        .map(|line| {
+            lines
+                .iter()
+                .position(|got| got == line)
+                .unwrap_or_else(|| panic!("{line:?} is missing from {text}"))
+        })
+        .collect();
+    assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+    assert!(!text.contains("changes prints it"), "{text}");
     let json = user.run(&["changes", "--since", "0.0.1", "--json"]);
     let shown: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(shown["since"], "0.0.1");
-    assert_eq!(shown["groups"][0]["key"], "features");
+    assert_eq!(shown["groups"][0]["key"], "window");
+    assert_eq!(
+        shown["highlights"][0],
+        "Drive another machine from the window."
+    );
+}
+
+#[test]
+fn an_old_body_without_notes_falls_back_to_its_subjects() {
+    let releases = releases_saying(OLD_BODY);
+    let user = User::new()
+        .with_update_check()
+        .with_env("FLOTTILLE_RELEASES", &releases.api());
+    ran(&user, "0.0.1");
+
+    let shown = shown_until(&user, "the notes", |shown| !shown["groups"].is_null());
+
+    // Each subject with a capital and no scope, all under Other.
+    let groups = shown["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{shown}");
+    assert_eq!(groups[0]["key"], "other");
+    let texts: Vec<&str> = groups[0]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "The sidebar says what is new",
+            "Changes prints it",
+            "A link opens"
+        ]
+    );
+    assert_eq!(groups[0]["changes"][2]["pr"], 1103);
+    assert_eq!(shown["highlights"], json!([]));
 }
 
 #[test]

@@ -28,15 +28,64 @@ fn tool(name: &str) -> PathBuf {
 /// A throwaway git repository, none of the machine's git settings.
 struct Repo {
     dir: tempfile::TempDir,
+    /// A `gh` standing for GitHub's API (`bin/gh`), and the descriptions of the pull requests it
+    /// knows (`prs/<number>`, and beside it the author's association and whether it can be read): the
+    /// changelog reads their `Note:` lines through it.
+    gh: tempfile::TempDir,
 }
 
 impl Repo {
     fn new() -> Repo {
         let repo = Repo {
             dir: tempfile::tempdir().unwrap(),
+            gh: tempfile::tempdir().unwrap(),
         };
         repo.git(&["init", "--quiet", "--initial-branch=main"]);
+        std::fs::create_dir_all(repo.gh.path().join("bin")).unwrap();
+        std::fs::create_dir_all(repo.gh.path().join("prs")).unwrap();
+        let gh = repo.gh.path().join("bin/gh");
+        // `gh api repos/{owner}/{repo}/pulls/<n> --jq <expression>`: the answer the changelog asks
+        // for (the author's association on a line, then the body), or a failure for a pull
+        // request marked unreadable. One known by neither is an empty description by an owner.
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$3\" = --jq ] || exit 2\n\
+             prs=$(dirname \"$0\")/../prs n=${2##*/}\n\
+             [ ! -e \"$prs/$n.unreadable\" ] || exit 1\n\
+             cat \"$prs/$n.association\" 2>/dev/null || echo OWNER\n\
+             cat \"$prs/$n\" 2>/dev/null || true\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         repo
+    }
+
+    /// The description of pull request `number`, as GitHub's API says it.
+    fn pr(&self, number: u32, body: &str) {
+        std::fs::write(self.gh.path().join(format!("prs/{number}")), body).unwrap();
+    }
+
+    /// Pull request `number` was written by someone who is `association` to the repository
+    /// (`OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, ...), as GitHub's API says it.
+    fn pr_by(&self, number: u32, association: &str) {
+        std::fs::write(
+            self.gh.path().join(format!("prs/{number}.association")),
+            format!("{association}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The API fails to read pull request `number`.
+    fn pr_unreadable(&self, number: u32) {
+        std::fs::write(self.gh.path().join(format!("prs/{number}.unreadable")), "").unwrap();
+    }
+
+    /// The environment that puts the fake `gh` first on the `PATH`.
+    fn with_gh<'a>(&self, command: &'a mut Command) -> &'a mut Command {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![self.gh.path().join("bin")];
+        paths.extend(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(paths).unwrap())
     }
 
     fn git_command(&self, args: &[&str]) -> Command {
@@ -147,11 +196,14 @@ impl Repo {
 
     /// `tools/changelog.sh` in this repository.
     fn changelog(&self, args: &[&str]) -> String {
-        let output = Command::new(tool("tools/changelog.sh"))
-            .args(args)
-            .current_dir(self.dir.path())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        let output = self
+            .with_gh(
+                Command::new(tool("tools/changelog.sh"))
+                    .args(args)
+                    .current_dir(self.dir.path())
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1"),
+            )
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -546,8 +598,8 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     assert_eq!(repo.next(&["stable", "--at", &released]), "0.1.2");
     assert_eq!(
         repo.changelog(&["--at", &released]),
-        "### Features\n\n- **tools**: cut long results (#350)\n\n\
-         ### Fixes\n\n- **store**: a lock (#351)\n"
+        "### All changes\n\n#### Features\n\n- **tools**: cut long results (#350)\n\n\
+         #### Fixes\n\n- **store**: a lock (#351)\n"
     );
     repo.tag("v0.1.2");
     repo.git(&["checkout", "--quiet", "dev"]);
@@ -564,7 +616,7 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     );
     assert_eq!(
         repo.changelog(&[]),
-        "### Other changes\n\n- **repo**: say more (#352)\n"
+        "### All changes\n\n#### Other changes\n\n- **repo**: say more (#352)\n"
     );
 }
 
@@ -584,8 +636,8 @@ fn a_second_fast_forward_release_counts_from_the_first() {
     assert_eq!(released, dev);
     assert_eq!(
         repo.changelog(&["v0.1.2..v0.1.3"]),
-        "### Fixes\n\n- **cli**: a flag (#360)\n\n\
-         ### Performance\n\n- **store**: fewer reads (#361)\n"
+        "### All changes\n\n#### Fixes\n\n- **cli**: a flag (#360)\n\n\
+         #### Performance\n\n- **store**: fewer reads (#361)\n"
     );
     repo.commit("feat(gui): another page (#362)");
     assert_eq!(repo.next(&["beta"]), "0.1.4-beta.1");
@@ -953,20 +1005,15 @@ fn the_changelog_groups_the_commits_by_type_with_their_pull_requests() {
     repo.commit("perf(store): fewer reads (#17)");
     repo.commit("Merge branch 'dev'");
 
-    let output = Command::new(tool("tools/changelog.sh"))
-        .current_dir(repo.dir.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{output:?}");
+    // No pull request says a note: the raw list is all there is, as it always was.
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "### Breaking changes\n\n- **store**: a new schema (#16)\n\n\
-         ### Features\n\n- **gui**: add a page (#14)\n- **store**: a new schema (#16)\n\n\
-         ### Fixes\n\n- **cli**: a typo (#13)\n\n\
-         ### Performance\n\n- **store**: fewer reads (#17)\n\n\
-         ### Other changes\n\n- **repo**: say more (#15)\n"
+        repo.changelog(&[]),
+        "### All changes\n\n\
+         #### Breaking changes\n\n- **store**: a new schema (#16)\n\n\
+         #### Features\n\n- **gui**: add a page (#14)\n- **store**: a new schema (#16)\n\n\
+         #### Fixes\n\n- **cli**: a typo (#13)\n\n\
+         #### Performance\n\n- **store**: fewer reads (#17)\n\n\
+         #### Other changes\n\n- **repo**: say more (#15)\n"
     );
 }
 
@@ -985,8 +1032,9 @@ fn the_changelog_of_a_stable_release_lists_the_dev_commits_between_the_two_marks
 
     assert_eq!(
         repo.changelog(&["--at", &dev]),
-        "### Features\n\n- **gui**: add a page (#14)\n\n\
-         ### Other changes\n\n- **repo**: say more (#15)\n"
+        "### All changes\n\n\
+         #### Features\n\n- **gui**: add a page (#14)\n\n\
+         #### Other changes\n\n- **repo**: say more (#15)\n"
     );
 }
 
@@ -1032,8 +1080,9 @@ fn two_releases_in_a_row_the_second_merges_its_version_is_the_next_and_its_chang
     assert_eq!(repo.next(&["stable", "--at", &dev]), "0.4.1");
     assert_eq!(
         repo.changelog(&["--at", &dev]),
-        "### Fixes\n\n- **cli**: a typo (#21)\n\n\
-         ### Other changes\n\n- **repo**: say more (#22)\n"
+        "### All changes\n\n\
+         #### Fixes\n\n- **cli**: a typo (#21)\n\n\
+         #### Other changes\n\n- **repo**: say more (#22)\n"
     );
 }
 
@@ -1048,7 +1097,275 @@ fn a_line_s_changelog_lists_its_commits_since_its_previous_tag() {
 
     assert_eq!(
         repo.changelog(&["--at", "HEAD", "--branch", "stable/0.3"]),
-        "### Fixes\n\n- **cli**: a typo (#14)\n"
+        "### All changes\n\n#### Fixes\n\n- **cli**: a typo (#14)\n"
+    );
+}
+
+// The notes of a release (#1178).
+
+#[test]
+fn a_note_line_becomes_the_entry() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("feat(gui): a page for the changes (#14)");
+    repo.pr(
+        14,
+        "I add a page for the changes.\r\n\r\nNote: Read what changed on a page of its own.\r\n\r\nTests: group_window_shell\r\n\r\nCloses #3",
+    );
+
+    // The sentence, the number beside it; the subject stays in the raw list.
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- Read what changed on a page of its own. (#14)\n\n\
+         ### All changes\n\n#### Features\n\n- **gui**: a page for the changes (#14)\n"
+    );
+}
+
+#[test]
+fn a_pull_request_without_a_note_is_only_in_the_raw_list() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("refactor(store): split a module (#21)");
+    repo.commit("feat(gui): a page for the changes (#22)");
+    repo.commit("fix(cli): a typo (#23)");
+    repo.commit("docs(repo): say more");
+    repo.pr(21, "I split a module.\n\nCloses #5");
+    repo.pr(22, "Note: Read what changed on a page of its own.");
+    repo.pr(23, "I fix a typo.");
+
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- Read what changed on a page of its own. (#22)\n\n\
+         ### All changes\n\n\
+         #### Features\n\n- **gui**: a page for the changes (#22)\n\n\
+         #### Fixes\n\n- **cli**: a typo (#23)\n\n\
+         #### Other changes\n\n- **store**: split a module (#21)\n- **repo**: say more\n"
+    );
+}
+
+#[test]
+fn a_note_from_an_outside_author_is_not_used() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("feat(gui): a page for the changes (#14)");
+    repo.commit("feat(gui): a second page (#15)");
+    // The description is read at release time, after the merge: whoever wrote the pull request
+    // can have changed it since. Only a maintainer's note is the release's.
+    repo.pr(14, "Note: Read what changed on a page of its own.");
+    repo.pr_by(14, "CONTRIBUTOR");
+    repo.pr(15, "Note: See the second page.");
+    repo.pr_by(15, "COLLABORATOR");
+
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- See the second page. (#15)\n\n\
+         ### All changes\n\n#### Features\n\n\
+         - **gui**: a page for the changes (#14)\n- **gui**: a second page (#15)\n"
+    );
+}
+
+#[test]
+fn a_pull_request_that_cannot_be_read_fails_the_changelog() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("fix(cli): a typo (#23)");
+    repo.pr_unreadable(23);
+
+    // A release built without its note cannot be edited afterwards: the build stops instead.
+    let output = repo
+        .with_gh(
+            Command::new(tool("tools/changelog.sh"))
+                .current_dir(repo.dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1"),
+        )
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("#23"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn notes_are_grouped_by_area_with_fixes_last() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    let commits = [
+        ("fix(gui): a link opens (#31)", "A link opens again."),
+        (
+            "feat(daemon): a quiet start (#32)",
+            "The daemon starts quietly.",
+        ),
+        (
+            "feat(hub): sign every action (#33)",
+            "Drive another machine, each action signed.",
+        ),
+        (
+            "feat(gui): a mark at the foot (#34)",
+            "See what is new from the sidebar.",
+        ),
+        (
+            "feat(sessions): resume a session (#35)",
+            "Resume a session where it stopped.",
+        ),
+        (
+            "feat(mcp): list the tools (#36)",
+            "Ask the tools an agent has.",
+        ),
+        (
+            "feat(git): follow a branch (#37)",
+            "Follow a branch from its project.",
+        ),
+        (
+            "feat(cli): remote on and off (#38)",
+            "Turn remote on from the command line.",
+        ),
+        (
+            "fix(store): a lock (#39)",
+            "A project can be removed while it is busy.",
+        ),
+        (
+            "feat(android): open a session (#40)",
+            "Open a session from the phone.",
+        ),
+        (
+            "perf(acp): fewer reads (#41)",
+            "Long conversations open faster.",
+        ),
+    ];
+    for (subject, note) in commits {
+        repo.commit(subject);
+        let number = subject.rsplit_once("(#").unwrap().1.trim_end_matches(')');
+        repo.pr(
+            number.parse().unwrap(),
+            &format!("Why.\n\nNote: {note}\n\nCloses #1"),
+        );
+    }
+
+    let changelog = repo.changelog(&[]);
+
+    // The areas in their order, the notes of each oldest first, the fixes last, then the raw list.
+    let notes = changelog.split("### All changes").next().unwrap();
+    assert_eq!(
+        notes,
+        "### Remote\n\n\
+         - Drive another machine, each action signed. (#33)\n\
+         - Turn remote on from the command line. (#38)\n\
+         - Open a session from the phone. (#40)\n\n\
+         ### Window\n\n- See what is new from the sidebar. (#34)\n\n\
+         ### Agents\n\n- Resume a session where it stopped. (#35)\n\
+         - Long conversations open faster. (#41)\n\n\
+         ### Tools\n\n- Ask the tools an agent has. (#36)\n\n\
+         ### Projects\n\n- Follow a branch from its project. (#37)\n\n\
+         ### Other\n\n- The daemon starts quietly. (#32)\n\n\
+         ### Fixed\n\n- A link opens again. (#31)\n- A project can be removed while it is busy. (#39)\n\n"
+    );
+    assert!(
+        changelog.contains("### All changes\n\n#### Features\n\n"),
+        "{changelog}"
+    );
+}
+
+#[test]
+fn the_token_is_given_to_the_step_that_reads_the_notes_only() {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // The build job: from its environment (the head's commit and branch) to its first step's run.
+    let build = workflow
+        .split("      HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n    outputs:")
+        .nth(1)
+        .expect("the build job");
+    let (job, steps) = build.split_once("    steps:").unwrap();
+    // The job's own environment reaches every step, the build scripts and the dependencies.
+    assert!(!job.contains("GH_TOKEN"), "{job}");
+    let (version, _) = steps
+        .split_once("name: The channel and the version")
+        .unwrap()
+        .1
+        .split_once("        run: |")
+        .unwrap();
+    assert!(
+        version.contains("GH_TOKEN: ${{ github.token }}"),
+        "{version}"
+    );
+}
+
+// The shape check asks for a note (#1178).
+
+/// What `.github/scripts/pr-note.sh` says of a pull request titled `title` that changes `changed`
+/// (one path per line), whose description is `body`: its workflow commands, on stdout.
+fn note_check(title: &str, changed: &[&str], body: &str) -> String {
+    let output = Command::new("bash")
+        .arg(tool(".github/scripts/pr-note.sh"))
+        .env("TITLE", title)
+        .env("BODY", body)
+        .env("CHANGED", changed.join("\n"))
+        .output()
+        .unwrap();
+    // A warning, never a failure: the pull request stays mergeable.
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn the_shape_check_warns_on_a_feature_without_a_note() {
+    let product = ["crates/flottille/src/daemon.rs", "docs/design.md"];
+    for title in ["feat(gui): a page", "fix(cli): a typo"] {
+        let said = note_check(title, &product, "I do it.\n\nCloses #1");
+        assert!(said.starts_with("::warning"), "{title}: {said}");
+        assert!(said.contains("Note:"), "{said}");
+    }
+    // A note, said at the start of its line, satisfies it.
+    assert_eq!(
+        note_check(
+            "feat(gui): a page",
+            &product,
+            "I do it.\n\nNote: Read what changed.\n\nCloses #1"
+        ),
+        ""
+    );
+    // Nothing the user can see: the type, or what the pull request touches, says so.
+    for title in [
+        "refactor(core): tidy",
+        "docs(repo): say more",
+        "ci(ci): faster",
+        "test(gui): more",
+    ] {
+        assert_eq!(note_check(title, &product, "Closes #1"), "", "{title}");
+    }
+    assert_eq!(
+        note_check(
+            "feat(repo): a tool",
+            &[
+                "tools/changelog.sh",
+                "crates/flottille-fake-gh/src/main.rs",
+                "crates/flottille/tests/a.rs"
+            ],
+            "Closes #1"
+        ),
+        ""
+    );
+    // The title is the author's: it is never said inside a workflow command, where a newline or
+    // `%0A` in it would start another one.
+    let said = note_check(
+        "feat(gui): a page%0A::error::injected\r",
+        &product,
+        "Closes #1",
+    );
+    assert!(said.starts_with("::warning"), "{said}");
+    assert!(!said.contains("injected"), "{said}");
+    // The workflow runs it, and its step cannot fail the check.
+    let workflow = std::fs::read_to_string(tool(".github/workflows/pull-request.yml")).unwrap();
+    assert!(
+        workflow.contains(".github/scripts/pr-note.sh"),
+        "{workflow}"
     );
 }
 
@@ -2876,18 +3193,21 @@ fn version_step_with(
     std::fs::write(&outputs, "").unwrap();
     let script = temp.path().join("version.sh");
     std::fs::write(&script, step_script(".github/workflows/ci.yml", "version")).unwrap();
-    let output = Command::new("bash")
-        .args(["--noprofile", "--norc", "-eo", "pipefail"])
-        .arg(&script)
-        .current_dir(clone.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GITHUB_REF_NAME", name)
-        .env("GITHUB_REF_TYPE", kind)
-        .env("GITHUB_SHA", sha)
-        .env("GITHUB_OUTPUT", &outputs)
-        .env("RUNNER_TEMP", temp.path())
-        .envs(more.iter().copied())
+    let output = repo
+        .with_gh(
+            Command::new("bash")
+                .args(["--noprofile", "--norc", "-eo", "pipefail"])
+                .arg(&script)
+                .current_dir(clone.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GITHUB_REF_NAME", name)
+                .env("GITHUB_REF_TYPE", kind)
+                .env("GITHUB_SHA", sha)
+                .env("GITHUB_OUTPUT", &outputs)
+                .env("RUNNER_TEMP", temp.path())
+                .envs(more.iter().copied()),
+        )
         .output()
         .unwrap();
     (
@@ -2938,7 +3258,10 @@ fn the_pushes_of_a_line_are_published_as_its_rcs() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(outputs, "channel=rc\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n");
-    assert_eq!(changelog, "### Fixes\n\n- **store**: a lock (#13)\n");
+    assert_eq!(
+        changelog,
+        "### All changes\n\n#### Fixes\n\n- **store**: a lock (#13)\n"
+    );
 }
 
 /// The line `stable/0.3` at 0.3.1, then a fix whose rc was published and that
@@ -2962,7 +3285,10 @@ fn a_line_s_tag_is_built_as_its_stable_release_with_the_line_s_changelog() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(outputs, "channel=stable\nversion=0.3.2\ntag=v0.3.2\n");
-    assert_eq!(changelog, "### Fixes\n\n- **cli**: a typo (#14)\n");
+    assert_eq!(
+        changelog,
+        "### All changes\n\n#### Fixes\n\n- **cli**: a typo (#14)\n"
+    );
 }
 
 #[test]

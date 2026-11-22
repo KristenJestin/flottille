@@ -11,6 +11,7 @@ on:
     types: [opened, edited, reopened, ready_for_review, synchronize]
 
 permissions:
+  contents: read
   pull-requests: write
   issues: read
 
@@ -18,6 +19,23 @@ jobs:
   shape:
     runs-on: ubuntu-latest
     steps:
+      # The script of the base, never the pull request's own: this job holds a token that writes.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      # A `feat` or `fix` of the product without a `Note:` line is a warning, never a failure.
+      - name: A note for the user
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          [ -f .github/scripts/pr-note.sh ] || exit 0
+          CHANGED=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/files" --paginate --jq '.[].filename') \
+            bash .github/scripts/pr-note.sh
       - uses: actions/github-script@v7
         with:
           script: |

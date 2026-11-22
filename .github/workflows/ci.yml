@@ -689,6 +689,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+      # `tools/changelog.sh` reads the notes of the merged pull requests through the API.
+      pull-requests: read
     env:
       # A pull request's alpha is built from its head (the commit and the branch pushed), not from
       # its merge commit, which no one pushed: the scripts below read these two, and fall back on
@@ -708,6 +710,9 @@ jobs:
           persist-credentials: false
       - name: The channel and the version
         id: version
+        env:
+          # Only this step: the build scripts and dependencies of the steps below never see it.
+          GH_TOKEN: ${{ github.token }}
         run: |
           skip() { echo "::notice::$1: nothing is published."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
           branch=${HEAD_REF:-$GITHUB_REF_NAME} sha=${HEAD_SHA:-$GITHUB_SHA}
