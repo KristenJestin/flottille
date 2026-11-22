@@ -203,6 +203,17 @@ pub fn open_address(run: Option<&str>, url: &str, cx: &mut App) {
         .ok();
 }
 
+/// Opens a link written in a Markdown text (a reply, a description): only a web address whose
+/// authority names no user (`flottille_core::address::web_authority`) opens, through
+/// [`open_address`] so another machine's `localhost` goes through its tunnel. Any other scheme, or
+/// an address that reads as another place than it goes to, opens nothing.
+pub fn open_markdown_link(url: &str, cx: &mut App) {
+    if flottille_core::address::web_authority(url).is_none() {
+        return;
+    }
+    open_address(None, url, cx);
+}
+
 /// Opens what an agent showed, after the checks Open makes (`Shell::open_shown`).
 pub fn open_shown(target: &str, cx: &mut App) {
     let Some(shell) = cx.try_global::<Tunnels>().map(|held| held.shell.clone()) else {
