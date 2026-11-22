@@ -1573,6 +1573,12 @@ on a real phone, by hand, and reported.
   ignored; a hub of before that sends them, and a machine of before that asks the hub to keep them,
   keep their sessions (each side reads the field and ignores it). A setting of `listen` sent to
   `remote.configure` is not read.
+- **The hub's hello is signed, with two limits taken** (#1232): something on the way that strips
+  `signed` *and* rewrites the device's hello can still make a new hub choose a lower protocol than
+  the device speaks; harmless today, because neither the hub nor `hub_session.rs` reads
+  `protocol()`. And the refusal's signed layout went from `flottille-hub-refused-v1` to `v2`, so a
+  signed refusal between this version and v0.4.1-beta.23 or 24 does not check on either side: each
+  falls back to "unreachable", with no false verdict. Accepted for pre-releases.
 
 - The project must be registered by hand on the other machine, under the same name.
 - A launch on another machine is judged by the receiving machine's gate, `child` as `led`; a child
