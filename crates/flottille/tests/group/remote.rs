@@ -47,6 +47,8 @@ mod remote_sessions;
 mod remote_settings;
 #[path = "../remote_tunnels.rs"]
 mod remote_tunnels;
+#[path = "../remote_uploads.rs"]
+mod remote_uploads;
 #[path = "../ssh_agent.rs"]
 mod ssh_agent;
 #[path = "../ssh_files.rs"]

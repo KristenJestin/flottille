@@ -654,7 +654,8 @@ to update rather than refuse each other's frames without saying why.
   it is kept, and sent when that machine links again.
 - **Paths are picked, not typed**, from the lists the machine gives, except where the user types one
   on purpose (`flottille --machine server project add ~/code/app`, which is that machine's path).
-- **Pictures** travel as bytes already (`agent.send {images}`); files other than pictures are left
+- **Pictures** travel as bytes (`agent.send {images}`), in chunks when the message would not fit
+  a frame ("Pictures sent to another machine"); files other than pictures and pasted texts are left
   for later.
 - **A link or a file an agent shows** (`web` `show_link`) belongs to its machine: a `localhost`
   address of another machine opens through a tunnel ("Tunnels"); a picture or a video of another
@@ -705,6 +706,31 @@ The command line takes `--machine <name>` on every command (`FLOTTILLE_MACHINE` 
 shows the sessions of every machine in one list ("One list of every machine", decided by the
 maintainer on 2026-11-20); a led session on another machine appears under its pilot with the
 machine's name.
+
+### Pictures sent to another machine
+
+A message to another machine is one signed request, one frame of the link (1 MiB): in base64, about
+700 KB of pictures in all. A picture the user takes or pastes reaches the session whatever its
+size, up to the limits a local message has (#1187), as a file an agent showed comes the other way:
+
+- **The client sends the files first**, each chunk one signed request on its own stream
+  (`agent.upload`, `protocol.md`), at most 512 KiB of a file, in order, then the message
+  (`agent.send` or `agent.start`) that names their upload (`upload`) instead of carrying them. The
+  window and the phone do so when the message, signed, would not fit a frame; a smaller one still
+  carries its pictures. Pasted texts sent as files go the same way.
+- **The receiving machine keeps them under the bounds of a local message**, judged at each chunk
+  before any of it is kept: 20 pictures (png, jpeg, gif, webp) and 20 pasted texts, each 5 MiB at
+  most. An upload is its sender's: the device that signed its chunks (this machine's clients
+  together), and no other client can add to it or take it. A sender has 2 uploads waiting at most,
+  the machine 8; the files are written in a folder of the daemon's data (`uploads/`, mode 0700),
+  under names of its own (`picture-3`), never one the sender gave, and the upload's name is 1 to 64
+  letters, digits, `_` or `-`.
+- **An upload whose message does not come is dropped** 2 minutes after its last chunk, with its
+  files; a daemon that starts removes what one that stopped left.
+- **The message takes them** as it would have taken them inline: judged, scaled and written in the
+  session's folder, then the upload is gone. A picture that arrived in part is refused, saying
+  which (`picture 2 arrived in part: …`); every refusal of a chunk says which picture and why, and
+  the composer shows it as a local refusal.
 
 ### One list of every machine
 
@@ -1082,15 +1108,14 @@ recreated.
   file is deleted) and the share sheet (an intent filter for `image/*` only: the pictures wait in
   the composer of the session the user picks, and are never sent without a tap). The window's limits
   hold in the composer and again in the core, before anything is sent: 20 pictures a message, 5
-  MiB each, png, jpeg, gif or webp. **A message is one signed request, so one frame of the link
-  (1 MiB), pictures in base64 included: about 700 KB of pictures together, which is the limit that
-  binds.** The core refuses a message that does not fit, saying so, and the app scales a jpeg, png
-  or webp over 230 KB down to 2000 px and re-encodes it, so that a camera shot fits (the window's
-  own messages to another machine meet the same frame: a follow-up may carry pictures in chunks).
+  MiB each, png, jpeg, gif or webp. A picture is sent as it is, never shrunk: a message that does
+  not fit one frame of the link goes in chunks ("Pictures sent to another machine"), and only its
+  words must fit a frame (the core refuses words that do not, saying so; the frame is measured on
+  the signed request itself, escapes included). A camera shot over 5 MiB alone is scaled down to
+  2000 px and re-encoded, the only way it can be sent.
   What another app hands over is never trusted: a uri the app has no grant for, one that fails or
-  one whose extra is of another type is left out (said once), a picture is refused before it is
-  held when it is over 5 MiB and is never sent cut short, and reading stops when the pictures held
-  pass the frame's 700 KB; the frame is measured on the signed request itself, escapes included. A
+  one whose extra is of another type is left out (said once), and a picture is refused before it
+  is held when it is over 5 MiB and is never sent cut short. A
   camera shot is read, then deleted, and what a dead process left is cleared at the start.
   Nothing of a picture is logged. A message to a machine
   that is off is refused, said as a toast with since when (`server is offline since 22:14`) and kept

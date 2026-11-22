@@ -105,6 +105,7 @@ mod tunnel_command;
 mod turn_failures;
 mod update;
 mod updates;
+mod uploads;
 mod vault;
 mod vault_command;
 mod watchdog;
