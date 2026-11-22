@@ -669,3 +669,120 @@ fn the_what_s_new_row_is_a_link_aligned_with_the_other_values(cx: &mut TestAppCo
         "it starts where the other values do, not indented like a button"
     );
 }
+
+fn selected(cx: &mut VisualTestContext, id: &str) -> bool {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .is_some_and(|found| found.selected())
+    })
+}
+
+/// A user whose last `flottille update --channel` chose `kept`, as the state folder says it.
+fn remembering(kept: &str) -> User {
+    let user = User::new();
+    let file = user.path("state/flottille/update-channel.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, kept).unwrap();
+    user
+}
+
+#[gpui_kit::test]
+fn choosing_beta_remembers_it_and_checks_for_an_update(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    assert!(selected(cx, "version-channel-stable"));
+    assert!(!selected(cx, "version-channel-beta"));
+
+    click(cx, "version-channel-beta");
+
+    // The daemon remembers it, as `--channel` does, and checks at once: nothing listens where the
+    // test's releases are, so the check says it failed on the Update row.
+    until(&shell, cx, "the channel is chosen and checked", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.version()
+                .read(cx)
+                .shown()
+                .is_some_and(|shown| shown.channel == "beta" && shown.failed.is_some())
+        })
+    });
+    assert_eq!(shown(&user)["channel"], "beta");
+    let kept = std::fs::read_to_string(user.path("state/flottille/update-channel.json")).unwrap();
+    assert!(kept.contains("beta"), "{kept}");
+    settle(cx);
+    assert!(selected(cx, "version-channel-beta"));
+    assert!(!selected(cx, "version-channel-stable"));
+    assert_eq!(
+        label(cx, "version-state-text").as_deref(),
+        Some("Could not check for an update")
+    );
+}
+
+#[gpui_kit::test]
+fn back_to_stable_keeps_a_newer_beta_until_a_stable_passes_it(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+
+    say(
+        &shell,
+        flottille_window::version::Shown::of(&json!({"channel": "stable", "ahead_of": "0.4.0"})),
+        cx,
+    );
+    advance(cx, Duration::from_millis(400));
+
+    // Neither an update nor "up to date": the build stays, and the row says why.
+    assert_eq!(
+        label(cx, "version-state-text").as_deref(),
+        Some("This build is newer than stable 0.4.0: it stays until a newer one is out")
+    );
+    assert!(!visible(cx, "version-download"));
+
+    say(
+        &shell,
+        flottille_window::version::Shown::of(&json!({"channel": "stable", "latest": "0.5.0"})),
+        cx,
+    );
+    advance(cx, Duration::from_millis(400));
+
+    assert_eq!(
+        label(cx, "version-state-text").as_deref(),
+        Some("0.5.0 is available")
+    );
+    assert!(visible(cx, "version-download"));
+}
+
+#[gpui_kit::test]
+fn an_alpha_build_shows_its_branch_and_offers_stable_or_beta(cx: &mut TestAppContext) {
+    let user = remembering(r#"{"channel":"alpha","branch":"feat/x"}"#);
+    let (shell, cx) = version_open(&user, cx);
+    advance(cx, Duration::from_millis(400));
+
+    // The command line's choice is said, never offered: no segment for it.
+    assert_eq!(
+        label(cx, "version-channel-other").as_deref(),
+        Some("alpha · feat/x")
+    );
+    assert!(!visible(cx, "version-channel"));
+    assert!(visible(cx, "version-channel-stable"));
+    assert!(visible(cx, "version-channel-beta"));
+
+    click(cx, "version-channel-stable");
+    until(&shell, cx, "the way back", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.version()
+                .read(cx)
+                .shown()
+                .is_some_and(|shown| shown.channel == "stable")
+        })
+    });
+    advance(cx, Duration::from_millis(600));
+
+    assert!(visible(cx, "version-channel"));
+    assert!(selected(cx, "version-channel-stable"));
+    assert!(!visible(cx, "version-channel-other"));
+    let kept = std::fs::read_to_string(user.path("state/flottille/update-channel.json")).unwrap();
+    assert!(
+        !kept.contains("feat/x"),
+        "the branch goes with the alpha: {kept}"
+    );
+}

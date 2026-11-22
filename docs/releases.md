@@ -609,7 +609,16 @@ is the old one or the new one, never half of one.
   setting.
 - **The window says it**: the foot of the sidebar (`0.4.0-beta.124 is available`, then
   `Downloading…`, then `Ready to restart`; it opens the section) and Settings, General, **Version**: this build's version, channel and commit, the
-  channel checked, the state of the update and its actions. While it downloads, the Update row
+  channel checked, the state of the update and its actions. **The channel is a choice there**,
+  Stable or Beta, in the segmented control of the Channel row: choosing one remembers it, as
+  `--channel` does, and checks for an update at once, the result fading in on the Update row (it
+  acts at once, as the page's other choices do: no dialog; #1145 may change that). Going from beta
+  back to stable with the installed beta newer than the latest stable changes nothing: the Update
+  row says **This build is newer than stable X: it stays until a newer one is out**, and a stable
+  above this build is offered as any update. **An alpha stays in the command line**
+  (`--channel alpha --branch <name>`, for trying a pull request): a binary on one shows
+  `alpha · <branch>` (an rc or a next, its channel) and **Use Stable** and **Use Beta**, which
+  forget the branch. While it downloads, the Update row
   shows a progress bar (the share received, `69.7 MB of 93.1 MB` beside it, an indeterminate
   stripe when the server does not say the size) and **Cancel** (`update.cancel`: the download
   stops and nothing is staged; it is no failure); done, the bar fills and folds away.

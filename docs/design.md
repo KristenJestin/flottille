@@ -1331,7 +1331,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
   refused, one JSON line each, secrets masked. For working on Flottille."), off by default
   (`developer.md`), and the path of its log unfolding under it. Last **Version** (`releases.md`,
-  "Updating").
+  "Updating"): the build, the **Channel** as a Stable or Beta choice that acts at once (an alpha
+  said with its branch and a way back), the update and its actions.
   **Machines** is Remote (`remote.md`), and nothing of it is typed on the page: a section says the
   state and holds the buttons, and what is typed, or what a request shows, is a dialog of the
   window's host. First whether remote is on: off, a notice ("Remote is off. This machine can join
