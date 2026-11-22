@@ -83,6 +83,12 @@ pub(crate) fn shown(text: &str, limit: usize) -> String {
     shown
 }
 
+/// Whether `c` hides or turns text a reader sees: a format character (`invisible`) or a line or
+/// paragraph separator (U+2028, U+2029), which no control check catches.
+pub fn hidden(c: char) -> bool {
+    invisible(c) || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
 /// Whether `c` is a format character (Unicode's category `Cf`, as of Unicode 15.1): it shows
 /// nothing, or turns the text around it (zero-width spaces and joiners, bidirectional overrides
 /// and isolates, the byte order mark, tags), so that two texts that look the same are not.

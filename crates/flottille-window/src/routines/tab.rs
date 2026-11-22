@@ -1136,10 +1136,14 @@ impl RoutinesTab {
         }
         if let Some(link) = &item.link {
             let (shell, link) = (self.shell.clone(), link.clone());
+            if let Some(host) = item.host() {
+                row = row.meta(host.to_owned());
+            }
+            // A `localhost` link of another machine opens through a tunnel, as a session's does.
             row = row
                 .on_click(move |_, _, cx| {
                     if let Some(shell) = shell.upgrade() {
-                        shell.read(cx).open_link(&link);
+                        shell.update(cx, |shell, cx| shell.open_address(None, &link, cx));
                     }
                 })
                 .trailing(icon(Icon::OpenInEditor).text_color(p.faint));

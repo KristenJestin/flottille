@@ -733,7 +733,9 @@ methods"; `flottille routine`, `docs/cli.md`).
   The result then carries `items` (`routine_result`, `docs/tools.md`), each with a stable `id`, a
   `title`, and optionally a `link`, a sentence, tags and a group, in the order the agent chose, and
   markdown beside them (`body`). The items are masked as every stored text, one line each with no
-  control character, and a link is a web address, shown as it is and never fetched.
+  control character and no invisible one (a bidirectional override, a zero-width space, U+2028),
+  the summary too, and a link is a web address with no user name in it (`https://a.com@b.example/`
+  is refused), shown as it is, with its host on the row, and never fetched.
   - **Compared with the last run, by id.** The last run is the routine's last **result** (a run
     that failed or was skipped gave none). An item whose id the last result did not list is **new**
     (the first result has no last: every item is new), and the ids the last result listed that

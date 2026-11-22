@@ -99,6 +99,16 @@ pub struct Item {
     pub new: bool,
 }
 
+impl Item {
+    /// Where the link goes (its host and port), said on the row so that a title cannot pass for
+    /// another place.
+    pub fn host(&self) -> Option<&str> {
+        self.link
+            .as_deref()
+            .and_then(flottille_core::address::web_authority)
+    }
+}
+
 fn text(value: &Value) -> Option<String> {
     value.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
 }
@@ -198,10 +208,15 @@ impl Event {
     }
 }
 
-/// A line of the agent's, with no control character.
+/// A line of the agent's, with no control and no invisible character (a bidirectional override
+/// would make it read as another text).
 fn plain(value: &Value) -> Option<String> {
     text(value)
-        .map(|line| line.chars().filter(|c| !c.is_control()).collect::<String>())
+        .map(|line| {
+            line.chars()
+                .filter(|c| !c.is_control() && !flottille_link::hidden(*c))
+                .collect::<String>()
+        })
         .filter(|line| !line.trim().is_empty())
 }
 
@@ -211,8 +226,10 @@ impl Item {
             id: plain(&value["id"])?,
             title: plain(&value["title"])?,
             link: text(&value["link"]).filter(|link| {
-                (link.starts_with("https://") || link.starts_with("http://"))
-                    && !link.chars().any(|c| c.is_control() || c.is_whitespace())
+                flottille_core::address::web_authority(link).is_some()
+                    && !link
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace() || flottille_link::hidden(c))
             }),
             text: plain(&value["text"]),
             tags: value["tags"]
@@ -572,6 +589,38 @@ mod tests {
         // What comes from outside: no link but the web's, no control character.
         assert_eq!(sections[0].1[1].link, None);
         assert_eq!(sections[0].1[1].text.as_deref(), Some("one[31m"));
+    }
+
+    #[test]
+    fn what_an_agent_said_shows_no_invisible_character() {
+        let item = Item::of(&json!({
+            "id": "a\u{200B}b", "title": "ok \u{202E}gnp.exe", "text": "one\u{2028}two",
+            "tags": ["\u{2067}x"], "group": "G\u{FEFF}",
+        }))
+        .unwrap();
+        assert_eq!(item.id, "ab");
+        assert_eq!(item.title, "ok gnp.exe");
+        assert_eq!(item.text.as_deref(), Some("onetwo"));
+        assert_eq!(item.tags, ["x"]);
+        assert_eq!(item.group.as_deref(), Some("G"));
+    }
+
+    #[test]
+    fn a_link_with_userinfo_is_no_link_and_a_row_says_the_host() {
+        let of = |link: &str| Item::of(&json!({"id": "a", "title": "A", "link": link})).unwrap();
+        assert_eq!(of("https://github.com@evil.example/x").link, None);
+        assert_eq!(of("http://user:pw@host.example/").link, None);
+        assert_eq!(of("https://a\u{202E}b.example/").link, None);
+        let linked = of("https://github.com/org/repo/issues/1");
+        assert_eq!(linked.host(), Some("github.com"));
+        assert_eq!(
+            of("https://host.example:8443/x").host(),
+            Some("host.example:8443")
+        );
+        assert_eq!(
+            Item::of(&json!({"id": "a", "title": "A"})).unwrap().host(),
+            None
+        );
     }
 
     #[test]

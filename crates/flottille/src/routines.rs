@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use flottille_core::address;
 use flottille_core::agent::{AgentState, GateMode, new_id};
 use flottille_core::approval;
 use flottille_core::routine::{self, Left, ResultItem, Routine, Run};
@@ -1003,12 +1004,22 @@ const GROUP_CHARS: usize = 80;
 const LINK_CHARS: usize = 2000;
 const BODY_CHARS: usize = 20_000;
 
-/// One line of at most `max` characters with no control character, trimmed: what an agent said
-/// is shown as it is said, so nothing in it may move the cursor or colour a terminal.
+/// Whether `c` may not be in what an agent said, but the line breaks of a body: a control
+/// character, or one that hides or turns the text around it (a bidirectional override, a
+/// zero-width space, U+2028).
+fn unfit(c: char) -> bool {
+    c.is_control() || flottille_link::hidden(c)
+}
+
+/// One line of at most `max` characters with no control or invisible character, trimmed: what an
+/// agent said is shown as it is said, so nothing in it may move the cursor, colour a terminal or
+/// make a text read as another.
 fn line(what: &str, text: &str, max: usize) -> Result<String, String> {
     let text = text.trim();
-    if text.chars().any(char::is_control) {
-        return Err(format!("{what} is one line with no control character"));
+    if text.chars().any(unfit) {
+        return Err(format!(
+            "{what} is one line with no control or invisible character"
+        ));
     }
     if text.chars().count() > max {
         return Err(format!("{what} is at most {max} characters"));
@@ -1047,9 +1058,11 @@ fn listed(
         {
             Some(link) => {
                 let link = line("its link", link, LINK_CHARS).map_err(|e| said(&e))?;
-                let web = link.starts_with("https://") || link.starts_with("http://");
-                if !web || link.chars().any(char::is_whitespace) {
-                    return Err(said("its link is a web address (http or https)"));
+                if address::web_authority(&link).is_none() || link.chars().any(char::is_whitespace)
+                {
+                    return Err(said(
+                        "its link is a web address (http or https) with no user name in it",
+                    ));
                 }
                 Some(link)
             }
@@ -1126,8 +1139,11 @@ pub fn result(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
         );
     }
     let secrets = secrets::Secrets::new(&std::env::vars_os().collect(), &[]);
-    let summary = secrets.mask(asked.summary.trim());
-    if summary.is_empty() || summary.contains('\n') || summary.chars().count() > SUMMARY_CHARS {
+    let summary = match line("the summary", &asked.summary, SUMMARY_CHARS) {
+        Ok(summary) => secrets.mask(&summary),
+        Err(_) => String::new(),
+    };
+    if summary.is_empty() {
         return Outcome::Invalid(format!(
             "refused: the summary is one line of at most {SUMMARY_CHARS} characters"
         ));
@@ -1163,13 +1179,11 @@ pub fn result(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
     {
         Some(body)
             if body.chars().count() > BODY_CHARS
-                || body
-                    .chars()
-                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t')) =>
+                || body.chars().any(|c| unfit(c) && !matches!(c, '\n' | '\t')) =>
         {
             return Outcome::Invalid(format!(
                 "refused: the body is markdown of at most {BODY_CHARS} characters, with no \
-                 control character"
+                 control or invisible character"
             ));
         }
         Some(body) => Some(secrets.mask(body)),

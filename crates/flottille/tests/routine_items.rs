@@ -195,6 +195,34 @@ fn a_result_that_is_not_a_clean_list_is_refused() {
             json!([{"id": "a", "title": "one\u{1b}[31mred"}]),
         ),
         (
+            "a title that reads backwards",
+            json!([{"id": "a", "title": "ok \u{202E}gnp.exe"}]),
+        ),
+        (
+            "an id that hides in a zero-width space",
+            json!([{"id": "a\u{200B}b", "title": "A"}]),
+        ),
+        (
+            "a sentence with a line separator",
+            json!([{"id": "a", "title": "A", "text": "one\u{2028}two"}]),
+        ),
+        (
+            "a tag that turns the text around",
+            json!([{"id": "a", "title": "A", "tags": ["\u{2067}x"]}]),
+        ),
+        (
+            "a group with a byte order mark",
+            json!([{"id": "a", "title": "A", "group": "G\u{FEFF}"}]),
+        ),
+        (
+            "a link that says another place than it goes",
+            json!([{"id": "a", "title": "A", "link": "https://github.com@evil.example/x"}]),
+        ),
+        (
+            "a link with a password",
+            json!([{"id": "a", "title": "A", "link": "http://user:pw@host.example/"}]),
+        ),
+        (
             "a sentence too long",
             json!([{"id": "a", "title": "A", "text": "x".repeat(400)}]),
         ),
@@ -209,6 +237,19 @@ fn a_result_that_is_not_a_clean_list_is_refused() {
     ];
     for (what, items) in wrong {
         let answer = mcp.call("routine_result", json!({"summary": "x", "items": items}));
+        assert!(answer.error, "{what} was not refused: {}", answer.text);
+    }
+    for (what, args) in [
+        (
+            "a summary that reads backwards",
+            json!({"summary": "done \u{202E}gnp.exe"}),
+        ),
+        (
+            "a body with a bidi isolate",
+            json!({"summary": "x", "body": "# Title\n\u{2066}hidden"}),
+        ),
+    ] {
+        let answer = mcp.call("routine_result", args);
         assert!(answer.error, "{what} was not refused: {}", answer.text);
     }
     let both = mcp.call(
