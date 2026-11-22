@@ -219,10 +219,15 @@ async fn ran(path: &PathBuf, args: &[String], time: Duration) -> Option<(bool, S
     let mut command = command(path, args);
     command.stdin(Stdio::null());
     let child = crate::children::spawn(&mut command).ok()?;
-    let output = tokio::time::timeout(time, child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
+    let pid = child.id();
+    let Ok(output) = tokio::time::timeout(time, child.wait_with_output()).await else {
+        // What it started itself is in its group, and outlives the child the timeout dropped.
+        if let Some(pid) = pid {
+            crate::agents::signal_group(pid, libc::SIGKILL);
+        }
+        return None;
+    };
+    let output = output.ok()?;
     let mut said = String::from_utf8_lossy(&output.stdout).into_owned();
     said.push('\n');
     said.push_str(&String::from_utf8_lossy(&output.stderr));
