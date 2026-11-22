@@ -129,7 +129,7 @@ fn held_by<'a>(
     machines: &'a crate::machines::Machines,
     this: &str,
     machine: &str,
-) -> &'a [crate::machines::Held] {
+) -> &'a [crate::machines::MachineProject] {
     match machine == this {
         true => machines.lists.this_projects.as_slice(),
         false => machines
@@ -1737,8 +1737,8 @@ mod tests {
         assert!(snapshot.elsewhere("s1@server").is_none());
     }
 
-    fn held(name: &str, remotes: &[&str]) -> crate::machines::Held {
-        crate::machines::Held {
+    fn held(name: &str, remotes: &[&str]) -> crate::machines::MachineProject {
+        crate::machines::MachineProject {
             name: name.to_owned(),
             remotes: remotes.iter().map(|r| (*r).to_owned()).collect(),
         }
@@ -1747,8 +1747,8 @@ mod tests {
     /// `pc` holding `app` and `server` holding `held_there`, each one session of its project.
     fn with_projects(
         state: &str,
-        this: Vec<crate::machines::Held>,
-        there: Vec<crate::machines::Held>,
+        this: Vec<crate::machines::MachineProject>,
+        there: Vec<crate::machines::MachineProject>,
     ) -> Snapshot {
         let mut machines = two_machines(state);
         machines.lists.this_projects = this;
