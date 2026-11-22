@@ -334,6 +334,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `routine.pause` | drive |
 | `routine.resume` | drive |
 | `routine.remove` | drive |
+| `routine.open` | drive |
 | `provider.list` | read |
 | `provider.enable` | drive |
 | `provider.disable` | drive |
@@ -2915,12 +2916,13 @@ session of the routine's project, at its time or when its event comes. A routine
   due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
 
 A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
-"outcome", "summary", "why", "trigger"}`. `session` is its root session (null for a skipped run), kept once it
+"outcome", "summary", "why", "trigger", "opened"}`. `session` is its root session (null for a skipped run), kept once it
 ended; `mode` the routine's when it started; `outcome` is `running`, `something`, `nothing`,
 `goes_on` (it said something and its session goes on as any session), `skipped` or `failed`;
 `summary` the one line its result said; `why` why it was skipped or failed (`delivered to its
 session still open, <session>` for an event given to the last run's session instead); `trigger`
-what started a run of an event, as the forge or the tracker said it (masked), null otherwise.
+what started a run of an event, as the forge or the tracker said it (masked), null otherwise; `opened` whether the
+user opened its result (`routine.open`).
 
 #### `routine.list`
 
@@ -2964,7 +2966,17 @@ schedule's next. Answers `{"routine"}`.
 `{"routine"}`: forgets it and its history; the sessions of its runs stay, as any session.
 `{"removed": "<name>"}`.
 
-Every change emits `routine.changed`, each run's outcome `routine.ran` (`docs/events.md`).
+#### `routine.open`
+
+`{"run"}`: the user opened the run's result (a window's result page): it is no longer unread.
+`{"run"}` with `opened` true, the first time's moment kept; opening it again changes nothing.
+`not-found` for no such run. A result with something to say (`something`, `goes_on`) that was not
+opened is **unread**: `routine.list` and `routine.show` give each routine's `unread`, how many
+there are, which a window shows as a dot and a count. A run that ended before results could be
+opened counts as opened. Emits `routine.opened`.
+
+Every change emits `routine.changed`, each run's outcome `routine.ran`, each result opened
+`routine.opened` (`docs/events.md`).
 
 ### `test.advance`
 

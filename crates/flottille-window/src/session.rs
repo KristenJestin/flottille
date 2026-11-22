@@ -248,7 +248,7 @@ pub fn said_at_offset(ms: u64, offset: i64) -> String {
 }
 
 /// How far east of UTC the machine's clock was at `ms`, in seconds.
-fn local_offset(ms: u64) -> i64 {
+pub(crate) fn local_offset(ms: u64) -> i64 {
     let time = (ms / 1000) as libc::time_t;
     // SAFETY: `localtime_r` writes only into `tm`, which outlives the call; a zeroed `tm` is a
     // valid one.

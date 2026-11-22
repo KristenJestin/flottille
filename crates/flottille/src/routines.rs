@@ -210,6 +210,12 @@ struct Named {
     routine: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Opened {
+    run: u64,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct List {
@@ -230,6 +236,7 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
                 let last = daemon.read(|store| store.routine_runs(&routine.id, 1))?;
                 let mut shown = routine.to_json();
                 shown["last"] = last.first().map_or(Value::Null, Run::to_json);
+                shown["unread"] = json!(daemon.read(|store| store.routine_unread(&routine.id))?);
                 listed.push(shown);
             }
             json!({"routines": listed})
@@ -238,8 +245,27 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             let asked: Named = serde_json::from_value(params)?;
             let routine = find(daemon, &asked.routine)?;
             let runs = daemon.read(|store| store.routine_runs(&routine.id, HISTORY))?;
-            json!({"routine": routine.to_json(),
+            let mut shown = routine.to_json();
+            shown["unread"] = json!(daemon.read(|store| store.routine_unread(&routine.id))?);
+            json!({"routine": shown,
                 "runs": runs.iter().map(Run::to_json).collect::<Vec<_>>()})
+        }
+        "routine.open" => {
+            let asked: Opened = serde_json::from_value(params)?;
+            let run = daemon
+                .read(|store| store.open_routine_run(asked.run, now_ms()))?
+                .ok_or_else(|| Failure::new("not-found", format!("no run {}", asked.run)))?;
+            let routine = daemon
+                .read(|store| store.routine(&run.routine))?
+                .ok_or_else(|| Failure::new("not-found", "the run's routine is gone"))?;
+            daemon
+                .emit(
+                    "routine.opened",
+                    json!({"routine": {"id": routine.id, "name": routine.name}, "run": run.to_json(),
+                        "project": routine.project}),
+                )
+                .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            json!({"run": run.to_json()})
         }
         "routine.add" => {
             let asked: Add = serde_json::from_value(params)?;

@@ -272,8 +272,9 @@ the wrong code first).
     whether it is on, the hub, the devices, the addresses) is one,
     and Usage and Notifications will be. Settings has six tabs (Agents, Approvals, Features,
     Vault, Machines, General), Usage later; a project's settings have six (Repositories,
-    Workspaces, Tasks, Instructions, Features, Vault); the project page four at most and room for
-    a fifth (Progress, for a project with a tracker). The limit is the mess, not a number: the
+    Workspaces, Tasks, Instructions, Features, Vault); the project page has Work, Pull requests,
+    Tickets, Specs while it is on, Progress for a project with a tracker, and Routines in every
+    project, after Progress (#1123). The limit is the mess, not a number: the
     tabs stay few enough to read at a glance, and when they are no longer the structure is
     reviewed (#1145). A smaller part stays a row of the Features tab, which opens its page in
     place of the list (`Subpage`), when the user turns it on or off (Specs, Review, the

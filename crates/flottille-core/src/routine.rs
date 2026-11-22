@@ -116,6 +116,9 @@ pub struct Run {
     /// What started it, as the forge or the tracker said it: none for a run of its schedule or
     /// by hand.
     pub trigger: Option<String>,
+    /// When the user opened its result, if they did: a result with something to say that was not
+    /// opened is unread.
+    pub opened_at: Option<u64>,
 }
 
 impl Run {
@@ -132,6 +135,7 @@ impl Run {
             "summary": self.summary,
             "why": self.why,
             "trigger": self.trigger,
+            "opened": self.opened_at.is_some(),
         })
     }
 }

@@ -37,6 +37,7 @@ use crate::model::{Place, Preparation};
 use crate::progress::ProgressPage;
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
+use crate::routines::RoutinesTab;
 use crate::runs::{CommandRow, arrange};
 use crate::shell::{Selection, Shell};
 use crate::tasks::{ProjectTasks, TaskInfo};
@@ -121,6 +122,8 @@ pub enum PageTab {
     Lists,
     /// The milestones of the tracker and their tickets.
     Progress,
+    /// The project's routines, their pages and results.
+    Routines,
 }
 
 /// What the tabs say of the lists, kept so that the page is drawn again only when it changes.
@@ -129,6 +132,8 @@ struct ListsSaid {
     counts: [usize; 2],
     specs: Option<usize>,
     chosen: Option<Kind>,
+    /// The results of its routines not opened yet: the Routines tab's count.
+    unread: usize,
 }
 
 pub struct ProjectPage {
@@ -153,6 +158,8 @@ pub struct ProjectPage {
     repositories_section: Entity<ProjectRepositories>,
     /// Its pull requests and tickets.
     items: Entity<ProjectItems>,
+    /// Its routines: read when the page opens, for the count on the tab.
+    routines: Entity<RoutinesTab>,
     /// Whether the project declares a tracker: its Progress tab shows.
     tracked: bool,
     /// What the Progress tab shows, read when the tab is chosen and dropped when it is left.
@@ -198,6 +205,12 @@ impl ProjectPage {
         };
         let reading = items.clone();
         cx.defer(move |cx| reading.update(cx, |items, cx| items.read(cx)));
+        let routines = {
+            let (shell, project) = (shell.clone(), name.clone());
+            cx.new(|cx| RoutinesTab::new(shell, project, cx))
+        };
+        let reading = routines.clone();
+        cx.defer(move |cx| reading.update(cx, |routines, cx| routines.read(cx)));
         let ended = {
             let tasks = tasks.downgrade();
             cx.new(|cx| EndedRuns::new(tasks, cx))
@@ -205,6 +218,7 @@ impl ProjectPage {
         let subscriptions = vec![
             cx.observe(&tasks, |page, _, cx| page.runs_moved(cx)),
             cx.observe(&items, |page, _, cx| page.lists_moved(cx)),
+            cx.observe(&routines, |page, _, cx| page.lists_moved(cx)),
         ];
         Self {
             shell,
@@ -221,6 +235,7 @@ impl ProjectPage {
             ended,
             repositories_section,
             items,
+            routines,
             tracked: false,
             progress: None,
             tab: PageTab::Work,
@@ -248,6 +263,28 @@ impl ProjectPage {
 
     pub fn items(&self) -> &Entity<ProjectItems> {
         &self.items
+    }
+
+    /// Its routines.
+    pub fn routines(&self) -> &Entity<RoutinesTab> {
+        &self.routines
+    }
+
+    /// Shows the Routines tab on the result of a run.
+    pub fn show_routine_result(&mut self, routine: &str, run: u64, cx: &mut Context<Self>) {
+        self.switched = true;
+        self.choose(PageTab::Routines, cx);
+        self.routines
+            .update(cx, |routines, cx| routines.open_result(routine, run, cx));
+    }
+
+    /// Shows the Routines tab on the result of the run a notification is about (`session` is
+    /// the run's, `name` its routine's).
+    pub fn show_routine_notified(&mut self, session: &str, name: &str, cx: &mut Context<Self>) {
+        self.switched = true;
+        self.choose(PageTab::Routines, cx);
+        self.routines
+            .update(cx, |routines, cx| routines.open_run_of(session, name, cx));
     }
 
     pub fn ended(&self) -> &Entity<EndedRuns> {
@@ -390,6 +427,9 @@ impl ProjectPage {
         }
         if self.branches != details.branches {
             self.branches = details.branches.clone();
+            let folder = self.branches.first().and_then(|(_, branch)| branch.clone());
+            self.routines
+                .update(cx, |routines, cx| routines.set_branch(folder, cx));
             cx.notify();
         }
         let several = !only_at_root(&self.repositories);
@@ -448,6 +488,7 @@ impl ProjectPage {
             counts: items.counts(),
             specs: items.specs_count(cx),
             chosen: items.chosen(cx),
+            unread: self.routines.read(cx).unread(),
         };
         if self.lists != said {
             self.lists = said;
@@ -560,12 +601,14 @@ impl Render for ProjectPage {
         // The tabs: Work, the two lists, Specs while it is on, and Progress while the project
         // declares a tracker.
         let progress_at = 3 + usize::from(self.lists.specs.is_some());
+        let routines_at = progress_at + usize::from(self.tracked);
         let chosen = match (self.tab, self.lists.chosen) {
             (PageTab::Work, _) => 0,
             (PageTab::Lists, Some(Kind::Pulls)) => 1,
             (PageTab::Lists, Some(Kind::Tickets)) => 2,
             (PageTab::Lists, None) => 3,
             (PageTab::Progress, _) => progress_at,
+            (PageTab::Routines, _) => routines_at,
         };
         let (shell, project) = (self.shell.clone(), self.name.clone());
         let this = cx.entity().downgrade();
@@ -579,10 +622,20 @@ impl Render for ProjectPage {
                 tabs.counted("specs", "Specs", count.to_string())
             })
             .when(self.tracked, |tabs| tabs.tab("progress", "Progress"))
+            // Always counted: the kit scales the count in and out as results come and are opened.
+            .counted(
+                "routines",
+                "Routines",
+                match self.lists.unread {
+                    0 => String::new(),
+                    unread => unread.to_string(),
+                },
+            )
             .on_choose(move |at, _, cx| {
                 let tab = match at {
                     0 => PageTab::Work,
                     at if at == progress_at && tracked => PageTab::Progress,
+                    at if at == routines_at => PageTab::Routines,
                     _ => PageTab::Lists,
                 };
                 match at {
@@ -601,9 +654,7 @@ impl Render for ProjectPage {
                 // Not inside the page's own update: the shell keeps the history, and feeds the
                 // Progress page the sessions it shows.
                 shell
-                    .update(cx, |shell, cx| {
-                        shell.tab_chosen(&project, tab == PageTab::Progress, cx)
-                    })
+                    .update(cx, |shell, cx| shell.tab_chosen(&project, tab, cx))
                     .ok();
             });
 
@@ -646,12 +697,14 @@ impl Render for ProjectPage {
                 Some(progress) => progress.clone().into_any_element(),
                 None => div().into_any_element(),
             },
+            PageTab::Routines => self.routines.clone().into_any_element(),
         };
         let shown_key = match chosen {
             0 => "work",
             1 => "pulls",
             2 => "tickets",
             at if at == progress_at && self.tracked => "progress",
+            at if at == routines_at => "routines",
             _ => "specs",
         };
         let column = div()

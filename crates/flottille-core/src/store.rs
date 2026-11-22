@@ -1084,6 +1084,15 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE routine_runs ADD COLUMN trigger TEXT;
 "#,
     ),
+    (
+        "routine_opened",
+        r#"
+    -- When the user opened a run's result: the windows' dot says a result with something to say
+    -- is not opened yet. The runs that ended before this column are taken as opened.
+    ALTER TABLE routine_runs ADD COLUMN opened_at INTEGER;
+    UPDATE routine_runs SET opened_at = COALESCE(ended_at, started_at);
+"#,
+    ),
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its

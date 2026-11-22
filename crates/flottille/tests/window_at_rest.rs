@@ -236,6 +236,69 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_the_project_page(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_routines_tab_its_page_and_a_result(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    user.fake_script(json!({"turns": [
+        {"when": "List the tickets waiting for my review", "do": [
+            {"say": "Four tickets wait."},
+            {"mcp": {"tool": "routine_result", "arguments": {"summary": "4 to review"}}}]},
+    ]}));
+    idle_session(&user);
+    user.call(
+        "routine.add",
+        json!({"name": "Tickets to review", "project": "app",
+            "prompt": "List the tickets waiting for my review",
+            "schedule": "weekdays 08:30"}),
+    )
+    .unwrap();
+    let run = user
+        .call("routine.run", json!({"routine": "Tickets to review"}))
+        .unwrap();
+    let run = run["run"]["id"].clone();
+    eventually("the run ends", || {
+        user.call("routine.show", json!({"routine": "Tickets to review"}))
+            .unwrap()["runs"][0]["outcome"]
+            == "something"
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's page is shown", |cx| {
+        cx.update(|window, _| window.try_find("project-tabs-routines").is_some())
+    });
+    let present = |cx: &mut VisualTestContext, id: &str| {
+        cx.update(|window, _| window.try_find(id.to_owned()).is_some())
+    };
+
+    cx.update(|window, cx| window.click("project-tabs-routines", cx));
+    until(&shell, cx, "the routine is listed", |cx| {
+        present(cx, "routine-Tickets to review-dot")
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the list, with its dot");
+
+    cx.update(|window, cx| window.click("routine-Tickets to review", cx));
+    until(&shell, cx, "the routine's page shows", |cx| {
+        present(cx, &format!("routine-run-{run}"))
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the routine's page");
+
+    cx.update(|window, cx| window.click(format!("routine-run-{run}"), cx));
+    until(&shell, cx, "the result shows", |cx| {
+        present(cx, "result-report")
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the result page");
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_prepared_workspace_s_page_with_its_time_to_ready(
     cx: &mut TestAppContext,
 ) {
