@@ -1381,14 +1381,6 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
 
 // ── #1177: the hub's truth, a device's look, where this machine listens ───────────────────────
 
-/// A machine whose daemon says it runs Flottille 0.4.0, protocol 2, whatever it is built as.
-fn machine_of_0_4_0() -> Machine {
-    Machine::of(User::new().with_env(
-        "FLOTTILLE_TEST_LINK_HELLO",
-        r#"{"flottille": "0.4.0", "protocols": [2]}"#,
-    ))
-}
-
 fn hub_state(machine: &Machine) -> Value {
     machine.remote()["hub"].clone()
 }
@@ -1409,7 +1401,7 @@ fn wait_for_hub(machine: &Machine, state: &str) {
 #[gpui_kit::test]
 fn a_protocol_mismatch_says_the_hub_is_old_and_how_to_update_it(cx: &mut TestAppContext) {
     let mut hub = TestHub::new();
-    let pc = machine_of_0_4_0();
+    let pc = Machine::new();
     set_up(&hub, &pc);
     // The hub is updated on its host to a build of before pair mode, or never was.
     hub.down();
@@ -1425,10 +1417,11 @@ fn a_protocol_mismatch_says_the_hub_is_old_and_how_to_update_it(cx: &mut TestApp
     });
     settle(&shell, cx);
     let said = label(cx, "hub-reason").unwrap();
-    assert_eq!(
-        said,
-        "The hub runs 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its \
-         host."
+    // This machine says its own build, which the hub session always does: its version is not fixed.
+    assert!(
+        said.starts_with("The hub runs 0.1.0 (protocol 1), this machine ")
+            && said.ends_with(" (protocol 2): update the hub on its host."),
+        "{said}"
     );
     // The hub is the one to update, on its host: never `flottille update`, never "this machine"
     // for the hub.
