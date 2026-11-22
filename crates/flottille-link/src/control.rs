@@ -15,7 +15,8 @@
 //!
 //! ```text
 //! device → hub   {"key": K, "nonce": Nd, "hello": {…}}
-//! hub → device   {"hub": H, "nonce": Nh, "hello": {…}, "proof": sign_H(session, 1, K, Nd, Nh)}
+//! hub → device   {"hub": H, "nonce": Nh, "hello": {…, "signed": sign_H(hello, K, Nd, Nh, …)},
+//!                 "proof": sign_H(session, 1, K, Nd, Nh)}
 //! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false,
 //!                                                 "proof": sign_H(refused, K, Nd, Nh, P, pair,
@@ -44,7 +45,7 @@
 //!
 //! The welcome or the refusal is said over a connection nothing protects on an `http://` hub. The
 //! refusal is a verdict a device acts on (it forgets the hub, or says its list was reset), so the
-//! hub signs it over the handshake: `refused` is `flottille-hub-refused-v1` and a zero byte, then
+//! hub signs it over the handshake: `refused` is `flottille-hub-refused-v2` and a zero byte, then
 //! the device's key, both nonces, what the hub received of the device's proof, `reset` as one byte
 //! and the reason's bytes. What it received is `pinned` (a zero byte when there is none, else a one
 //! and the hash) and `pair` (a zero byte, else a one, the pairing's proof and `Proposed::bytes`):
@@ -54,6 +55,16 @@
 //! 2026-11-22) or does not check (said by something on the way, answering a request changed on the
 //! way, or caught in another session) changes nothing: the device says the hub could not be
 //! reached.
+//!
+//! The hub's hello decides the protocol and whether a side needs an update, so the hub signs it
+//! over the handshake too: `signed` is its signature over `flottille-hub-hello-v1` and a zero
+//! byte, the device's key, both nonces, the length of its version (4 bytes, big-endian), the
+//! version, then each protocol it speaks (4 bytes each). A hub that speaks no protocol of the
+//! device's says, before the handshake, `{"refused": "…", "hello": {…, "signed": …}, "hub": H,
+//! "nonce": Nh}`. A device takes the hub's word on the version, that one side needs an update or
+//! that a lower protocol is the one both speak, only from a hello its pinned key signed: one that
+//! is not signed (a hub of before 2026-11-22) or does not check opens a session only on the
+//! device's newest protocol, and is otherwise the hub not reached.
 //!
 //! A device that pairs (`docs/remote.md`, "Pairing") is no member yet: its proof carries `pair`,
 //! the card it proposes (`Proposed`) and its proof that it holds the pair code's secret, which
@@ -99,7 +110,9 @@ const SESSION: &[u8] = b"flottille-hub-session-v1\0";
 /// The start of what a device proves with a pair code's secret.
 const PAIR: &[u8] = b"flottille-hub-pair-v1\0";
 /// The start of what the hub signs when it refuses a device at the end of the handshake.
-const REFUSED: &[u8] = b"flottille-hub-refused-v1\0";
+const REFUSED: &[u8] = b"flottille-hub-refused-v2\0";
+/// The start of what the hub signs of its hello.
+const HELLO: &[u8] = b"flottille-hub-hello-v1\0";
 /// The longest line a device takes from its hub: a list of `MOST_CHANGES + MANAGING_HEADROOM`
 /// changes fits.
 pub const LINE_LIMIT: usize = 4 << 20;
@@ -408,6 +421,41 @@ impl Transcript {
         bytes
     }
 
+    /// What the hub signs of its hello: bound to this handshake, so that a hello caught in one
+    /// session says nothing in another.
+    fn hello_bytes(&self, hello: &Hello) -> Vec<u8> {
+        let mut bytes = HELLO.to_vec();
+        bytes.extend_from_slice(self.device.as_bytes());
+        bytes.extend_from_slice(&self.device_nonce.0);
+        bytes.extend_from_slice(&self.hub_nonce.0);
+        let version = hello.flottille.as_bytes();
+        bytes.extend_from_slice(
+            &u32::try_from(version.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(version);
+        for protocol in &hello.protocols {
+            bytes.extend_from_slice(&protocol.to_be_bytes());
+        }
+        bytes
+    }
+
+    /// The hub's hello, signed over this handshake with `key`.
+    fn signed_hello(&self, key: &SigningKey, hello: &Hello) -> SignedHello {
+        SignedHello {
+            hello: hello.clone(),
+            signed: Some(sign(key, &self.hello_bytes(hello))),
+        }
+    }
+
+    /// Whether the hub of this handshake signed `hello`.
+    fn hub_said(&self, hello: &SignedHello) -> bool {
+        hello
+            .signed
+            .is_some_and(|signed| verify(&self.hub, &self.hello_bytes(&hello.hello), &signed))
+    }
+
     fn pair_mac(&self, secret: &PairSecret, proposed: &Proposed) -> Hmac<Sha256> {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&secret.0).expect("HMAC takes a key of any length");
@@ -460,8 +508,27 @@ struct DeviceHello {
 struct HubHello {
     hub: PublicKey,
     nonce: Nonce32,
-    hello: Hello,
+    hello: SignedHello,
     proof: Signature,
+}
+
+/// The hub's hello with its signature over the handshake (`Transcript::hello_bytes`), beside the
+/// fields a device of before reads, which ignores it; a hub of before signs none.
+#[derive(Clone, Serialize, Deserialize)]
+struct SignedHello {
+    #[serde(flatten)]
+    hello: Hello,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signed: Option<Signature>,
+}
+
+/// The hub's refusal before the handshake, when it speaks no protocol of the device's, beside its
+/// `refused`: its hello, and the key and nonce it signed it with (a hub of before says neither).
+#[derive(Deserialize)]
+struct RefusedHello {
+    hello: SignedHello,
+    hub: PublicKey,
+    nonce: Nonce32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1129,12 +1196,19 @@ impl Session {
                 .await
                 .map_err(lost)?;
             if let Some(reason) = answer.get("refused").and_then(|refused| refused.as_str()) {
-                // A hub with no protocol in common says its own hello with its refusal: the
-                // device says what to update from both, in its own words.
-                if let Some(theirs) = answer
-                    .get("hello")
-                    .and_then(|hello| serde_json::from_value::<Hello>(hello.clone()).ok())
-                    && let Err(refusal) = choose_hub(hello, &theirs)
+                // A hub with no protocol in common says its own hello with its refusal, signed
+                // over this handshake: the device says what to update from both, in its own
+                // words. Unsigned, or signed by another key, it is no word on the version.
+                if let Ok(theirs) = serde_json::from_value::<RefusedHello>(answer.clone())
+                    && pinned.is_none_or(|pinned| *pinned == theirs.hub)
+                    && (Transcript {
+                        hub: theirs.hub,
+                        device: own,
+                        device_nonce: nonce,
+                        hub_nonce: theirs.nonce,
+                    })
+                    .hub_said(&theirs.hello)
+                    && let Err(refusal) = choose_hub(hello, &theirs.hello.hello)
                 {
                     return Err(ControlError::NeedsUpdate(refusal));
                 }
@@ -1165,7 +1239,6 @@ impl Session {
                     "it did not prove it holds the key it showed".to_owned(),
                 ));
             }
-            let protocol = choose_hub(hello, &theirs.hello).map_err(ControlError::NeedsUpdate)?;
             let proof = sign(key, &proof_bytes(2, &theirs.hub, &theirs.nonce, &nonce));
             let transcript = Transcript {
                 hub: theirs.hub,
@@ -1173,6 +1246,26 @@ impl Session {
                 device_nonce: nonce,
                 hub_nonce: theirs.nonce,
             };
+            // The hub's word that one side needs an update, or that a lower protocol than this
+            // device's newest is the one both speak, is taken only when the hub signed it:
+            // anything on the way to an `http://` hub can add a protocol to its hello or take one
+            // out. A hello it did not sign (a hub of before 2026-11-22) is taken for this device's
+            // newest protocol only.
+            let offered = &theirs.hello.hello.protocols;
+            if !offered.contains(&hello.newest()) && !transcript.hub_said(&theirs.hello) {
+                return Err(ControlError::Unreachable {
+                    hub: authority.clone(),
+                    why: format!(
+                        "its hello offers protocols {offered:?} without the hub's signature, as \
+                         an older flottille-hub or something on the way to it does, and this \
+                         machine speaks {:?}: the hub could not be reached (an older hub is \
+                         updated on its host)",
+                        hello.protocols
+                    ),
+                });
+            }
+            let protocol =
+                choose_hub(hello, &theirs.hello.hello).map_err(ControlError::NeedsUpdate)?;
             let pair = pair.map(|(mut pairing, secret)| {
                 pairing.proof = transcript.pair_proof(&secret, &pairing.proposed);
                 pairing
@@ -1756,13 +1849,26 @@ pub async fn arrive(
         let theirs: DeviceHello = read_frame(&mut reader, HANDSHAKE_LIMIT).await?;
         let nonce = Nonce32::new()?;
         let hub = key.public();
+        let transcript = Transcript {
+            hub,
+            device: theirs.key,
+            device_nonce: theirs.nonce,
+            hub_nonce: nonce,
+        };
+        let signed = transcript.signed_hello(&key.0, hello);
         let protocol = match choose_hub(&theirs.hello, hello) {
             Ok(protocol) => protocol,
             Err(refusal) => {
-                // Said as the device reads it, with the hub's hello for it to say it itself.
+                // Said as the device reads it, with the hub's hello, signed, for it to say it
+                // itself.
                 let _ = write_line(
                     &mut writer,
-                    &serde_json::json!({"refused": refusal.to_string(), "hello": hello}),
+                    &serde_json::json!({
+                        "refused": refusal.to_string(),
+                        "hello": signed,
+                        "hub": hub,
+                        "nonce": nonce,
+                    }),
                 )
                 .await;
                 return Err(format!(
@@ -1777,7 +1883,7 @@ pub async fn arrive(
             &HubHello {
                 hub,
                 nonce,
-                hello: hello.clone(),
+                hello: signed,
                 proof,
             },
         )
@@ -1791,12 +1897,6 @@ pub async fn arrive(
         ) {
             return Err("the device did not prove it holds the key it showed".to_owned());
         }
-        let transcript = Transcript {
-            hub,
-            device: theirs.key,
-            device_nonce: theirs.nonce,
-            hub_nonce: nonce,
-        };
         Ok((
             transcript,
             proved.pinned,
@@ -1918,6 +2018,62 @@ mod tests {
             ..transcript
         };
         assert!(!other.proves_pair(&secret, &proposed, &proof));
+    }
+
+    #[test]
+    fn the_hub_s_hello_is_signed_for_one_session_and_one_hello() {
+        let hub = SigningKey::from_bytes(&[1; 32]);
+        let device = |n: u8| PublicKey(SigningKey::from_bytes(&[n; 32]).verifying_key());
+        let transcript = Transcript {
+            hub: PublicKey(hub.verifying_key()),
+            device: device(2),
+            device_nonce: Nonce32([3; 32]),
+            hub_nonce: Nonce32([4; 32]),
+        };
+        let hello = Hello {
+            flottille: "0.4.0".to_owned(),
+            protocols: vec![1, 2],
+        };
+        let signed = transcript.signed_hello(&hub, &hello);
+        assert!(transcript.hub_said(&signed));
+        // Not with a protocol taken out or added, not for another version, not in another
+        // session, not unsigned, not as another signature of the hub's.
+        let changed = |change: &dyn Fn(&mut Hello)| {
+            let mut changed = signed.clone();
+            change(&mut changed.hello);
+            changed
+        };
+        assert!(!transcript.hub_said(&changed(&|hello| hello.protocols = vec![1])));
+        assert!(!transcript.hub_said(&changed(&|hello| hello.protocols.push(999))));
+        assert!(!transcript.hub_said(&changed(&|hello| hello.flottille = "0.4.01".to_owned())));
+        let other = Transcript {
+            device_nonce: Nonce32([5; 32]),
+            ..transcript
+        };
+        assert!(!other.hub_said(&signed));
+        let unsigned = SignedHello {
+            signed: None,
+            ..signed.clone()
+        };
+        assert!(!transcript.hub_said(&unsigned));
+        let session_proof = sign(
+            &hub,
+            &proof_bytes(1, &device(2), &Nonce32([3; 32]), &Nonce32([4; 32])),
+        );
+        let replayed = SignedHello {
+            signed: Some(session_proof),
+            ..signed.clone()
+        };
+        assert!(!transcript.hub_said(&replayed));
+        assert!(
+            transcript
+                .hello_bytes(&hello)
+                .starts_with(b"flottille-hub-hello-v1\0")
+        );
+        // A device of before reads the hub's hello as it did, the signature beside it ignored.
+        let said = serde_json::to_value(&signed).unwrap();
+        assert!(said["signed"].is_string());
+        assert_eq!(serde_json::from_value::<Hello>(said).unwrap(), hello);
     }
 
     #[test]

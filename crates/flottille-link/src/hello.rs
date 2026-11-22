@@ -26,7 +26,7 @@ impl Hello {
     }
 
     /// The newest protocol this side speaks, `0` for a side that says none.
-    fn newest(&self) -> u32 {
+    pub fn newest(&self) -> u32 {
         self.protocols.iter().copied().max().unwrap_or(0)
     }
 }
