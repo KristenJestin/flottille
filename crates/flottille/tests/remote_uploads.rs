@@ -269,3 +269,54 @@ fn chunks_without_their_message_are_dropped() {
     assert_eq!(answer["error"]["code"], "not-found", "{answer}");
     assert!(error_of(&answer).contains("dropped"), "{answer}");
 }
+
+/// The folder an upload of the device that signs for `pc` has on the server: the name of the
+/// sender's folder is its key, then `-` and the upload's name.
+fn folder_of(server: &Machine, name: &str) -> std::path::PathBuf {
+    let owner = std::fs::read_dir(server.user.path("data/flottille/uploads"))
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .find_map(|folder| folder.strip_suffix("-first").map(str::to_owned))
+        .expect("the first upload is kept");
+    server
+        .user
+        .path("data/flottille/uploads")
+        .join(format!("{owner}-{name}"))
+}
+
+#[test]
+fn a_file_left_on_disk_is_never_appended_to_and_a_refused_chunk_leaves_nothing() {
+    let (_hub, pc, server, _agent) = machines(User::with_fake_agent());
+    // The upload whose folder tells whose uploads these are, and which waits for its next chunk.
+    let one = picture(CHUNK + 100);
+    let first = chunk("first", 1, PNG, one.len(), 0, &one[..CHUNK]);
+    assert_eq!(ask(&pc, "agent.upload", first)["result"]["received"], CHUNK);
+
+    // Files a stopped daemon, or a chunk racing the drop of an upload, left under the names of
+    // uploads to come: the bytes of those would be the start of the picture.
+    let shot = picture(CHUNK + 100);
+    for name in ["left", "over", "more"] {
+        let folder = folder_of(&server, name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("picture-1"), b"old bytes").unwrap();
+        let answer = ask(
+            &pc,
+            "agent.upload",
+            chunk(name, 1, PNG, shot.len(), 0, &shot[..CHUNK]),
+        );
+        assert!(answer.get("error").is_some(), "{name}: {answer}");
+        assert!(
+            !folder.exists(),
+            "{name}: the folder of a refused chunk stays"
+        );
+    }
+    assert_eq!(kept(&server), 1, "only the first upload is kept");
+
+    // None of the refusals took a place of the sender's two: the same names now go through, from
+    // nothing, and what is on disk is what was sent.
+    upload(&pc, "left", 1, PNG, &shot);
+    assert_eq!(
+        std::fs::read(folder_of(&server, "left").join("picture-1")).unwrap(),
+        shot
+    );
+}

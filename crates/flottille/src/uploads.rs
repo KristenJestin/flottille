@@ -137,8 +137,9 @@ async fn drop_when_late(held: Held, key: (String, String)) {
         };
         let idle = upload.last.elapsed();
         if idle >= lasts {
+            // The folder goes under the guard: a chunk that starts an upload of the same name
+            // waits for it, and never finds this one's folder to lose.
             let upload = uploads.remove(&key).expect("it is there");
-            drop(uploads);
             let _ = std::fs::remove_dir_all(&upload.folder);
             return;
         }
@@ -249,35 +250,25 @@ fn keep(
             .uploads()
             .join(format!("{sender}-{}", asked.upload)),
     };
-    let unavailable = |error: std::io::Error| {
-        Failure::new(
-            "unavailable",
-            format!("{said} {number} cannot be kept: {error}"),
-        )
-    };
-    ensure_private_dir(&folder).map_err(|e| {
-        Failure::new(
-            "unavailable",
-            format!("{said} {number} cannot be kept: {e}"),
-        )
-    })?;
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(folder.join(file_name(kind, number)))
-            .map_err(unavailable)?;
-        file.write_all(&bytes).map_err(unavailable)?;
-    }
+    // Recorded before anything is written: whatever the write leaves on disk is then known, and
+    // bound, by the table.
     let upload = uploads.entry(key.clone()).or_insert_with(|| Upload {
-        folder,
+        folder: folder.clone(),
         files: BTreeMap::new(),
         last: Instant::now(),
     });
     upload.last = Instant::now();
+    if let Err(error) = write(&folder, kind, number, expected, &bytes) {
+        // A chunk that failed may have written a part of itself: the upload is not trusted any
+        // more, nor its folder; the sender sends it again from its start.
+        uploads.remove(&key);
+        let _ = std::fs::remove_dir_all(&folder);
+        return Err(Failure::new(
+            "unavailable",
+            format!("{said} {number} cannot be kept: {error}"),
+        ));
+    }
+    let upload = uploads.get_mut(&key).expect("recorded above");
     upload
         .files
         .entry((kind, number))
@@ -289,6 +280,31 @@ fn keep(
         .received = received;
     let answer = json!({"upload": asked.upload, "file": number, "received": received});
     Ok((answer, made.then_some(key)))
+}
+
+/// The chunk `bytes` of a file written at its end in `folder`, which is made if it is not there.
+/// The first chunk makes the file and refuses one that is there: what a stopped daemon left, or
+/// what an upload dropped just before left, is never a start to append to. Never through a link.
+fn write(
+    folder: &std::path::Path,
+    kind: Kind,
+    number: u32,
+    expected: u64,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    ensure_private_dir(folder).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut options = std::fs::OpenOptions::new();
+    if expected == 0 {
+        options.write(true).create_new(true);
+    } else {
+        options.append(true);
+    }
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(folder.join(file_name(kind, number)))?
+        .write_all(bytes)
 }
 
 /// The file of a picture or a text of an upload: this daemon's name, never the sender's.
