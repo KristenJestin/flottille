@@ -110,6 +110,15 @@ pub enum Selection {
     WhatsNew,
 }
 
+/// A page of another machine to open once that machine is in front.
+#[derive(Clone, Debug, PartialEq)]
+enum There {
+    /// A session, by its id there.
+    Session(String),
+    /// A project's page, by its name.
+    Project(String),
+}
+
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
 /// row's number, so that the next row is a toast of its own.
 #[derive(Default)]
@@ -302,9 +311,9 @@ pub struct Shell {
     /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
     /// machine.
     switch_wait: Option<Task<()>>,
-    /// The session to open once the first read of the machine brought in front came: that
-    /// machine (`None`: this one) and the session's id there.
-    open_there: Option<(Option<String>, String)>,
+    /// The page to open once the first read of the machine brought in front came: that machine
+    /// (`None`: this one) and the session or the project there.
+    open_there: Option<(Option<String>, There)>,
     /// The rows of other machines' sessions whose close was asked: gone from the list at once.
     closing: HashSet<String>,
     /// The daemon's last read as it gave it, before the sessions on other machines are added
@@ -700,6 +709,17 @@ impl Shell {
         let read = matches!(news, crate::machines::News::Read(_));
         self.machines
             .update(cx, |section, cx| section.news(news, window, cx));
+        self.say_held(cx);
+        if let Some(read) = self.machines.read(cx).machines() {
+            let launched = crate::model::remote_agents(read);
+            if cx
+                .try_global::<crate::model::RemoteAgents>()
+                .is_none_or(|now| now.0 != launched)
+            {
+                cx.set_global(crate::model::RemoteAgents(launched));
+                cx.refresh_windows();
+            }
+        }
         // The sessions on other machines, or their state, may have changed: their rows follow.
         if read
             && !self.switching
@@ -735,13 +755,17 @@ impl Shell {
     /// opens that session once its first read came. The switch's own wait applies: past it, the
     /// window is back on this machine and says why.
     pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
-        self.choose_then(Some(machine.clone()), Some((Some(machine), agent)), cx);
+        self.choose_then(
+            Some(machine.clone()),
+            Some((Some(machine), There::Session(agent))),
+            cx,
+        );
     }
 
     /// Opens the session `agent` of this machine, listed while another machine's is open: this
     /// machine comes back in front, then the session opens.
     pub fn open_here(&mut self, agent: String, cx: &mut Context<Self>) {
-        self.choose_then(None, Some((None, agent)), cx);
+        self.choose_then(None, Some((None, There::Session(agent))), cx);
     }
 
     /// The user confirmed the end of the session of the row `session`: one of another machine's
@@ -806,6 +830,38 @@ impl Shell {
         &self.machines
     }
 
+    /// Says to every page whether the machine in front takes changes now ([`crate::machines::Held`]),
+    /// when that changed.
+    fn say_held(&mut self, cx: &mut Context<Self>) {
+        let front = self.aim.machine();
+        let holding = crate::machines::holding(front.as_deref(), self.machines.read(cx).machines());
+        if crate::machines::held(cx) != holding {
+            cx.set_global(crate::machines::Held(holding));
+            cx.refresh_windows();
+        }
+    }
+
+    /// The machine whose list names `project` while the machine in front has no such project:
+    /// `Some(None)` for this machine, listed while another is in front.
+    fn machine_of_project(&self, project: &str, cx: &App) -> Option<Option<String>> {
+        let front = self.read.as_ref()?;
+        if front.projects.iter().any(|p| p.name == project) {
+            return None;
+        }
+        let machines = self.machines.read(cx).machines()?;
+        let names =
+            |listed: &[crate::machines::Listed]| listed.iter().any(|s| s.project == project);
+        if self.aim.machine().is_some() && names(&machines.lists.this) {
+            return Some(None);
+        }
+        machines
+            .lists
+            .machines
+            .iter()
+            .find(|(name, listed)| Some(name) != self.aim.machine().as_ref() && names(listed))
+            .map(|(name, _)| Some(name.clone()))
+    }
+
     /// The machine the window shows, when it is not this one.
     pub fn machine_shown(&self) -> Option<String> {
         self.aim.machine()
@@ -817,12 +873,25 @@ impl Shell {
         self.choose_then(name, None, cx);
     }
 
+    /// Shows the machine `name` (`None`: this one) on the page of `project`: the composer's
+    /// picker chose where the session starts, and that machine's page of the project is where it
+    /// starts. One that is off is said so and not shown, as `choose_machine` does.
+    pub fn choose_machine_for(
+        &mut self,
+        name: Option<String>,
+        project: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let then = Some((name.clone(), There::Project(project.to_owned())));
+        self.choose_then(name, then, cx);
+    }
+
     /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
     /// once the switch starts, never for a machine that is off or whose key could not be read.
     fn choose_then(
         &mut self,
         name: Option<String>,
-        then: Option<(Option<String>, String)>,
+        then: Option<(Option<String>, There)>,
         cx: &mut Context<Self>,
     ) {
         // A choice still reading the key gives way to this one.
@@ -905,6 +974,8 @@ impl Shell {
         self.seen.connections.store(0, Ordering::SeqCst);
         self.aim.set(aimed);
         cx.set_global(crate::machines::Shown(shown));
+        self.say_held(cx);
+        self.read_folders(cx);
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.waiting_for_the_daemon(true, cx);
@@ -913,8 +984,21 @@ impl Shell {
     /// The session of another machine asked for, once that machine's read holds it: its page is
     /// opened, on the agent asked for.
     fn open_there_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((machine, agent)) = self.open_there.clone() else {
+        let Some((machine, there)) = self.open_there.clone() else {
             return;
+        };
+        let agent = match there {
+            There::Session(agent) => agent,
+            There::Project(project) => {
+                if self.aim.machine() != machine
+                    || !self.snapshot.projects.iter().any(|p| p.name == project)
+                {
+                    return;
+                }
+                self.open_there = None;
+                self.open(Selection::Project(project), window, cx);
+                return;
+            }
         };
         let root = self.snapshot.root_of(&agent);
         if self.aim.machine() != machine || self.snapshot.session(&root).is_none() {
@@ -1058,8 +1142,27 @@ impl Shell {
     /// Opens the form that adds a project.
     pub fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
+        let asks_machine = self
+            .machines
+            .read(cx)
+            .machines()
+            .is_some_and(|read| crate::machines::choices(read).len() > 1);
         self.add_project
-            .update(cx, |form, cx| form.open(window, cx));
+            .update(cx, |form, cx| form.open(asks_machine, window, cx));
+        self.read_folders(cx);
+    }
+
+    /// The folders the machine shown offers to add a project from, while the form is open on
+    /// another machine: this one's are picked with the system's dialog.
+    fn read_folders(&mut self, cx: &mut Context<Self>) {
+        if let Some(machine) = self.aim.machine()
+            && self.add_project.read(cx).is_open()
+        {
+            self.perform(Command::ProjectFolders {
+                machine: Some(machine),
+                path: None,
+            });
+        }
     }
 
     /// The dialog that renames a session.
@@ -1713,6 +1816,8 @@ impl Shell {
                 // What the machine now shown lists, and its connections: the reads made when the
                 // window opened went to the machine it was on then.
                 if switched {
+                    // What Settings and a project's settings show is that machine's now.
+                    self.texts_due = true;
                     self.extensions.update(cx, |registry, cx| registry.read(cx));
                     let connections = self.settings.read(cx).connections().clone();
                     connections.update(cx, |section, cx| section.read(cx));
@@ -2256,6 +2361,10 @@ impl Shell {
                     }
                 }
             }
+            Outcome::ProjectFolders { machine, read } => {
+                self.add_project
+                    .update(cx, |form, cx| form.folders_answered(machine, read, cx));
+            }
             Outcome::ProjectDetected { seq, read, .. } => {
                 self.add_project
                     .update(cx, |form, cx| form.detect_answered(seq, read, cx));
@@ -2446,28 +2555,6 @@ impl Shell {
             } => {
                 let check = self.settings.read(cx).check().clone();
                 check.update(cx, |check, cx| check.answered(then, answer, cx));
-            }
-            Outcome::Asked {
-                then: crate::extensions::Then::Runners { project },
-                answer,
-            } => {
-                // `offered` names every machine that would take the session, this one too.
-                let runners: Vec<String> = answer
-                    .map(|read| {
-                        let this = read["this"]["name"].as_str().unwrap_or_default().to_owned();
-                        read["offered"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|name| name.as_str())
-                            .filter(|name| *name != this)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if let Some(composer) = self.composer_of(&project).cloned() {
-                    composer.update(cx, |composer, cx| composer.set_runners(runners, cx));
-                }
             }
             Outcome::Asked {
                 then: crate::extensions::Then::Tunnels(then),
@@ -4037,6 +4124,14 @@ impl Shell {
 
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        // A project of another machine only: its page is that machine's, brought in front.
+        if let Selection::Project(project) = &selection
+            && let Some(machine) = self.machine_of_project(project, cx)
+        {
+            let then = Some((machine.clone(), There::Project(project.clone())));
+            self.choose_then(machine, then, cx);
+            return;
+        }
         self.select(selection, window, cx);
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.set_bell(false, cx);

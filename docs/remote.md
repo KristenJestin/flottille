@@ -583,6 +583,34 @@ open; bringing in front a machine that needs an update, or that went off meanwhi
 toast that says why, and the window stays on the machine it shows. The window reads the
 device key from the same keyring item, or the same file, as the command line.
 
+**Built (#1182), in the window: every page works on any machine.** The window addresses another
+machine one way only, the one its sessions use: bringing that machine in front, every connection of
+the window signed with the device key for it and carried by this machine's daemon. Settings opens
+with `Settings of` (the kit's select: this machine, then the other runners, each with its role and
+state, `runner · online`);
+choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
+and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
+that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
+machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
+window keeps; one line under the tabs says it while another machine is shown (`This window
+(appearance, version) stays this machine's, pc, whichever machine is chosen above.`). Settings, Machines is the hub's list, the same from
+every machine. **Add project** asks first on which machine (radios: this one first, then the runners,
+each with its role and state; Next), then the folder there (Back returns to the machine): on
+another machine it is picked in that machine's folders, never typed, from its home, a folder opened
+after the other (`project.folders`, `..` going up), each saying whether it is a repository and how
+many it holds, or that it is already a project; a repository is picked, then detected and added
+there. On this machine it is typed or picked with the system's dialog, as before. A
+project of another machine only opens its page by bringing that machine in front; its settings and
+every tab follow. A page of another machine says it once, at its top, in its path line (`server /
+Settings / Agents`, `server / app`, `server / app / Settings`), which unfolds as that machine
+comes in front and folds away when this one is back. While the machine in front is off, or this
+device is a `viewer` there, one line above the page says why (`server offline since 22:14`, `This
+device may only view server`), and the controls that write (Settings' sections, a project's
+settings, a project page's composer and its tab, Add project's button) fade their ink and take no
+click, while the page still scrolls and its tabs still read; nothing is sent, nothing is kept. A
+machine that is off is not brought in front (a failure toast says it, as for its sessions): what
+the window shows of it is what it read while it was on.
+
 ## Roles
 
 The user chooses what a device may do on the device when it pairs, from what it proposes; the role
@@ -737,8 +765,10 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
   project: a project registered on several machines under the same name is one group. Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
-  machine's name as a tag (`server`); a session of this machine carries none. There is no machine
-  switcher: the machines' states (online, offline since, needs an update) are in Settings,
+  machine's name as a tag (`server`); a session of this machine carries none. The machine is
+  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
+  in a project's composer (the machine picker); the
+  machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
@@ -1450,6 +1480,34 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
+  project's choosers switch the whole window, as opening a session there does, rather than a page
+  aimed at a machine of its own while the rest stays: one way to address a machine, and the
+  sidebar, the bell and the pages always say the same machine.
+- **`project.folders` lists one folder's folders at a time** (#1182), from the machine's home: the
+  dialog opens them one after the other, and a folder that is a repository itself is picked; a
+  folder that only holds repositories (not one itself) is opened, not picked. It is `drive`, as
+  adding is.
+- **The choosers name each machine with its icon, its role and its state** (#1182): the kit draws
+  the icon of the machine chosen in its colour before its name on the chooser's button (`server in
+  teal` is the colour's word, for the ones who do not see colours), and each row of the list has the
+  machine's icon in its colour, its role and state, with a check on the chosen one that moves over
+  `PANEL` (the kit's tinted option, `MenuItem::tint` and `checked`; `Select` and `RadioChoices` take
+  the same tint). Nothing is drawn beside the kit's chooser. A chooser that stops having a choice
+  (the project is on one machine only, the last runner is gone) folds away with its words. The
+  choosers offer the runners only: a controller holds no project.
+- **The composer's machine picker lists the machines that have the project** (#1182): the runners
+  that offered it over their link, or whose light list of sessions names it (kept while a machine is
+  off, which offers nothing). One that is off is greyed and says `offline since 22:14`; it is not
+  picked. A project on one machine has no picker. Choosing a machine brings it in front on the
+  project's page, like every page of another machine, and the place is `main` again. A machine in
+  front that goes off says under the composer to pick another or wait; the composer stays free for
+  the picker, and nothing is started.
+- **A session started on another machine is a row of its pilot's rail** (#1182): its machine's icon
+  and its title in the rail's Agents, and, for a child, a line of the sub-agents list; both bring
+  that machine in front on it. The header of a session names the machine it runs on when the user
+  has several (`[icon] server / main`).
 
 - One list of every machine (#1150): the window follows the other machines through its own
   daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`

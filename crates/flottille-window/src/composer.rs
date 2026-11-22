@@ -43,6 +43,7 @@ pub struct PlaceChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Place,
+    Machine,
 }
 
 /// The provider and the model a project's file gives its agents, each when it gives it.
@@ -199,10 +200,9 @@ pub struct Composer {
     /// What the daemon keeps of the draft, and the wait before it is written.
     keeping: Keeping,
     places: Vec<PlaceChoice>,
-    /// The machines, other than this one, that would take a session of the project on the agent
-    /// picked (`remote.machines` with the project and the agent, read each time the menu opens).
-    runners: Vec<String>,
     choice: Choice,
+    /// The machine the composer starts on is off: nothing is started on it.
+    machine_off: bool,
     /// A workspace made from the picker, which becomes the place once the daemon lists it.
     wanted: Option<String>,
     menu: Option<Menu>,
@@ -283,8 +283,8 @@ impl Composer {
             has_text: false,
             focused: false,
             places: Vec::new(),
-            runners: Vec::new(),
             choice: Choice::Main,
+            machine_off: false,
             wanted: None,
             menu: None,
             providers: Providers::default(),
@@ -638,6 +638,15 @@ impl Composer {
         cx.notify();
     }
 
+    /// The place is `main` again: another machine's places are not this one's.
+    fn back_to_main(&mut self, cx: &mut Context<Self>) {
+        self.wanted = None;
+        self.choice = Choice::Main;
+        self.error = None;
+        self.set_blocked();
+        cx.notify();
+    }
+
     /// Puts the caret at the end of what the field holds and gives it the focus: where "New
     /// session" lands, a draft kept or not.
     pub fn focus_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -659,39 +668,7 @@ impl Composer {
         } else {
             Some(menu)
         };
-        if self.menu == Some(Menu::Place) {
-            self.ask_runners(cx);
-        }
         cx.notify();
-    }
-
-    /// Asks the daemon which machines would take a session of this project on the agent picked,
-    /// what `flottille remote members --runners --project --agent` asks.
-    fn ask_runners(&self, cx: &mut Context<Self>) {
-        let mut params = serde_json::json!({"project": self.project});
-        if let Some(agent) = &self.pick.provider {
-            params["agent"] = serde_json::Value::from(agent.clone());
-        }
-        let then = crate::extensions::Then::Runners {
-            project: self.project.clone(),
-        };
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::Ask {
-                    method: "remote.machines".into(),
-                    params,
-                    then,
-                })
-            })
-            .ok();
-    }
-
-    /// What the daemon answered: the machines that can run the project, this one left out.
-    pub fn set_runners(&mut self, runners: Vec<String>, cx: &mut Context<Self>) {
-        if self.runners != runners {
-            self.runners = runners;
-            cx.notify();
-        }
     }
 
     /// Why the chosen place cannot take a session now: a workspace prepared again. The choice is
@@ -718,6 +695,7 @@ impl Composer {
 
     fn can_send(&self) -> bool {
         self.blocked.is_none()
+            && !self.machine_off
             // Before the daemon listed the providers, it picks one itself, or says why not.
             && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
             && self.model_refused().is_none()
@@ -816,7 +794,7 @@ impl Composer {
         }
     }
 
-    fn render_pickers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_pickers(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (glyph, label) = match &self.choice {
             Choice::Main => (Icon::Folder, "main".to_owned()),
             Choice::Workspace(name) => (Icon::Branch, name.clone()),
@@ -840,6 +818,7 @@ impl Composer {
             )
             .child(Attachments::button(cx, Self::attached_of))
             .child(div().flex_1())
+            .children(self.machine_picker(window, cx))
             .children(self.render_agent_picker(cx))
             .child(self.mode.clone())
             .child(
@@ -847,6 +826,82 @@ impl Composer {
                     .disabled(!can_send)
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
+    }
+
+    /// The machines that have the project, when there are several: this one first, each with its
+    /// state.
+    fn machine_choices(&self, cx: &App) -> Vec<crate::machines::Choice> {
+        let Some(shell) = self.shell.upgrade() else {
+            return Vec::new();
+        };
+        let shown = crate::machines::shown_machine(cx);
+        shell
+            .read(cx)
+            .machines()
+            .read(cx)
+            .machines()
+            .map(|read| crate::machines::project_choices(read, &self.project, shown.as_deref()))
+            .unwrap_or_default()
+    }
+
+    /// The picker of the machine the session starts on, beside the agent's: only a project that
+    /// is on several machines has one. Choosing another brings it in front, on this project's
+    /// page, the place back on `main`.
+    fn machine_picker(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        // Once the project is on one machine only, the picker narrows and fades away with the
+        // choices it had.
+        let (choices, present) =
+            crate::machines::kept("machine-picker-kept", self.machine_choices(cx), window, cx);
+        if choices.is_empty() {
+            return None;
+        }
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let (this, shell, project) = (
+            cx.entity().downgrade(),
+            self.shell.clone(),
+            self.project.clone(),
+        );
+        let picker = crate::machines::picker(
+            "machine-picker",
+            "machine-choice",
+            &choices,
+            chosen,
+            self.open_of(Menu::Machine),
+            Self::handler(cx, |this, _, cx| this.toggle_menu(Menu::Machine, cx)),
+            move |name, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.menu = None;
+                    this.back_to_main(cx);
+                })
+                .ok();
+                let project = project.clone();
+                shell
+                    .update(cx, |shell, cx| shell.choose_machine_for(name, &project, cx))
+                    .ok();
+            },
+        );
+        // It enters when the project turns out to be on several machines, and leaves when it is
+        // not any more.
+        crate::machines::narrowing(
+            "machine-picker-fold",
+            present,
+            enter("machine-picker-enter", 0, picker).into_any_element(),
+            window,
+            cx,
+        )
+    }
+
+    /// Whether the list of `menu` is open.
+    fn open_of(&self, menu: Menu) -> bool {
+        self.menu == Some(menu)
     }
 
     /// The one picker of the agent, once a provider is picked.
@@ -967,24 +1022,6 @@ impl Composer {
                 (!place.ready).then_some("not ready"),
                 place.ready.then(|| Choice::Workspace(name.clone())),
             ));
-        }
-        // Another machine that can run the project: choosing it shows that machine, where the
-        // session then starts.
-        for name in &self.runners {
-            let machine = name.clone();
-            items.push(
-                MenuItem::new(format!("place-choice-machine-{name}"), name.clone())
-                    .leading(Icon::Service)
-                    .note("other machine")
-                    .on_click(Self::handler(cx, move |this, _, cx| {
-                        this.menu = None;
-                        let machine = machine.clone();
-                        this.shell
-                            .update(cx, |shell, cx| shell.choose_machine(Some(machine), cx))
-                            .ok();
-                        cx.notify();
-                    })),
-            );
         }
         // Not a place: it opens the page's new-workspace modal, the one its own button opens.
         items.push(
@@ -1159,6 +1196,14 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
+        // The machine in front is off: what it says, and the way out, which is the picker.
+        let machine_off = crate::machines::held(cx)
+            .filter(|holding| holding.offline)
+            .map(|holding| {
+                let (name, state) = holding.line.split_once(' ').unwrap_or((&holding.line, ""));
+                format!("{name} is {state}: pick another machine, or wait for it.")
+            });
+        self.machine_off = machine_off.is_some();
         let focus = fade("composer-focus", self.focused, HOVER, window, cx);
         self.attached.place(window, cx);
         let strip = self.attached.strip(window, cx, |this, at, window, cx| {
@@ -1210,8 +1255,25 @@ impl Render for Composer {
                 .overflow_hidden()
                 .child(body),
         )
-        .child(self.render_pickers(cx).into_any_element())
+        .child(self.render_pickers(window, cx).into_any_element())
         .children(self.render_not_ready(cx))
+        .child(presence_of(
+            "composer-machine-off-line",
+            machine_off.map(SharedString::from),
+            move |why| {
+                div()
+                    .id("composer-machine-off")
+                    .aria_label(why.clone())
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(why)
+                    .test_support()
+                    .into_any_element()
+            },
+        ))
         .child(presence_of(
             "composer-model-refused-line",
             self.model_refused().map(SharedString::from),

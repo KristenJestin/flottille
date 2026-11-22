@@ -328,6 +328,90 @@ pub fn elsewhere_id(machine: &str, agent: &str) -> String {
     format!("{agent}@{machine}")
 }
 
+/// Whether a session started on another machine is shown under its pilot: a child or a led session
+/// while it lives or once it reported. A session handed to the user is theirs, on its machine only.
+fn under_its_pilot(launched: &crate::machines::Launched) -> bool {
+    launched.kind != "handed"
+        && !(launched.state == "ended" && launched.heard.as_deref() != Some("child-report"))
+}
+
+/// A session or a child an agent of this machine started on another, as the lists of its pilot's
+/// session say it: a row with its machine's icon in the rail's Agents and, for a child, in the
+/// sub-agents list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteAgent {
+    /// The id of its row among the agents of this machine's tree: never an id of this machine's.
+    pub key: String,
+    pub machine: String,
+    /// Its id on its machine.
+    pub agent: String,
+    /// The agent of this machine that started it.
+    pub caller: String,
+    /// `child` or `led`.
+    pub kind: String,
+    pub title: String,
+    /// As last known: `running`, `waiting`, `reported`, `failed`, `offline since 22:14`.
+    pub state: String,
+    pub mark: crate::state::AgentState,
+    /// Its machine's icon and colour, as the member list signs them.
+    pub icon: String,
+    pub colour: String,
+    pub offline: bool,
+}
+
+/// What [`remote_agents`] says now, kept where a page reads it with no read of the shell, which
+/// may be updating it.
+#[derive(Default)]
+pub struct RemoteAgents(pub Vec<RemoteAgent>);
+
+impl gpui_kit::Global for RemoteAgents {}
+
+/// The sessions and the children the agents of this machine started on others, which a session
+/// page lists beside its own agents when the agent that started them is one of its tree.
+pub fn remote_agents(machines: &crate::machines::Machines) -> Vec<RemoteAgent> {
+    use crate::state::AgentState;
+    machines
+        .launches
+        .iter()
+        .filter(|launched| under_its_pilot(launched))
+        .map(|launched| {
+            let machine = machines.machine(&launched.machine);
+            let (state, mark) = last_known(launched, machine);
+            let offline = machine.is_some_and(|machine| !machine.online());
+            let mark = match (mark, state.as_str()) {
+                (Some(mark), _) => mark,
+                (None, "reported") => AgentState::Completed,
+                (None, "failed") => AgentState::Failed,
+                (None, _) => AgentState::Idle,
+            };
+            let (icon, colour) = machines
+                .members
+                .iter()
+                .find(|member| member.name == launched.machine)
+                .map_or_else(
+                    || ("desktop".to_owned(), "grey".to_owned()),
+                    crate::machines::Member::look,
+                );
+            RemoteAgent {
+                key: elsewhere_id(&launched.machine, &launched.agent),
+                machine: launched.machine.clone(),
+                agent: launched.agent.clone(),
+                caller: launched.caller.clone(),
+                kind: launched.kind.clone(),
+                title: match launched.title.is_empty() {
+                    true => format!("agent {}", launched.agent),
+                    false => launched.title.clone(),
+                },
+                state,
+                mark,
+                icon,
+                colour,
+                offline,
+            }
+        })
+        .collect()
+}
+
 /// The state of a session started on another machine as last known here, in words, and its mark:
 /// what its machine last told, unless that machine is off now.
 fn last_known(
@@ -1031,9 +1115,7 @@ impl Snapshot {
     pub fn with_elsewhere(mut self, machines: &crate::machines::Machines) -> Snapshot {
         let mut added = Vec::new();
         for launched in &machines.launches {
-            if launched.kind == "handed"
-                || (launched.state == "ended" && launched.heard.as_deref() != Some("child-report"))
-            {
+            if !under_its_pilot(launched) {
                 continue;
             }
             let root = self.root_of(&launched.caller);
@@ -1296,6 +1378,7 @@ mod tests {
                 reason: None,
                 role: Some("runner".to_owned()),
                 linked: false,
+                projects: None,
             }],
             lists: crate::machines::Lists {
                 this: vec![listed("r1", "app", 5)],
@@ -2206,6 +2289,7 @@ mod tests {
             reason: None,
             role: Some("runner".into()),
             linked: false,
+            projects: None,
         };
         let online = machine("online");
         let words = |l, m| last_known(&l, m).0;

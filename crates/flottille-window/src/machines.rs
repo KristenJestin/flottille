@@ -23,6 +23,8 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+use gpui_kit::prelude::FluentBuilder as _;
+
 use crate::device::Device;
 use crate::link::{Conn, Connect, Update};
 
@@ -108,6 +110,9 @@ pub struct Machine {
     pub role: Option<String>,
     /// Whether it has a live link to this machine, which always goes through the hub.
     pub linked: bool,
+    /// The projects it offered over its link, by name; `None` once the link ended or before it
+    /// offered: what it keeps for a project is then its light list of sessions.
+    pub projects: Option<Vec<String>>,
 }
 
 impl Machine {
@@ -120,6 +125,7 @@ impl Machine {
             reason: value["reason"].as_str().map(str::to_owned),
             role: value["role"].as_str().map(str::to_owned),
             linked: value["reached"].is_object(),
+            projects: offered(&value["offers"]),
         }
     }
 
@@ -378,6 +384,8 @@ pub struct Machines {
     pub launches: Vec<Launched>,
     /// The sessions of every machine.
     pub lists: Lists,
+    /// The projects this machine offers, by name, when it says them.
+    pub this_projects: Option<Vec<String>>,
 }
 
 impl Machines {
@@ -407,6 +415,16 @@ impl Machines {
             .iter()
             .find(|seen| seen.fingerprint == machine)
     }
+}
+
+/// The names of the projects an `offers` value holds, `None` when it holds none (no offer).
+fn offered(offers: &Value) -> Option<Vec<String>> {
+    offers["projects"].as_array().map(|projects| {
+        projects
+            .iter()
+            .filter_map(|project| project["name"].as_str().map(str::to_owned))
+            .collect()
+    })
 }
 
 fn text(value: &Value) -> String {
@@ -779,6 +797,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         },
         launches: Vec::new(),
         lists: Lists::default(),
+        this_projects: offered(&machines["this"]["offers"]),
     };
     if let Ok(lists) = conn.ask_within("remote.sessions", json!({}), BOUND)? {
         read.lists = Lists {
@@ -862,6 +881,471 @@ pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
     cx.try_global::<Shown>()
         .and_then(|shown| shown.0.clone())
         .map(|machine| format!("on {machine}"))
+}
+
+/// A machine the user may choose where a page is a machine's (Settings of, Add project, the
+/// composer): this one first, then the other machines that run agents.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    /// `None`: this machine.
+    pub name: Option<String>,
+    pub title: String,
+    pub role: Option<String>,
+    /// Its state in words: `online`, `offline since 22:14`.
+    pub state: String,
+    /// Its icon and its colour, as the member list signs them (`desktop`, `teal`).
+    pub icon: String,
+    pub colour: String,
+    pub online: bool,
+}
+
+impl Choice {
+    /// Its key among the options: `here` for this machine, its name for another.
+    pub fn key(&self) -> gpui_kit::SharedString {
+        self.name
+            .clone()
+            .unwrap_or_else(|| "here".to_owned())
+            .into()
+    }
+
+    /// What it is and how it is: `runner · online`, `this machine · runner · online`.
+    pub fn line(&self) -> gpui_kit::SharedString {
+        let mut said: Vec<&str> = Vec::new();
+        if self.name.is_none() {
+            said.push("this machine");
+        }
+        said.extend(self.role.as_deref());
+        said.push(&self.state);
+        said.join(" · ").into()
+    }
+
+    /// Its role and its state, without saying it is this machine: the second line of its row.
+    fn detail(&self) -> gpui_kit::SharedString {
+        let mut said: Vec<&str> = self.role.as_deref().into_iter().collect();
+        said.push(&self.state);
+        said.join(" · ").into()
+    }
+
+    /// How it is drawn, in words: `server in teal`.
+    pub fn look_words(&self) -> String {
+        format!("{} in {}", self.icon, self.colour)
+    }
+}
+
+/// The icon and the colour, as words, the member list signs `name` with (this machine's own when
+/// `None`): a grey desktop for a machine that is in no list.
+fn look_of(machines: &Machines, name: Option<&str>) -> (String, String) {
+    let name = name.or(machines.this.as_deref());
+    machines
+        .members
+        .iter()
+        .find(|member| Some(member.name.as_str()) == name)
+        .map(Member::look)
+        .unwrap_or_else(|| ("desktop".to_owned(), "grey".to_owned()))
+}
+
+/// The machines the user may choose, as `machines` says them: none but this one while it is in
+/// no member list.
+pub fn choices(machines: &Machines) -> Vec<Choice> {
+    let role_of = |name: &str| {
+        machines
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .map(|member| member.role.clone())
+    };
+    let this = machines.this.clone();
+    let (icon, colour) = look_of(machines, None);
+    let here = Choice {
+        name: None,
+        title: this.clone().unwrap_or_else(|| "This machine".to_owned()),
+        role: this.as_deref().and_then(role_of),
+        state: "online".to_owned(),
+        icon,
+        colour,
+        online: true,
+    };
+    if !machines.member() {
+        return vec![here];
+    }
+    std::iter::once(here)
+        .chain(machines.runners().map(|machine| {
+            let (icon, colour) = look_of(machines, Some(&machine.name));
+            Choice {
+                name: Some(machine.name.clone()),
+                title: machine.name.clone(),
+                role: machine.role.clone(),
+                state: machine.state_words(),
+                icon,
+                colour,
+                online: machine.online(),
+            }
+        }))
+        .collect()
+}
+
+impl Machines {
+    /// Keeps the projects the machines offered in `before` for those that offer none now: a
+    /// machine that is off still has its projects, and the composer's picker says it is off.
+    pub fn remember_offers(&mut self, before: &Machines) {
+        for machine in &mut self.machines {
+            if machine.projects.is_none() {
+                machine.projects = before
+                    .machine(&machine.name)
+                    .and_then(|machine| machine.projects.clone());
+            }
+        }
+        if self.this_projects.is_none() {
+            self.this_projects = before.this_projects.clone();
+        }
+    }
+
+    /// Whether the machine `name` (`None`: this one) has the project: what it offered over its
+    /// link, else its light list of sessions, which is kept while it is off.
+    pub fn has_project(&self, name: Option<&str>, project: &str) -> bool {
+        let named = |listed: &[Listed]| listed.iter().any(|session| session.project == project);
+        let offers = |offered: &Option<Vec<String>>| {
+            offered
+                .as_ref()
+                .is_some_and(|names| names.iter().any(|offered| offered == project))
+        };
+        match name {
+            None => offers(&self.this_projects) || named(&self.lists.this),
+            Some(name) => {
+                self.machine(name)
+                    .is_some_and(|machine| offers(&machine.projects))
+                    || self
+                        .lists
+                        .machines
+                        .iter()
+                        .any(|(machine, listed)| machine == name && named(listed))
+            }
+        }
+    }
+}
+
+/// The machines that have `project`, as the composer's picker lists them: this one first, each
+/// with its state. The machine in front (`front`, `None` for this one) is always one of them.
+pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {
+    choices(machines)
+        .into_iter()
+        .filter(|choice| {
+            choice.name.as_deref() == front || machines.has_project(choice.name.as_deref(), project)
+        })
+        .collect()
+}
+
+/// The machine in front as a choice, when the user has several machines: what the header of a
+/// session and the pickers say. `None` while this machine is alone.
+pub fn front_choice(machines: &Machines, front: Option<&str>) -> Option<Choice> {
+    let all = choices(machines);
+    if all.len() < 2 {
+        return None;
+    }
+    all.into_iter()
+        .find(|choice| choice.name.as_deref() == front)
+}
+
+/// A machine's mark: its icon in its colour, saying both in words for what the colour cannot
+/// (`server in teal`). It fades in over `HOVER` when another machine takes its place.
+pub fn mark(
+    id: impl Into<gpui_kit::ElementId>,
+    icon: &str,
+    colour: &str,
+    size: f32,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> impl gpui_kit::IntoElement {
+    use gpui_kit::{InteractiveElement as _, ParentElement as _, SharedString, Styled as _};
+    use gpui_kit::{StatefulInteractiveElement as _, TestSupportExt as _, div, px};
+    let id = id.into();
+    let said = SharedString::from(format!("{icon} in {colour}"));
+    let shown = gpui_design_system::changed(&id, &said, window, cx);
+    div()
+        .id(id)
+        .aria_label(said)
+        .flex_none()
+        .opacity(shown)
+        .child(
+            gpui_design_system::icon(crate::glyphs::device(icon))
+                .size(px(size))
+                .text_color(shade(colour)),
+        )
+        .test_support()
+}
+
+/// What a chooser of the machines last had to show: kept so that it can fold away with its
+/// words once the user has no choice left (the project is on one machine only).
+struct Kept(Vec<Choice>);
+
+/// `choices` while there are two or more, else the ones the chooser `id` last showed (none if it
+/// never showed any), and whether there is a choice now.
+pub fn kept(
+    id: &'static str,
+    choices: Vec<Choice>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> (Vec<Choice>, bool) {
+    let present = choices.len() >= 2;
+    let state = window.use_keyed_state(id, cx, |_, _| Kept(Vec::new()));
+    let shown = state.update(cx, |kept, _| {
+        if present {
+            kept.0 = choices;
+        }
+        kept.0.clone()
+    });
+    (shown, present)
+}
+
+/// What [`narrowing`] remembers: how far the block is in, and its width as the last frame
+/// measured it.
+struct Narrow {
+    motion: gpui_design_system::motion::Motion,
+    width: std::rc::Rc<std::cell::Cell<f32>>,
+}
+
+/// `content`, a block of a toolbar that goes while the toolbar stays: it narrows to nothing and
+/// fades over `PANEL` when `present` turns false, and widens in when it turns true again, what
+/// is beside it moving with it. Present at its first frame it is simply there. None once it has
+/// folded away. Build it on every frame, also when it is absent: it is its own state.
+pub fn narrowing(
+    id: &'static str,
+    present: bool,
+    content: gpui_kit::AnyElement,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> Option<gpui_kit::AnyElement> {
+    use gpui_design_system::motion::{Motion, PANEL};
+    use gpui_kit::{Bounds, InteractiveElement as _, IntoElement as _, ParentElement as _};
+    use gpui_kit::{Pixels, Styled as _, TestSupportExt as _, canvas, div, px};
+    let state = window.use_keyed_state(id, cx, move |_, _| Narrow {
+        motion: Motion::settled(if present { 1.0 } else { 0.0 }),
+        width: Default::default(),
+    });
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let target = if present { 1.0 } else { 0.0 };
+    let (t, running, width) = state.update(cx, |narrow, _| {
+        if narrow.motion.target() != target {
+            narrow.motion.animate(target, PANEL, now, reduce);
+        }
+        let running = narrow.motion.is_running(now);
+        if !running {
+            narrow.motion.settle(now);
+        }
+        (narrow.motion.value(now), running, narrow.width.clone())
+    });
+    if running {
+        window.request_animation_frame();
+    }
+    if t == 0.0 && !present {
+        return None;
+    }
+    let measured = width.clone();
+    let measure = canvas(
+        move |bounds: Bounds<Pixels>, _, _| measured.set(f32::from(bounds.size.width)),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full();
+    // Clipped only while it moves, so that a list the content opens is not.
+    let moving = t < 1.0;
+    Some(
+        div()
+            .id(id)
+            .flex_none()
+            .when(moving, |d| {
+                d.overflow_hidden().w(px(width.get() * t)).opacity(t)
+            })
+            .child(div().relative().flex_none().child(content).child(measure))
+            .test_support()
+            .into_any_element(),
+    )
+}
+
+/// A picker of the machines: the machine chosen as its icon, in its colour, and its name, and
+/// the list of the machines, each with its icon in its colour, its role and its state, a check
+/// on the one chosen. One that is off or needs an update is greyed and says why; it is not
+/// picked. The owner keeps whether the list is open.
+#[allow(clippy::too_many_arguments)]
+pub fn picker(
+    id: &'static str,
+    entries: &'static str,
+    choices: &[Choice],
+    chosen: usize,
+    open: bool,
+    on_toggle: impl Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+    on_choose: impl Fn(Option<String>, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+) -> gpui_kit::AnyElement {
+    use gpui_design_system::{Dropdown, MenuItem};
+    use gpui_kit::{IntoElement as _, div};
+    let current = choices.get(chosen).or(choices.first());
+    let Some(current) = current else {
+        return div().into_any_element();
+    };
+    let on_choose = std::rc::Rc::new(on_choose);
+    let items = choices.iter().enumerate().map(|(at, choice)| {
+        let item = MenuItem::new(format!("{entries}-{}", choice.key()), choice.title.clone())
+            .leading(crate::glyphs::device(&choice.icon))
+            .tint(shade(&choice.colour))
+            .detail(choice.detail())
+            .selected(at == chosen)
+            .checked(at == chosen);
+        let item = match choice.name.is_none() {
+            true => item.note("this machine"),
+            false => item,
+        };
+        match choice.online {
+            false => item.disabled(choice.state.clone()),
+            true => {
+                let (name, on_choose) = (choice.name.clone(), on_choose.clone());
+                item.on_click(move |window, cx| on_choose(name.clone(), window, cx))
+            }
+        }
+    });
+    Dropdown::new(id, current.title.clone())
+        .leading(crate::glyphs::device(&current.icon))
+        .tint(shade(&current.colour))
+        .open(open)
+        .on_toggle(on_toggle)
+        .items(items)
+        .into_any_element()
+}
+
+/// Why the pages of the machine in front take no change now, when they take none: that machine
+/// is off (`server offline since 22:14`: nothing is sent to it, nothing is kept for it), or this
+/// device may only view it (`This device may only view server`: the daemon's refusal is the guard,
+/// this only says it beforehand). Said once, at the top of the page; its controls fade and take
+/// no click.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Held(pub Option<Holding>);
+
+impl gpui_kit::Global for Held {}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Holding {
+    /// The line the page says it in.
+    pub line: String,
+    /// The machine is off: the link to it is not a daemon that does not answer.
+    pub offline: bool,
+}
+
+/// Why the pages of the machine `front` take no change, as `machines` says it.
+pub fn holding(front: Option<&str>, machines: Option<&Machines>) -> Option<Holding> {
+    let (name, machines) = (front?, machines?);
+    if let Some(machine) = machines.machine(name).filter(|machine| !machine.online()) {
+        return Some(Holding {
+            line: format!("{name} {}", machine.state_words()),
+            offline: true,
+        });
+    }
+    let this = machines.this.as_deref()?;
+    machines
+        .members
+        .iter()
+        .find(|member| member.name == this && member.role == "viewer")
+        .map(|_| Holding {
+            line: format!("This device may only view {name}"),
+            offline: false,
+        })
+}
+
+/// What [`Held`] says now.
+pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
+    cx.try_global::<Held>().and_then(|held| held.0.clone())
+}
+
+/// The line at the top of a page of another machine that names it, then where the page is:
+/// `server / Settings / Agents`; nothing on this machine. It unfolds and fades in when another
+/// machine comes in front, and folds away with its words when this one comes back.
+pub fn where_line(
+    id: &'static str,
+    parts: &[&str],
+    cx: &gpui_kit::App,
+) -> gpui_design_system::PresenceOf {
+    use gpui_design_system::{Type as _, palette, presence_of};
+    use gpui_kit::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
+    use gpui_kit::{SharedString, StatefulInteractiveElement as _, TestSupportExt as _, div, px};
+    let p = palette(cx);
+    let said = shown_machine(cx).map(|machine| {
+        SharedString::from(
+            std::iter::once(machine.as_str())
+                .chain(parts.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" / "),
+        )
+    });
+    presence_of(format!("{id}-block"), said, move |said| {
+        let (machine, rest) = said.split_once(" / ").unwrap_or((said.as_ref(), ""));
+        div()
+            .id(id)
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(13.))
+            .child(
+                div()
+                    .medium()
+                    .text_color(p.text)
+                    .child(SharedString::from(machine.to_owned())),
+            )
+            .when(!rest.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_color(p.faint)
+                        .child(SharedString::from(format!("/ {rest}"))),
+                )
+            })
+            .test_support()
+            .into_any_element()
+    })
+}
+
+/// `page`, the controls of a page of the machine in front, held while [`Held`] says so: its ink
+/// fades over `HOVER` and no click reaches it, while it still scrolls and is read. The same
+/// element held or not: what the controls keep between frames stays theirs.
+pub fn hold(
+    page: gpui_kit::Stateful<gpui_kit::Div>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let holding = held(cx).is_some();
+    hold_when(page, holding, window, cx)
+}
+
+/// As [`hold`], but only for a machine that takes no change from this device (a viewer): one that
+/// is off leaves the page free, for what picks another machine to be reached.
+pub fn hold_unless_off(
+    page: gpui_kit::Stateful<gpui_kit::Div>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let holding = held(cx).is_some_and(|holding| !holding.offline);
+    hold_when(page, holding, window, cx)
+}
+
+fn hold_when(
+    page: gpui_kit::Stateful<gpui_kit::Div>,
+    holding: bool,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use gpui_design_system::{fade, motion::HOVER};
+    use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
+    use gpui_kit::{TestSupportExt as _, div};
+    let t = fade("page-held-fade", holding, HOVER, window, cx);
+    page.opacity(1.0 - 0.45 * t).when(holding, |d| {
+        d.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .capture_any_mouse_up(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id("page-held-veil")
+                    .absolute()
+                    .size_0()
+                    .test_support(),
+            )
+    })
 }
 
 // ── The machine shown ─────────────────────────────────────────────────────────────────────────
@@ -1000,5 +1484,155 @@ fn carry(pair: &Pair, machine: Option<&(String, Arc<DeviceKey>)>) -> std::io::Re
         let mut out = serde_json::to_vec(&signed).map_err(std::io::Error::other)?;
         out.push(b'\n');
         (&pair.daemon).write_all(&out)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Holding, Listed, Lists, Machine, Machines, Member, front_choice, holding, project_choices,
+    };
+    use serde_json::Value;
+
+    fn machines(state: &str, role: &str) -> Machines {
+        Machines {
+            this: Some("pc".to_owned()),
+            machines: vec![Machine {
+                name: "server".to_owned(),
+                fingerprint: "f2".to_owned(),
+                state: state.to_owned(),
+                since: None,
+                reason: None,
+                role: Some("runner".to_owned()),
+                linked: false,
+                projects: None,
+            }],
+            members: vec![Member {
+                name: "pc".to_owned(),
+                key: Value::Null,
+                fingerprint: "f1".to_owned(),
+                role: role.to_owned(),
+                added_by: "the hub".to_owned(),
+                machine: None,
+                icon: None,
+                colour: None,
+            }],
+            ..Machines::default()
+        }
+    }
+
+    #[test]
+    fn this_machine_in_front_holds_nothing() {
+        assert_eq!(holding(None, Some(&machines("offline", "viewer"))), None);
+    }
+
+    #[test]
+    fn a_machine_that_is_off_is_held_with_its_state() {
+        assert_eq!(
+            holding(Some("server"), Some(&machines("offline", "runner"))),
+            Some(Holding {
+                line: "server offline".to_owned(),
+                offline: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_viewer_is_held_with_the_reason() {
+        assert_eq!(
+            holding(Some("server"), Some(&machines("online", "viewer"))),
+            Some(Holding {
+                line: "This device may only view server".to_owned(),
+                offline: false,
+            })
+        );
+        assert_eq!(
+            holding(Some("server"), Some(&machines("online", "controller"))),
+            None
+        );
+    }
+    fn listing(project: &str) -> Listed {
+        Listed {
+            id: "s1".to_owned(),
+            title: "A session".to_owned(),
+            project: project.to_owned(),
+            state: "idle".to_owned(),
+            exchanged_at: 1,
+            created_at: 1,
+            pilot: None,
+        }
+    }
+
+    /// `pc` (this machine, the hub's member) and `server`, which kept a session of `site` in its
+    /// list and offered `app` while it was linked.
+    fn two(server_offers: Option<Vec<&str>>, state: &str) -> Machines {
+        let mut read = machines(state, "runner");
+        read.hub = Some(super::Hub {
+            url: "http://hub".to_owned(),
+            state: "connected".to_owned(),
+            since: None,
+            reason: None,
+            forgotten: false,
+        });
+        read.machines[0].projects =
+            server_offers.map(|names| names.into_iter().map(str::to_owned).collect());
+        read.this_projects = Some(vec!["app".to_owned(), "solo".to_owned()]);
+        read.lists = Lists {
+            this: Vec::new(),
+            machines: vec![("server".to_owned(), vec![listing("site")])],
+        };
+        read
+    }
+
+    #[test]
+    fn a_project_is_on_the_machines_that_offered_it_or_listed_a_session_of_it() {
+        let read = two(Some(vec!["app"]), "online");
+        assert!(read.has_project(None, "app"));
+        assert!(read.has_project(Some("server"), "app"), "offered");
+        assert!(
+            read.has_project(Some("server"), "site"),
+            "its list names it, as it does while it is off and offers nothing"
+        );
+        assert!(!read.has_project(Some("server"), "solo"));
+        assert!(!read.has_project(Some("nobody"), "app"));
+    }
+
+    #[test]
+    fn the_composer_lists_this_machine_first_then_those_that_have_the_project() {
+        let read = two(Some(vec!["app"]), "online");
+        let names = |project: &str| -> Vec<Option<String>> {
+            project_choices(&read, project, None)
+                .into_iter()
+                .map(|choice| choice.name)
+                .collect()
+        };
+        assert_eq!(names("app"), [None, Some("server".to_owned())]);
+        assert_eq!(names("solo"), [None], "one machine: no picker");
+    }
+
+    #[test]
+    fn a_machine_that_is_off_is_listed_as_off_and_the_one_in_front_always_is() {
+        let read = two(None, "offline");
+        // Its list names `site`: it is listed, off, after this machine, which is in front.
+        let choices = project_choices(&read, "site", None);
+        assert_eq!(choices.len(), 2);
+        assert!(!choices[1].online);
+        assert_eq!(choices[1].state, "offline");
+        // In front, it is listed whatever its lists say.
+        assert_eq!(project_choices(&read, "app", Some("server")).len(), 2);
+    }
+
+    #[test]
+    fn the_header_names_a_machine_only_among_several() {
+        assert_eq!(front_choice(&Machines::default(), None), None);
+        let read = two(Some(vec!["app"]), "online");
+        assert_eq!(
+            front_choice(&read, Some("server")).map(|choice| choice.title),
+            Some("server".to_owned())
+        );
+        let (icon, colour) = front_choice(&read, None)
+            .map(|c| (c.icon, c.colour))
+            .unwrap();
+        assert_eq!((icon.as_str(), colour.as_str()), ("desktop", "grey"));
     }
 }
