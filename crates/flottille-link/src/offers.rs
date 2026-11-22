@@ -70,6 +70,13 @@ impl Capabilities {
         if !self.projects.iter().any(|offered| offered.name == project) {
             return Some(format!("the project {project} is not on {machine}"));
         }
+        self.agent_refusal(machine, agent)
+    }
+
+    /// Why the runner `machine` that offers this would not run `agent` (any agent signed in,
+    /// when none is named), whatever the project: an agent's launch takes its project with it
+    /// (`docs/remote.md`, "Which project").
+    pub fn agent_refusal(&self, machine: &str, agent: Option<&str>) -> Option<String> {
         match agent {
             Some(agent) if !self.agents.iter().any(|signed_in| signed_in == agent) => {
                 Some(format!("{agent} is not signed in on {machine}"))

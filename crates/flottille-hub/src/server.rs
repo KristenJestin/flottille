@@ -500,7 +500,13 @@ async fn run<C: Clock + Send + 'static>(
             let frames = match frames {
                 Ok(frames) => frames,
                 Err((reason, reset)) => {
-                    let _ = session.send(&ToDevice::Refused { reason, reset }).await;
+                    let _ = session
+                        .send(&ToDevice::Refused {
+                            reason,
+                            reset,
+                            proof: None,
+                        })
+                        .await;
                     session.close().await;
                     return "it is not a member any more".to_owned();
                 }
@@ -568,7 +574,7 @@ async fn run<C: Clock + Send + 'static>(
                     "a pairing's session lasts {} s: this machine declared none in time",
                     shared.waits.pair_idle.as_secs()
                 );
-                let _ = session.send(&ToDevice::Refused { reason: reason.clone(), reset: false }).await;
+                let _ = session.send(&ToDevice::Refused { reason: reason.clone(), reset: false, proof: None }).await;
                 session.close().await;
                 return reason;
             }

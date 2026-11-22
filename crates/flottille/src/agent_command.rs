@@ -232,6 +232,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     message,
                     images: Vec::new(),
                     texts: Vec::new(),
+                    upload: None,
                 })?,
             )?;
             if json {
@@ -266,6 +267,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     message,
                     images: Vec::new(),
                     texts: Vec::new(),
+                    upload: None,
                     compact: (compact || no_compact).then_some(compact),
                 })?,
             )?;
@@ -582,6 +584,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 message,
                 images: Vec::new(),
                 texts: Vec::new(),
+                upload: None,
             },
             json,
         ),

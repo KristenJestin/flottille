@@ -22,7 +22,15 @@ import org.flottille.core.RealPhone
 
 /** Holds the phone's core for the life of the process: one core, whichever activity is on screen. */
 class FlottilleApplication : Application() {
-    val phone: Phone by lazy { RealPhone(FlottilleCore(this)) }
+    private val real: Phone by lazy { RealPhone(FlottilleCore(this)) }
+    private var played: Phone? = null
+
+    /** The core. A test that plays it (a fake core and a fake server) sets this before the screens start. */
+    var phone: Phone
+        get() = played ?: real
+        set(value) {
+            played = value
+        }
 
     override fun onCreate() {
         super.onCreate()
@@ -39,6 +47,7 @@ class Incoming : ViewModel() {
 class MainActivity : ComponentActivity() {
     // Registered before the activity starts: the gallery, and the camera with its permission.
     private val pictures = SystemPictures(this)
+    private val tunnels = SystemTunnelHost(this)
 
     // What an intent asks of the app: a session to open (a notification's, #828), pictures to place
     // (the share sheet). Both wait here until the screens take them.
@@ -63,6 +72,7 @@ class MainActivity : ComponentActivity() {
                 sharedNote = incoming.shared.refused,
                 onSharedPlaced = { incoming.shared = Pictured(emptyList()) },
                 open = open,
+                tunnels = tunnels,
             )
         }
     }

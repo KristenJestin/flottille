@@ -4,6 +4,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.flottille.core.Conversation
 import org.flottille.core.HubCard
+import org.flottille.core.OpenedTunnel
+import org.flottille.core.Tunnel
+import org.flottille.core.TunnelEnd
 import org.flottille.core.Phone
 import org.flottille.core.PhoneException
 import org.flottille.core.Picture
@@ -59,6 +62,15 @@ class FakePhone(initial: PhoneView = PhoneView()) : Phone {
 
     /** The methods whose refusal says the request or the question is decided or gone. */
     val gone = mutableSetOf<String>()
+
+    /** What the page asked to open, in order: machine, run (none for a link) and address. */
+    val opened = mutableListOf<Triple<String, String?, String>>()
+    /** For each of [opened]: whether it was for the user's browser. */
+    val openedForBrowser = mutableListOf<Boolean>()
+    val closedTunnels = mutableListOf<String>()
+
+    /** How many holds of the connection are on (`keepConnected`). */
+    var holds = 0
 
     private fun refuse(method: String) {
         refusals[method]?.let { throw PhoneException(it, gone = method in gone) }
@@ -123,4 +135,39 @@ class FakePhone(initial: PhoneView = PhoneView()) : Phone {
 
     override suspend fun picture(machine: String, agent: String, name: String): ByteArray =
         pictureBytes[name] ?: throw PhoneException("no picture named $name")
+
+    override suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean): OpenedTunnel {
+        refuse("openAddress")
+        opened += Triple(machine, run, url)
+        openedForBrowser += browser
+        val n = state.value.tunnels.size + closedTunnels.size + 1
+        val tunnel = Tunnel("t$n", machine, run ?: "r1", 5173, 41000 + n)
+        state.value = state.value.copy(tunnels = state.value.tunnels + tunnel)
+        return OpenedTunnel(tunnel, url.replace(Regex("^(\\w+://)[^/?#]+"), "$1localhost:${tunnel.localPort}"))
+    }
+
+    override fun closeTunnel(tunnel: String) {
+        closedTunnels += tunnel
+        val held = state.value.tunnels.firstOrNull { it.tunnel == tunnel } ?: throw PhoneException("no tunnel $tunnel is held by this phone")
+        state.value = state.value.copy(
+            tunnels = state.value.tunnels - held,
+            tunnelsEnded = state.value.tunnelsEnded + TunnelEnd(held.tunnel, held.machine, held.run, "closed by the user"),
+        )
+    }
+
+    /** The tunnel ends by itself: the run ended, the link dropped. */
+    fun tunnelEnds(tunnel: String, reason: String) {
+        val held = state.value.tunnels.first { it.tunnel == tunnel }
+        state.value = state.value.copy(
+            tunnels = state.value.tunnels - held,
+            tunnelsEnded = state.value.tunnelsEnded + TunnelEnd(held.tunnel, held.machine, held.run, reason),
+        )
+    }
+
+    override fun isLocal(url: String): Boolean = Regex("^\\w+://(localhost|127\\.0\\.0\\.1|\\[::1]|0\\.0\\.0\\.0)(:\\d+)?([/?#]|$)").containsMatchIn(url)
+
+    override fun keepConnected(): AutoCloseable {
+        holds += 1
+        return AutoCloseable { holds -= 1 }
+    }
 }

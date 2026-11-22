@@ -5,7 +5,8 @@ use crate::state::Status;
 use gpui_design_system::{Type, palette, presence_of, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window,
+    div, px,
 };
 
 use crate::composer::Composer;
@@ -284,7 +285,12 @@ impl MainArea {
 impl Render for MainArea {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let waiting = !self.read && self.reachable && self.not_answering.is_none();
+        // Another machine that is off is said as such, greyed: no restart of this one is offered.
+        let holding = crate::machines::held(cx);
+        let not_answering = self
+            .not_answering
+            .filter(|_| !holding.as_ref().is_some_and(|holding| holding.offline));
+        let waiting = !self.read && self.reachable && not_answering.is_none();
         let veil = crate::loading::veil(waiting, &p, window, cx);
         let root = div()
             .id("main")
@@ -330,7 +336,8 @@ impl Render for MainArea {
         let page = page.children(veil);
         root.flex()
             .flex_col()
-            .child(self.not_answering_banner(cx))
+            .child(self.not_answering_banner(not_answering, cx))
+            .child(held_line(holding.map(|holding| holding.line), cx))
             .child(page)
     }
 }
@@ -338,9 +345,13 @@ impl Render for MainArea {
 impl MainArea {
     /// The banner above the page while Flottille does not answer: it unfolds and fades in, and
     /// folds away and fades out, with its last words, once it answers again.
-    fn not_answering_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn not_answering_banner(
+        &self,
+        not_answering: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
-        let said = self.not_answering.map(|since| {
+        let said = not_answering.map(|since| {
             format!(
                 "It has not answered since {}. Restarting it cuts the turns under way.",
                 crate::session::clock(since)
@@ -349,7 +360,7 @@ impl MainArea {
         });
         // Folding away, it says what it said when Flottille answered again, and is no longer
         // clicked.
-        let leaving = self.not_answering.is_none();
+        let leaving = not_answering.is_none();
         let restarting = self.restarting || leaving && self.restarted;
         let disabled = self.restarting || leaving;
         let shell = self.shell.clone();
@@ -403,4 +414,29 @@ impl MainArea {
                 .into_any_element()
         })
     }
+}
+
+/// The line above a page of the machine in front while it takes no change
+/// ([`crate::machines::Held`]): it unfolds and fades in, and folds away with its words.
+fn held_line(line: Option<String>, cx: &mut Context<MainArea>) -> impl IntoElement {
+    let p = palette(cx);
+    presence_of(
+        "page-held-block",
+        line.map(SharedString::from),
+        move |line| {
+            div()
+                .id("page-held")
+                .aria_label(line.clone())
+                .px(space::LG)
+                .py(space::SM)
+                .bg(p.wait_bg)
+                .border_b_1()
+                .border_color(p.wait_line)
+                .text_size(px(12.5))
+                .text_color(p.text)
+                .child(line)
+                .test_support()
+                .into_any_element()
+        },
+    )
 }

@@ -120,6 +120,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `events.watch` | read |
 | `project.list` | read |
 | `project.show` | read |
+| `project.folders` | drive |
 | `project.detect` | drive |
 | `project.add` | drive |
 | `project.removal` | read |
@@ -289,6 +290,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.start` | drive |
 | `agent.run` | drive |
 | `agent.send` | drive |
+| `agent.upload` | drive |
 | `agent.send_now` | drive |
 | `agent.unqueue` | drive |
 | `agent.answer` | drive |
@@ -442,6 +444,17 @@ When the project follows a default that cannot be followed (`workspaces.toml` is
 `workspaces_folder.show`), the result also holds `workspaces_default_error`, the reason; the data
 folder is what `workspaces_root` then is. `not-found` when there is none,
 `invalid-config` when its file cannot be used.
+
+#### `project.folders`
+
+`{"path"?}`. The folders inside `path` (absolute, or `~` or starting with `~/`; the home of the
+user the daemon runs for, `HOME`, when left out), for a client that picks where a project is added
+rather than typing it (`docs/remote.md`, "Paths are picked, not typed"): `{"path", "shown",
+"parent", "folders": [{"name", "path", "repository", "repositories", "project"}]}`. `shown` is the path from `~`
+(`~/code`); `parent` is `null` at `/`. The folders are in alphabetical order, hidden folders and
+links left out; `repository` says whether the folder is a Git repository itself, `repositories` how many `project.detect` would find in each, and `project` the
+name of the project already registered there, `null` when none. `refused` when the path is not
+absolute or cannot be read. It is `drive`: only what adds a project needs it.
 
 #### `project.detect`
 
@@ -813,8 +826,12 @@ at all), and downloads or applies nothing unless asked.
   sessions a restart stops, `[{"id", "title", "project"}]` (each root whose agent or one of its
   sub-agents has a process, whatever its state), oldest first. The download's progress is told at
   most once a second.
-- `update.set {check}` writes `updates.toml` (`"automatically"` checks at once) and answers as
-  `update.show`.
+- `update.set {check?, channel?}` (at least one) writes `updates.toml` (`check: "automatically"`
+  checks at once) and/or remembers the channel, `"stable"` or `"beta"` (what `--channel` keeps, an
+  alpha's branch forgotten; checked at once, whatever `check` says), and answers as `update.show`.
+  An alpha, an rc or a next is refused: `flottille update --channel alpha --branch <name>` chooses
+  an alpha. `update.show` says `channel` and `branch`, and `ahead_of`, the channel's latest build
+  when this one is newer than it (a beta kept above the latest stable).
 - `update.check` checks once now, whatever `check` says.
 - `update.download` downloads the latest build and stages it beside the binary; it answers at once
   and says the rest in `update.changed`.
@@ -2207,6 +2224,30 @@ message so). The name it says is always the daemon's, `pasted-text.txt`, whateve
 A message carries 20 texts at most, 5 MiB each (`refused` for more, an empty text, or one too
 big); a text with no marker is marked after the message; with texts, the message may be empty. The
 files go with the images of the agent. `agent.start` takes `texts` as it takes `images`.
+
+`upload` names the upload of `agent.upload` whose files are the message's pictures and pasted
+texts, in their numbers' order, as if it carried them inline (`docs/remote.md`, "Pictures sent to
+another machine"): the upload is gone once the message took it. `not-found` when the sender has no
+such upload (dropped 2 minutes after its last chunk, or another device's); `refused` when a file
+of it arrived in part (the upload stays, for the rest), or when the message carries `images` or
+`texts` too. `agent.start` takes `upload` as it takes `images`.
+
+#### `agent.upload`
+
+`{"upload", "file", "kind", "mime"?, "size", "offset", "data"}`. One chunk of a picture or a pasted
+text of a message to come, which names the upload in `agent.send` or `agent.start`: `{"upload",
+"file", "received"}`, `received` the bytes of that file kept so far. `upload` is the sender's name
+for it, 1 to 64 letters, digits, `_` or `-`; `file` the picture's number among the message's
+pictures (`kind` `image`, with its `mime`, as `agent.send` takes it) or the text's among its texts
+(`kind` `text`, UTF-8, no `mime`), from 1; `size` the whole file's bytes; `data` the chunk in base64,
+512 KiB at most, starting at `offset`, which is where the chunks before it ended. The bounds of a
+local message hold at each chunk, before any of it is kept: `refused` for a number past 20, a type
+not taken, a size of 0 or over 5 MiB, a chunk too big, empty or not base64, one out of order, a
+file whose size or type changed, one longer than its size, and a sender with 2 uploads waiting
+already (the machine holds 8, `busy:` past them); each refusal says which picture or text. An
+upload is its sender's (the device that signed it, or this machine's clients), kept in the
+daemon's data folder under names of its own, and dropped 2 minutes after its last chunk unless a
+message took it.
 
 #### `agent.answer`
 

@@ -55,6 +55,8 @@ pub struct Live {
 struct State {
     /// The channel's latest build, when it is newer than this one.
     latest: Option<String>,
+    /// The channel's latest build, when this build is newer than it.
+    ahead_of: Option<String>,
     /// Why the last check failed, said once in the update's place.
     failed: Option<String>,
     checking: bool,
@@ -119,6 +121,7 @@ fn shown(daemon: &Daemon) -> Value {
             _ => "never",
         },
         "latest": state.latest,
+        "ahead_of": state.ahead_of,
         "failed": automatically.err().or_else(|| state.failed.clone()),
         "checking": state.checking,
         "staged": staged,
@@ -184,7 +187,10 @@ pub async fn watch(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     }
 }
 
-/// One check of the channel, off the daemon's workers.
+/// One check of the channel, off the daemon's workers. A result is kept only for the channel
+/// still chosen when it ends: when another was chosen meanwhile, it is dropped, and the chosen
+/// one is checked in its turn (a check that runs is not told to stop: it is not restarted, it is
+/// followed by another, which the choice's own request found running and left to this loop).
 async fn check(daemon: &Arc<Daemon>) {
     {
         let mut state = daemon.updates.state.lock().unwrap();
@@ -194,27 +200,37 @@ async fn check(daemon: &Arc<Daemon>) {
         state.checking = true;
     }
     changed(daemon);
-    let paths = daemon.paths.clone();
-    let found = tokio::task::spawn_blocking(move || {
-        update::latest(&paths).map_err(|error| error.to_string())
-    })
-    .await
-    .unwrap_or_else(|error| Err(error.to_string()));
-    {
-        let mut state = daemon.updates.state.lock().unwrap();
-        state.checking = false;
-        match found {
-            Ok(latest) => {
-                state.latest = latest.map(|version| version.to_string());
-                state.failed = None;
+    loop {
+        let paths = daemon.paths.clone();
+        let followed = update::followed_now(&paths);
+        let found = tokio::task::spawn_blocking(move || {
+            update::checked(&paths).map_err(|error| error.to_string())
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        {
+            let mut state = daemon.updates.state.lock().unwrap();
+            // Compared under the lock the choice's reset takes: no result of a channel left is
+            // stored after the reset, and none is shown.
+            if update::followed_now(&daemon.paths) != followed {
+                continue;
             }
-            Err(why) => {
-                if state.failed.is_none() {
-                    eprintln!("flottille daemon: the check for an update failed: {why}");
+            state.checking = false;
+            match found {
+                Ok(found) => {
+                    state.latest = found.latest.map(|version| version.to_string());
+                    state.ahead_of = found.ahead_of.map(|version| version.to_string());
+                    state.failed = None;
                 }
-                state.failed = Some(why);
+                Err(why) => {
+                    if state.failed.is_none() {
+                        eprintln!("flottille daemon: the check for an update failed: {why}");
+                    }
+                    state.failed = Some(why);
+                }
             }
         }
+        break;
     }
     changed(daemon);
 }
@@ -285,7 +301,10 @@ async fn when_idle(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Set {
-    check: String,
+    /// `automatically` or `never`.
+    check: Option<String>,
+    /// `stable` or `beta`: the others are `flottille update --channel`'s, alpha with its branch.
+    channel: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -300,23 +319,54 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
     match method {
         "update.show" => {}
         "update.set" => {
-            let Set { check } = serde_json::from_value(params)?;
-            if !matches!(check.as_str(), "automatically" | "never") {
+            let Set { check, channel } = serde_json::from_value(params)?;
+            if check.is_none() && channel.is_none() {
+                return Err(Failure::new(
+                    "invalid-params",
+                    "set the check or the channel",
+                ));
+            }
+            if check
+                .as_deref()
+                .is_some_and(|check| !matches!(check, "automatically" | "never"))
+            {
                 return Err(Failure::new(
                     "invalid-params",
                     "check is \"automatically\" or \"never\"",
                 ));
             }
+            if channel
+                .as_deref()
+                .is_some_and(|channel| !matches!(channel, "stable" | "beta"))
+            {
+                return Err(Failure::new(
+                    "invalid-params",
+                    "channel is \"stable\" or \"beta\": an alpha is chosen with \
+                     `flottille update --channel alpha --branch <name>`",
+                ));
+            }
             let paths = &daemon.paths;
-            std::fs::create_dir_all(&paths.config).map_err(|e| {
-                Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
-            })?;
-            crate::providers::write_in_place(
-                &paths.config.join("updates.toml"),
-                &format!("check = \"{check}\"\n"),
-            )
-            .map_err(|e| Failure::new("unavailable", format!("updates.toml: {e}")))?;
-            if check == "automatically" {
+            if let Some(check) = &check {
+                std::fs::create_dir_all(&paths.config).map_err(|e| {
+                    Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
+                })?;
+                crate::providers::write_in_place(
+                    &paths.config.join("updates.toml"),
+                    &format!("check = \"{check}\"\n"),
+                )
+                .map_err(|e| Failure::new("unavailable", format!("updates.toml: {e}")))?;
+            }
+            if let Some(channel) = &channel {
+                update::choose(paths, channel)
+                    .map_err(|e| Failure::new("unavailable", format!("the channel: {e}")))?;
+                // What was found belongs to the channel left: the check of the new one says it.
+                let mut state = daemon.updates.state.lock().unwrap();
+                state.latest = None;
+                state.ahead_of = None;
+                state.failed = None;
+            }
+            // A channel chosen is checked at once, the check's setting aside.
+            if channel.is_some() || check.as_deref() == Some("automatically") {
                 let checking = daemon.clone();
                 tokio::spawn(async move { self::check(&checking).await });
             }

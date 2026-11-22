@@ -26,4 +26,10 @@ a UniFFI library) for everything that talks to a daemon.
   requests, the mode, Stop and the tree read only; `SessionKey` is the one entry point, by machine
   and session id (a notification's intent carries `org.flottille.app.MACHINE` and `AGENT`).
 
+- a run's page (`Runs.kt`, `TunnelBrowser.kt`, `TunnelService.kt`, #831): the session page's runs and
+  the links an agent showed open through a tunnel (`Phone.openAddress`), in an in-app web view or, with
+  **Open in browser**, in the user's browser with the tunnel kept by a foreground service whose
+  notification has Close. `FlottilleApplication.phone` can be replaced, which the instrumentation
+  tests do to play the core (`PlayedPhone`) against a fake server.
+
 Needs you and the notifications come with the issues after #826.

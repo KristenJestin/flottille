@@ -1,6 +1,8 @@
 //! Flottille's domain and store, shared by the daemon and its clients.
 
-pub mod address;
+// Moved to the protocol crate, which the phone's core reads too and which holds no store: the
+// path stays for the daemon and the window.
+pub use flottille_protocol::address;
 pub mod agent;
 pub mod ansi;
 pub mod approval;

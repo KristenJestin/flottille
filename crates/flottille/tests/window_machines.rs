@@ -853,6 +853,7 @@ fn a_live_link_says_it_goes_through_the_hub_and_no_address() {
         reason: None,
         role: None,
         linked,
+        projects: None,
     };
     assert_eq!(machine(true).link_words(), "Linked through the hub");
     assert_eq!(machine(false).link_words(), "Not reached yet");

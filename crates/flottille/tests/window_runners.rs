@@ -115,7 +115,7 @@ fn click(cx: &mut VisualTestContext, id: &str) {
 }
 
 #[gpui_kit::test]
-fn the_start_dialog_offers_the_machines_that_can_run_the_project(cx: &mut TestAppContext) {
+fn the_composer_offers_the_machines_that_have_the_project(cx: &mut TestAppContext) {
     let _turn = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -169,26 +169,23 @@ fn the_start_dialog_offers_the_machines_that_can_run_the_project(cx: &mut TestAp
     until(&shell, cx, "the start dialog of site is there", |cx| {
         present(cx, "place-picker")
     });
-    click(cx, "place-picker");
-    assert!(present(cx, "place-choice-main"));
     assert!(
-        !present(cx, "place-choice-machine-server"),
-        "the server has no project site"
+        !present(cx, "machine-picker"),
+        "the server has no project site: no picker"
     );
-    click(cx, "place-picker");
 
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::Project("app".into()), window, cx)
     });
-    until(&shell, cx, "the start dialog of app is there", |cx| {
-        present(cx, "place-picker")
+    until(&shell, cx, "the machine picker of app is there", |cx| {
+        present(cx, "machine-picker")
     });
-    click(cx, "place-picker");
+    click(cx, "machine-picker");
     until(&shell, cx, "the server is offered", |cx| {
-        present(cx, "place-choice-machine-server")
+        present(cx, "machine-choice-server")
     });
     // Choosing it shows that machine, where the session then starts.
-    click(cx, "place-choice-machine-server");
+    click(cx, "machine-choice-server");
     until(&shell, cx, "the window shows the server", |cx| {
         shell.read_with(&*cx, |s, _| s.machine_shown().as_deref() == Some("server"))
     });
