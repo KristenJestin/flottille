@@ -126,8 +126,12 @@ class SystemPictures(private val activity: ComponentActivity) : PictureSource {
         }
     }
 
-    init {
-        // What a process that died between the shot and its read left behind.
+    /**
+     * What a process that died between the shot and its read left behind. Called once the activity
+     * has its context (onCreate): the system builds the activity first and attaches it after, so
+     * its cache folder does not exist yet when this class is built.
+     */
+    fun clearLeftovers() {
         clearShots(File(activity.cacheDir, "pictures"))
     }
 

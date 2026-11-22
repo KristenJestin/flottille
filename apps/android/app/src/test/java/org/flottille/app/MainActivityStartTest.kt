@@ -1,5 +1,7 @@
 package org.flottille.app
 
+import androidx.activity.ComponentActivity
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -15,5 +17,16 @@ class MainActivityStartTest {
         // The system calls the constructor, then attach(): a property initialiser that asks the
         // activity for its cache folder crashed the app at launch.
         Robolectric.buildActivity(MainActivity::class.java)
+    }
+
+    @Test
+    fun a_shot_left_by_a_dead_process_is_cleared_once_the_activity_has_its_context() {
+        val activity = Robolectric.buildActivity(ComponentActivity::class.java).create().get()
+        val folder = java.io.File(activity.cacheDir, "pictures").apply { mkdirs() }
+        java.io.File(folder, "photo-1.jpg").writeText("left")
+
+        SystemPictures(activity).clearLeftovers()
+
+        assertEquals(emptyList<String>(), folder.list()!!.toList())
     }
 }

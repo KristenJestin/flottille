@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        pictures.clearLeftovers()
         val phone = (application as FlottilleApplication).phone
         // A recreated activity (a rotation) holds the same intent: what it shared is not read again.
         taken(intent, recreated = savedInstanceState != null)
