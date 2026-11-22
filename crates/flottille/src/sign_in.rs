@@ -177,11 +177,12 @@ impl Program {
 }
 
 /// Where the sign-in finds `program`: on the daemon's PATH, or in the test's folder of programs
-/// alone when `FLOTTILLE_TEST_PROGRAMS` names one, so that no test ever runs a program the
-/// machine has installed.
+/// alone when `FLOTTILLE_TEST_PROGRAMS` names one in a test build, so that no test ever runs a
+/// program the machine has installed (a release build never reads it).
 fn locate(program: Program) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let path = match std::env::var_os("FLOTTILLE_TEST_PROGRAMS") {
+    let tests = std::env::var_os("FLOTTILLE_TEST_PROGRAMS").filter(|_| cfg!(debug_assertions));
+    let path = match tests {
         Some(folder) => folder,
         None => std::env::var_os("PATH")?,
     };
