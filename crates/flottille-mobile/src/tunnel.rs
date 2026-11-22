@@ -22,8 +22,8 @@ use flottille_link::{Answers, Link};
 use flottille_protocol::address;
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::sync::{oneshot, watch};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
 use crate::MobileError;
@@ -103,18 +103,76 @@ pub(crate) fn run_for_port(
         .ok_or_else(|| MobileError::new(format!("no run of {machine} serves port {port}")))
 }
 
+/// An open that runs on the core's runtime for a caller that may go before it is done (the
+/// Kotlin coroutine of a panel the user left): when it does, what the open has not finished is
+/// stopped, and the tunnel it opened, if it got that far, is closed. Nothing is left listening on
+/// the phone for a page nobody looks at.
+struct Opening {
+    answer: oneshot::Receiver<Result<(Opened, bool), MobileError>>,
+    task: JoinHandle<()>,
+    inner: Arc<Inner>,
+    answered: bool,
+}
+
+impl Drop for Opening {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        // Closed first, so that an open that ends now finds nobody to tell and closes its own
+        // tunnel; one that ended already left its answer here.
+        self.answer.close();
+        self.task.abort();
+        if let Ok(Ok((opened, true))) = self.answer.try_recv() {
+            let _ = self.inner.close_tunnel(&opened.tunnel.tunnel);
+        }
+    }
+}
+
 impl Inner {
+    /// `open_address` for a caller that may be dropped before it is answered: the open runs on the
+    /// core's runtime, and is undone when nobody is left to take its tunnel.
+    pub(crate) async fn open_address_for_caller(
+        self: &Arc<Self>,
+        machine: String,
+        run: Option<String>,
+        url: String,
+        browser: bool,
+    ) -> Result<Opened, MobileError> {
+        let (done, answer) = oneshot::channel();
+        let inner = self.clone();
+        let task = self.handle.spawn(async move {
+            let opened = inner.open_address(&machine, run, &url, browser).await;
+            // Nobody takes it: the tunnel this opened is closed, one that was held already stays.
+            if let Err(Ok((opened, true))) = done.send(opened) {
+                let _ = inner.close_tunnel(&opened.tunnel.tunnel);
+            }
+        });
+        let mut opening = Opening {
+            answer,
+            task,
+            inner: self.clone(),
+            answered: false,
+        };
+        let answer = (&mut opening.answer).await;
+        opening.answered = true;
+        answer
+            .map_err(|error| MobileError::new(format!("the core failed: {error}")))?
+            .map(|(opened, _)| opened)
+    }
+
     /// Opens (or finds, when it is open already) the tunnel to the run of `machine` that `url`
     /// names: `run`'s own address when a run is given, else the port a `localhost` link writes.
     /// `browser` says the tunnel is for the user's browser: the in-app browser and the user's one
-    /// never share a tunnel, since the first closes its own with its panel.
-    pub(crate) async fn open_address(
+    /// never share a tunnel, since the first closes its own with its panel. With the tunnel,
+    /// whether this call opened it (it is false for one held already).
+    async fn open_address(
         self: &Arc<Self>,
         machine: &str,
         run: Option<String>,
         url: &str,
         browser: bool,
-    ) -> Result<Opened, MobileError> {
+    ) -> Result<(Opened, bool), MobileError> {
         let port = address::local_port(url);
         if run.is_none() && port.is_none() {
             return Err(MobileError::new(format!(
@@ -130,9 +188,9 @@ impl Inner {
             }
         };
         if let Some(held) = self.reaching(machine, &run, asked, browser) {
-            return Ok(through(held, url));
+            return Ok((through(held, url), false));
         }
-        self.open(machine, run, asked, browser, url).await
+        Ok((self.open(machine, run, asked, browser, url).await?, true))
     }
 
     /// The tunnel already held to `run` of `machine`, for the same asked port and the same use.

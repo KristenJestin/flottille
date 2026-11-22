@@ -15,7 +15,7 @@
 
 use crate::glyphs;
 use crate::state::{AgentState, Pill, StateIcon, Status};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
@@ -29,8 +29,8 @@ use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
-    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Piece,
-    PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
+    Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
+    Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
     changed, changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line,
     presence, presence_of, section_label, selectable, space, text_region, tint, tipped_when_cut,
     toast, toggle_id, turning,
@@ -301,6 +301,11 @@ pub struct SessionPage {
     unchecked: bool,
     /// One state per agent, read by its rail row and its line in the sub-agents list.
     statuses: HashMap<String, Entity<Status>>,
+    /// One state per session or child this tree started on another machine, by its row's key.
+    remote_statuses: RefCell<HashMap<String, Entity<Status>>>,
+    /// The launches on other machines the lists were last built from: a change of them rebuilds
+    /// the sub-agents lists, so that a child that goes folds away.
+    remote_launched: Vec<crate::model::RemoteAgent>,
     conversation: Entity<ConversationView>,
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
@@ -458,6 +463,8 @@ impl SessionPage {
             providers: Providers::default(),
             unchecked: false,
             statuses: HashMap::new(),
+            remote_statuses: RefCell::new(HashMap::new()),
+            remote_launched: Vec::new(),
             conversation,
             rail,
             drawer,
@@ -1972,7 +1979,7 @@ impl SessionPage {
                 };
                 match kind {
                     None => {
-                        let lines = self.sub_agents();
+                        let lines = self.sub_agents(cx);
                         if row.read(cx).sub_agents != lines {
                             row.update(cx, |row, cx| {
                                 row.sub_agents = lines;
@@ -2017,8 +2024,55 @@ impl SessionPage {
         });
     }
 
-    /// The children of the shown agent, as its sub-agents list shows them.
-    fn sub_agents(&self) -> Vec<SubAgent> {
+    /// The sessions and the children this tree started on other machines, those of an agent of
+    /// the tree: the rail lists them beside its agents.
+    fn remote(&self, cx: &App) -> Vec<crate::model::RemoteAgent> {
+        let launched = cx
+            .try_global::<crate::model::RemoteAgents>()
+            .map(|launched| launched.0.clone())
+            .unwrap_or_default();
+        launched
+            .into_iter()
+            .filter(|remote| self.tree.iter().any(|agent| agent.id == remote.caller))
+            .collect()
+    }
+
+    /// The state of a remote agent's row, made when it first comes and moved as it changes.
+    fn remote_status(&self, remote: &crate::model::RemoteAgent, cx: &mut App) -> Entity<Status> {
+        let status = self
+            .remote_statuses
+            .borrow_mut()
+            .entry(remote.key.clone())
+            .or_insert_with(|| cx.new(|_| Status::new(remote.mark)))
+            .clone();
+        status.update(cx, |status, cx| status.set(remote.mark, cx));
+        status
+    }
+
+    /// The children of the shown agent, as its sub-agents list shows them: its own, then those
+    /// it started on other machines.
+    fn sub_agents(&self, cx: &mut App) -> Vec<SubAgent> {
+        let remote: Vec<SubAgent> = self
+            .remote(cx)
+            .into_iter()
+            .filter(|remote| remote.kind == "child" && remote.caller == self.shown)
+            .map(|remote| SubAgent {
+                id: remote.key.clone(),
+                name: remote.title.clone(),
+                provider: String::new(),
+                model: None,
+                runs_on: format!("on {}", remote.machine),
+                doing: remote.state.clone(),
+                status: self.remote_status(&remote, cx),
+                asks: false,
+                machine: Some(RemoteMark {
+                    machine: remote.machine.clone(),
+                    agent: remote.agent.clone(),
+                    icon: remote.icon.clone(),
+                    colour: remote.colour.clone(),
+                }),
+            })
+            .collect();
         self.tree
             .iter()
             .filter(|a| a.parent.as_deref() == Some(&self.shown))
@@ -2035,8 +2089,10 @@ impl SessionPage {
                         .requests
                         .values()
                         .any(|r| r.agent == agent.id && self.decision(r.number).is_none()),
+                    machine: None,
                 })
             })
+            .chain(remote)
             .collect()
     }
 
@@ -2091,6 +2147,14 @@ impl SessionPage {
 impl Render for SessionPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
+        let launched = cx
+            .try_global::<crate::model::RemoteAgents>()
+            .map(|launched| launched.0.clone())
+            .unwrap_or_default();
+        if self.remote_launched != launched {
+            self.remote_launched = launched;
+            self.refresh_conversation(cx);
+        }
         let asks = self.asks(cx);
         let room = self.room.take();
         self.ask_dock.update(cx, |dock, cx| {
@@ -2102,6 +2166,16 @@ impl Render for SessionPage {
         let wide = self.layout == Layout::Wide;
         let drawer = self.drawer.clone();
         let place = self.opened.place.clone();
+        // The machine the session runs on, when the user has several: `[icon] server / main`.
+        let machine = self.shell.upgrade().and_then(|shell| {
+            let shown = crate::machines::shown_machine(cx);
+            shell
+                .read(cx)
+                .machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| crate::machines::front_choice(read, shown.as_deref()))
+        });
         let header = div()
             .id("session-header")
             .flex_none()
@@ -2145,6 +2219,36 @@ impl Render for SessionPage {
                     },
                 )
             })
+            .children(machine.map(|machine| {
+                enter(
+                    "session-machine-enter",
+                    0,
+                    div()
+                        .id("session-machine")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_color(p.faint)
+                        .aria_label(SharedString::from(machine.title.clone()))
+                        .child(crate::machines::mark(
+                            "session-machine-mark",
+                            &machine.icon,
+                            &machine.colour,
+                            13.,
+                            window,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .mono(12.)
+                                .text_color(p.mute)
+                                .child(SharedString::from(machine.title)),
+                        )
+                        .child(div().mono(12.).child("/"))
+                        .test_support(),
+                )
+            }))
             .child(
                 div()
                     .id("session-place")
@@ -4078,6 +4182,19 @@ pub struct SubAgent {
     /// A request of its own waits for the user: a child never needs them itself, but what it
     /// asked and its parent forwarded is theirs to answer.
     pub asks: bool,
+    /// It runs on another machine: the one it runs on, drawn on its line.
+    pub machine: Option<RemoteMark>,
+}
+
+/// The machine a sub-agent runs on, when it is not this one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteMark {
+    pub machine: String,
+    /// Its id on that machine.
+    pub agent: String,
+    /// The machine's icon and colour, as the member list signs them.
+    pub icon: String,
+    pub colour: String,
 }
 
 /// What a request's card shows, once the page knows it.
@@ -4220,6 +4337,8 @@ pub struct Row {
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
+    /// The children of other machines, which fold away when they go.
+    remote_rows: Listing<SubAgent>,
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
@@ -4267,7 +4386,7 @@ impl Row {
         cx: &mut gpui_kit::App,
     ) -> Entity<Row> {
         let sub_agents = match block {
-            Block::SubAgents => page.sub_agents(),
+            Block::SubAgents => page.sub_agents(cx),
             _ => Vec::new(),
         };
         let card = match block {
@@ -4296,6 +4415,7 @@ impl Row {
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
+                remote_rows: Listing::default().at_rest(),
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
@@ -5990,23 +6110,80 @@ impl Render for Row {
                         self.pills.insert(agent.id.clone(), pill);
                     }
                 }
-                let rows = self.sub_agents.iter().map(|agent| {
+                // A child on another machine folds away when it is gone (its machine ended it, or
+                // the launch is no longer listed), and unfolds as it comes.
+                self.remote_rows.sync(
+                    self.sub_agents
+                        .iter()
+                        .filter(|agent| agent.machine.is_some())
+                        .map(|agent| (agent.id.clone(), agent.clone())),
+                    cx.background_executor().now(),
+                    cx.reduce_motion(),
+                );
+                let build = |agent: &SubAgent, window: &mut Window, cx: &mut gpui_kit::App| {
                     let target = agent.id.clone();
                     let page = self.page.clone();
+                    let there = agent.machine.clone();
+                    // A child on another machine carries that machine's icon, in its
+                    // colour, beside its state.
+                    let leading = div()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(self.icons[&agent.id].clone())
+                        .children(agent.machine.as_ref().map(|there| {
+                            crate::machines::mark(
+                                format!("sub-agent-{}-mark", agent.id),
+                                &there.icon,
+                                &there.colour,
+                                12.,
+                                window,
+                                cx,
+                            )
+                        }));
                     ListRow::new(
                         ElementId::Name(format!("sub-agent-{}", agent.id).into()),
                         SharedString::from(agent.name.clone()),
                     )
-                    .leading(self.icons[&agent.id].clone())
+                    .leading(leading)
                     .detail(SharedString::from(agent.runs_on.clone()))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
                     .on_click(move |_, _, cx| {
-                        if let Some(page) = page.upgrade() {
-                            page.update(cx, |page, cx| page.select(&target, cx));
+                        let Some(page) = page.upgrade() else {
+                            return;
+                        };
+                        match &there {
+                            // Its page is that machine's: it is brought in front.
+                            Some(there) => {
+                                let shell = page.read(cx).shell.clone();
+                                let (machine, agent) = (there.machine.clone(), there.agent.clone());
+                                shell
+                                    .update(cx, |shell, cx| {
+                                        shell.open_elsewhere(machine, agent, cx)
+                                    })
+                                    .ok();
+                            }
+                            None => page.update(cx, |page, cx| page.select(&target, cx)),
                         }
                     })
-                });
+                };
+                let mut rows: Vec<AnyElement> = self
+                    .sub_agents
+                    .iter()
+                    .filter(|agent| agent.machine.is_none())
+                    .map(|agent| build(agent, window, cx).into_any_element())
+                    .collect();
+                for listed in self.remote_rows.rows() {
+                    rows.push(
+                        Item::new(
+                            ElementId::Name(format!("sub-agent-{}-item", listed.key).into()),
+                            listed.placement,
+                            build(listed.value, window, cx),
+                        )
+                        .into_any_element(),
+                    );
+                }
                 // Folded to one line that counts them until a click opens the list: twenty
                 // sub-agents would fill several screens of the conversation.
                 let turn = turning(id("sub-agents-toggle"), self.open, window, cx);
@@ -7161,6 +7338,9 @@ pub struct SessionRail {
     gauges: HashMap<String, Motion>,
     /// How many task runs each agent last had going: its row says it while the count folds away.
     last_runs: HashMap<String, usize>,
+    /// The sessions and children started on other machines the rail has drawn: one that is gone
+    /// from the tree's launches folds away with its last words.
+    remote_seen: HashMap<String, crate::model::RemoteAgent>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -7248,6 +7428,7 @@ impl SessionRail {
             review_choice: HashMap::new(),
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
+            remote_seen: HashMap::new(),
             menu,
             linked: false,
             removable,
@@ -7616,6 +7797,100 @@ impl SessionRail {
             cx.notify();
         }
     }
+}
+
+/// The row of a session or a child this tree started on another machine, in the rail's Agents:
+/// its machine's icon in its colour, its title, and the machine and its state. A click brings
+/// that machine in front on it. It unfolds as it comes and folds away as it goes, and fades while
+/// its machine is off.
+fn remote_row(
+    remote: &crate::model::RemoteAgent,
+    present: bool,
+    shell: Option<WeakEntity<Shell>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let p = palette(cx);
+    let id = format!("rail-remote-{}", remote.agent);
+    let off = fade(format!("{id}-off"), remote.offline, HOVER, window, cx);
+    let (machine, agent) = (remote.machine.clone(), remote.agent.clone());
+    let mark = crate::machines::mark(
+        format!("{id}-mark"),
+        &remote.icon,
+        &remote.colour,
+        13.,
+        window,
+        cx,
+    );
+    let row = div()
+        .id(ElementId::Name(format!("{id}-row").into()))
+        .w_full()
+        .h(px(RAIL_ROW))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .pl(space::SM)
+        .pr(space::XS)
+        .rounded(px(8.))
+        .opacity(1.0 - 0.45 * off)
+        .cursor_pointer()
+        .child(
+            div()
+                .w(px(16.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(mark),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .medium()
+                        .text_size(px(13.))
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(SharedString::from(remote.title.clone())),
+                )
+                .child(
+                    div()
+                        .mono(11.)
+                        .text_color(p.faint)
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(SharedString::from(format!(
+                            "{} · {}",
+                            remote.machine, remote.state
+                        ))),
+                ),
+        )
+        .on_click(move |_, _, cx| {
+            if let Some(shell) = &shell {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open_elsewhere(machine.clone(), agent.clone(), cx)
+                    })
+                    .ok();
+            }
+        });
+    let named = div()
+        .id(ElementId::Name(id.clone().into()))
+        .aria_label(SharedString::from(format!(
+            "{} on {}",
+            remote.title, remote.machine
+        )))
+        .child(hoverable(row, move |d, t| d.bg(p.hover.opacity(t))))
+        .test_support();
+    presence(
+        ElementId::Name(format!("{id}-block").into()),
+        present,
+        named,
+    )
+    .into_any_element()
 }
 
 impl Render for SessionRail {
@@ -8239,6 +8514,23 @@ impl Render for SessionRail {
                     );
                 }
             }
+        }
+        // The sessions and children this tree started on other machines: a row each, with its
+        // machine's icon. One that is gone folds away with its words.
+        let remote = self
+            .page
+            .upgrade()
+            .map(|page| page.read(cx).remote(cx))
+            .unwrap_or_default();
+        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
+        for found in &remote {
+            self.remote_seen.insert(found.key.clone(), found.clone());
+        }
+        let mut seen: Vec<_> = self.remote_seen.values().cloned().collect();
+        seen.sort_by(|a, b| a.key.cmp(&b.key));
+        for found in seen {
+            let here = remote.iter().any(|now| now.key == found.key);
+            rows.push(remote_row(&found, here, shell.clone(), window, cx));
         }
         let agents = div()
             .id("rail-agents")

@@ -294,6 +294,8 @@ pub struct SettingsPage {
     /// The daemon's refusal of the last switch, by provider.
     refused: HashMap<String, String>,
     narrow: bool,
+    /// The list of the machine chooser at the top is open.
+    machine_menu: bool,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
     /// What the user says of themselves, edited on this page.
@@ -447,6 +449,7 @@ impl SettingsPage {
             pending: HashMap::new(),
             refused: HashMap::new(),
             narrow: false,
+            machine_menu: false,
             judge_pending: false,
             judge_turning: None,
             judge_refused: None,
@@ -2534,9 +2537,11 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
-        let header = PageHeader::new("settings-header", "Settings");
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
+        let header = PageHeader::new("settings-header", "Settings").crumb(
+            crate::machines::where_line("settings-where", &["Settings", SECTIONS[tab].1], cx),
+        );
         if SECTIONS[tab].0 == "general" {
             self.check.update(cx, |check, cx| check.ensure(cx));
         }
@@ -2608,7 +2613,12 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
+            .children(
+                self.machine_chooser(window, cx)
+                    .map(|chooser| column(enter(key("machine"), 1, chooser).into_any_element())),
+            )
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
+            .child(column(self.own_line(cx).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
         // plays again), after the tabs.
         let page = div()
@@ -2628,6 +2638,8 @@ impl Render for SettingsPage {
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
+        // Held after its blocks: what it adds comes after them, and a block's place stays its own.
+        let page = crate::machines::hold(page, window, cx);
         div()
             .size_full()
             .flex()
@@ -2635,6 +2647,101 @@ impl Render for SettingsPage {
             .text_color(p.text)
             .child(top)
             .child(page)
+    }
+}
+
+impl SettingsPage {
+    /// Whose settings these are, at the top of the page: this machine, then the other machines
+    /// that run agents, each with its state; choosing one shows it (`Shell::choose_machine`), as
+    /// opening one of its sessions does. None while this machine is in no member list or knows no
+    /// other runner.
+    fn machine_chooser(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let (choices, present) = crate::machines::kept(
+            "settings-machine-kept",
+            self.machines
+                .read(cx)
+                .machines()
+                .map(crate::machines::choices)
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        if choices.is_empty() {
+            return None;
+        }
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
+        let toggle = page.clone();
+        let picker = crate::machines::picker(
+            "settings-machine",
+            "settings-machine",
+            &choices,
+            chosen,
+            self.machine_menu,
+            move |_, cx| {
+                toggle
+                    .update(cx, |page, cx| {
+                        page.machine_menu = !page.machine_menu;
+                        cx.notify();
+                    })
+                    .ok();
+            },
+            move |name, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.machine_menu = false;
+                    cx.notify();
+                })
+                .ok();
+                shell
+                    .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                    .ok();
+            },
+        );
+        // The chooser folds away, with its words, once there is no other machine to choose.
+        Some(presence(
+            "settings-machine-presence",
+            present,
+            div()
+                .pb(space::LG)
+                .child(Field::new("settings-machine-field", "Settings of", picker)),
+        ))
+    }
+
+    /// One line under the tabs while another machine is shown, whichever tab: the appearance and
+    /// the version are this window's, and stay this machine's.
+    fn own_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let this = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.this.clone())
+            .unwrap_or_else(|| "this machine".to_owned());
+        let said = crate::machines::shown_machine(cx).map(|_| {
+            SharedString::from(format!(
+                "This window (appearance, version) stays this machine's, {this}, whichever \
+                 machine is chosen above."
+            ))
+        });
+        presence_of("settings-own-block", said, move |said| {
+            div()
+                .id("settings-own")
+                .aria_label(said.clone())
+                .text_size(px(12.5))
+                .text_color(p.mute)
+                .child(said)
+                .test_support()
+                .into_any_element()
+        })
+        .space(space::MD)
     }
 }
 

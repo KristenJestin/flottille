@@ -1,6 +1,7 @@
 package org.flottille.app
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebStorage
@@ -90,25 +91,27 @@ fun TunnelBrowser(
             },
             onRelease = {
                 it.stopLoading()
-                it.destroy()
                 // The tunnel closes with the panel: nothing of its page stays for the next one, whose
                 // origin (`localhost`, whatever the port) the cookies and the storage do not tell apart.
-                clearTunnelSite()
+                clearTunnelSite(it)
+                it.destroy()
             },
         )
     }
     // A tunnel that ended on its own leaves the page up, to say so: its site goes with it.
-    LaunchedEffect(ended != null) { if (ended != null) clearTunnelSite() }
+    LaunchedEffect(ended != null) { if (ended != null) clearTunnelSite(web[0]) }
 }
 
 /**
  * Forgets what the pages of tunnels stored in the web view: cookies and web storage are shared by
- * every `localhost` page whatever its port, so a run's page would hand them to the next run's.
+ * every `localhost` page whatever its port, so a run's page would hand them to the next run's;
+ * the HTTP cache of [page] goes too.
  */
-internal fun clearTunnelSite() {
+internal fun clearTunnelSite(page: WebView?) {
     CookieManager.getInstance().removeAllCookies(null)
     CookieManager.getInstance().flush()
     WebStorage.getInstance().deleteAllData()
+    page?.clearCache(true)
 }
 
 /**
@@ -126,14 +129,29 @@ internal class TunnelWebViewClient(
         if (request.isForMainFrame) onFailed(error.description.toString())
     }
 
+    private fun here(uri: android.net.Uri): Boolean {
+        val host = uri.host.orEmpty()
+        return (host == "localhost" || host == "127.0.0.1" || host.endsWith(".localhost")) && uri.port == localPort
+    }
+
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val uri = request.url
-        val host = uri.host.orEmpty()
-        val here = (host == "localhost" || host == "127.0.0.1" || host.endsWith(".localhost")) &&
-            uri.port == localPort
-        if (here) return false
+        if (here(uri)) return false
         if (request.isForMainFrame && request.hasGesture() && isWebAddress(uri.toString())) onOutside(uri.toString())
         return true
+    }
+
+    /**
+     * The check [shouldOverrideUrlLoading] cannot make: it is not called for a POST, so a form that
+     * posts to another site would load that site here, under the tunnel's address. A main frame
+     * that starts loading a web address outside the tunnel's origin is stopped, and the page goes
+     * back to what it showed when the load had got as far as showing something else.
+     */
+    override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+        if (!isWebAddress(url) || here(android.net.Uri.parse(url))) return
+        view.stopLoading()
+        val shown = view.url
+        if (shown != null && !here(android.net.Uri.parse(shown)) && view.canGoBack()) view.goBack()
     }
 }
 

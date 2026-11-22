@@ -120,6 +120,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `events.watch` | read |
 | `project.list` | read |
 | `project.show` | read |
+| `project.folders` | drive |
 | `project.detect` | drive |
 | `project.add` | drive |
 | `project.removal` | read |
@@ -431,6 +432,17 @@ When the project follows a default that cannot be followed (`workspaces.toml` is
 `workspaces_folder.show`), the result also holds `workspaces_default_error`, the reason; the data
 folder is what `workspaces_root` then is. `not-found` when there is none,
 `invalid-config` when its file cannot be used.
+
+#### `project.folders`
+
+`{"path"?}`. The folders inside `path` (absolute, or `~` or starting with `~/`; the home of the
+user the daemon runs for, `HOME`, when left out), for a client that picks where a project is added
+rather than typing it (`docs/remote.md`, "Paths are picked, not typed"): `{"path", "shown",
+"parent", "folders": [{"name", "path", "repository", "repositories", "project"}]}`. `shown` is the path from `~`
+(`~/code`); `parent` is `null` at `/`. The folders are in alphabetical order, hidden folders and
+links left out; `repository` says whether the folder is a Git repository itself, `repositories` how many `project.detect` would find in each, and `project` the
+name of the project already registered there, `null` when none. `refused` when the path is not
+absolute or cannot be read. It is `drive`: only what adds a project needs it.
 
 #### `project.detect`
 

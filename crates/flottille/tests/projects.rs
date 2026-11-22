@@ -2086,3 +2086,49 @@ mod removal {
         assert!(refused.contains(&agent), "{refused}");
     }
 }
+
+#[test]
+fn the_folders_a_project_may_be_added_from_are_listed_from_home() {
+    let user = User::new();
+    let app = user.path("home/code/app");
+    user.git_init(&app);
+    user.git_init(&app.join("web"));
+    user.git_init(&user.path("home/code/shop"));
+    add(&user, &user.path("home/code/shop"));
+    std::fs::create_dir_all(user.path("home/notes")).unwrap();
+    std::fs::create_dir_all(user.path("home/.hidden/repo")).unwrap();
+
+    let home = user.call("project.folders", json!({})).unwrap();
+    assert_eq!(home["path"], user.path("home").to_str().unwrap());
+    assert_eq!(home["shown"], "~");
+    let names: Vec<&str> = home["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| folder["name"].as_str().unwrap())
+        .collect();
+    // Hidden folders left out, in alphabetical order.
+    assert_eq!(names, ["code", "notes"]);
+
+    let code = user
+        .call("project.folders", json!({"path": "~/code"}))
+        .unwrap();
+    assert_eq!(code["shown"], "~/code");
+    assert_eq!(code["parent"], user.path("home").to_str().unwrap());
+    assert_eq!(code["folders"][0]["name"], "app");
+    assert_eq!(code["folders"][0]["path"], app.to_str().unwrap());
+    // As many repositories as `project.detect` finds there.
+    assert_eq!(code["folders"][0]["repositories"], 2);
+    assert_eq!(code["folders"][0]["repository"], true);
+    assert_eq!(
+        home["folders"][0]["repository"], false,
+        "code holds repositories, is none"
+    );
+    assert_eq!(code["folders"][0]["project"], Value::Null);
+    assert_eq!(code["folders"][1]["project"], "shop");
+
+    let (kind, message) = user
+        .call("project.folders", json!({"path": "code"}))
+        .unwrap_err();
+    assert_eq!(kind, "refused", "{message}");
+}

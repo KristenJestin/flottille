@@ -22,6 +22,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("project.list", Read),
     ("project.show", Read),
     // It looks through any folder the client names, and serves only `project.add`.
+    ("project.folders", Drive),
     ("project.detect", Drive),
     ("project.add", Drive),
     ("project.removal", Read),

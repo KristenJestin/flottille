@@ -384,7 +384,22 @@ device that pinned the hub's key, from its pair code or since, refuses another o
 it proves anything. The hub then welcomes a member's device, a member's machine, or a device whose
 pairing it took, and refuses any other key; the refusal says the list was reset when the device
 pinned a list that starts otherwise, and nothing else of the list: a stranger learns neither its
-root nor its members. Once welcomed, a device asks (a member's change, what it is, its presence)
+root nor its members. **What a refusal proves**: the hub signs it with its key, over
+`flottille-hub-refused-v1`, a zero byte, the device's key, both nonces, what it received of the
+device's proof (the hash it pinned, or none; the pairing it asked, or none), `reset` and the
+reason, so that it holds for this session, and this request, only. The device's own signature
+covers neither the hash nor the pairing: something on the way could add a pairing to a member's
+proof, or change the hash, to have the hub refuse it; the device checks the refusal against what it
+sent, and such a refusal does not check. A device acts on a refusal (it forgets the hub, or says
+its list was reset) only once that signature checks; an unsigned refusal, or one whose signature
+does not check (said by something on the way to an `http://` hub, answering a request changed on
+the way, or caught in another session), changes nothing, and the device says the hub could not be
+reached. A refusal said before the handshake (`{"refused": "…"}` with no hello both can use) is
+unsigned too: the device says the hub could not be reached, and shows its words as what answered,
+not as the hub's. A hub of before 2026-11-22 signs no
+refusal: a device of this version that it refuses says it cannot reach it, and keeps trying, until
+the hub is updated; a device of before takes this hub's signed refusal as it took an unsigned one.
+A refusal later in a session (a member removed meanwhile) only ends the session. Once welcomed, a device asks (a member's change, what it is, its presence)
 and is answered by number; each ask is taken only while the device is still welcome,
 so that a session opened before a change that leaves it out asks nothing more. The hub sends the
 list whole, what it knows of each device, and, to a runner, the presence, at once and whenever
@@ -583,6 +598,34 @@ open; bringing in front a machine that needs an update, or that went off meanwhi
 toast that says why, and the window stays on the machine it shows. The window reads the
 device key from the same keyring item, or the same file, as the command line.
 
+**Built (#1182), in the window: every page works on any machine.** The window addresses another
+machine one way only, the one its sessions use: bringing that machine in front, every connection of
+the window signed with the device key for it and carried by this machine's daemon. Settings opens
+with `Settings of` (the kit's select: this machine, then the other runners, each with its role and
+state, `runner · online`);
+choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
+and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
+that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
+machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
+window keeps; one line under the tabs says it while another machine is shown (`This window
+(appearance, version) stays this machine's, pc, whichever machine is chosen above.`). Settings, Machines is the hub's list, the same from
+every machine. **Add project** asks first on which machine (radios: this one first, then the runners,
+each with its role and state; Next), then the folder there (Back returns to the machine): on
+another machine it is picked in that machine's folders, never typed, from its home, a folder opened
+after the other (`project.folders`, `..` going up), each saying whether it is a repository and how
+many it holds, or that it is already a project; a repository is picked, then detected and added
+there. On this machine it is typed or picked with the system's dialog, as before. A
+project of another machine only opens its page by bringing that machine in front; its settings and
+every tab follow. A page of another machine says it once, at its top, in its path line (`server /
+Settings / Agents`, `server / app`, `server / app / Settings`), which unfolds as that machine
+comes in front and folds away when this one is back. While the machine in front is off, or this
+device is a `viewer` there, one line above the page says why (`server offline since 22:14`, `This
+device may only view server`), and the controls that write (Settings' sections, a project's
+settings, a project page's composer and its tab, Add project's button) fade their ink and take no
+click, while the page still scrolls and its tabs still read; nothing is sent, nothing is kept. A
+machine that is off is not brought in front (a failure toast says it, as for its sessions): what
+the window shows of it is what it read while it was on.
+
 ## Roles
 
 The user chooses what a device may do on the device when it pairs, from what it proposes; the role
@@ -741,8 +784,10 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   project: a project that several machines have is one group, whatever its name there (the next
   bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
-  machine's name as a tag (`server`); a session of this machine carries none. There is no machine
-  switcher: the machines' states (online, offline since, needs an update) are in Settings,
+  machine's name as a tag (`server`); a session of this machine carries none. The machine is
+  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
+  in a project's composer (the machine picker); the
+  machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
 - **The same project.** Two projects are the same when the remotes of their repositories are the
   same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
@@ -849,11 +894,13 @@ local child's work; nothing moves your branch.*
   there. One it has: a new workspace on the caller's branch, only the missing commits sent. None:
   it makes the project itself, under the caller's name of it (or `-2`, `-3`… when that name is
   another project's), in its folder for projects from other machines,
-  `$XDG_DATA_HOME/flottille/projects/<project>`; each repository is cloned from the bundle, its
+  `$XDG_DATA_HOME/flottille/projects/<project>` (the project's, not Flottille's, to the gate, as
+  a workspace in the data folder is: a session the user starts there writes in it); each repository is cloned from the bundle, its
   whole history the first time, never from its remote; then the workspace and the session as
   above. The project is then that machine's like any other, on its side of the list, its file
-  marked `from_machine = "pc"`. The words of the launch say which project it runs in, and when it
-  makes one.
+  marked with that machine's key (`from_machine = "<key>"`): its member's name is not kept, since
+  a runner may rename any member and another may take it. The words of the launch say which
+  project it runs in, and when it makes one.
 - **The project's settings travel with each launch**: its branch rules (`branch_prefix`,
   `branch_format`), `never`, its tasks and services (`tasks`), its `setup`, its `message_checks`,
   its pull request conventions, its `rules` and `rules_alone`, and each repository's `base`,
@@ -865,7 +912,13 @@ local child's work; nothing moves your branch.*
   A project the user registered by hand keeps the settings the user gave it there: the caller's
   are not laid over them, and the launch's words say so. A project made for one machine's launches
   takes only that machine's: another machine's launch runs in it and leaves its settings as they
-  are, its words saying whose they keep. Settings that cannot be used there (a task needing a
+  are, its words saying whose they keep (a project whose file names the machine instead, as the
+  first builds of dev wrote it, is no machine's: it keeps its settings; removed, the next launch
+  makes it again). The settings
+  are laid only on the project file they were classed against, as a held write is done only while
+  its words still hold: when the user (or anything else) changed that file meanwhile, the launch
+  is refused when it is allowed, saying the project changed, and nothing is laid; the caller
+  launches again. Settings that cannot be used there (a task needing a
   service that machine lacks) refuse the launch, saying why.
 - **What the settings change is classed as the same writes of an agent there** (`docs/tools.md`,
   "The project"), by the receiving machine's gate, against the project as it is there: each task
@@ -873,7 +926,12 @@ local child's work; nothing moves your branch.*
   line or a sensitive path is base; asking turned off, `check` or `read_only` set are base), each
   setup step as `setup add`, the rules and `rules_alone` as `set_rules` (base), each repository's
   base branches and dependencies as `set_settings`; what no agent's tool writes there is the
-  user's word, base: an entry removed from `never`, the message checks and the commit checks. The
+  user's word, base: an entry removed from `never`, the message checks and the commit checks, the
+  branch and pull request conventions (its template is text given to the agents, as the rules
+  are), and a repository the project lacks, which is checked as one the user adds there: no link
+  out of the project's folder, no repository of another project (`It adds the repository lib to
+  the project`). In a project Flottille made, a repository whose folder leads out of the project
+  is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
   judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
   Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
@@ -1306,6 +1364,12 @@ recreated.
   closes, and the notice says so (`no connection for 10 minutes`); the in-app browser's tunnels
   and those of the two uses are never shared (`open_address(…, browser)`). A `viewer`'s page draws
   no tunnel control (the machine would refuse it).
+  Built (#1230), what the second review of that left: an **Open** whose panel is left before the
+  machine has answered (Back, say) opens no tunnel, and closes the one it had opened if the answer
+  came first (`Core.open_address` is undone with its caller; a tunnel held before, which that call
+  only found, stays); a form that posts to another site, which the web view does not report to
+  `shouldOverrideUrlLoading`, is stopped when its load starts (`onPageStarted`) and the page goes
+  back; the web view's HTTP cache goes with the cookies and the storage.
 - **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
   <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
   the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
@@ -1473,6 +1537,34 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
+  project's choosers switch the whole window, as opening a session there does, rather than a page
+  aimed at a machine of its own while the rest stays: one way to address a machine, and the
+  sidebar, the bell and the pages always say the same machine.
+- **`project.folders` lists one folder's folders at a time** (#1182), from the machine's home: the
+  dialog opens them one after the other, and a folder that is a repository itself is picked; a
+  folder that only holds repositories (not one itself) is opened, not picked. It is `drive`, as
+  adding is.
+- **The choosers name each machine with its icon, its role and its state** (#1182): the kit draws
+  the icon of the machine chosen in its colour before its name on the chooser's button (`server in
+  teal` is the colour's word, for the ones who do not see colours), and each row of the list has the
+  machine's icon in its colour, its role and state, with a check on the chosen one that moves over
+  `PANEL` (the kit's tinted option, `MenuItem::tint` and `checked`; `Select` and `RadioChoices` take
+  the same tint). Nothing is drawn beside the kit's chooser. A chooser that stops having a choice
+  (the project is on one machine only, the last runner is gone) folds away with its words. The
+  choosers offer the runners only: a controller holds no project.
+- **The composer's machine picker lists the machines that have the project** (#1182): the runners
+  that offered it over their link, or whose light list of sessions names it (kept while a machine is
+  off, which offers nothing). One that is off is greyed and says `offline since 22:14`; it is not
+  picked. A project on one machine has no picker. Choosing a machine brings it in front on the
+  project's page, like every page of another machine, and the place is `main` again. A machine in
+  front that goes off says under the composer to pick another or wait; the composer stays free for
+  the picker, and nothing is started.
+- **A session started on another machine is a row of its pilot's rail** (#1182): its machine's icon
+  and its title in the rail's Agents, and, for a child, a line of the sub-agents list; both bring
+  that machine in front on it. The header of a session names the machine it runs on when the user
+  has several (`[icon] server / main`).
 
 - One list of every machine (#1150): the window follows the other machines through its own
   daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`
@@ -1703,6 +1795,21 @@ on a real phone, by hand, and reported.
   (`shouldInterceptRequest` over a stream of the link) would remove it for the in-app view, but
   needs a raw-stream API in the core and the web view's own request handling (cookies, redirects,
   websockets) rebuilt over it: not done. Reversible: the listener is `bind_local`.
+- **What the idle end counts, and what it leaves (#1230).** The idle end of an **Open in browser**
+  tunnel counts connections, not bytes: a connection that only opens and closes starts the 10
+  minutes again, and a page that keeps a connection open (a dev server's live-reload websocket)
+  keeps the tunnel for as long as the page stays open in the browser. That is the use (the page is
+  in the user's browser and is in use), and the notification's Close is the way out; counting bytes
+  would end a tunnel under a page that is only listening. Reversible: `accept` is the one place.
+  The in-app browser's tunnel has no idle end either: with an **Open in browser** tunnel kept, the
+  service keeps the core connected with the app in the background, and an in-app panel left open
+  then keeps its tunnel until the user comes back and leaves it. Closing it when the app stops
+  would lose the page at every switch of app; the panel is on screen when the user returns.
+- **Cache and service workers (#1230).** When a tunnel's panel closes or its tunnel ends, the
+  cookies, the web storage and the HTTP cache of the web view are cleared. The platform has no call
+  of its own for service workers: `WebStorage.deleteAllData` is the one that may include them, and
+  what remains is keyed by the origin `localhost:<port>`, a port the system picked at random for that
+  tunnel, which another page is unlikely to be given again.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
@@ -1788,7 +1895,10 @@ on a real phone, by hand, and reported.
   replace the hub (`--replace`): a machine has one hub.
 - A removal is carried out by every daemon that takes the list holding it: the machines it trusts
   are written again, and its link to the removed member's machine is cut at once
-  (`remote.disconnected`, `it was removed from the member list`). The removed machine's own session
+  (`remote.disconnected`, `it was removed from the member list`). A link to it that was being made
+  when the list came is judged again as it is kept, and closed (`refused: this machine's key is not
+  one of the user's`): it never gets `remote.connected`. So is a client's link to it dialled for a
+  request then: closed, and the request answered `unavailable`. The removed machine's own session
   to the hub is refused, so it never sees the removal itself; its links are cut by the others.
 - `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
   (its state is `remote.machines`' `hub`, and `remote.hub` says it changed).

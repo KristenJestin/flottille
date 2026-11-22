@@ -260,10 +260,6 @@ pub enum Then {
     ConnectionRequest(connection_request::Then),
     /// The findings' own: the shell gives the answer to the dialog that marks one filed.
     Findings(crate::findings::Then),
-    /// `remote.machines` of the composer of `project`: the machines that can run it.
-    Runners {
-        project: String,
-    },
     /// The health check's own: the shell gives the answer to Check Flottille in Settings.
     Check(crate::check::Then),
     /// The tunnels' own: the shell gives the answer to the Tunnels section of the services page.
@@ -628,7 +624,6 @@ impl Registry {
             Then::Connections(_)
             | Then::ConnectionRequest(_)
             | Then::Findings(_)
-            | Then::Runners { .. }
             | Then::Check(_)
             | Then::Tunnels(_) => {}
         }
