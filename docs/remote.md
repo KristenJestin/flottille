@@ -1283,6 +1283,12 @@ recreated.
   closes, and the notice says so (`no connection for 10 minutes`); the in-app browser's tunnels
   and those of the two uses are never shared (`open_address(…, browser)`). A `viewer`'s page draws
   no tunnel control (the machine would refuse it).
+  Built (#1230), what the second review of that left: an **Open** whose panel is left before the
+  machine has answered (Back, say) opens no tunnel, and closes the one it had opened if the answer
+  came first (`Core.open_address` is undone with its caller; a tunnel held before, which that call
+  only found, stays); a form that posts to another site, which the web view does not report to
+  `shouldOverrideUrlLoading`, is stopped when its load starts (`onPageStarted`) and the page goes
+  back; the web view's HTTP cache goes with the cookies and the storage.
 - **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
   <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
   the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
@@ -1680,6 +1686,21 @@ on a real phone, by hand, and reported.
   (`shouldInterceptRequest` over a stream of the link) would remove it for the in-app view, but
   needs a raw-stream API in the core and the web view's own request handling (cookies, redirects,
   websockets) rebuilt over it: not done. Reversible: the listener is `bind_local`.
+- **What the idle end counts, and what it leaves (#1230).** The idle end of an **Open in browser**
+  tunnel counts connections, not bytes: a connection that only opens and closes starts the 10
+  minutes again, and a page that keeps a connection open (a dev server's live-reload websocket)
+  keeps the tunnel for as long as the page stays open in the browser. That is the use (the page is
+  in the user's browser and is in use), and the notification's Close is the way out; counting bytes
+  would end a tunnel under a page that is only listening. Reversible: `accept` is the one place.
+  The in-app browser's tunnel has no idle end either: with an **Open in browser** tunnel kept, the
+  service keeps the core connected with the app in the background, and an in-app panel left open
+  then keeps its tunnel until the user comes back and leaves it. Closing it when the app stops
+  would lose the page at every switch of app; the panel is on screen when the user returns.
+- **Cache and service workers (#1230).** When a tunnel's panel closes or its tunnel ends, the
+  cookies, the web storage and the HTTP cache of the web view are cleared. The platform has no call
+  of its own for service workers: `WebStorage.deleteAllData` is the one that may include them, and
+  what remains is keyed by the origin `localhost:<port>`, a port the system picked at random for that
+  tunnel, which another page is unlikely to be given again.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
