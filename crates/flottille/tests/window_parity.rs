@@ -177,6 +177,15 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("agent tree", Window(&["agent.tree"])),
     // ── What reaches you ─────────────────────────────────────────────────────────────────────
     // The bell and the sessions that need an answer say what `inbox` lists.
+    // ── Routines: the Routines tab of a project ──────────────────────────────────────────────
+    ("routine add", Window(&["routine.add"])),
+    ("routine list", Window(&["routine.list"])),
+    ("routine show", Window(&["routine.show"])),
+    ("routine edit", Window(&["routine.edit"])),
+    ("routine run", Window(&["routine.run"])),
+    ("routine pause", Window(&["routine.pause"])),
+    ("routine resume", Window(&["routine.resume"])),
+    ("routine remove", Window(&["routine.remove"])),
     ("inbox", Window(&["notifications.list"])),
     ("notifications", Window(&["notifications.list"])),
     ("notifications read", Window(&["notifications.read"])),
@@ -197,6 +206,10 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("deny", Window(&["approval.deny"])),
     // ── The window and the doors ─────────────────────────────────────────────────────────────
     ("window", Script("opens the window")),
+    (
+        "open",
+        Script("brings the window to a session: what a desktop notification's click runs"),
+    ),
     (
         "bridge claude",
         Script("the door a Claude Code agent is run through: not a user's act"),
