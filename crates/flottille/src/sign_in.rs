@@ -384,6 +384,14 @@ fn programs(daemon: &Daemon) -> Vec<(Program, Option<String>)> {
 
 /// A sign-in that runs: what the user needs of it, held here only while it runs.
 struct Running {
+    /// This flow's own: what its readers and its follower touch, never a later flow of the same
+    /// program.
+    id: u64,
+    /// The key of the device that started it, `None` for a client of this machine: only that
+    /// caller is given its address and its code, or gives it a code or cancels it.
+    starter: Option<flottille_link::PublicKey>,
+    /// Where it was started from, said to another caller.
+    from: String,
     host: Option<String>,
     address: Option<String>,
     code: Option<String>,
@@ -401,6 +409,37 @@ struct Running {
 fn running() -> &'static Mutex<HashMap<Program, Running>> {
     static RUNNING: OnceLock<Mutex<HashMap<Program, Running>>> = OnceLock::new();
     RUNNING.get_or_init(Mutex::default)
+}
+
+/// The id of the next sign-in.
+static NEXT_FLOW: AtomicU64 = AtomicU64::new(1);
+
+/// Whom the request being served is from: the key of the device that signed it, or `None` for a
+/// client of this machine, and the name of that machine (`connection.login`'s rule).
+fn caller(daemon: &Daemon) -> (Option<flottille_link::PublicKey>, String) {
+    match crate::daemon::asked() {
+        Some(asked) => (Some(asked.key), asked.device.clone()),
+        None => (
+            None,
+            crate::link::remote_of(daemon)
+                .ok()
+                .and_then(|remote| remote.listed().ok().map(|(_, name)| name))
+                .unwrap_or_else(|| "this machine".to_owned()),
+        ),
+    }
+}
+
+/// The refusal another caller than the one that started `flow` is given: that it runs, and from
+/// where, never what it shows.
+fn not_yours(program: Program, flow: &Running) -> Failure {
+    Failure::new(
+        "refused",
+        format!(
+            "a sign-in of {} runs, started from {}",
+            program.name(),
+            flow.from
+        ),
+    )
 }
 
 /// What a line of a sign-in says the user needs: the first address it holds, and the one-time
@@ -442,6 +481,7 @@ impl Reading {
 /// Reads a stream of the sign-in line by line, keeping only the address and the code.
 async fn read_stream(
     program: Program,
+    id: u64,
     stream: impl AsyncRead + Unpin,
     reading: Arc<Mutex<Reading>>,
 ) {
@@ -453,7 +493,7 @@ async fn read_stream(
             (reading.address.clone(), reading.code.clone())
         };
         let mut running = running().lock().unwrap();
-        if let Some(flow) = running.get_mut(&program) {
+        if let Some(flow) = running.get_mut(&program).filter(|flow| flow.id == id) {
             let changed = flow.address != address || flow.code != code;
             flow.address = address;
             flow.code = code;
@@ -627,10 +667,15 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
             ));
         }
     };
+    let (starter, from) = caller(&daemon);
+    let id = NEXT_FLOW.fetch_add(1, Ordering::Relaxed);
     let said = {
         let mut flows = running().lock().unwrap();
         match flows.get(&program) {
-            Some(flow) if !flow.ended => return Ok(shown(program, flow)),
+            Some(flow) if !flow.ended && flow.starter == starter => {
+                return Ok(shown(program, flow));
+            }
+            Some(flow) if !flow.ended => return Err(not_yours(program, flow)),
             _ => {}
         }
         let mut command = command(&path, &args);
@@ -647,14 +692,17 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
         let said = Arc::new(Notify::new());
         let reading = Arc::new(Mutex::new(Reading::default()));
         if let Some(out) = child.stdout.take() {
-            tokio::spawn(read_stream(program, out, reading.clone()));
+            tokio::spawn(read_stream(program, id, out, reading.clone()));
         }
         if let Some(err) = child.stderr.take() {
-            tokio::spawn(read_stream(program, err, reading));
+            tokio::spawn(read_stream(program, id, err, reading));
         }
         flows.insert(
             program,
             Running {
+                id,
+                starter,
+                from,
                 host: host.clone(),
                 address: None,
                 code: None,
@@ -666,7 +714,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
                 ended: false,
             },
         );
-        tokio::spawn(follow(daemon.clone(), program, path, child));
+        tokio::spawn(follow(daemon.clone(), program, id, path, child));
         said
     };
     announce(&daemon, program, host.as_deref(), "started", None);
@@ -677,7 +725,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
         let notified = said.notified();
         {
             let flows = running().lock().unwrap();
-            let Some(flow) = flows.get(&program) else {
+            let Some(flow) = flows.get(&program).filter(|flow| flow.id == id) else {
                 break;
             };
             let ready = flow.address.is_some() && (flow.code.is_some() || !wants_code);
@@ -690,7 +738,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
         }
     }
     let flows = running().lock().unwrap();
-    match flows.get(&program) {
+    match flows.get(&program).filter(|flow| flow.id == id) {
         Some(flow) => Ok(shown(program, flow)),
         None => Ok(json!({"program": program.name(), "host": host, "running": false})),
     }
@@ -701,6 +749,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
 async fn follow(
     daemon: Arc<Daemon>,
     program: Program,
+    id: u64,
     path: PathBuf,
     mut child: tokio::process::Child,
 ) {
@@ -714,7 +763,7 @@ async fn follow(
     }
     let (host, cancelled) = {
         let mut flows = running().lock().unwrap();
-        match flows.get_mut(&program) {
+        match flows.get_mut(&program).filter(|flow| flow.id == id) {
             Some(flow) => {
                 flow.ended = true;
                 flow.input = None;
@@ -756,12 +805,18 @@ async fn follow(
         };
         ("failed", Some(why))
     };
-    running().lock().unwrap().remove(&program);
+    {
+        // A sign-in started since, while this one's status was read, is not this one's to end.
+        let mut flows = running().lock().unwrap();
+        if flows.get(&program).is_some_and(|flow| flow.id == id) {
+            flows.remove(&program);
+        }
+    }
     announce(&daemon, program, host.as_deref(), state, why.as_deref());
 }
 
 /// `signin.code`: the code the user pasted, written once to the program's input, which closes.
-async fn code(program: Program, code: String) -> Answer {
+async fn code(daemon: &Daemon, program: Program, code: String) -> Answer {
     let code = code.trim().to_owned();
     if code.is_empty() || code.contains(['\n', '\r']) || code.len() > 4096 {
         return Err(Failure::new(
@@ -769,6 +824,7 @@ async fn code(program: Program, code: String) -> Answer {
             "the code is one line of text, as the browser shows it",
         ));
     }
+    let (starter, _) = caller(daemon);
     let input = {
         let mut flows = running().lock().unwrap();
         let Some(flow) = flows.get_mut(&program).filter(|flow| !flow.ended) else {
@@ -777,6 +833,9 @@ async fn code(program: Program, code: String) -> Answer {
                 format!("{} is not signing in", program.name()),
             ));
         };
+        if flow.starter != starter {
+            return Err(not_yours(program, flow));
+        }
         if !flow.asks_code {
             return Err(Failure::new(
                 "refused",
@@ -807,7 +866,8 @@ async fn code(program: Program, code: String) -> Answer {
 }
 
 /// `signin.cancel`: stops the sign-in, its whole process group.
-fn cancel(program: Program) -> Answer {
+fn cancel(daemon: &Daemon, program: Program) -> Answer {
+    let (starter, _) = caller(daemon);
     let mut flows = running().lock().unwrap();
     let Some(flow) = flows.get_mut(&program).filter(|flow| !flow.ended) else {
         return Err(Failure::new(
@@ -815,6 +875,9 @@ fn cancel(program: Program) -> Answer {
             format!("{} is not signing in", program.name()),
         ));
     };
+    if flow.starter != starter {
+        return Err(not_yours(program, flow));
+    }
     flow.cancelled = true;
     flow.input = None;
     if flow.pid != 0 {
@@ -875,11 +938,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 program,
                 code: given,
             } = serde_json::from_value(params)?;
-            code(program_of(&program)?, given).await
+            code(&daemon, program_of(&program)?, given).await
         }
         "signin.cancel" => {
             let Named { program } = serde_json::from_value(params)?;
-            cancel(program_of(&program)?)
+            cancel(&daemon, program_of(&program)?)
         }
         "signin.sign_out" => {
             let Named { program } = serde_json::from_value(params)?;

@@ -2771,7 +2771,12 @@ since.
 `{"program"}`. Starts the program's own sign-in on this machine, without a shell, one at a time
 for each program (a second start answers the one that runs), and answers once the program said
 the address to open and, for a device flow, the code (20 s at most), or ended: `{"program",
-"host", "running", "address", "code", "asks_code"}`. `asks_code` is `true` while the program waits
+"host", "running", "address", "code", "asks_code"}`. A sign-in is bound to the caller that
+started it, as `connection.login` is: the device that signed the request, or this machine's own
+clients. Only that caller is answered its address and its code, and gives it a code or cancels it;
+another one is `refused` with `a sign-in of <program> runs, started from <machine>`, without them.
+The address is the first the program prints, without the user and password it may hold, and
+masked. `asks_code` is `true` while the program waits
 for a code the browser shows, to give with `signin.code`. Its end is `signin.changed`
 (`docs/events.md`); it is cut after 15 minutes. `refused` when the program is not installed or
 signs in only in a terminal (the sentence names the line to type).
@@ -2780,12 +2785,13 @@ signs in only in a terminal (the sentence names the line to type).
 
 `{"program", "code"}`. Writes the code the user pasted, one line, to the input of the program's
 sign-in, once, and closes that input: `{"program"}`. The code is not kept. `refused` when the
-program is not signing in, asks for no code, or was given its code already.
+program is not signing in, asks for no code, was given its code already, or was started by another
+caller.
 
 #### `signin.cancel`
 
 `{"program"}`. Stops the sign-in, its whole process group: `{"program"}`, then `signin.changed`
-with `cancelled`. `refused` when it is not signing in.
+with `cancelled`. `refused` when it is not signing in, or was started by another caller.
 
 #### `signin.sign_out`
 
