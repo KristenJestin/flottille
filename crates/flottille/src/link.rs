@@ -509,11 +509,17 @@ impl Remote {
         self.close().await;
     }
 
-    /// The machines this one trusts: the file as last read whole.
+    /// The machines this one trusts: the file as last read whole, read again only when it changed
+    /// since (a hand edit changes its stamp). A list kept that the file could not be written
+    /// with (disk full, read-only folder) is not given back the machines it lost.
     fn peers(&self) -> Peers {
         let file = self.folder.join(PEERS_FILE);
         let mut kept = self.peers.lock().unwrap();
-        kept.read = stamp(&file);
+        let now = stamp(&file);
+        if now == kept.read {
+            return kept.last.clone();
+        }
+        kept.read = now;
         match read_json::<Peers>(&file) {
             Ok(peers) => {
                 kept.said = false;
