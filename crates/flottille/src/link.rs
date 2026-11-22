@@ -596,6 +596,12 @@ impl Remote {
         let key = *link.peer().as_bytes();
         {
             let mut seen = self.seen.lock().unwrap();
+            // Judged again under the lock `trust_machines` cuts the links under: a removal that
+            // came while this link was made has cut the others already, and would miss this one.
+            if self.trusted(&link.peer()).is_none() {
+                link.close(NOT_TRUSTED);
+                return;
+            }
             let seen = seen.entry(key).or_insert_with(Seen::new);
             if let Some((_, old, old_dialled)) = &seen.link
                 && *old_dialled != dialled
