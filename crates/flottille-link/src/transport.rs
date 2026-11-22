@@ -1031,43 +1031,83 @@ mod tests {
         CertificateDer::from_pem_slice(pem.as_bytes()).unwrap()
     }
 
-    #[test]
-    fn the_phone_trusts_the_systems_and_the_users_roots_but_not_the_removed() {
-        let system = include_str!("../tests/roots/system.pem");
-        let removed = include_str!("../tests/roots/removed.pem");
-        let user = include_str!("../tests/roots/user.pem");
+    /// A tree laid out as Android 14's: the system's roots in the module of Conscrypt, an older
+    /// folder beside it, and the user's own, one of the system's removed by them and one added.
+    /// The folder, the system's folders in Android's order, and the user's.
+    fn android_tree() -> (
+        tempfile::TempDir,
+        [std::path::PathBuf; 2],
+        std::path::PathBuf,
+    ) {
         let folder = tempfile::tempdir().unwrap();
-        // Laid out as Android 14's: the system's roots in the module of Conscrypt, an older
-        // folder beside it, and the user's own, one of the system's removed by them.
         let apex = folder.path().join("apex/com.android.conscrypt/cacerts");
-        let older = folder.path().join("system/etc/security/cacerts");
+        let previous = folder.path().join("system/etc/security/cacerts");
         let mine = folder.path().join("data/misc/user/0");
         for made in [
             &apex,
-            &older,
+            &previous,
             &mine.join("cacerts-added"),
             &mine.join("cacerts-removed"),
         ] {
             std::fs::create_dir_all(made).unwrap();
         }
-        std::fs::write(apex.join("1a2b3c4d.0"), system).unwrap();
+        let removed = include_str!("../tests/roots/removed.pem");
+        std::fs::write(
+            apex.join("1a2b3c4d.0"),
+            include_str!("../tests/roots/system.pem"),
+        )
+        .unwrap();
         std::fs::write(apex.join("5e6f7a8b.0"), removed).unwrap();
-        std::fs::write(mine.join("cacerts-removed/5e6f7a8b.0"), removed).unwrap();
-        std::fs::write(mine.join("cacerts-added/9c0d1e2f.0"), user).unwrap();
-        // An older folder the phone no longer reads, and a file that holds no certificate.
-        std::fs::write(older.join("5e6f7a8b.0"), removed).unwrap();
         std::fs::write(apex.join("README"), "not a certificate").unwrap();
+        // Removed by its content: the name its hash had when the user removed it may have moved.
+        std::fs::write(mine.join("cacerts-removed/0f0f0f0f.1"), removed).unwrap();
+        std::fs::write(
+            mine.join("cacerts-added/9c0d1e2f.0"),
+            include_str!("../tests/roots/user.pem"),
+        )
+        .unwrap();
+        std::fs::write(
+            previous.join("7c7c7c7c.0"),
+            include_str!("../tests/roots/older.pem"),
+        )
+        .unwrap();
+        (folder, [apex, previous], mine)
+    }
 
-        let mut found = android_roots(&[apex.as_path(), older.as_path()], &mine);
-        found.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
-        let mut expected = vec![certificate(system), certificate(user)];
-        expected.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
-        assert_eq!(found, expected);
-        // Before Android 14, the older folder is the system's.
-        std::fs::remove_dir_all(folder.path().join("apex")).unwrap();
+    fn roots_of(system: &[std::path::PathBuf; 2], user: &Path) -> Vec<CertificateDer<'static>> {
+        android_roots(&[system[0].as_path(), system[1].as_path()], user)
+    }
+
+    #[test]
+    fn the_phone_trusts_the_systems_roots_but_not_the_removed_nor_the_users() {
+        let (_folder, system, user) = android_tree();
+        // Android trusts the user's own authorities only in an app that asks for them, which
+        // this one does not; a file that is no certificate is passed over.
         assert_eq!(
-            android_roots(&[apex.as_path(), older.as_path()], &mine),
-            vec![certificate(user)]
+            roots_of(&system, &user),
+            vec![certificate(include_str!("../tests/roots/system.pem"))]
+        );
+    }
+
+    #[test]
+    fn the_phone_reads_the_older_folder_when_the_modules_is_empty() {
+        let (_folder, system, user) = android_tree();
+        for entry in std::fs::read_dir(&system[0]).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        assert_eq!(
+            roots_of(&system, &user),
+            vec![certificate(include_str!("../tests/roots/older.pem"))]
+        );
+    }
+
+    #[test]
+    fn the_phone_reads_the_older_folder_before_android_14() {
+        let (_folder, system, user) = android_tree();
+        std::fs::remove_dir_all(&system[0]).unwrap();
+        assert_eq!(
+            roots_of(&system, &user),
+            vec![certificate(include_str!("../tests/roots/older.pem"))]
         );
     }
 
