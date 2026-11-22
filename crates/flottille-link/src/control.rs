@@ -1138,9 +1138,15 @@ impl Session {
                 {
                     return Err(ControlError::NeedsUpdate(refusal));
                 }
-                return Err(ControlError::Refused {
+                // Said before any key is proved, so by anything on the way to an `http://` hub:
+                // no verdict, and its words are said as what answered, not as the hub's.
+                return Err(ControlError::Unreachable {
                     hub: authority.clone(),
-                    reason: shown(reason, SHOWN),
+                    why: format!(
+                        "what answered refused this device before the handshake, unsigned, \
+                         saying \"{}\": the hub could not be reached",
+                        shown(reason, SHOWN)
+                    ),
                 });
             }
             let theirs: HubHello = serde_json::from_value(answer)

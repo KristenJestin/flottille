@@ -394,7 +394,9 @@ sent, and such a refusal does not check. A device acts on a refusal (it forgets 
 its list was reset) only once that signature checks; an unsigned refusal, or one whose signature
 does not check (said by something on the way to an `http://` hub, answering a request changed on
 the way, or caught in another session), changes nothing, and the device says the hub could not be
-reached. A hub of before 2026-11-22 signs no
+reached. A refusal said before the handshake (`{"refused": "…"}` with no hello both can use) is
+unsigned too: the device says the hub could not be reached, and shows its words as what answered,
+not as the hub's. A hub of before 2026-11-22 signs no
 refusal: a device of this version that it refuses says it cannot reach it, and keeps trying, until
 the hub is updated; a device of before takes this hub's signed refusal as it took an unsigned one.
 A refusal later in a session (a member removed meanwhile) only ends the session. Once welcomed, a device asks (a member's change, what it is, its presence)

@@ -1989,9 +1989,15 @@ async fn text_from_the_network_is_shown_without_control_characters() {
     let refused = stranger_at_url(address, &device_key(7))
         .connect(&place.machine("pc"), &hello(), &Tls::System)
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("no"), "{refused:?}");
+        .unwrap_err();
+    // Said before any key was proved: no verdict, and the words are what answered, not the hub.
+    assert!(
+        matches!(refused, ControlError::Unreachable { .. }),
+        "{refused}"
+    );
+    let refused = refused.to_string();
+    assert!(refused.contains("unsigned, saying \"no"), "{refused:?}");
+    assert!(refused.contains("could not be reached"), "{refused:?}");
     assert!(!refused.chars().any(char::is_control), "{refused:?}");
 }
 
