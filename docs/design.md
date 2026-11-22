@@ -1198,7 +1198,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   machine of the user together (a project of the same name on several machines is one group; a
   session of another machine carries that machine's name on its second line, `server`, greyed
   with `server offline since 22:14` while it is off, `docs/remote.md`, "One list of every
-  machine"), sorted by
+  machine"; every page works on any of those machines, Settings and Add project choosing which,
+  a page of another machine naming it once in its path line, `server / Settings / Agents`,
+  `docs/remote.md`, "Built (#1182)"), sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
@@ -1463,7 +1465,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
   refused, one JSON line each, secrets masked. For working on Flottille."), off by default
   (`developer.md`), and the path of its log unfolding under it. Last **Version** (`releases.md`,
-  "Updating").
+  "Updating"): the build, the **Channel** as a Stable or Beta choice that acts at once (an alpha
+  said with its branch and a way back), the update and its actions.
   **Machines** is Remote (`remote.md`), and nothing of it is typed on the page: a section says the
   state and holds the buttons, and what is typed, or what a request shows, is a dialog of the
   window's host. First whether remote is on: off, a notice ("Remote is off. This machine can join

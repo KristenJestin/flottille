@@ -583,6 +583,34 @@ open; bringing in front a machine that needs an update, or that went off meanwhi
 toast that says why, and the window stays on the machine it shows. The window reads the
 device key from the same keyring item, or the same file, as the command line.
 
+**Built (#1182), in the window: every page works on any machine.** The window addresses another
+machine one way only, the one its sessions use: bringing that machine in front, every connection of
+the window signed with the device key for it and carried by this machine's daemon. Settings opens
+with `Settings of` (the kit's select: this machine, then the other runners, each with its role and
+state, `runner · online`);
+choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
+and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
+that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
+machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
+window keeps; one line under the tabs says it while another machine is shown (`This window
+(appearance, version) stays this machine's, pc, whichever machine is chosen above.`). Settings, Machines is the hub's list, the same from
+every machine. **Add project** asks first on which machine (radios: this one first, then the runners,
+each with its role and state; Next), then the folder there (Back returns to the machine): on
+another machine it is picked in that machine's folders, never typed, from its home, a folder opened
+after the other (`project.folders`, `..` going up), each saying whether it is a repository and how
+many it holds, or that it is already a project; a repository is picked, then detected and added
+there. On this machine it is typed or picked with the system's dialog, as before. A
+project of another machine only opens its page by bringing that machine in front; its settings and
+every tab follow. A page of another machine says it once, at its top, in its path line (`server /
+Settings / Agents`, `server / app`, `server / app / Settings`), which unfolds as that machine
+comes in front and folds away when this one is back. While the machine in front is off, or this
+device is a `viewer` there, one line above the page says why (`server offline since 22:14`, `This
+device may only view server`), and the controls that write (Settings' sections, a project's
+settings, a project page's composer and its tab, Add project's button) fade their ink and take no
+click, while the page still scrolls and its tabs still read; nothing is sent, nothing is kept. A
+machine that is off is not brought in front (a failure toast says it, as for its sessions): what
+the window shows of it is what it read while it was on.
+
 ## Roles
 
 The user chooses what a device may do on the device when it pairs, from what it proposes; the role
@@ -654,7 +682,8 @@ to update rather than refuse each other's frames without saying why.
   it is kept, and sent when that machine links again.
 - **Paths are picked, not typed**, from the lists the machine gives, except where the user types one
   on purpose (`flottille --machine server project add ~/code/app`, which is that machine's path).
-- **Pictures** travel as bytes already (`agent.send {images}`); files other than pictures are left
+- **Pictures** travel as bytes (`agent.send {images}`), in chunks when the message would not fit
+  a frame ("Pictures sent to another machine"); files other than pictures and pasted texts are left
   for later.
 - **A link or a file an agent shows** (`web` `show_link`) belongs to its machine: a `localhost`
   address of another machine opens through a tunnel ("Tunnels"); a picture or a video of another
@@ -706,13 +735,40 @@ shows the sessions of every machine in one list ("One list of every machine", de
 maintainer on 2026-11-20); a led session on another machine appears under its pilot with the
 machine's name.
 
+### Pictures sent to another machine
+
+A message to another machine is one signed request, one frame of the link (1 MiB): in base64, about
+700 KB of pictures in all. A picture the user takes or pastes reaches the session whatever its
+size, up to the limits a local message has (#1187), as a file an agent showed comes the other way:
+
+- **The client sends the files first**, each chunk one signed request on its own stream
+  (`agent.upload`, `protocol.md`), at most 512 KiB of a file, in order, then the message
+  (`agent.send` or `agent.start`) that names their upload (`upload`) instead of carrying them. The
+  window and the phone do so when the message, signed, would not fit a frame; a smaller one still
+  carries its pictures. Pasted texts sent as files go the same way.
+- **The receiving machine keeps them under the bounds of a local message**, judged at each chunk
+  before any of it is kept: 20 pictures (png, jpeg, gif, webp) and 20 pasted texts, each 5 MiB at
+  most. An upload is its sender's: the device that signed its chunks (this machine's clients
+  together), and no other client can add to it or take it. A sender has 2 uploads waiting at most,
+  the machine 8; the files are written in a folder of the daemon's data (`uploads/`, mode 0700),
+  under names of its own (`picture-3`), never one the sender gave, and the upload's name is 1 to 64
+  letters, digits, `_` or `-`.
+- **An upload whose message does not come is dropped** 2 minutes after its last chunk, with its
+  files; a daemon that starts removes what one that stopped left.
+- **The message takes them** as it would have taken them inline: judged, scaled and written in the
+  session's folder, then the upload is gone. A picture that arrived in part is refused, saying
+  which (`picture 2 arrived in part: …`); every refusal of a chunk says which picture and why, and
+  the composer shows it as a local refusal.
+
 ### One list of every machine
 
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
   project: a project registered on several machines under the same name is one group. Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
-  machine's name as a tag (`server`); a session of this machine carries none. There is no machine
-  switcher: the machines' states (online, offline since, needs an update) are in Settings,
+  machine's name as a tag (`server`); a session of this machine carries none. The machine is
+  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
+  in a project's composer (the machine picker); the
+  machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
@@ -788,13 +844,57 @@ local child's work; nothing moves your branch.*
   children. A led session on the computer may start a child on the server; a led session on the
   server is a root there, and may start its own children there.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
-  when it is offline, or that it runs no agent. It must have the project, the caller's provider
-  signed in and a free slot ("Roles"): otherwise refused, naming the runners that would take it, if
-  any (`refused: server has no slot free for project app (2 of 2 run); laptop would take it`).
-- **The project** must be registered on that machine under the same name, with the same
-  repositories (by their paths in the project): otherwise refused, with what to do (`the project app
-  is not on server: register it there with flottille --machine server project add <folder>`). The
-  first version registers nothing by itself and syncs no configuration.
+  when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
+  free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
+  server has no slot free for project app (2 of 2 run); laptop would take it`). It need not have
+  the project: the project travels with the launch (below).
+- **Which project** (decided 2026-11-21, built #1188). The receiving machine recognises a project
+  it has by its repositories, whatever its name or folder: each repository of the launch at the
+  same path in the project, with a root commit in common and, when both have a remote, the same URL
+  (`https://github.com/acme/ledgerly.git` and `git@github.com:acme/ledgerly` are the same). A
+  project of the launch's name whose repository is not there yet takes it too: it is received
+  there. One it has: a new workspace on the caller's branch, only the missing commits sent. None:
+  it makes the project itself, under the caller's name of it (or `-2`, `-3`… when that name is
+  another project's), in its folder for projects from other machines,
+  `$XDG_DATA_HOME/flottille/projects/<project>`; each repository is cloned from the bundle, its
+  whole history the first time, never from its remote; then the workspace and the session as
+  above. The project is then that machine's like any other, on its side of the list, its file
+  marked `from_machine = "pc"`. The words of the launch say which project it runs in, and when it
+  makes one.
+- **The project's settings travel with each launch**: its branch rules (`branch_prefix`,
+  `branch_format`), `never`, its tasks and services (`tasks`), its `setup`, its `message_checks`,
+  its pull request conventions, its `rules` and `rules_alone`, and each repository's `base`,
+  `depends_on` and `commit_checks`. A project Flottille made takes them, each replaced by the
+  caller's at every launch, **once the launch is allowed** (by the gate at once or by the user's
+  answer): a launch held or refused lays nothing. Every other key, its folder, its workspaces'
+  folder, its caps, its provider, its forges, its tracker and its `variables` (whose values may be
+  secrets: they never travel, and a launch that sends them is refused), stays that machine's own.
+  A project the user registered by hand keeps the settings the user gave it there: the caller's
+  are not laid over them, and the launch's words say so. A project made for one machine's launches
+  takes only that machine's: another machine's launch runs in it and leaves its settings as they
+  are, its words saying whose they keep. Settings that cannot be used there (a task needing a
+  service that machine lacks) refuse the launch, saying why.
+- **What the settings change is classed as the same writes of an agent there** (`docs/tools.md`,
+  "The project"), by the receiving machine's gate, against the project as it is there: each task
+  added or changed as `tasks add` or `edit` (its line judged as a run of it: `sudo`, a never-listed
+  line or a sensitive path is base; asking turned off, `check` or `read_only` set are base), each
+  setup step as `setup add`, the rules and `rules_alone` as `set_rules` (base), each repository's
+  base branches and dependencies as `set_settings`; what no agent's tool writes there is the
+  user's word, base: an entry removed from `never`, the message checks and the commit checks. The
+  launch takes the strongest class: one base change makes it the user's to decide, never the
+  judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
+  Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
+  turns off asking before the task deploy runs`, `It empties the never list, which was `rm -rf``),
+  and the request the reasons of each.
+- **A project made for a launch that does not start goes with it**: refused by the user, its agent
+  ended while held, or swept for its code that never came, the project made for it is removed,
+  its file and its folder, once its workspace is gone, unless another launch of the same machine
+  may still start in it. Two launches of a new project at once make it once: the second takes the
+  project the first made.
+- Not yet (#1188's follow-up): the folder for projects from other machines as a setting of that
+  machine; a setup that needs ignored files or vault entries the receiving machine lacks holding
+  the first launch until the user shares them; the making shown on the launch's row; the refusals
+  in the window's words with their action.
 - **The place**: a new workspace on that machine, on the caller's branch for each repository of the
   caller's place, with the caller's uncommitted changes laid on it as uncommitted changes. A `child`
   on another machine works in that copy of its parent's place: a child still works in its parent's
@@ -852,15 +952,19 @@ For each repository of the caller's place, before the session starts:
   `refs/flottille/machines/*`), and the bundle holds only the missing ones (a bundle with those as
   prerequisites); otherwise it holds the whole history of the branch. The receiver verifies the
   bundle (`git bundle verify`) and fetches it.
-- **Ignored files do not travel**: a `.env` is the machine's own, taken by its setup's `copy` steps
-  as today. A setup that misses one fails as it does today, saying which.
+- **Ignored files do not travel**, nor the project's `variables`: a `.env` is the machine's own,
+  taken by its setup's `copy` steps as today. A setup that misses one fails as it does today,
+  saying which. Nothing is ever copied as a file between machines; a secret goes only through the
+  vault's sharing. The settings that travel are sent as the caller's file writes them: a secret
+  written by hand into a task's line would travel with it.
 - **An uncommitted file holding a secret that is not ignored** (an `.env` missing from `.gitignore`)
   travels to the other machine with the rest of the uncommitted work, as it would in a commit:
   nothing refuses it nor warns.
 - On the receiving machine the workspace is created from those commits, on the same branch name
   (with `-2`, `-3` when that name is taken there), prepared by the project's setup, and the
   uncommitted commit is laid on it as uncommitted changes. A repository the project has there but
-  never received is cloned from the bundle, never from its remote.
+  never received, and every repository of a project made for the launch, is cloned from the
+  bundle, never from its remote: it has no remote there.
 
 **Coming back.** When the remote session has committed and reports (`child-report`, or a led
 session's `session-turn-ended` that reports), its daemon sends a bundle of **only the new commits**,
@@ -1082,15 +1186,14 @@ recreated.
   file is deleted) and the share sheet (an intent filter for `image/*` only: the pictures wait in
   the composer of the session the user picks, and are never sent without a tap). The window's limits
   hold in the composer and again in the core, before anything is sent: 20 pictures a message, 5
-  MiB each, png, jpeg, gif or webp. **A message is one signed request, so one frame of the link
-  (1 MiB), pictures in base64 included: about 700 KB of pictures together, which is the limit that
-  binds.** The core refuses a message that does not fit, saying so, and the app scales a jpeg, png
-  or webp over 230 KB down to 2000 px and re-encodes it, so that a camera shot fits (the window's
-  own messages to another machine meet the same frame: a follow-up may carry pictures in chunks).
+  MiB each, png, jpeg, gif or webp. A picture is sent as it is, never shrunk: a message that does
+  not fit one frame of the link goes in chunks ("Pictures sent to another machine"), and only its
+  words must fit a frame (the core refuses words that do not, saying so; the frame is measured on
+  the signed request itself, escapes included). A camera shot over 5 MiB alone is scaled down to
+  2000 px and re-encoded, the only way it can be sent.
   What another app hands over is never trusted: a uri the app has no grant for, one that fails or
-  one whose extra is of another type is left out (said once), a picture is refused before it is
-  held when it is over 5 MiB and is never sent cut short, and reading stops when the pictures held
-  pass the frame's 700 KB; the frame is measured on the signed request itself, escapes included. A
+  one whose extra is of another type is left out (said once), and a picture is refused before it
+  is held when it is over 5 MiB and is never sent cut short. A
   camera shot is read, then deleted, and what a dead process left is cleared at the start.
   Nothing of a picture is logged. A message to a machine
   that is off is refused, said as a toast with since when (`server is offline since 22:14`) and kept
@@ -1187,6 +1290,29 @@ recreated.
 - **On the phone**, the page opens in an in-app browser by default (the tunnel lives with the app in
   the foreground). **Open in browser** hands it to the user's browser and keeps the tunnel alive
   with a foreground service and its notification, closed from that notification.
+  Built (#831): the session page lists the commands of the session that run and report an address
+  (`run.started`, `run.ready`, `run.ended` of the page's events), and a link an agent showed
+  (`agent.link_shown`, a `url`) is a card of the conversation, each with **Open** and **Open in
+  browser**. The phone's core does what a client's daemon does: it signs `tunnel.open {run, port?}`
+  for the machine, listens on `127.0.0.1` of the phone (a port the system picks at random, never
+  the run's own), opens one stream of the link per connection (64 at once, one past it is closed),
+  and holds the tunnel with the request's
+  stream, which the machine ends with its run and the phone ends by dropping it (`Core.open_address`,
+  `Core.close_tunnel`; the view says the tunnels held and, for each that ended, why). A link names
+  no run: the core asks `run.list`, takes the run that reports its port, else the only one that
+  runs, and the machine checks the port again. A page of the web opens as it is, in the user's
+  browser. The in-app browser is a web view that loads that tunnel's origin only (any other link
+  is dropped, unless it is an `http(s)` address its main frame goes to on a tap, which goes to the
+  user's browser: a page starts no other app), enters and leaves over the panel's duration, says
+  when its tunnel ended, **closes its tunnel with its panel** and forgets the page's cookies and
+  storage then. **Open in browser** starts a foreground service (type `specialUse`) that holds the
+  core's connection, so that the links stay up with the app in the background, and shows one
+  notification, "Tunnel kept open", with **Close**; the service ends when its tunnels have, and an
+  end that is not the user's own (the run ended, the link dropped) is a notice of its own that says
+  why. A tunnel of **Open in browser** has an idle end: with no connection open for 10 minutes it
+  closes, and the notice says so (`no connection for 10 minutes`); the in-app browser's tunnels
+  and those of the two uses are never shared (`open_address(…, browser)`). A `viewer`'s page draws
+  no tunnel control (the machine would refuse it).
 - **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
   <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
   the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
@@ -1354,6 +1480,34 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
+  project's choosers switch the whole window, as opening a session there does, rather than a page
+  aimed at a machine of its own while the rest stays: one way to address a machine, and the
+  sidebar, the bell and the pages always say the same machine.
+- **`project.folders` lists one folder's folders at a time** (#1182), from the machine's home: the
+  dialog opens them one after the other, and a folder that is a repository itself is picked; a
+  folder that only holds repositories (not one itself) is opened, not picked. It is `drive`, as
+  adding is.
+- **The choosers name each machine with its icon, its role and its state** (#1182): the kit draws
+  the icon of the machine chosen in its colour before its name on the chooser's button (`server in
+  teal` is the colour's word, for the ones who do not see colours), and each row of the list has the
+  machine's icon in its colour, its role and state, with a check on the chosen one that moves over
+  `PANEL` (the kit's tinted option, `MenuItem::tint` and `checked`; `Select` and `RadioChoices` take
+  the same tint). Nothing is drawn beside the kit's chooser. A chooser that stops having a choice
+  (the project is on one machine only, the last runner is gone) folds away with its words. The
+  choosers offer the runners only: a controller holds no project.
+- **The composer's machine picker lists the machines that have the project** (#1182): the runners
+  that offered it over their link, or whose light list of sessions names it (kept while a machine is
+  off, which offers nothing). One that is off is greyed and says `offline since 22:14`; it is not
+  picked. A project on one machine has no picker. Choosing a machine brings it in front on the
+  project's page, like every page of another machine, and the place is `main` again. A machine in
+  front that goes off says under the composer to pick another or wait; the composer stays free for
+  the picker, and nothing is started.
+- **A session started on another machine is a row of its pilot's rail** (#1182): its machine's icon
+  and its title in the rail's Agents, and, for a child, a line of the sub-agents list; both bring
+  that machine in front on it. The header of a session names the machine it runs on when the user
+  has several (`[icon] server / main`).
 
 - One list of every machine (#1150): the window follows the other machines through its own
   daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`
@@ -1564,6 +1718,26 @@ on a real phone, by hand, and reported.
 - **The window's tunnels are not listed again after a restart (#830).** The listener is the
   window's connection's: a window that quits closes them, and one that opens again starts with
   none (`tunnel.list` still lists what a command line holds).
+- **On the phone (#831), one notification for all the tunnels kept**: the service shows one
+  ongoing notification that lists them, and its Close closes every one, rather than one
+  notification and one Close each (a foreground service has one notification). Reversible: a
+  notification per tunnel is a loop. A tunnel ends with the phone's link to its machine, as the
+  daemon's does: a link that drops and comes back is a tunnel to open again, said as a notice.
+- **A run's address is listed only for the followed session (#831)**: the page derives the runs from
+  the events it holds (the commands of the session's own agent), so a run a child started, or one
+  that started before the page's latest events, is not listed; the links an agent showed are in
+  the conversation as they are for any message. Reversible: the core can ask `run.list {tree}`.
+- **What remains exposed on the phone (#831).** The phone's listener has no token: any app of the
+  phone (one with the INTERNET permission, or a page in the user's browser by cross-site requests
+  or DNS rebinding) can connect to `127.0.0.1:<port>` and read the run's page with the phone's
+  identity, for as long as a tunnel is open. What bounds it: the port is random (an app has to
+  scan for it), the in-app browser's tunnel closes with its panel, and an **Open in browser**
+  tunnel, which the user's browser needs for as long as it likes, ends after 10 minutes with no
+  connection and when the user closes it from the notification. Another app that scans the
+  loopback in that time can still reach the page. Serving the in-app web view without a listener
+  (`shouldInterceptRequest` over a stream of the link) would remove it for the in-app view, but
+  needs a raw-stream API in the core and the web view's own request handling (cookies, redirects,
+  websockets) rebuilt over it: not done. Reversible: the listener is `bind_local`.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
@@ -1799,15 +1973,18 @@ on a real phone, by hand, and reported.
   come back for it`).
 - `agent_launch {machine}` (`crates/flottille/src/launches.rs`): the caller's machine refuses it
   at once when `machine` is no machine of the user's, is this one, is not a runner, is offline, or
-  its offer lacks the project, the caller's provider or, for a child, a free slot, naming the
+  its offer lacks the caller's provider or, for a child, a free slot, naming the
   runners whose offers would take it; `workspace`, `new_workspace`, `repositories`, `branch`,
   `base` and `project` are refused with it, since the place is a copy of the caller's. It then
   sends the `launch` machine message (the launch's name, the caller and the root of its tree, the
   kind, the project, the title, the brief, the provider, model, effort and role, the mode, the
-  kept switch to Full, the caller's branch and repositories), and the code of the caller's place
+  kept switch to Full, the caller's branch and repositories, each repository's root commits and
+  remote URL without credentials, and the project's settings that travel), and the code of the
+  caller's place
   under the launch's name, and answers with the agent started there or the request waiting there.
 - The receiving machine takes a `launch` only from a runner's machine, for an agent it names, while
-  it runs agents itself, and checks again the project and its repositories, the provider signed in
+  it runs agents itself, recognises the project by its repositories or makes it (`travelled.rs`,
+  #1188), and checks the provider signed in
   there, the brief's length (the judge's 8,000 characters) and, for a child, a free slot of its own
   cap. Its gate then judges it: Full (with a switch it verified) accepts it; Auto asks its judge,
   with the words and the brief whole, nothing of the caller's conversation (which is on the other

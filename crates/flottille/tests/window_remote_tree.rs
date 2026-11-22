@@ -690,3 +690,157 @@ fn a_row_of_another_machine_draws_no_frame_at_rest(cx: &mut TestAppContext) {
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     assert_eq!((drawn, asked), (0, 0), "(frames drawn, frames asked)");
 }
+
+#[gpui_kit::test]
+fn the_session_header_names_its_machine_by_its_icon(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (pilot, _mcp) = root(&pc, "auto");
+    let (shell, cx) = window(&pc, cx);
+    open_page(&shell, &pilot, cx);
+
+    // `[icon] pc / main`: the machine, then the place, in the header's path.
+    until(&shell, cx, "the header names the machine", |cx| {
+        label(cx, "session-machine".into()).as_deref() == Some("pc")
+    });
+    let mark = label(cx, "session-machine-mark".into()).unwrap_or_default();
+    assert!(
+        mark.contains(" in "),
+        "its icon and colour, in words: {mark:?}"
+    );
+    assert!(present(cx, "session-place".into()), "the place stays");
+}
+
+#[gpui_kit::test]
+fn a_session_led_on_another_machine_is_in_the_rail_with_its_machine_icon(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+    let (shell, cx, _row) = the_led_row(&pc, &agent, cx);
+    open_page(&shell, &pilot, cx);
+
+    let id = format!("rail-remote-{agent}");
+    until(&shell, cx, "its row in the rail's Agents", |cx| {
+        present(cx, id.clone().into())
+    });
+    let said = label(cx, id.clone().into()).unwrap_or_default();
+    assert!(said.starts_with("Finish the export"), "{said}");
+    assert!(said.contains("server"), "{said}");
+    let mark = label(cx, format!("{id}-mark").into()).unwrap_or_default();
+    assert!(mark.contains(" in "), "{mark:?}");
+}
+
+#[gpui_kit::test]
+fn a_child_on_another_machine_is_in_the_sub_agents_list_with_its_machine_icon(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "machine": "server", "title": "Render the year",
+            "brief": "Render a year of invoices."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer.text.find("(agent ").expect("an agent");
+    let agent = answer.text[at + 7..at + 19].to_owned();
+    eventually("the child runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+    let (shell, cx) = window(&pc, cx);
+    let page = open_page(&shell, &pilot, cx);
+
+    // The conversation names the launch: its sub-agents card lists the child, on its machine.
+    let call = |seq: u64, data: serde_json::Value, name: &str| Event {
+        seq,
+        at: seq,
+        name: name.into(),
+        data,
+    };
+    let events = vec![
+        call(
+            20_000,
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"title": "Render the year", "kind": "child", "machine": "server"}}),
+            "agent.tool_call",
+        ),
+        call(
+            20_001,
+            json!({"id": "l", "update": true, "status": "completed"}),
+            "agent.tool_call",
+        ),
+        call(
+            20_002,
+            json!({"text": "Rendering it on the server."}),
+            "agent.message",
+        ),
+    ];
+    page.update(cx, |p, cx| {
+        let token = p.token().unwrap();
+        p.apply(
+            token,
+            SessionUpdate::History {
+                events,
+                earlier: false,
+            },
+            cx,
+        )
+    });
+    settle(&shell, cx);
+    let at = page.read_with(cx, |p, cx| {
+        p.conversation()
+            .read(cx)
+            .blocks()
+            .iter()
+            .position(|block| matches!(block, Block::SubAgents))
+            .expect("the sub-agents card")
+    });
+    cx.update(|window, cx| window.click(format!("row-{at}-sub-agents-toggle"), cx));
+    settle(&shell, cx);
+
+    let row = format!("sub-agent-{}", elsewhere_id("server", &agent));
+    assert!(present(cx, row.clone().into()), "{row}");
+    let mark = label(cx, format!("{row}-mark").into()).unwrap_or_default();
+    assert!(mark.contains(" in "), "{mark:?}");
+
+    // At rest the row is whole. When its launch is no longer listed it folds away over several
+    // frames, then is gone: the frames are drawn with no read of the machines, which would list
+    // the launch again.
+    let item = format!("{row}-item");
+    let height = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .try_find(item.clone())
+                .map(|found| f32::from(found.bounds().size.height))
+        })
+    };
+    let whole = height(cx).expect("the row's frame");
+    assert!(whole > 20., "{whole}");
+    cx.update(|_, cx| {
+        cx.set_global(flottille_window::model::RemoteAgents(Vec::new()));
+        cx.refresh_windows();
+    });
+    let mut drawn = Vec::new();
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        match height(cx) {
+            Some(height) => drawn.push(height),
+            None => break,
+        }
+    }
+    assert!(
+        drawn.iter().any(|h| *h > 1. && *h < whole - 1.),
+        "it folds before it is gone: {drawn:?}"
+    );
+    assert!(!present(cx, row.clone().into()), "gone once the fold ended");
+}

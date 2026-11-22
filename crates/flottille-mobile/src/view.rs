@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use flottille_link::{Members, PeerState, PublicKey, Role};
 use flottille_protocol::words::{self, THE_CONVERSATION};
+
+use crate::tunnel::{TunnelEnd, TunnelView};
 use serde_json::Value;
 
 /// What the app draws, whole, with every batch.
@@ -31,6 +33,10 @@ pub struct ViewState {
     pub conversation: Option<ConversationView>,
     pub requests: Vec<RequestView>,
     pub asks: Vec<AskView>,
+    /// The tunnels the phone holds to the runs of its machines, oldest first.
+    pub tunnels: Vec<TunnelView>,
+    /// The tunnels that ended, with why, the newest last: `TUNNELS_ENDED_KEPT` of them.
+    pub tunnels_ended: Vec<TunnelEnd>,
     /// What the core refused and the user should know, newest last (a member list that does not
     /// check).
     pub said: Vec<String>,
@@ -109,9 +115,22 @@ pub struct ConversationView {
     pub entries: Vec<Entry>,
     /// The agents of the session's tree under its root, read only.
     pub children: Vec<ChildView>,
+    /// The commands of the followed session that run and have an address, oldest first: each opens
+    /// through a tunnel.
+    pub runs: Vec<RunView>,
 }
 
-/// One entry of a conversation: `user`, `agent`, `thought` or `tool`, and its text.
+/// A command of a session that runs and has an address (`run.started`, `run.ready`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RunView {
+    pub run: String,
+    /// The line it runs, as the daemon masks it.
+    pub line: String,
+    /// The address it reports.
+    pub url: String,
+}
+
+/// One entry of a conversation: `user`, `agent`, `thought`, `tool` or `link`, and its text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Entry {
     /// The number of the event the entry starts at: stable, and what orders the page.
@@ -120,6 +139,8 @@ pub struct Entry {
     pub text: String,
     /// The names of the pictures that went with a message of the user (`Core::image` reads each).
     pub images: Vec<String>,
+    /// A `link` entry's address, the one an agent showed (`agent.link_shown`); empty for the rest.
+    pub link: String,
 }
 
 /// An agent of the session's tree, as `agent.tree` gives it.
@@ -209,6 +230,8 @@ pub(crate) struct View {
     /// The followed session and its events by number: an event seen twice (loaded, then live) is
     /// one.
     followed: Option<Followed>,
+    tunnels: Vec<TunnelView>,
+    tunnels_ended: Vec<TunnelEnd>,
     said: Vec<String>,
 }
 
@@ -246,6 +269,9 @@ struct Session {
     state: String,
     last: u64,
 }
+
+/// The tunnels that ended kept in `tunnels_ended`, the newest.
+const TUNNELS_ENDED_KEPT: usize = 16;
 
 /// The sentences kept in `said`, the newest.
 const SAID_KEPT: usize = 8;
@@ -361,6 +387,30 @@ impl View {
 
     pub(crate) fn hub(&mut self, hub: &str) {
         hub.clone_into(&mut self.hub);
+    }
+
+    /// A tunnel the phone holds.
+    pub(crate) fn tunnel_opened(&mut self, tunnel: TunnelView) {
+        self.tunnels.push(tunnel);
+    }
+
+    /// A tunnel ended: it is no longer held, and `reason` says why. One the view never held (a
+    /// join again cleared it) says nothing.
+    pub(crate) fn tunnel_ended(&mut self, tunnel: &TunnelView, reason: String) {
+        let before = self.tunnels.len();
+        self.tunnels.retain(|held| held.tunnel != tunnel.tunnel);
+        if self.tunnels.len() == before {
+            return;
+        }
+        self.tunnels_ended.push(TunnelEnd {
+            tunnel: tunnel.tunnel.clone(),
+            machine: tunnel.machine.clone(),
+            run: tunnel.run.clone(),
+            reason,
+        });
+        if self.tunnels_ended.len() > TUNNELS_ENDED_KEPT {
+            self.tunnels_ended.remove(0);
+        }
     }
 
     pub(crate) fn say(&mut self, sentence: String) {
@@ -736,6 +786,7 @@ impl View {
                     more: followed.more,
                     entries: entries(followed.events.values()),
                     children: followed.children.clone(),
+                    runs: runs(followed.events.values()),
                 }
             }),
             requests: self
@@ -744,6 +795,8 @@ impl View {
                 .map(|((machine, _), held)| self.request_view(machine, held))
                 .collect(),
             asks: self.asks.values().cloned().collect(),
+            tunnels: self.tunnels.clone(),
+            tunnels_ended: self.tunnels_ended.clone(),
             said: self.said.clone(),
         }
     }
@@ -760,13 +813,20 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
             "agent.prompted" | "agent.user_message" => ("user", false),
             "agent.message" => ("agent", true),
             "agent.thought" => ("thought", true),
+            // The card of the link is what the user sees of a `web` `show_link`, not the step.
+            "agent.tool_call" if data["raw_input"]["action"] == "show_link" => continue,
             "agent.tool_call" if data["update"] != true => ("tool", false),
+            // Only the links of the web and of a dev server open on the phone; a file of the
+            // machine is not on it.
+            "agent.link_shown" if data["kind"] == "url" => ("link", false),
             _ => continue,
         };
-        let text = if kind == "tool" {
-            text(&data["title"])
-        } else {
-            text(&data["text"])
+        let text = match kind {
+            "tool" => text(&data["title"]),
+            "link" => Some(text(&data["title"]))
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| text(&data["host"])),
+            _ => text(&data["text"]),
         };
         let id = data["message_id"].as_str().map(str::to_owned);
         let goes_on = piece
@@ -784,11 +844,47 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
                     .flatten()
                     .map(self::text)
                     .collect(),
+                link: if kind == "link" {
+                    self::text(&data["target"])
+                } else {
+                    String::new()
+                },
             }),
         }
         message = if piece { id } else { None };
     }
     entries
+}
+
+/// The commands of a session that run and have an address, oldest first: from `run.started`,
+/// `run.ready` and `run.ended` among the events the page holds.
+fn runs<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<RunView> {
+    let mut runs: Vec<RunView> = Vec::new();
+    for event in events {
+        let data = &event["data"];
+        let run = text(&data["run"]);
+        match event["name"].as_str().unwrap_or_default() {
+            "run.started" | "run.ready" => {
+                let url = text(&data["url"]);
+                let line = text(&data["line"]);
+                match runs.iter_mut().find(|known| known.run == run) {
+                    Some(known) => {
+                        if !url.is_empty() {
+                            known.url = url;
+                        }
+                        if !line.is_empty() {
+                            known.line = line;
+                        }
+                    }
+                    None => runs.push(RunView { run, line, url }),
+                }
+            }
+            "run.ended" => runs.retain(|known| known.run != run),
+            _ => {}
+        }
+    }
+    runs.retain(|run| !run.url.is_empty());
+    runs
 }
 
 /// A question of the agent `agent`, from an `agent.asked` event or a question of `agent.tree`:

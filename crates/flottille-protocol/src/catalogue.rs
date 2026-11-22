@@ -22,6 +22,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("project.list", Read),
     ("project.show", Read),
     // It looks through any folder the client names, and serves only `project.add`.
+    ("project.folders", Drive),
     ("project.detect", Drive),
     ("project.add", Drive),
     ("project.removal", Read),
@@ -213,6 +214,7 @@ pub const METHODS: &[(&str, Class)] = &[
     // `agent.start`'s name before it.
     ("agent.run", Drive),
     ("agent.send", Drive),
+    ("agent.upload", Drive),
     ("agent.send_now", Drive),
     ("agent.unqueue", Drive),
     ("agent.answer", Drive),
@@ -338,6 +340,7 @@ mod tests {
         // writes none of it: the machine refuses each write by this class (`docs/remote.md`, "Roles").
         for method in [
             "agent.send",
+            "agent.upload",
             "agent.send_now",
             "agent.answer",
             "agent.cancel",

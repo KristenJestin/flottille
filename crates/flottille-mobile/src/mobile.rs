@@ -25,6 +25,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::join::pair;
 use crate::keys::{Sealed, Sealer, endpoint_key, write_private};
+use crate::tunnel::Opened;
 use crate::view::{View, ViewState};
 use crate::{MobileError, link};
 
@@ -84,6 +85,9 @@ const GONE: [&str; 3] = [
     " does not wait for an answer",
     " has no question waiting for you",
 ];
+/// Why a message whose words alone do not fit one frame of the link is refused: its pictures go in
+/// chunks, its words cannot.
+const TOO_BIG: &str = "this message is too big for the link: its words take 1 MiB at most";
 /// A `before` past every event: the daemon then gives the latest page.
 const LATEST: u64 = i64::MAX as u64;
 
@@ -103,24 +107,45 @@ pub struct Core {
 pub(crate) struct Inner {
     pub(crate) folder: PathBuf,
     pub(crate) sealed: Sealed,
-    handle: tokio::runtime::Handle,
+    pub(crate) handle: tokio::runtime::Handle,
     state: Mutex<State>,
     ids: AtomicU64,
     /// The number of the next connection.
     connections: AtomicU64,
+    /// How long a tunnel for the user's browser may go with no connection, in milliseconds.
+    browser_idle: AtomicU64,
 }
 
-struct State {
+pub(crate) struct State {
     /// The key of the phone's endpoint, its machine in the list: a new one each join.
     endpoint: Arc<MachineKey>,
     device: Option<Device>,
     key: Option<Arc<DeviceKey>>,
-    view: View,
+    pub(crate) view: View,
+    /// The tunnels the phone holds, by id: what closes each.
+    pub(crate) tunnels: HashMap<String, crate::tunnel::Held>,
     /// The connection: what `disconnect` ends.
     connection: Option<Connection>,
     /// The number of the last event handed over to the app of each runner, by its machine key
     /// (`machine_id`): a name may be another runner's tomorrow.
     seen: BTreeMap<String, u64>,
+}
+
+impl Core {
+    /// How long the tunnels opened from now on for the user's browser may go with no connection
+    /// (ten minutes by default). Not part of the bindings: for the tests.
+    #[doc(hidden)]
+    pub fn set_browser_idle(&self, idle: std::time::Duration) {
+        self.inner
+            .browser_idle
+            .store(idle.as_millis() as u64, Ordering::SeqCst);
+    }
+}
+
+impl Inner {
+    pub(crate) fn browser_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.browser_idle.load(Ordering::SeqCst))
+    }
 }
 
 /// What `connect` started.
@@ -152,7 +177,7 @@ impl Drop for Connection {
 }
 
 /// What reaches the batches, in order.
-enum Note {
+pub(crate) enum Note {
     Event {
         machine: String,
         key: PublicKey,
@@ -214,11 +239,13 @@ impl Core {
                 device,
                 key,
                 view,
+                tunnels: HashMap::new(),
                 connection: None,
                 seen,
             }),
             ids: AtomicU64::new(1),
             connections: AtomicU64::new(1),
+            browser_idle: AtomicU64::new(crate::tunnel::BROWSER_IDLE.as_millis() as u64),
         });
         Ok(Arc::new(Core {
             inner,
@@ -482,20 +509,10 @@ impl Core {
         if text.trim().is_empty() && pictures.is_empty() {
             return Err(MobileError::new("the message is empty"));
         }
-        let mut params = json!({"agent": agent, "message": text});
-        if !pictures.is_empty() {
-            use base64::Engine;
-            params["images"] = pictures
-                .iter()
-                .map(|picture| {
-                    json!({"mime": picture.mime,
-                        "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
-                })
-                .collect();
-        }
+        let words = json!({"agent": agent, "message": text});
         let inner = self.inner.clone();
         self.inner
-            .on(async move { inner.call(&machine, "agent.send", params).await.map(drop) })
+            .on(async move { inner.send_message(&machine, words, &pictures).await })
             .await
     }
 
@@ -583,6 +600,31 @@ impl Core {
             .await
     }
 
+    /// Opens the address `url` of `machine` through a tunnel: `run`'s own address when a run is
+    /// named, else the run that serves the port a `localhost` link writes. The tunnel lives while
+    /// the core stays connected, until the machine ends it (the run ended), the link goes, or
+    /// `close_tunnel`. A tunnel already held to the same run, for the same use, is the one
+    /// answered: no second one. `browser` says the address goes to the user's browser, which no
+    /// panel of the app closes: that tunnel ends on its own after ten minutes with no connection.
+    /// The phone listens on a random port of `127.0.0.1`, which any app of the phone can reach.
+    pub async fn open_address(
+        &self,
+        machine: String,
+        run: Option<String>,
+        url: String,
+        browser: bool,
+    ) -> Result<Opened, MobileError> {
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move { inner.open_address(&machine, run, &url, browser).await })
+            .await
+    }
+
+    /// Closes the tunnel `tunnel`.
+    pub fn close_tunnel(&self, tunnel: String) -> Result<(), MobileError> {
+        self.inner.close_tunnel(&tunnel)
+    }
+
     /// The view state as it is now.
     pub fn view(&self) -> ViewState {
         self.inner.state().view.state()
@@ -600,7 +642,7 @@ impl Drop for Core {
 }
 
 impl Inner {
-    fn state(&self) -> MutexGuard<'_, State> {
+    pub(crate) fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap()
     }
 
@@ -638,7 +680,7 @@ impl Inner {
         Ok(())
     }
 
-    fn note(&self, note: Note) {
+    pub(crate) fn note(&self, note: Note) {
         if let Some(connection) = &self.state().connection {
             let _ = connection.notes.send(note);
         }
@@ -747,7 +789,7 @@ impl Inner {
     }
 
     /// The link to `machine`, or why there is none.
-    fn link_of(&self, machine: &str) -> Result<Link, MobileError> {
+    pub(crate) fn link_of(&self, machine: &str) -> Result<Link, MobileError> {
         let mut state = self.state();
         let why = state
             .view
@@ -774,7 +816,7 @@ impl Inner {
 
     /// Sends `method` with `params` to `machine` on `link`, signed with the device key: what comes
     /// back on its stream.
-    async fn ask(
+    pub(crate) async fn ask(
         &self,
         machine: &str,
         link: &Link,
@@ -794,17 +836,66 @@ impl Inner {
             .expect("a message is JSON")
             .len();
         if size > flottille_link::FRAME_LIMIT {
-            return Err(MobileError::new(
-                "this message is too big for the link: its pictures and its words take 1 MiB at most together, about 700 KiB of pictures",
-            ));
+            return Err(MobileError::new(TOO_BIG));
         }
         link.ask(&message)
             .await
             .map_err(|error| MobileError::new(error.to_string()))
     }
 
+    /// The message `words` to `machine` with its `pictures`: inline when, signed, it fits one frame
+    /// of the link, else the pictures sent first in chunks, each a signed request of its own, then
+    /// the message naming their upload (`docs/remote.md`, "Pictures sent to another machine"). It
+    /// is judged from the pictures' sizes, and one is encoded only as it goes: a phone never holds
+    /// 20 large pictures encoded at once. What the runner refuses says which picture and why.
+    async fn send_message(
+        &self,
+        machine: &str,
+        mut words: Value,
+        pictures: &[Picture],
+    ) -> Result<(), MobileError> {
+        let files: Vec<flottille_link::Attached> = pictures
+            .iter()
+            .map(|picture| flottille_link::Attached::Picture {
+                mime: &picture.mime,
+                bytes: &picture.data,
+            })
+            .collect();
+        if files.is_empty() || flottille_link::fits_with("agent.send", &words, &files) {
+            if !files.is_empty() {
+                use base64::Engine;
+                words["images"] = pictures
+                    .iter()
+                    .map(|picture| {
+                        json!({"mime": picture.mime,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
+                    })
+                    .collect();
+            }
+            return self.call(machine, "agent.send", words).await.map(drop);
+        }
+        // The words still travel in one frame: when they cannot, nothing is sent.
+        if !flottille_link::fits("agent.send", &words) {
+            return Err(MobileError::new(TOO_BIG));
+        }
+        let link = self.link_of(machine)?;
+        let upload = flottille_link::upload_name().map_err(MobileError::new)?;
+        for chunk in flottille_link::upload_chunks(&upload, &files) {
+            self.call_on(machine, &link, "agent.upload", chunk).await?;
+        }
+        words["upload"] = json!(upload);
+        self.call_on(machine, &link, "agent.send", words)
+            .await
+            .map(drop)
+    }
+
     /// `method` on `machine`: its result, or its refusal.
-    async fn call(&self, machine: &str, method: &str, params: Value) -> Result<Value, MobileError> {
+    pub(crate) async fn call(
+        &self,
+        machine: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, MobileError> {
         let link = self.link_of(machine)?;
         self.call_on(machine, &link, method, params).await
     }

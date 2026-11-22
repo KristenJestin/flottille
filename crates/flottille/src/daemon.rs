@@ -263,6 +263,9 @@ pub struct Daemon {
     /// Held while a removal decides which branches to delete and deletes them, one removal at a
     /// time: two removals each counting its branch as kept in the other's would delete both.
     pub landing: tokio::sync::Mutex<()>,
+    /// Held while a launch from another machine recognises its project again and makes it: two
+    /// launches of a new project at once make it once, the second taking the first's.
+    pub making_projects: tokio::sync::Mutex<()>,
     /// Held while the notification centre is kept: the keeper and the sweep each read the events
     /// after the cursor, and two at once would each write what the other did not see.
     pub notifying: std::sync::Mutex<()>,
@@ -329,6 +332,8 @@ pub struct Daemon {
     pub presence: crate::presence::Presences,
     /// What rings: the sounds and the desktop's notifications (#1002).
     pub rings: crate::rings::Rings,
+    /// The pictures and texts of messages sent in chunks, waiting for their messages (`uploads`).
+    pub uploads: crate::uploads::Uploads,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -412,6 +417,7 @@ impl Daemon {
             preparing: Lock::named("preparing", HashSet::new()),
             removing_workspaces: Lock::named("removing_workspaces", HashSet::new()),
             landing: tokio::sync::Mutex::new(()),
+            making_projects: tokio::sync::Mutex::new(()),
             notifying: std::sync::Mutex::new(()),
             removing_projects: Lock::named("removing_projects", HashSet::new()),
             removing: Lock::named("removing", HashMap::new()),
@@ -440,6 +446,7 @@ impl Daemon {
             whatsnew: crate::whatsnew::Live::default(),
             presence: crate::presence::Presences::default(),
             rings: crate::rings::Rings::new(paths),
+            uploads: crate::uploads::Uploads::default(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -692,6 +699,8 @@ async fn serve(
         Some(bus),
     ));
     watchdog::start(&daemon.watch)?;
+    // What came in chunks to a daemon that stopped waits for no message any more.
+    crate::uploads::clear(&daemon);
     if let Some(key) = machine_key
         && let Err(why) = start_link(&daemon, key)
     {

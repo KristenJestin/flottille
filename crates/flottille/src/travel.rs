@@ -306,6 +306,17 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
         .name_of(&key)
         .ok_or_else(|| format!("the machine launch {launch} came from is not the user's now"))?;
     let (link, key) = remote.link_to(&machine)?;
+    // The sender's name of the project, which may be another here.
+    let theirs = stored(daemon.read(|store| {
+        store.launches(
+            "in",
+            Some(&first.machine),
+            flottille_core::store::LaunchFilter::Named(launch),
+        )
+    }))?
+    .into_iter()
+    .find_map(|launch| launch.asked["asked"]["project"].as_str().map(str::to_owned))
+    .unwrap_or_else(|| first.project.clone());
     let mut back = Vec::new();
     for (index, travel) in travels.iter().enumerate() {
         let folder = workspace.folder_of(&travel.repository);
@@ -333,7 +344,7 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
             Git::Offer(GitOffer {
                 transfer,
                 launch: launch.to_owned(),
-                project: travel.project.clone(),
+                project: theirs.clone(),
                 repository: travel.repository.clone(),
                 branch: there.clone(),
                 size,
@@ -438,6 +449,11 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
         received.answer(Err(refused));
         return;
     }
+    // Taken into the project of this machine the launch runs in, whatever its name here.
+    let git = match &launch {
+        Some(launch) => localised(git, &launch.project),
+        None => git,
+    };
     let answer = match git {
         Git::Fetch(_) => unreachable!("served above"),
         Git::Has(asked) => has(&daemon, &asked).await,
@@ -452,6 +468,25 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
         },
     };
     received.answer(answer);
+}
+
+/// `git` about the project of this machine named `project`.
+fn localised(git: Git, project: &str) -> Git {
+    match git {
+        Git::Has(mut asked) => {
+            asked.project = project.to_owned();
+            Git::Has(asked)
+        }
+        Git::Offer(mut offer) if !offer.back => {
+            offer.project = project.to_owned();
+            Git::Offer(offer)
+        }
+        Git::Place(mut place) => {
+            place.project = project.to_owned();
+            Git::Place(place)
+        }
+        other => other,
+    }
 }
 
 /// Refuses a machine that is no runner's or controller's: a viewer's, or one of no member.
@@ -555,12 +590,8 @@ async fn read_offered(link: &Link, offer: &GitOffer, file: &Path) -> Result<(), 
 
 /// The project named `project` here, and the folder of its repository `repository`.
 fn repository_of(daemon: &Daemon, project: &str, repository: &str) -> Result<PathBuf, String> {
-    let project = projects::load_project(daemon, project).map_err(|_| {
-        format!(
-            "the project {project} is not on this machine: register it there with flottille \
-             --machine <this machine> project add <folder>"
-        )
-    })?;
+    let project = projects::load_project(daemon, project)
+        .map_err(|_| format!("the project {project} is not on this machine"))?;
     if !project.repositories.iter().any(|r| r.path == repository) {
         return Err(format!(
             "the project {} has no repository {repository} on this machine",

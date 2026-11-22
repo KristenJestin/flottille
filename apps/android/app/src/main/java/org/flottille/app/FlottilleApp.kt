@@ -83,6 +83,7 @@ fun FlottilleApp(
     sharedNote: String? = null,
     onSharedPlaced: () -> Unit = {},
     open: SessionKey? = null,
+    tunnels: TunnelHost = TunnelHost.None,
 ) {
     FlottilleTheme {
         val palette = LocalPalette.current
@@ -174,6 +175,7 @@ fun FlottilleApp(
                             },
                             onToast = { toast = it },
                             onBack = { page = null },
+                            tunnels = tunnels,
                         )
                     }
                 }

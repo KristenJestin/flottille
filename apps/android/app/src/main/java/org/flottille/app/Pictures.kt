@@ -24,16 +24,6 @@ import org.flottille.core.Picture
 object PictureLimits {
     const val MOST = 20
     const val BYTES = 5 * 1024 * 1024
-
-    /**
-     * What the pictures of a message take together: a request is one frame of the link, 1 MiB, and
-     * the pictures travel in base64 (the window's own messages to another machine meet the same
-     * frame). The core refuses what does not fit; the composer says so before.
-     */
-    const val LINK_BYTES = 700_000
-
-    /** What a picture is scaled down to when it is bigger: three of them fit a message. */
-    const val TARGET_BYTES = 230_000
     val TYPES = listOf("image/png", "image/jpeg", "image/gif", "image/webp")
 
     /** Why [add] cannot join the [held] pictures of a message, or null when it can. */
@@ -43,8 +33,6 @@ object PictureLimits {
             add.bytes.isEmpty() -> "${add.name.ifEmpty { "this picture" }} is empty"
             add.bytes.size > BYTES -> "${add.name.ifEmpty { "this picture" }} is over 5 MiB"
             held.size >= MOST -> "A message carries $MOST pictures at most"
-            held.sumOf { it.bytes.size } + add.bytes.size > LINK_BYTES ->
-                "A message carries 700 KB of pictures at most, the link's frame: remove one or pick a smaller picture"
             else -> null
         }
 }
@@ -166,16 +154,13 @@ class ResolverReader(private val resolver: ContentResolver) : PictureReader {
  * The pictures at [uris] (a gallery pick, a share), read for a message. A uri comes from another
  * app, so it is never trusted: one the app has no grant for, one that fails, one that is no picture
  * or is over [PictureLimits.BYTES] (refused before it is held, and never cut short) is left out and
- * said once, and reading stops once the pictures held pass [PictureLimits.LINK_BYTES], what a
- * message carries (the composer says it for the last).
+ * said once. A picture is held as it is, never shrunk: the core sends it in chunks (#1187).
  */
 fun readPictures(uris: List<Uri>, reader: PictureReader): Pictured {
     val pictures = mutableListOf<Picture>()
     var unread = 0
     var oversize: String? = null
-    var held = 0
     for (uri in uris.take(PictureLimits.MOST)) {
-        if (held > PictureLimits.LINK_BYTES) break
         try {
             val mime = reader.type(uri)
             val name = uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifEmpty { "picture" }
@@ -184,7 +169,6 @@ fun readPictures(uris: List<Uri>, reader: PictureReader): Pictured {
                 unread += 1
             } else {
                 pictures += picture
-                held += picture.bytes.size
             }
         } catch (big: TooBig) {
             oversize = "${big.name.ifEmpty { "a picture" }} is over 5 MiB"
@@ -216,7 +200,8 @@ fun sharedUris(intent: Intent): List<Uri> {
 
 /**
  * The shot the camera wrote into [file]: read, and deleted whatever comes of it. A photo of a phone
- * is several MiB, so it is read up to [CAMERA_BYTES] and scaled down as a gallery pick is.
+ * may be more than a message's picture takes, so it is read up to [CAMERA_BYTES] and scaled down
+ * only when it is over [PictureLimits.BYTES]: it could not be sent otherwise.
  */
 fun readShot(file: File): Picture? =
     try {
@@ -256,16 +241,15 @@ private fun readAtMost(stream: InputStream, limit: Int): ByteArray {
 }
 
 /**
- * The picture [stream] holds, scaled down to 2000 px on its long side and re-encoded when it is
- * over [PictureLimits.TARGET_BYTES] (a phone's camera makes several MiB, and a message carries one
- * frame of the link), as the daemon scales what it is given. A gif or a webp is left as it is: the
- * composer refuses one that does not fit.
+ * The picture [stream] holds, as it is when it is [PictureLimits.BYTES] at most; over it (a camera's
+ * shot alone may be), scaled down to 2000 px on its long side and re-encoded, as the daemon scales
+ * what it is given. A gif or a webp is left as it is: the composer refuses one that does not fit.
  */
 private fun fitted(stream: InputStream, mime: String, name: String, limit: Int): Picture {
     val bytes = readAtMost(stream, limit)
     // Past the limit it was cut short: never sent as a picture it is not.
     if (bytes.size > limit) throw TooBig(name)
-    if (bytes.size <= PictureLimits.TARGET_BYTES || mime !in listOf("image/jpeg", "image/png", "image/webp")) {
+    if (bytes.size <= PictureLimits.BYTES || mime !in listOf("image/jpeg", "image/png", "image/webp")) {
         return Picture(mime, bytes, name)
     }
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -279,7 +263,7 @@ private fun fitted(stream: InputStream, mime: String, name: String, limit: Int):
         for (quality in listOf(85, 70, 55)) {
             val out = ByteArrayOutputStream()
             bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            if (out.size() <= PictureLimits.TARGET_BYTES) {
+            if (out.size() <= PictureLimits.BYTES) {
                 bitmap.recycle()
                 return Picture("image/jpeg", out.toByteArray(), jpeg)
             }
