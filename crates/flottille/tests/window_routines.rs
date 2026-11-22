@@ -1102,3 +1102,54 @@ fn the_form_chooses_to_ring_only_when_something_is_new(cx: &mut TestAppContext) 
         .clone();
     assert_eq!(kept["rings"], "new", "{kept}");
 }
+
+#[gpui_kit::test]
+fn a_routine_made_by_an_agent_says_so(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "By hand", LIST_REVIEWS, json!({}));
+    // A session of the user's, in Full, names itself and makes a routine with the tool.
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let titled = mcp.call("session_title", json!({"title": "Plan the mornings"}));
+    assert!(!titled.error, "{}", titled.text);
+    let made = mcp.call(
+        "routine",
+        json!({"action": "create", "name": "Mornings", "prompt": LIST_REVIEWS,
+            "schedule": "weekdays 08:30"}),
+    );
+    assert!(!made.error, "{}", made.text);
+
+    let (shell, cx) = open_routine(&user, "Mornings", cx);
+    until(&shell, cx, "its author shows", |cx| {
+        present(cx, "routine-made-by")
+    });
+    assert_eq!(
+        label(cx, "routine-made-by").as_deref(),
+        Some("Made by Plan the mornings"),
+        "the session's title"
+    );
+    click(cx, "routines-back");
+    let row = "routine-By hand";
+    until(&shell, cx, "the user's own is listed", |cx| {
+        present(cx, row)
+    });
+    click(cx, row);
+    until(&shell, cx, "its page shows", |cx| {
+        present(cx, "routine-header")
+    });
+    settle(cx);
+    assert!(
+        !present(cx, "routine-made-by"),
+        "the user's own says nothing"
+    );
+}
