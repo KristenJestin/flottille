@@ -3097,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-alpha.feat-picker-columns.8#854aaa0a45e5342a54ce3d13bc2eccdd5ff91c90"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.8#bb27ad92a565a5a109a0e92dc179a1900750e657"
 dependencies = [
  "gpui-kit",
  "qrcodegen",
