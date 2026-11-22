@@ -187,7 +187,10 @@ pub async fn watch(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     }
 }
 
-/// One check of the channel, off the daemon's workers.
+/// One check of the channel, off the daemon's workers. A result is kept only for the channel
+/// still chosen when it ends: when another was chosen meanwhile, it is dropped, and the chosen
+/// one is checked in its turn (a check that runs is not told to stop: it is not restarted, it is
+/// followed by another, which the choice's own request found running and left to this loop).
 async fn check(daemon: &Arc<Daemon>) {
     {
         let mut state = daemon.updates.state.lock().unwrap();
@@ -197,28 +200,37 @@ async fn check(daemon: &Arc<Daemon>) {
         state.checking = true;
     }
     changed(daemon);
-    let paths = daemon.paths.clone();
-    let found = tokio::task::spawn_blocking(move || {
-        update::checked(&paths).map_err(|error| error.to_string())
-    })
-    .await
-    .unwrap_or_else(|error| Err(error.to_string()));
-    {
-        let mut state = daemon.updates.state.lock().unwrap();
-        state.checking = false;
-        match found {
-            Ok(found) => {
-                state.latest = found.latest.map(|version| version.to_string());
-                state.ahead_of = found.ahead_of.map(|version| version.to_string());
-                state.failed = None;
+    loop {
+        let paths = daemon.paths.clone();
+        let followed = update::followed_now(&paths);
+        let found = tokio::task::spawn_blocking(move || {
+            update::checked(&paths).map_err(|error| error.to_string())
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        {
+            let mut state = daemon.updates.state.lock().unwrap();
+            // Compared under the lock the choice's reset takes: no result of a channel left is
+            // stored after the reset, and none is shown.
+            if update::followed_now(&daemon.paths) != followed {
+                continue;
             }
-            Err(why) => {
-                if state.failed.is_none() {
-                    eprintln!("flottille daemon: the check for an update failed: {why}");
+            state.checking = false;
+            match found {
+                Ok(found) => {
+                    state.latest = found.latest.map(|version| version.to_string());
+                    state.ahead_of = found.ahead_of.map(|version| version.to_string());
+                    state.failed = None;
                 }
-                state.failed = Some(why);
+                Err(why) => {
+                    if state.failed.is_none() {
+                        eprintln!("flottille daemon: the check for an update failed: {why}");
+                    }
+                    state.failed = Some(why);
+                }
             }
         }
+        break;
     }
     changed(daemon);
 }
