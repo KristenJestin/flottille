@@ -814,13 +814,57 @@ local child's work; nothing moves your branch.*
   children. A led session on the computer may start a child on the server; a led session on the
   server is a root there, and may start its own children there.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
-  when it is offline, or that it runs no agent. It must have the project, the caller's provider
-  signed in and a free slot ("Roles"): otherwise refused, naming the runners that would take it, if
-  any (`refused: server has no slot free for project app (2 of 2 run); laptop would take it`).
-- **The project** must be registered on that machine under the same name, with the same
-  repositories (by their paths in the project): otherwise refused, with what to do (`the project app
-  is not on server: register it there with flottille --machine server project add <folder>`). The
-  first version registers nothing by itself and syncs no configuration.
+  when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
+  free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
+  server has no slot free for project app (2 of 2 run); laptop would take it`). It need not have
+  the project: the project travels with the launch (below).
+- **Which project** (decided 2026-11-21, built #1188). The receiving machine recognises a project
+  it has by its repositories, whatever its name or folder: each repository of the launch at the
+  same path in the project, with a root commit in common and, when both have a remote, the same URL
+  (`https://github.com/acme/ledgerly.git` and `git@github.com:acme/ledgerly` are the same). A
+  project of the launch's name whose repository is not there yet takes it too: it is received
+  there. One it has: a new workspace on the caller's branch, only the missing commits sent. None:
+  it makes the project itself, under the caller's name of it (or `-2`, `-3`… when that name is
+  another project's), in its folder for projects from other machines,
+  `$XDG_DATA_HOME/flottille/projects/<project>`; each repository is cloned from the bundle, its
+  whole history the first time, never from its remote; then the workspace and the session as
+  above. The project is then that machine's like any other, on its side of the list, its file
+  marked `from_machine = "pc"`. The words of the launch say which project it runs in, and when it
+  makes one.
+- **The project's settings travel with each launch**: its branch rules (`branch_prefix`,
+  `branch_format`), `never`, its tasks and services (`tasks`), its `setup`, its `message_checks`,
+  its pull request conventions, its `rules` and `rules_alone`, and each repository's `base`,
+  `depends_on` and `commit_checks`. A project Flottille made takes them, each replaced by the
+  caller's at every launch, **once the launch is allowed** (by the gate at once or by the user's
+  answer): a launch held or refused lays nothing. Every other key, its folder, its workspaces'
+  folder, its caps, its provider, its forges, its tracker and its `variables` (whose values may be
+  secrets: they never travel, and a launch that sends them is refused), stays that machine's own.
+  A project the user registered by hand keeps the settings the user gave it there: the caller's
+  are not laid over them, and the launch's words say so. A project made for one machine's launches
+  takes only that machine's: another machine's launch runs in it and leaves its settings as they
+  are, its words saying whose they keep. Settings that cannot be used there (a task needing a
+  service that machine lacks) refuse the launch, saying why.
+- **What the settings change is classed as the same writes of an agent there** (`docs/tools.md`,
+  "The project"), by the receiving machine's gate, against the project as it is there: each task
+  added or changed as `tasks add` or `edit` (its line judged as a run of it: `sudo`, a never-listed
+  line or a sensitive path is base; asking turned off, `check` or `read_only` set are base), each
+  setup step as `setup add`, the rules and `rules_alone` as `set_rules` (base), each repository's
+  base branches and dependencies as `set_settings`; what no agent's tool writes there is the
+  user's word, base: an entry removed from `never`, the message checks and the commit checks. The
+  launch takes the strongest class: one base change makes it the user's to decide, never the
+  judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
+  Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
+  turns off asking before the task deploy runs`, `It empties the never list, which was `rm -rf``),
+  and the request the reasons of each.
+- **A project made for a launch that does not start goes with it**: refused by the user, its agent
+  ended while held, or swept for its code that never came, the project made for it is removed,
+  its file and its folder, once its workspace is gone, unless another launch of the same machine
+  may still start in it. Two launches of a new project at once make it once: the second takes the
+  project the first made.
+- Not yet (#1188's follow-up): the folder for projects from other machines as a setting of that
+  machine; a setup that needs ignored files or vault entries the receiving machine lacks holding
+  the first launch until the user shares them; the making shown on the launch's row; the refusals
+  in the window's words with their action.
 - **The place**: a new workspace on that machine, on the caller's branch for each repository of the
   caller's place, with the caller's uncommitted changes laid on it as uncommitted changes. A `child`
   on another machine works in that copy of its parent's place: a child still works in its parent's
@@ -878,15 +922,19 @@ For each repository of the caller's place, before the session starts:
   `refs/flottille/machines/*`), and the bundle holds only the missing ones (a bundle with those as
   prerequisites); otherwise it holds the whole history of the branch. The receiver verifies the
   bundle (`git bundle verify`) and fetches it.
-- **Ignored files do not travel**: a `.env` is the machine's own, taken by its setup's `copy` steps
-  as today. A setup that misses one fails as it does today, saying which.
+- **Ignored files do not travel**, nor the project's `variables`: a `.env` is the machine's own,
+  taken by its setup's `copy` steps as today. A setup that misses one fails as it does today,
+  saying which. Nothing is ever copied as a file between machines; a secret goes only through the
+  vault's sharing. The settings that travel are sent as the caller's file writes them: a secret
+  written by hand into a task's line would travel with it.
 - **An uncommitted file holding a secret that is not ignored** (an `.env` missing from `.gitignore`)
   travels to the other machine with the rest of the uncommitted work, as it would in a commit:
   nothing refuses it nor warns.
 - On the receiving machine the workspace is created from those commits, on the same branch name
   (with `-2`, `-3` when that name is taken there), prepared by the project's setup, and the
   uncommitted commit is laid on it as uncommitted changes. A repository the project has there but
-  never received is cloned from the bundle, never from its remote.
+  never received, and every repository of a project made for the launch, is cloned from the
+  bundle, never from its remote: it has no remote there.
 
 **Coming back.** When the remote session has committed and reports (`child-report`, or a led
 session's `session-turn-ended` that reports), its daemon sends a bundle of **only the new commits**,
@@ -1824,15 +1872,18 @@ on a real phone, by hand, and reported.
   come back for it`).
 - `agent_launch {machine}` (`crates/flottille/src/launches.rs`): the caller's machine refuses it
   at once when `machine` is no machine of the user's, is this one, is not a runner, is offline, or
-  its offer lacks the project, the caller's provider or, for a child, a free slot, naming the
+  its offer lacks the caller's provider or, for a child, a free slot, naming the
   runners whose offers would take it; `workspace`, `new_workspace`, `repositories`, `branch`,
   `base` and `project` are refused with it, since the place is a copy of the caller's. It then
   sends the `launch` machine message (the launch's name, the caller and the root of its tree, the
   kind, the project, the title, the brief, the provider, model, effort and role, the mode, the
-  kept switch to Full, the caller's branch and repositories), and the code of the caller's place
+  kept switch to Full, the caller's branch and repositories, each repository's root commits and
+  remote URL without credentials, and the project's settings that travel), and the code of the
+  caller's place
   under the launch's name, and answers with the agent started there or the request waiting there.
 - The receiving machine takes a `launch` only from a runner's machine, for an agent it names, while
-  it runs agents itself, and checks again the project and its repositories, the provider signed in
+  it runs agents itself, recognises the project by its repositories or makes it (`travelled.rs`,
+  #1188), and checks the provider signed in
   there, the brief's length (the judge's 8,000 characters) and, for a child, a free slot of its own
   cap. Its gate then judges it: Full (with a switch it verified) accepts it; Auto asks its judge,
   with the words and the brief whole, nothing of the caller's conversation (which is on the other
