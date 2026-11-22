@@ -63,6 +63,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("update.check", Drive),
     // They replace this machine's binary and restart its daemon: asked on the machine only.
     ("update.download", Local),
+    ("update.cancel", Local),
     ("update.restart", Local),
     ("whatsnew.show", Read),
     ("whatsnew.seen", Drive),

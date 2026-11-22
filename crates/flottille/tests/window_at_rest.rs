@@ -2732,3 +2732,39 @@ fn what_is_new_and_its_mark_are_still_at_rest(cx: &mut TestAppContext) {
         "the page, (frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_version_section_with_a_download_s_bar_at_a_share(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the update is read", |cx| {
+        shell.read_with(cx, |s, cx| s.version().read(cx).shown().is_some())
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_settings_at(flottille_window::settings::Reveal::Version, window, cx)
+    });
+    settle(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        let downloading = flottille_window::version::Shown::of(&json!({
+            "latest": "99.0.0",
+            "downloading": {"done": 69_700_000, "total": 93_100_000},
+        }));
+        shell
+            .version()
+            .update(cx, |section, cx| section.set_shown(downloading, cx))
+    });
+    until(&shell, cx, "the bar is shown", |cx| {
+        cx.update(|window, _| window.try_find("version-bar-1").is_some())
+    });
+    settle(&shell, cx);
+
+    // A bar at a share draws nothing more: its fill reached it and stays.
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
