@@ -786,3 +786,126 @@ fn restart_to_update_with_nothing_staged_is_refused() {
     let (code, message) = refused.unwrap_err();
     assert_eq!(code, "nothing-staged", "{message}");
 }
+
+/// The beta channel's releases: each version listed, the newest first.
+fn betas_at(releases: &Releases, programs: &Path, versions: &[&str]) {
+    let made: Vec<Value> = versions
+        .iter()
+        .map(|version| {
+            releases.release(
+                &format!("v{version}"),
+                version,
+                &standing_for(programs, version),
+                None,
+            )
+        })
+        .collect();
+    releases.list(&made.iter().collect::<Vec<_>>());
+}
+
+/// The channel remembered, as the state folder holds it.
+fn kept(user: &User) -> Value {
+    let file = user.path("state/flottille/update-channel.json");
+    serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+}
+
+#[test]
+fn choosing_beta_remembers_it_and_checks_for_an_update() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    stable_at(&releases, programs.path(), &this_version());
+    betas_at(&releases, programs.path(), &[&format!("{NEWER}-beta.1")]);
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    assert_eq!(
+        user.call("update.show", json!({})).unwrap()["channel"],
+        "stable"
+    );
+
+    let set = user.call("update.set", json!({"channel": "beta"})).unwrap();
+
+    assert_eq!(set["channel"], "beta");
+    assert_eq!(kept(&user)["channel"], "beta");
+    // The check follows at once, with no click on Check now, and says the beta it found.
+    let shown = shown_until(&user, "the check", |shown| {
+        shown["latest"] == format!("{NEWER}-beta.1")
+    });
+    assert_eq!(shown["channel"], "beta");
+    assert_eq!(
+        shown["check"], "never",
+        "the check's setting is not touched"
+    );
+    // The beta's list was read, not stable's alone.
+    assert!(
+        requests(&releases)
+            .iter()
+            .any(|p| p == "/repos/o/r/releases?per_page=100"),
+        "{:?}",
+        requests(&releases)
+    );
+}
+
+#[test]
+fn back_to_stable_keeps_a_newer_beta_until_a_stable_passes_it() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    // This build is newer than the latest stable, as a beta installed above it is.
+    stable_at(&releases, programs.path(), "0.0.5");
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    user.call("update.set", json!({"channel": "beta"})).unwrap();
+
+    user.call("update.set", json!({"channel": "stable"}))
+        .unwrap();
+
+    let shown = shown_until(&user, "the check", |shown| shown["ahead_of"] == "0.0.5");
+    assert_eq!(shown["channel"], "stable");
+    // Nothing is offered, and nothing goes down: the build stays.
+    assert_eq!(shown["latest"], Value::Null);
+    assert_eq!(kept(&user)["channel"], "stable");
+    // A stable above this build ends the wait, and is offered like any update.
+    stable_at(&releases, programs.path(), NEWER);
+    user.call("update.check", json!({})).unwrap();
+    let shown = shown_until(&user, "the newer stable", |shown| shown["latest"] == NEWER);
+    assert_eq!(shown["ahead_of"], Value::Null);
+}
+
+#[test]
+fn an_alpha_build_shows_its_branch_and_offers_stable_or_beta() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    stable_at(&releases, programs.path(), &this_version());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    // `flottille update --channel alpha --branch feat/x` left this behind.
+    let file = user.path("state/flottille/update-channel.json");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"channel":"alpha","branch":"feat/x"}"#).unwrap();
+
+    let shown = user.call("update.show", json!({})).unwrap();
+    assert_eq!(shown["channel"], "alpha");
+    assert_eq!(shown["branch"], "feat/x");
+
+    // The way back: stable, and the branch is forgotten with the alpha.
+    let back = user
+        .call("update.set", json!({"channel": "stable"}))
+        .unwrap();
+    assert_eq!(back["channel"], "stable");
+    assert_eq!(back["branch"], Value::Null);
+    assert_eq!(kept(&user)["branch"], Value::Null);
+}
+
+#[test]
+fn the_window_s_choice_of_channel_is_stable_or_beta_only() {
+    let user = User::new();
+
+    for channel in ["alpha", "rc", "next", "nightly"] {
+        let refused = user.call("update.set", json!({"channel": channel}));
+
+        let (code, _) = refused.unwrap_err();
+        assert_eq!(code, "invalid-params", "{channel}");
+    }
+    assert_eq!(
+        user.call("update.show", json!({})).unwrap()["channel"],
+        "stable"
+    );
+    // A request that asks for nothing is not one.
+    assert!(user.call("update.set", json!({})).is_err());
+}
