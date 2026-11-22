@@ -83,10 +83,27 @@ pub(crate) fn shown(text: &str, limit: usize) -> String {
     shown
 }
 
-/// Whether `c` hides or turns text a reader sees: a format character (`invisible`) or a line or
-/// paragraph separator (U+2028, U+2029), which no control check catches.
+/// Whether `c` hides or turns text a reader sees: a format character (`invisible`), a line or
+/// paragraph separator (U+2028, U+2029), which no control check catches, or one of the characters
+/// that are no format character yet show nothing: variation selectors, Hangul fillers, the
+/// combining grapheme joiner and the blank braille pattern. The text and emoji presentation
+/// selectors (U+FE0E, U+FE0F) are left out: they are part of the emoji people write (⚠️ ❤️).
 pub fn hidden(c: char) -> bool {
-    invisible(c) || matches!(c, '\u{2028}' | '\u{2029}')
+    const BLANK: &[(u32, u32)] = &[
+        (0x034F, 0x034F),
+        (0x115F, 0x1160),
+        (0x2028, 0x2029),
+        (0x2800, 0x2800),
+        (0x3164, 0x3164),
+        (0xFE00, 0xFE0D),
+        (0xFFA0, 0xFFA0),
+        (0xE0100, 0xE01EF),
+    ];
+    let code = u32::from(c);
+    invisible(c)
+        || BLANK
+            .iter()
+            .any(|&(first, last)| (first..=last).contains(&code))
 }
 
 /// Whether `c` is a format character (Unicode's category `Cf`, as of Unicode 15.1): it shows
@@ -120,4 +137,42 @@ pub(crate) fn invisible(c: char) -> bool {
     FORMAT
         .iter()
         .any(|&(first, last)| (first..=last).contains(&c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_character_that_shows_nothing_is_hidden_format_character_or_not() {
+        for c in [
+            '\u{202E}',
+            '\u{2028}', // format, separator
+            '\u{FE00}',
+            '\u{FE0D}',
+            '\u{E0100}',
+            '\u{E01EF}', // variation selectors
+            '\u{115F}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{FFA0}', // Hangul fillers
+            '\u{034F}',
+            '\u{2800}', // combining grapheme joiner, blank braille
+        ] {
+            assert!(hidden(c), "U+{:04X} shows something", u32::from(c));
+        }
+        for c in [
+            '\u{FE0E}',
+            '\u{FE0F}', // the text and emoji presentation selectors: ⚠️ ❤️
+            'a',
+            ' ',
+            'é',
+            '\u{FDFF}',
+            '\u{E01F0}',
+            '\u{2801}',
+            '한',
+        ] {
+            assert!(!hidden(c), "U+{:04X} was hidden", u32::from(c));
+        }
+    }
 }
