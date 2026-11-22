@@ -810,4 +810,37 @@ fn a_child_on_another_machine_is_in_the_sub_agents_list_with_its_machine_icon(
     assert!(present(cx, row.clone().into()), "{row}");
     let mark = label(cx, format!("{row}-mark").into()).unwrap_or_default();
     assert!(mark.contains(" in "), "{mark:?}");
+
+    // At rest the row is whole. When its launch is no longer listed it folds away over several
+    // frames, then is gone: the frames are drawn with no read of the machines, which would list
+    // the launch again.
+    let item = format!("{row}-item");
+    let height = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .try_find(item.clone())
+                .map(|found| f32::from(found.bounds().size.height))
+        })
+    };
+    let whole = height(cx).expect("the row's frame");
+    assert!(whole > 20., "{whole}");
+    cx.update(|_, cx| {
+        cx.set_global(flottille_window::model::RemoteAgents(Vec::new()));
+        cx.refresh_windows();
+    });
+    let mut drawn = Vec::new();
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        match height(cx) {
+            Some(height) => drawn.push(height),
+            None => break,
+        }
+    }
+    assert!(
+        drawn.iter().any(|h| *h > 1. && *h < whole - 1.),
+        "it folds before it is gone: {drawn:?}"
+    );
+    assert!(!present(cx, row.clone().into()), "gone once the fold ended");
 }

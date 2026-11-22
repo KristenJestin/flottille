@@ -19,8 +19,9 @@ use flottille_window::link::Connect;
 use flottille_window::shell::Selection;
 use flottille_window::tree::project_id;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::seen::{colour, seen};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Hsla, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 /// How long a link, a switch or a read of the machines may take.
@@ -135,6 +136,13 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     }
 }
 
+fn click_without_settling(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+    let _ = shell;
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    cx.update(|window, cx| window.render_frame(cx));
+}
+
 fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
@@ -152,6 +160,43 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
         window
             .try_find(id)
             .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+/// The colour the window draws the machine `name` in (`None`: this one), as the member list signs
+/// it.
+fn shade_of(shell: &Entity<Shell>, name: Option<&str>, cx: &mut VisualTestContext) -> Hsla {
+    shell.read_with(cx, |s, cx| {
+        let read = s
+            .machines()
+            .read(cx)
+            .machines()
+            .expect("the machines are read");
+        let choice = flottille_window::machines::choices(read)
+            .into_iter()
+            .find(|choice| choice.name.as_deref() == name)
+            .expect("a machine of the list");
+        flottille_window::machines::shade(&choice.colour)
+    })
+}
+
+/// How wide the element `id` is drawn, `None` when it is not drawn at all.
+fn width_of(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .map(|found| f32::from(found.bounds().size.width))
+    })
+}
+
+/// How tall the element `id` is drawn, `None` when it is not drawn at all.
+fn height_of(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .map(|found| f32::from(found.bounds().size.height))
     })
 }
 
@@ -245,11 +290,27 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
         "{:?}",
         label(cx, "settings-machine-server-detail")
     );
+    // The kit draws the mark: the icon leads the chooser and each row, in the machine's colour,
+    // and the machine chosen has the check.
     assert!(
-        label(cx, "settings-machine-mark").is_some_and(|said| said.contains(" in ")),
-        "{:?}",
-        label(cx, "settings-machine-mark")
+        !present(cx, "settings-machine-mark"),
+        "no mark drawn beside the chooser"
     );
+    assert_eq!(
+        colour("settings-machine-leading"),
+        Some(shade_of(&shell, None, cx)),
+        "the chooser's icon"
+    );
+    assert_eq!(
+        colour("settings-machine-here-leading"),
+        Some(shade_of(&shell, None, cx))
+    );
+    assert_eq!(
+        colour("settings-machine-server-leading"),
+        Some(shade_of(&shell, Some("server"), cx))
+    );
+    assert_eq!(seen("settings-machine-here-check"), Some(1.0));
+    assert_eq!(seen("settings-machine-server-check"), Some(0.0));
     click(&shell, "settings-machine-server", cx);
     until(&shell, cx, "the server is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
@@ -329,6 +390,15 @@ fn a_project_is_added_on_another_machine_with_its_folder_picked_there(cx: &mut T
         label(cx, "add-project-machine-here").as_deref(),
         Some("pc"),
         "this machine first"
+    );
+    // Each is marked by its icon in its colour, drawn by the kit.
+    assert_eq!(
+        colour("add-project-machine-here-leading"),
+        Some(shade_of(&shell, None, cx))
+    );
+    assert_eq!(
+        colour("add-project-machine-server-leading"),
+        Some(shade_of(&shell, Some("server"), cx))
     );
     click(&shell, "add-project-machine-server", cx);
     until(&shell, cx, "the server is shown", |cx| {
@@ -683,7 +753,25 @@ fn the_composer_picks_the_machine_among_those_that_have_the_project(cx: &mut Tes
         present(cx, "machine-picker")
     });
     assert_eq!(label(cx, "machine-picker").as_deref(), Some("pc"));
+    assert!(
+        !present(cx, "machine-picker-mark"),
+        "the kit draws the mark"
+    );
+    assert_eq!(
+        colour("machine-picker-leading"),
+        Some(shade_of(&shell, None, cx))
+    );
     click(&shell, "machine-picker", cx);
+    assert_eq!(
+        seen("machine-choice-here-check"),
+        Some(1.0),
+        "the chosen row"
+    );
+    assert_eq!(seen("machine-choice-server-check"), Some(0.0));
+    assert_eq!(
+        colour("machine-choice-server-leading"),
+        Some(shade_of(&shell, Some("server"), cx))
+    );
     assert_eq!(
         label(cx, "machine-choice-here-label").as_deref(),
         Some("pc")
@@ -706,6 +794,11 @@ fn the_composer_picks_the_machine_among_those_that_have_the_project(cx: &mut Tes
     });
     settle(&shell, cx);
     assert_eq!(label(cx, "machine-picker").as_deref(), Some("server"));
+    assert_eq!(
+        colour("machine-picker-leading"),
+        Some(shade_of(&shell, Some("server"), cx)),
+        "the button's icon follows the machine chosen"
+    );
     assert_eq!(label(cx, "place-picker").as_deref(), Some("main"));
 }
 
@@ -760,5 +853,96 @@ fn a_chosen_machine_that_goes_off_says_to_pick_another_or_wait(cx: &mut TestAppC
         shown(&shell, cx).is_none()
     });
     settle(&shell, cx);
+    assert!(!present(cx, "composer-machine-off"));
+}
+
+#[gpui_kit::test]
+fn the_composer_machine_picker_folds_away_when_the_project_is_on_one_machine_only(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    open_project(&shell, "app", cx);
+    until(&shell, cx, "the machine picker", |cx| {
+        present(cx, "machine-picker")
+    });
+    settle(&shell, cx);
+
+    // At rest it is drawn whole, not clipped.
+    let whole = width_of(cx, "machine-picker-fold").expect("the picker is drawn");
+    let picker = width_of(cx, "machine-picker").expect("its button");
+    assert!(whole >= picker && whole > 40., "{whole} {picker}");
+
+    // The server drops the project: the picker narrows and fades while it goes, then is gone.
+    server
+        .user
+        .call("project.remove", json!({"name": "app"}))
+        .unwrap();
+    let drawn = std::cell::RefCell::new(Vec::new());
+    until(&shell, cx, "the picker is gone", |cx| {
+        match width_of(cx, "machine-picker-fold") {
+            Some(width) => {
+                drawn.borrow_mut().push(width);
+                false
+            }
+            None => true,
+        }
+    });
+    let drawn = drawn.into_inner();
+    assert!(
+        drawn.iter().any(|width| *width > 1. && *width < whole - 1.),
+        "it narrows before it is gone: {drawn:?}"
+    );
+    assert!(
+        drawn.windows(2).all(|pair| pair[1] <= pair[0] + 0.5),
+        "and never widens again: {drawn:?}"
+    );
+    assert!(!present(cx, "machine-picker"));
+    settle(&shell, cx);
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+#[gpui_kit::test]
+fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    open_project(&shell, "app", cx);
+    until(&shell, cx, "the machine picker", |cx| {
+        present(cx, "machine-picker")
+    });
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-server", cx);
+    until(&shell, cx, "the server is shown", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+    });
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the notice under the composer", |cx| {
+        present(cx, "composer-machine-off")
+    });
+    settle(&shell, cx);
+    let whole = height_of(cx, "composer-machine-off-line").expect("its frame");
+    assert!(whole > 10., "{whole}");
+
+    // Leaving the machine folds the notice away, with its words, over several frames.
+    click_without_settling(&shell, "machine-picker", cx);
+    cx.update(|window, cx| window.click("machine-choice-here".to_owned(), cx));
+    let drawn = std::cell::RefCell::new(Vec::new());
+    until(&shell, cx, "the notice is gone", |cx| {
+        match height_of(cx, "composer-machine-off-line") {
+            Some(height) => {
+                drawn.borrow_mut().push(height);
+                false
+            }
+            None => true,
+        }
+    });
+    let drawn = drawn.into_inner();
+    assert!(
+        drawn
+            .iter()
+            .any(|height| *height > 1. && *height < whole - 1.),
+        "it folds before it is gone: {drawn:?}"
+    );
     assert!(!present(cx, "composer-machine-off"));
 }
