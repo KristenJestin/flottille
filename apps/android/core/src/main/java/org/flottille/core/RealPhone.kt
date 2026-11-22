@@ -1,22 +1,41 @@
 package org.flottille.core
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.launch
 import org.flottille.core.ffi.MobileException
 import org.flottille.core.ffi.ViewState
 
 /** The real core, as [Phone]: the bindings stay in this module. */
-class RealPhone(private val core: FlottilleCore) : Phone {
+class RealPhone(
+    private val core: FlottilleCore,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) : Phone {
     override val view: PhoneView get() = core.view.toPhoneView()
+
+    /**
+     * One connection for everyone who follows the view: the screens, while the app is on screen,
+     * and the service that keeps a tunnel for the user's browser, once it is not. It lasts while
+     * any of them collects, and a collector that comes later starts from the view as it is.
+     */
+    private val shared: Flow<PhoneView> =
+        connected().shareIn(scope, SharingStarted.WhileSubscribed(replayExpirationMillis = 0), replay = 1)
 
     /**
      * Connected while collected. A hub that cannot be reached is said in the view and dialled again
      * after a wait that grows (the connection is the core's; the screens never loop). A phone that
      * joined no hub has nothing to connect to: its view, once.
      */
-    override fun views(): Flow<PhoneView> = flow {
+    override fun views(): Flow<PhoneView> = shared
+
+    private fun connected(): Flow<PhoneView> = flow {
         emit(view)
         if (!view.joined) return@flow
         var wait = FIRST_WAIT
@@ -80,6 +99,23 @@ class RealPhone(private val core: FlottilleCore) : Phone {
     override suspend fun picture(machine: String, agent: String, name: String): ByteArray =
         guarded { core.image(machine, agent, name) }
 
+    override suspend fun openAddress(machine: String, run: String?, url: String): OpenedTunnel =
+        guarded { core.openAddress(machine, run, url) }.let { OpenedTunnel(it.tunnel.toTunnel(), it.url) }
+
+    override fun closeTunnel(tunnel: String) =
+        try {
+            core.closeTunnel(tunnel)
+        } catch (refused: MobileException) {
+            throw PhoneException(refused.sentence())
+        }
+
+    override fun isLocal(url: String): Boolean = FlottilleCore.isLocal(url)
+
+    override fun keepConnected(): AutoCloseable {
+        val job = scope.launch { shared.collect { } }
+        return AutoCloseable { job.cancel() }
+    }
+
     /** The core's refusal, as the sentence the screens say. */
     private suspend fun <T> guarded(work: suspend () -> T): T =
         try {
@@ -136,13 +172,16 @@ internal fun ViewState.toPhoneView(): PhoneView {
                 child = page.child,
                 ended = page.ended,
                 more = page.more,
-                entries = page.entries.map { Entry(it.seq.toLong(), it.kind, it.text, it.images) },
+                entries = page.entries.map { Entry(it.seq.toLong(), it.kind, it.text, it.images, it.link) },
                 children = page.children.map { Child(it.agent, it.title, it.doing, it.role, it.depth.toInt()) },
+                runs = page.runs.map { Run(it.run, it.line, it.url) },
             )
         },
         requests = requests.map {
             Request(it.machine, it.number.toLong(), it.agent, it.tool, it.kind, it.call, it.base, it.judgement, it.why, it.always, it.source, it.says)
         },
+        tunnels = tunnels.map { it.toTunnel() },
+        tunnelsEnded = tunnelsEnded.map { TunnelEnd(it.tunnel, it.machine, it.run, it.reason) },
         asks = asks.map { ask ->
             Ask(
                 ask.machine,
@@ -154,3 +193,5 @@ internal fun ViewState.toPhoneView(): PhoneView {
         },
     )
 }
+
+private fun org.flottille.core.ffi.TunnelView.toTunnel() = Tunnel(tunnel, machine, run, port.toInt(), localPort.toInt())

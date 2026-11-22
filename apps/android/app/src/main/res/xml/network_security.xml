@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The in-app browser reads a run's page through a tunnel, on the phone's own loopback, in clear:
+     nothing else of the app speaks http, and the tunnel's bytes are carried encrypted by the link. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain>127.0.0.1</domain>
+    </domain-config>
+</network-security-config>
