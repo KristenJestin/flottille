@@ -452,6 +452,11 @@ pub struct Project {
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub obsolete: Vec<String>,
+    /// The machine whose launch made the project here, when Flottille made it: its settings that
+    /// travel (`TRAVELLING`) follow that machine's at each launch (`docs/remote.md`, "What
+    /// travels"). None for a project the user registered, whose settings are the user's alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_machine: Option<String>,
 }
 
 /// What is said of a `[forges]` table, which named Bitbucket Data Center hosts before each
@@ -520,6 +525,7 @@ struct File {
     windows: bool,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
+    from_machine: Option<String>,
 }
 
 fn all_repositories() -> RepositorySet {
@@ -606,6 +612,7 @@ impl Project {
             rules_alone: false,
             windows: false,
             obsolete: Vec::new(),
+            from_machine: None,
         }
     }
 
@@ -985,6 +992,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         rules_alone: file.rules_alone,
         windows: file.windows,
         obsolete,
+        from_machine: file.from_machine,
     })
 }
 
@@ -1470,6 +1478,93 @@ pub fn slug(text: &str) -> String {
     slug.trim_end_matches('-').to_owned()
 }
 
+/// The keys of a project's file that travel with a launch to another machine (`docs/remote.md`,
+/// "What travels"): how its workspaces are prepared, its tasks and services, its checks, its
+/// rules, its branch and commit conventions. Its folder, its workspaces' folder, its caps, its
+/// provider, its forges, its tracker and every other key are the machine's own.
+pub const TRAVELLING: [&str; 10] = [
+    "branch_prefix",
+    "branch_format",
+    "never",
+    "variables",
+    "tasks",
+    "setup",
+    "message_checks",
+    "pull_requests",
+    "rules",
+    "rules_alone",
+];
+
+/// The keys of a repository that travel with it, beside its path.
+pub const TRAVELLING_REPOSITORY: [&str; 3] = ["base", "depends_on", "commit_checks"];
+
+/// The settings of the project file `text` that travel: its keys of [`TRAVELLING`] as written,
+/// and `repositories`, each repository's path with its keys of [`TRAVELLING_REPOSITORY`].
+pub fn travelling(text: &str) -> Result<serde_json::Value, String> {
+    let table: toml::Table = text
+        .parse()
+        .map_err(|error: toml::de::Error| error.message().to_owned())?;
+    let json = |value: &toml::Value| serde_json::to_value(value).map_err(|e| e.to_string());
+    let mut settings = serde_json::Map::new();
+    for key in TRAVELLING {
+        if let Some(value) = table.get(key) {
+            settings.insert(key.to_owned(), json(value)?);
+        }
+    }
+    let mut repositories = Vec::new();
+    for repository in table
+        .get("repositories")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+    {
+        let mut kept = serde_json::Map::new();
+        for key in std::iter::once("path").chain(TRAVELLING_REPOSITORY) {
+            if let Some(value) = repository.get(key) {
+                kept.insert(key.to_owned(), json(value)?);
+            }
+        }
+        repositories.push(serde_json::Value::Object(kept));
+    }
+    settings.insert("repositories".to_owned(), repositories.into());
+    Ok(serde_json::Value::Object(settings))
+}
+
+/// The TOML of `settings` that came from another machine, for their keys to be laid in a
+/// project's file: refused when it holds a key that does not travel.
+pub fn travelled_toml(settings: &serde_json::Value) -> Result<String, String> {
+    let Some(keys) = settings.as_object() else {
+        return Err("the settings of a project are a table".to_owned());
+    };
+    for (key, value) in keys {
+        if key == "repositories" {
+            let repositories = value
+                .as_array()
+                .ok_or("the repositories of the settings are a list")?;
+            for repository in repositories {
+                let fields = repository
+                    .as_object()
+                    .ok_or("a repository of the settings is a table")?;
+                if !fields.get("path").is_some_and(serde_json::Value::is_string) {
+                    return Err("a repository of the settings names its path".to_owned());
+                }
+                if let Some(other) = fields
+                    .keys()
+                    .find(|key| *key != "path" && !TRAVELLING_REPOSITORY.contains(&key.as_str()))
+                {
+                    return Err(format!("repositories.{other} is no setting that travels"));
+                }
+            }
+        } else if !TRAVELLING.contains(&key.as_str()) {
+            return Err(format!("{key} is no setting that travels"));
+        }
+    }
+    let table: toml::Table =
+        serde_json::from_value(settings.clone()).map_err(|error| error.to_string())?;
+    toml::to_string(&table).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1494,6 +1589,61 @@ mod tests {
         [[repositories]]
         path = "."
     "#;
+
+    #[test]
+    fn only_the_settings_that_travel_leave_and_come_in() {
+        let text = r#"
+            folder = "/work/app"
+            workspaces_root = "/work/trees"
+            max_children = 3
+            provider = "claude"
+            branch_format = "^feat/"
+            rules = "Small commits."
+            message_checks = ["check {message}"]
+            [tasks.test]
+            line = "cargo test"
+            check = true
+            [[setup]]
+            run = "make deps"
+            [[repositories]]
+            path = "."
+            remote = "upstream"
+            base = ["dev"]
+            [repositories.forge]
+            kind = "github"
+        "#;
+
+        let settings = travelling(text).unwrap();
+
+        for own in ["folder", "workspaces_root", "max_children", "provider"] {
+            assert!(settings.get(own).is_none(), "{own}: {settings}");
+        }
+        assert_eq!(settings["branch_format"], "^feat/");
+        assert_eq!(settings["tasks"]["test"]["line"], "cargo test");
+        assert_eq!(settings["setup"][0]["run"], "make deps");
+        assert_eq!(
+            settings["repositories"],
+            serde_json::json!([{"path": ".", "base": ["dev"]}])
+        );
+        let toml = travelled_toml(&settings).unwrap();
+        assert!(toml.contains("cargo test"), "{toml}");
+
+        // A key that is the machine's own is refused when it comes.
+        let mut sent = settings.clone();
+        sent["folder"] = "/etc".into();
+        assert!(
+            travelled_toml(&sent)
+                .unwrap_err()
+                .contains("folder is no setting that travels")
+        );
+        let mut sent = settings;
+        sent["repositories"][0]["remote"] = "evil".into();
+        assert!(
+            travelled_toml(&sent)
+                .unwrap_err()
+                .contains("repositories.remote")
+        );
+    }
 
     #[test]
     fn a_repository_deletes_its_branch_on_merge_only_when_its_file_says_so() {

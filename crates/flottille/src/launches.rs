@@ -120,7 +120,8 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
             .iter()
             .find(|(offering, _)| offering == name)
             .map(|(_, offers)| {
-                let why = offers.refusal(name, &project.name, Some(&asked.provider));
+                // The project goes with the launch: only the agent and the slots bound it.
+                let why = offers.agent_refusal(name, Some(&asked.provider));
                 let full = child
                     && offers
                         .projects
@@ -142,12 +143,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         )),
         Some(why) => why,
     };
-    if let Some(mut why) = refusal {
-        if why.ends_with(&format!("is not on {machine}")) {
-            why.push_str(&format!(
-                ": register it there with flottille --machine {machine} project add <folder>"
-            ));
-        }
+    if let Some(why) = refusal {
         let others: Vec<&str> = offers
             .iter()
             .map(|(name, _)| name.as_str())
@@ -167,6 +163,17 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
     };
     let place = place_of(daemon, caller, &project)?;
     let branch = branch_of(&place[0].1).await.map_err(refused)?;
+    let identities = crate::travelled::identities(&project, &place).await;
+    let settings = projects::travelling(daemon, &project.name).map_err(|f| refused(f.message))?;
+    if serde_json::to_string(&settings)
+        .is_ok_and(|text| text.len() > crate::travelled::LONGEST_SETTINGS)
+    {
+        return Err(refused(format!(
+            "refused: the settings of {} are more than {} KiB: they cannot travel",
+            project.name,
+            crate::travelled::LONGEST_SETTINGS / 1024
+        )));
+    }
     let mut tree = crate::tree::root_of(daemon, &caller.id);
     let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
         GateMode::Ask => ("ask", None),
@@ -201,6 +208,8 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         switch,
         branch: branch.clone(),
         repositories: place.iter().map(|(path, _)| path.clone()).collect(),
+        identities,
+        settings: Some(settings),
     };
     let judged = link
         .send(&Message::Machine(MachineMessage::Launch(Box::new(
@@ -493,24 +502,18 @@ async fn judged(
     if held >= MOST_HELD {
         return Err(too_many_held(sender));
     }
-    let project = projects::load_project(daemon, &asked.project).map_err(|_| {
-        format!(
-            "the project {} is not on {here}: register it there with flottille --machine {here} \
-             project add <folder>",
-            asked.project
-        )
-    })?;
-    if let Some(missing) = asked
-        .repositories
-        .iter()
-        .find(|path| !project.repositories.iter().any(|r| &r.path == *path))
-    {
-        return Err(format!(
-            "the project {} on {here} has no repository {missing}: add it there with the same \
-             path",
-            project.name
-        ));
-    }
+    // The project it runs in: one this machine has, recognised by its repositories, or one made
+    // for it once every check passed.
+    let found = crate::travelled::recognise(daemon, &asked, here).await?;
+    let project = match &found {
+        crate::travelled::Found::Here(project) => (**project).clone(),
+        crate::travelled::Found::Made { name, folder } => flottille_core::project::Project::new(
+            name,
+            folder.clone(),
+            asked.repositories.clone(),
+            &daemon.paths.data,
+        ),
+    };
     let offered = {
         let daemon = daemon.clone();
         tokio::task::spawn_blocking(move || crate::link::offered(&daemon))
@@ -563,7 +566,8 @@ async fn judged(
         },
         _ => GateMode::Auto,
     };
-    let says = words(kind, &asked, sender);
+    let mut says = words(kind, &asked, sender);
+    says.splice(1..1, crate::travelled::words(&found, &asked, sender));
     let judgement = match mode {
         GateMode::Full => None,
         GateMode::Ask => None,
@@ -582,6 +586,13 @@ async fn judged(
             .as_ref()
             .is_some_and(|judged| judged.verdict == "allow");
     let state = if accepted { "accepted" } else { "held" };
+    let project = crate::travelled::made(daemon, found, &asked, sender)?;
+    // Its project's settings are laid only once the launch is allowed: now, or at the user's
+    // answer.
+    if accepted {
+        let came = serde_json::to_value(&asked).unwrap_or_default();
+        crate::travelled::take_settings(daemon, &project.name, &came, sender)?;
+    }
     let record = Launch {
         way: "in".into(),
         machine,
@@ -767,10 +778,11 @@ pub(crate) fn refuse_other_code(launch: &Launch, git: &flottille_link::Git) -> R
         ),
         Git::Fetch(_) => return Ok(()),
     };
-    if project != launch.project {
+    // The sender names its project as it calls it: the project here may have another name.
+    if project != asked.project {
         return Err(format!(
             "launch {name} is for project {}, not {project}: no code of another is taken for it",
-            launch.project
+            asked.project
         ));
     }
     let whole = matches!(git, Git::Place(_));
@@ -984,6 +996,21 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     let Some(agent) = launch.agent.clone() else {
         return;
     };
+    // Its project's settings first, which its setup follows: a launch whose settings cannot be
+    // used here is refused, saying why.
+    let mut allowed = allowed;
+    if allowed {
+        let from = launch.asked["from"].as_str().unwrap_or("another machine");
+        if let Err(why) =
+            crate::travelled::take_settings(daemon, &launch.project, &launch.asked["asked"], from)
+        {
+            eprintln!(
+                "flottille daemon: launch {} is refused: {why}",
+                launch.launch
+            );
+            allowed = false;
+        }
+    }
     let state = match allowed {
         true => "started",
         false => "refused",
