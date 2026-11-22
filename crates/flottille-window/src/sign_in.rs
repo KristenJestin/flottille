@@ -545,7 +545,9 @@ impl SignInSection {
                     .child(address)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        shell.update(cx, |shell, _| shell.open_link(&opened)).ok();
+                        if opens(&opened) {
+                            shell.update(cx, |shell, _| shell.open_link(&opened)).ok();
+                        }
                     }),
                 move |link, t| link.bg(p.hover.opacity(t)),
             )
@@ -689,6 +691,12 @@ impl Render for SignInSection {
             .child(section)
             .child(self.confirm(cx))
     }
+}
+
+/// Whether the dialog opens `address`: one of the web only, since the handler it is given to
+/// would open a file or run a scheme's program as readily.
+fn opens(address: &str) -> bool {
+    address.starts_with("https://") || address.starts_with("http://")
 }
 
 #[cfg(test)]

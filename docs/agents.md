@@ -93,9 +93,12 @@ a shell with the daemon's environment (the user's own configuration, where the p
 login), its input closed unless it asks for a code. It reads what the program prints line by line
 for two things only: the first address it names and the one-time code it shows; every line is
 dropped once read. The address and the code are held in the daemon's memory while the sign-in
-runs and given only in the answer to `signin.start` (and `signin.list` says that one runs): the
-window shows the address, opened with the system's default handler of the machine the window runs
-on, and the code with a copy button. A code the browser shows for the user to paste back is typed
+runs and given only in the answer to `signin.start` (and `signin.list` says that one runs), to the
+caller that started it alone (the device that signed its request, or this machine's own clients):
+another one is told that it runs and where it was started from. The address is kept without the
+user and password it may hold, and masked. The window shows it, opened with the system's default
+handler of the machine the window runs on when it is an `http://` or `https://` address only, and
+the code with a copy button. A code the browser shows for the user to paste back is typed
 in the dialog's hidden field and sent once (`signin.code`): written to the program's input with a
 line's end, which then closes, and kept nowhere. When the program ends, its own status says
 whether it is signed in now; `signin.changed` says the program and the state only. A sign-in is
