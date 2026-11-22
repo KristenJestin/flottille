@@ -115,6 +115,19 @@ cut after 15 minutes (a device code lasts that long); Cancel kills its process g
 | `bkt`, Bitbucket Cloud | a context for the host (`docs/forges.md`), never `bkt auth` | `bkt auth login https://bitbucket.org --kind cloud --web` | the address it prints when it cannot open a browser itself; it waits on `127.0.0.1` of the machine signing in, so its browser must be there | `bkt auth logout api.bitbucket.org` (it removes the host's contexts too) | `bkt`'s README, `pkg/cmd/auth/auth.go`, `pkg/oauth/flow.go` and `server.go` |
 | `bkt`, Data Center | the same | none: its token is asked in a terminal ("token is required when not running in a TTY"); the row says `bkt auth login https://<host> --web-token` | | `bkt auth logout <host>` | the same |
 
+What each program prints is read once in a temporary `HOME` and XDG folders, the command stopped
+after its first lines, and the fakes print that wording (the older one kept as a second scenario
+where the parser still reads it). The one-time code is read after `one-time code`, in the forms
+the programs print it: after a colon, in parentheses, or alone on the line under; and only when
+it looks like a code (groups of capital letters and digits joined by dashes, `ABCD-1234`). With
+none found, the dialog says to finish in the browser with the code the program shows (#1248).
+
+| Program | Version read | What it printed |
+|---|---|---|
+| `gh` | 2.104.0 (2026-11) | with a clipboard utility: `! One-time code (XXXX-XXXX) copied to clipboard`, then `Open this URL to continue in your web browser: <address>`; without one: `! Failed to copy one-time code to clipboard`, a sentence on the line under it, then `! First copy your one-time code: XXXX-XXXX` and the same address line (older versions print the colon form alone) |
+| `claude` | 2.1.330 | `Opening browser to sign in…`, `If the browser didn't open, visit:`, the address on the line under, `Paste code here if prompted >` |
+| `glab`, `codex`, `acli`, `bkt` | not read | not installed where the check ran: their fakes keep the wording of their documentation, to read once on a machine that has them |
+
 A program with no flow that works without a terminal says, in its row, the one line the user
 would type in a terminal on that machine, with a Copy button, and nothing else. After a Bitbucket
 Cloud sign-in, `bkt` still needs a context for the workspace (`docs/forges.md`, "The programs it

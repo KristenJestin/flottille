@@ -346,6 +346,43 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
     );
 }
 
+/// #1248: gh copies its one-time code to the clipboard of the machine it runs on, so the code the
+/// dialog shows for another machine's sign-in is the only one the user sees: it is the recent
+/// wording's, read from its parentheses.
+#[gpui_kit::test]
+fn the_code_of_a_recent_gh_is_shown_for_another_machine_s_sign_in(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server_on(
+        Machine::of(runner()),
+        runner().with_sign_in_programs(&["gh"]),
+    );
+    server.user.sign_in_script(
+        "gh",
+        json!({"signed_in": false,
+               "sign_in": {"address": "https://github.com/login/device", "code": "ABCD-1234"}}),
+    );
+    let (shell, cx) = window(&pc, cx);
+    settings(&shell, "agents", cx);
+    settings_of(&shell, "server", cx);
+    until(&shell, cx, "the server's gh row is read", |cx| {
+        label(cx, "sign-in-state-gh").as_deref() == Some("Not signed in")
+    });
+
+    settle(&shell, cx);
+    click(&shell, "sign-in-gh", cx);
+
+    until(&shell, cx, "the dialog shows the server's code", |cx| {
+        label(cx, "sign-in-code").as_deref() == Some("ABCD-1234")
+    });
+    assert_eq!(
+        label(cx, "sign-in-address").as_deref(),
+        Some("https://github.com/login/device")
+    );
+    assert!(
+        !server.user.sign_in_record("gh").is_empty(),
+        "it is the server's gh that ran"
+    );
+}
+
 #[gpui_kit::test]
 fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();

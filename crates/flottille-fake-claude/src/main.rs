@@ -133,7 +133,8 @@ fn auth(dir: &std::path::Path, args: &[String]) -> Option<i32> {
             }
             sign_in::login(dir, &script, args, |address, _| {
                 println!("Opening browser to sign in…");
-                println!("If the browser didn't open, visit: {address}");
+                // As Claude Code 2.1.330 prints it: the address on the line under.
+                println!("If the browser didn't open, visit:\n{address}");
                 print!("Paste code here if prompted > ");
             })
         }

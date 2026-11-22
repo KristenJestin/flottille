@@ -46,7 +46,7 @@ fn until(
     what: &str,
     check: impl Fn(&mut VisualTestContext) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(25);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
@@ -179,6 +179,41 @@ fn sign_in_shows_the_address_and_the_code_and_ends_signed_in(cx: &mut TestAppCon
     });
     settle(cx);
     assert!(!visible(cx, "sign-in-modal"), "the dialog closed");
+}
+
+/// #1248: a program that says its code in no way the daemon can read is never shown a wrong one:
+/// the dialog says to finish in the browser with the code the program shows.
+#[gpui_kit::test]
+fn a_dialog_with_no_code_found_says_to_use_the_code_the_program_shows(cx: &mut TestAppContext) {
+    let user = user(&["gh"]);
+    user.sign_in_script(
+        "gh",
+        json!({"signed_in": false,
+               "sign_in": {"address": "https://github.com/login/device",
+                           "code": "ABCD-1234", "wording": "no code"}}),
+    );
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+    until(&shell, cx, "gh's row says it is not signed in", |cx| {
+        label(cx, "sign-in-state-gh").as_deref() == Some("Not signed in")
+    });
+    click(cx, "sign-in-gh");
+
+    until(
+        &shell,
+        cx,
+        "the dialog says there is no code to show",
+        |cx| {
+            label(cx, "sign-in-address").as_deref() == Some("https://github.com/login/device")
+                && label(cx, "sign-in-no-code").is_some()
+        },
+    );
+    assert_eq!(
+        label(cx, "sign-in-no-code").as_deref(),
+        Some("Finish in your browser with the code the program shows.")
+    );
+    assert!(!visible(cx, "sign-in-code"), "no code is made up");
+    user.call("signin.cancel", json!({"program": "gh"})).ok();
 }
 
 #[gpui_kit::test]

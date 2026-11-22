@@ -40,6 +40,9 @@ pub const SENTENCE: &str = "The command lines your projects' forges and trackers
 pub const DIALOG_SENTENCE: &str = "Finish in your browser, on any device. Flottille never sees your \
                                    password and keeps nothing the program prints.";
 
+/// What the dialog says when the program shows a code and none could be read from what it printed.
+pub const NO_CODE_SENTENCE: &str = "Finish in your browser with the code the program shows.";
+
 /// What the field of a pasted code says under it.
 pub const PASTED_HINT: &str = "If your browser shows a code, paste it here: it goes to the program \
                                once and is kept nowhere.";
@@ -113,6 +116,8 @@ struct Flow {
     address: Option<String>,
     code: Option<String>,
     asks_code: bool,
+    /// The program shows a one-time code (a device flow).
+    shows_code: bool,
     /// The daemon answered the start.
     started: bool,
     /// The pasted code was sent.
@@ -264,6 +269,7 @@ impl SignInSection {
                 flow.address = answer["address"].as_str().map(str::to_owned);
                 flow.code = answer["code"].as_str().map(str::to_owned);
                 flow.asks_code = answer["asks_code"] == true;
+                flow.shows_code = answer["shows_code"] == true;
                 self.shown = flow.clone();
             }
             Err(why) => {
@@ -559,6 +565,18 @@ impl SignInSection {
             move |code| crate::programs::command_row("sign-in-code".into(), code, p),
         )
         .space(space::MD);
+        let no_code = presence(
+            "sign-in-no-code-block",
+            flow.shows_code && flow.code.is_none() && flow.address.is_some(),
+            div()
+                .id("sign-in-no-code")
+                .aria_label(NO_CODE_SENTENCE)
+                .text_size(px(12.5))
+                .text_color(p.mute)
+                .child(NO_CODE_SENTENCE)
+                .test_support(),
+        )
+        .space(space::MD);
         let pasted = presence(
             "sign-in-pasted-block",
             flow.asks_code,
@@ -593,7 +611,12 @@ impl SignInSection {
                 "sign-in-starting",
                 !flow.started,
                 Skeleton::new("sign-in-skeleton").h(px(48.)),
-                div().flex().flex_col().child(link).child(code),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(link)
+                    .child(code)
+                    .child(no_code),
             ))
             .child(pasted)
             .child(waiting_line);
