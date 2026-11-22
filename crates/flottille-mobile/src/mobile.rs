@@ -606,6 +606,7 @@ impl Core {
     /// `close_tunnel`. A tunnel already held to the same run, for the same use, is the one
     /// answered: no second one. `browser` says the address goes to the user's browser, which no
     /// panel of the app closes: that tunnel ends on its own after ten minutes with no connection.
+    /// A caller that goes before the machine answers (the panel was left) leaves no tunnel open.
     /// The phone listens on a random port of `127.0.0.1`, which any app of the phone can reach.
     pub async fn open_address(
         &self,
@@ -614,9 +615,8 @@ impl Core {
         url: String,
         browser: bool,
     ) -> Result<Opened, MobileError> {
-        let inner = self.inner.clone();
         self.inner
-            .on(async move { inner.open_address(&machine, run, &url, browser).await })
+            .open_address_for_caller(machine, run, url, browser)
             .await
     }
 
