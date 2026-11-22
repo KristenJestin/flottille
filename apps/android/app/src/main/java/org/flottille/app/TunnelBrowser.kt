@@ -14,7 +14,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import android.webkit.WebResourceError
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -48,6 +52,7 @@ fun TunnelBrowser(
     val palette = LocalPalette.current
     // The page's view, for Back: held in a box, never in state (it is not something to draw).
     val web = remember { arrayOfNulls<WebView>(1) }
+    var failed by remember { mutableStateOf<String?>(null) }
     BackHandler {
         val shown = web[0]
         if (shown != null && shown.canGoBack()) shown.goBack() else onClose()
@@ -63,6 +68,7 @@ fun TunnelBrowser(
             Tag(opened.tunnel.machine)
         }
         Message(ended?.let { "The tunnel ended: $it" }, modifier = Modifier.padding(horizontal = Space.Lg), tag = "browser-ended")
+        Message(failed?.let { "The page could not be loaded: $it" }, modifier = Modifier.padding(horizontal = Space.Lg), tag = "browser-failed")
         AndroidView(
             modifier = Modifier.weight(1f).fillMaxWidth().testTag("browser-page"),
             factory = { context ->
@@ -75,6 +81,10 @@ fun TunnelBrowser(
                     settings.allowContentAccess = false
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     webViewClient = object : WebViewClient() {
+                        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                            if (request.isForMainFrame) failed = error.description.toString()
+                        }
+
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                             val uri = request.url
                             val host = uri.host.orEmpty()

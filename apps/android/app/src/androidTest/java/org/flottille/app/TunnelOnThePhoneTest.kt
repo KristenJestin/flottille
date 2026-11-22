@@ -8,6 +8,7 @@ import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.platform.app.InstrumentationRegistry
@@ -82,10 +83,10 @@ class TunnelOnThePhoneTest {
         rule.waitForIdle()
     }
 
-    private fun until(what: String, holds: () -> Boolean) {
+    private fun until(what: String, detail: () -> String = { "" }, holds: () -> Boolean) {
         val limit = System.currentTimeMillis() + 20_000
         while (!holds()) {
-            check(System.currentTimeMillis() < limit) { "$what within 20 s" }
+            check(System.currentTimeMillis() < limit) { "$what within 20 s ${detail()}" }
             Thread.sleep(100)
         }
     }
@@ -102,7 +103,12 @@ class TunnelOnThePhoneTest {
         start()
         rule.onNodeWithTag("run-open:r1").performClick()
         // The web view asks the tunnel's local port; the run's server answers through it.
-        until("the run's server was asked through the tunnel") { server.requests.isNotEmpty() }
+        until("the run's server was asked through the tunnel", detail = {
+            val failed = rule.onAllNodesWithTag("browser-failed").fetchSemanticsNodes().size
+            "(opened: ${phone.opened.toList()}, tunnels: ${phone.state.value.tunnels}, browser shown: " +
+                "${rule.onAllNodesWithTag("browser-page").fetchSemanticsNodes().size}, failed message nodes: $failed, " +
+                "texts: ${rule.onAllNodesWithTag("browser-failed").fetchSemanticsNodes().map { it.config.toString() }})"
+        }) { server.requests.isNotEmpty() }
         assertEquals(listOf(Triple("server", "r1", "http://localhost:${server.port}/app")), phone.opened)
         val request = server.requests.first()
         assertTrue(request, request.startsWith("GET /app "))
