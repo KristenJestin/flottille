@@ -395,14 +395,17 @@ impl Remote {
         let file = self.folder.join(PEERS_FILE);
         {
             let _writing = self.writing.lock().unwrap();
-            // A file broken by hand is written over: the list is what says whom to trust.
-            let before = read_json::<Peers>(&file).unwrap_or_default();
             let peers = Peers {
                 machines: machines
                     .into_iter()
                     .map(|(name, key)| Peer { name, key })
                     .collect(),
             };
+            // Kept before the file is written: a link judged meanwhile is judged by this list,
+            // never by the one before it, which may still hold a machine removed now.
+            self.peers.lock().unwrap().last = peers.clone();
+            // A file broken by hand is written over: the list is what says whom to trust.
+            let before = read_json::<Peers>(&file).unwrap_or_default();
             let same = serde_json::to_value(&peers).ok() == serde_json::to_value(&before).ok();
             if !same && let Err(error) = write_json(&file, &peers) {
                 eprintln!(
@@ -411,8 +414,10 @@ impl Remote {
                     file.display()
                 );
             }
+            let mut kept = self.peers.lock().unwrap();
+            kept.read = stamp(&file);
+            kept.said = false;
         }
-        self.peers();
         self.lists
             .send_modify(|taken| *taken = taken.wrapping_add(1));
         // A machine removed from the list: its link is cut now, not when it next says something.
@@ -541,6 +546,13 @@ impl Remote {
         find(&self.peers())
     }
 
+    /// Whether the peers as last read hold `key`: no file is read, so that it is asked under the
+    /// `seen` lock. `trust_machines` changes them before it cuts the links under that lock.
+    fn trusted_kept(&self, key: &PublicKey) -> bool {
+        let kept = self.peers.lock().unwrap();
+        kept.last.machines.iter().any(|peer| peer.key == *key)
+    }
+
     /// A key refused: said in the log, unless it was lately.
     fn say_refused(&self, key: &PublicKey) {
         for line in self.refused_lines(Some(key), Instant::now()) {
@@ -594,11 +606,13 @@ impl Remote {
             .links
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = *link.peer().as_bytes();
+        // The peers' file read again if it changed, before the lock: none is read under it.
+        let trusted = self.trusted(&link.peer()).is_some();
         {
             let mut seen = self.seen.lock().unwrap();
             // Judged again under the lock `trust_machines` cuts the links under: a removal that
             // came while this link was made has cut the others already, and would miss this one.
-            if self.trusted(&link.peer()).is_none() {
+            if !trusted || !self.trusted_kept(&link.peer()) {
                 link.close(NOT_TRUSTED);
                 return;
             }
@@ -1907,16 +1921,18 @@ impl Remote {
             .endpoint
             .connect(peer.key, Traffic::Client, &self.hello, &peer.name)
             .await?;
+        let trusted = self.trusted(&peer.key).is_some();
         let mut seen = self.seen.lock().unwrap();
         // Judged again under the lock `trust_machines` cuts the links under, as a machine link is
         // (`linked`): a removal that came while this link was dialled would miss it.
-        if self.trusted(&peer.key).is_none() {
+        if !trusted || !self.trusted_kept(&peer.key) {
             link.close(REMOVED);
             return Err(LinkError::Closed(format!("{}: {REMOVED}", peer.name)));
         }
-        if let Some(seen) = seen.get_mut(peer.key.as_bytes()) {
-            seen.client = Some(link.clone());
-        }
+        // Kept even for a machine not seen yet, so that a removal that comes next cuts it.
+        seen.entry(*peer.key.as_bytes())
+            .or_insert_with(Seen::new)
+            .client = Some(link.clone());
         Ok(link)
     }
 
