@@ -95,14 +95,31 @@ class TunnelPageTest {
         rule.waitForIdle()
         // The core was asked for the run's own address, then the web view reads the address through the tunnel.
         assertEquals(listOf(Triple("server", "r1", "http://localhost:5173/app")), phone.opened)
+        // For the app's own web view: its tunnel has no idle end, its panel closes it.
+        assertEquals(listOf(false), phone.openedForBrowser)
         rule.onNodeWithTag("browser").assertIsDisplayed()
         rule.onNodeWithTag("browser-page").assertIsDisplayed()
-        // The tunnel is said in the run's row, with Close; closing the browser leaves it to the row.
         says("tunnel:r1", "localhost:41001 → server")
         rule.onNodeWithTag("browser-close").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("browser-page").assertDoesNotExist()
         assertTrue(host.kept.isEmpty() && host.browsed.isEmpty())
+    }
+
+    @Test
+    fun closing_the_in_app_browser_closes_its_tunnel() {
+        val phone = phone()
+        start(phone)
+        rule.onNodeWithTag("run-open:r1").performClick()
+        rule.waitForIdle()
+        // Open: its row says the tunnel, and none is closed while the page is up.
+        says("tunnel:r1", "localhost:41001 → server")
+        assertEquals(emptyList<String>(), phone.closedTunnels)
+        rule.onNodeWithTag("browser-close").performClick()
+        rule.waitForIdle()
+        // The listener of a tunnel is reachable by any app of the phone: it does not outlive its page.
+        assertEquals(listOf("t1"), phone.closedTunnels)
+        rule.onNodeWithTag("tunnel:r1").assertDoesNotExist()
     }
 
     @Test
@@ -112,6 +129,8 @@ class TunnelPageTest {
         rule.onNodeWithTag("run-browser:r1").performClick()
         rule.waitForIdle()
         assertEquals(1, host.kept.size)
+        // The user's browser reaches this tunnel for as long as it likes: it has an idle end.
+        assertEquals(listOf(true), phone.openedForBrowser)
         assertEquals("http://localhost:41001/app", host.kept.single().url)
         assertEquals("t1", host.kept.single().tunnel.tunnel)
         // The in-app browser stays closed: the page is the user's browser's.

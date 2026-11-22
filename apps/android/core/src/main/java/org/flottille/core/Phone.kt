@@ -204,10 +204,12 @@ interface Phone {
     /**
      * Opens [url], an address of [machine] (`localhost…`), through a tunnel: [run]'s own address
      * when a run is named, else the run that serves the port the link writes. A tunnel held to the
-     * same run is the one answered. The machine decides what it reaches and refuses with a
+     * same run and use is the one answered. [browser] says the address goes to the user's browser
+     * (its tunnel ends by itself after ten minutes with no connection), not to the app's own web
+     * view (whose panel closes its tunnel). The machine decides what it reaches and refuses with a
      * sentence ([PhoneException]).
      */
-    suspend fun openAddress(machine: String, run: String?, url: String): OpenedTunnel
+    suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean): OpenedTunnel
 
     /** Closes the tunnel [tunnel]. */
     fun closeTunnel(tunnel: String)

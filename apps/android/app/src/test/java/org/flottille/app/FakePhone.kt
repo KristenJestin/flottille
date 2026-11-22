@@ -65,6 +65,8 @@ class FakePhone(initial: PhoneView = PhoneView()) : Phone {
 
     /** What the page asked to open, in order: machine, run (none for a link) and address. */
     val opened = mutableListOf<Triple<String, String?, String>>()
+    /** For each of [opened]: whether it was for the user's browser. */
+    val openedForBrowser = mutableListOf<Boolean>()
     val closedTunnels = mutableListOf<String>()
 
     /** How many holds of the connection are on (`keepConnected`). */
@@ -134,9 +136,10 @@ class FakePhone(initial: PhoneView = PhoneView()) : Phone {
     override suspend fun picture(machine: String, agent: String, name: String): ByteArray =
         pictureBytes[name] ?: throw PhoneException("no picture named $name")
 
-    override suspend fun openAddress(machine: String, run: String?, url: String): OpenedTunnel {
+    override suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean): OpenedTunnel {
         refuse("openAddress")
         opened += Triple(machine, run, url)
+        openedForBrowser += browser
         val n = state.value.tunnels.size + closedTunnels.size + 1
         val tunnel = Tunnel("t$n", machine, run ?: "r1", 5173, 41000 + n)
         state.value = state.value.copy(tunnels = state.value.tunnels + tunnel)

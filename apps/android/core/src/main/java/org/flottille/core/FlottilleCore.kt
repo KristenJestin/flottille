@@ -100,7 +100,8 @@ class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoClose
     suspend fun image(machine: String, agent: String, name: String): ByteArray = core.image(machine, agent, name)
 
     /** The tunnel to the run of `machine` that `url` names, and the address read through it. */
-    suspend fun openAddress(machine: String, run: String?, url: String) = core.openAddress(machine, run, url)
+    suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean) =
+        core.openAddress(machine, run, url, browser)
 
     /** Closes a tunnel the phone holds. */
     fun closeTunnel(tunnel: String) = core.closeTunnel(tunnel)

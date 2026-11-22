@@ -98,7 +98,7 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
 
     override suspend fun picture(machine: String, agent: String, name: String): ByteArray = ByteArray(0)
 
-    override suspend fun openAddress(machine: String, run: String?, url: String): OpenedTunnel {
+    override suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean): OpenedTunnel {
         opened += Triple(machine, run, url)
         val listener = ServerSocket(0, 50, IPV4_LOOPBACK)
         val tunnel = Tunnel("t${++count}", machine, run ?: "r1", server.port, listener.localPort)

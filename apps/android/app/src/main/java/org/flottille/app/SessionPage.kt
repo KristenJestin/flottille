@@ -203,6 +203,21 @@ fun SessionPage(
     var browsing by remember(key) { mutableStateOf<OpenedTunnel?>(null) }
     var shownBrowsing by remember { mutableStateOf(browsing) }
     if (browsing != null) shownBrowsing = browsing
+    // The in-app browser's tunnel lives with its panel: it closes with it, however the panel goes
+    // (Close, Back, or the page itself leaving). Another app of the phone can reach a tunnel's
+    // listener, so none stays open for a page nobody looks at.
+    DisposableEffect(browsing?.tunnel?.tunnel) {
+        val tunnel = browsing?.tunnel?.tunnel
+        onDispose {
+            if (tunnel != null) {
+                try {
+                    phone.closeTunnel(tunnel)
+                } catch (gone: PhoneException) {
+                    // Ended already: the view says why.
+                }
+            }
+        }
+    }
     val busy = remember(key) { mutableStateListOf<String>() }
     val opening = Opening(
         readOnly = readOnly,
@@ -215,7 +230,7 @@ fun SessionPage(
                 busy += slot
                 scope.launch {
                     try {
-                        val opened = phone.openAddress(key.machine, run, url)
+                        val opened = phone.openAddress(key.machine, run, url, inBrowser)
                         if (inBrowser) tunnels.keepForBrowser(opened) else browsing = opened
                     } catch (cancelled: CancellationException) {
                         throw cancelled

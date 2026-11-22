@@ -99,8 +99,8 @@ class RealPhone(
     override suspend fun picture(machine: String, agent: String, name: String): ByteArray =
         guarded { core.image(machine, agent, name) }
 
-    override suspend fun openAddress(machine: String, run: String?, url: String): OpenedTunnel =
-        guarded { core.openAddress(machine, run, url) }.let { OpenedTunnel(it.tunnel.toTunnel(), it.url) }
+    override suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean): OpenedTunnel =
+        guarded { core.openAddress(machine, run, url, browser) }.let { OpenedTunnel(it.tunnel.toTunnel(), it.url) }
 
     override fun closeTunnel(tunnel: String) =
         try {
