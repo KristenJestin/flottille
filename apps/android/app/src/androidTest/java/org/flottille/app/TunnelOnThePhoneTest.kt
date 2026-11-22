@@ -86,6 +86,9 @@ class TunnelOnThePhoneTest {
     private fun until(what: String, seconds: Int = 20, detail: () -> String = { "" }, holds: () -> Boolean) {
         val limit = System.currentTimeMillis() + seconds * 1_000L
         while (!holds()) {
+            // The screens' clock moves while the test waits for them: the in-app browser is faded in
+            // by it, and a web view that is not drawn does not load.
+            rule.waitForIdle()
             check(System.currentTimeMillis() < limit) { "$what within $seconds s ${detail()}" }
             Thread.sleep(100)
         }
@@ -103,8 +106,7 @@ class TunnelOnThePhoneTest {
         start()
         rule.onNodeWithTag("run-open:r1").performClick()
         // The web view asks the tunnel's local port; the run's server answers through it.
-        // The emulator starts its web view cold: the first page takes the longest.
-        until("the run's server was asked through the tunnel", seconds = 120, detail = {
+        until("the run's server was asked through the tunnel", seconds = 60, detail = {
             val failed = rule.onAllNodesWithTag("browser-failed").fetchSemanticsNodes().size
             val probe = phone.state.value.tunnels.firstOrNull()?.let { tunnel ->
                 try {
