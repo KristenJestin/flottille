@@ -2,18 +2,19 @@
 //! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
 //! **Connect to your hub** while this machine is in no member list, a dialog where the code
 //! `flottille-hub pair` printed is pasted and the card this machine proposes confirmed; then the
-//! devices of the list, each renamed or removed from its "⋯". The page says the state and holds
-//! the buttons: what is typed is a dialog of the
+//! devices of the list, each renamed, drawn another way or removed from its "⋯". The page says
+//! the state and holds the buttons: what is typed is a dialog of the
 //! window's host. A device is added on the hub only: every new member, and every result, is a
 //! toast. What is asked goes to this machine's daemon, signed with the
 //! device key ([`crate::machines::Remote`]); what it answers comes back as news.
 
 use std::collections::HashMap;
 
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
     Button, Confirm, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices, Section,
-    Select, SelectOption, Switch, Toast, changed, changing, enter, palette, presence, presence_of,
-    space, tipped_when_cut, toast,
+    Select, SelectOption, Swatch, Swatches, Switch, Toast, changed, changing, enter, fade, palette,
+    presence, presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -24,9 +25,10 @@ use gpui_kit::{
 };
 use zeroize::Zeroizing;
 
-use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
+use crate::commands::{boxed, line_field, problem_line, spaced, stack};
 use crate::machines::{
-    Ask, Asked, Hub, ICONS, Machines, Member, News, ROLES, Remote, how_it_failed, role_words,
+    Ask, Asked, COLOURS, Hub, ICONS, Machines, Member, News, ROLES, Remote, how_it_failed,
+    role_words, shade,
 };
 use crate::modals::Modals;
 
@@ -36,6 +38,8 @@ pub const CONNECT_MODAL: &str = "hub-connect";
 pub const RENAME_MODAL: &str = "member-rename";
 /// The confirmation of a removal, over any page.
 pub const REMOVAL_DIALOG: &str = "member-removal-dialog";
+/// The dialog that changes a device's icon and colour.
+pub const LOOK_MODAL: &str = "member-look";
 
 const REMOTE_OFF: &str = "Remote is off. This machine can join a hub and link to your other \
                           machines.";
@@ -54,6 +58,13 @@ const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines w
 const HUB_SENTENCE: &str = "The hub keeps the list of your devices and carries their links, \
                             encrypted end to end: it reads nothing of what they say to each \
                             other.";
+const FORGOTTEN: &str = "The hub no longer knows this machine";
+const FORGOTTEN_SENTENCE: &str = "The list below is the one this machine saw last, kept as it \
+                                  was. Pair again with your hub's code to be one of its devices \
+                                  again: what the hub holds now replaces it.";
+const PAIR_AGAIN_SAID: &str = "Paste the code your hub's host printed. This machine proposes its \
+                               name, how it is drawn and what it may do: change them before you \
+                               pair again. What the hub holds now replaces the old list.";
 
 /// What is asked to be removed, until it is confirmed or cancelled.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,12 +87,24 @@ pub struct MachinesSection {
     connect_icon: usize,
     connect_role: usize,
     connect_error: Option<SharedString>,
+    /// The dialog pairs this machine again, after the hub forgot it: what the hub holds replaces
+    /// the old list.
+    connect_replaces: bool,
+    /// A change of the list, a look or a pairing was asked and not answered yet: the buttons and
+    /// the items that ask it are busy, so that one click is one request.
+    changing: bool,
+    /// The dialog that changes a device's look: whose, and the icon and colour chosen.
+    looking: Option<String>,
+    look_icon: usize,
+    look_colour: usize,
     /// What was read while remote was on: drawn while the settings fold away as it is turned off.
     kept: Option<Machines>,
     /// A change of remote was asked and not answered yet.
     configuring: bool,
     members: Listing<Member>,
-    menus: HashMap<String, Entity<Menu>>,
+    /// A device's "⋯" menu, made again when what it offers changes (the hub refuses, or a change
+    /// is being made): the reason its items wait, with it.
+    menus: HashMap<String, (Option<String>, Entity<Menu>)>,
     removal: Option<Removal>,
     /// What the confirmation said last, which it still shows while it fades out.
     removal_said: Removal,
@@ -103,6 +126,11 @@ impl MachinesSection {
             connect_icon: 0,
             connect_role: 1,
             connect_error: None,
+            connect_replaces: false,
+            changing: false,
+            looking: None,
+            look_icon: 0,
+            look_colour: 0,
             kept: None,
             configuring: false,
             members: Listing::default(),
@@ -141,6 +169,25 @@ impl MachinesSection {
     /// The refusal the dialog shows, when the last pairing was refused.
     pub fn connect_error(&self) -> Option<&SharedString> {
         self.connect_error.as_ref()
+    }
+
+    /// Whether the dialog pairs this machine again, after the hub forgot it.
+    pub fn connect_replaces(&self) -> bool {
+        self.connect_replaces
+    }
+
+    /// Whether a change was asked and is not answered yet.
+    pub fn is_changing(&self) -> bool {
+        self.changing
+    }
+
+    /// Whether the list shown is an old one: the hub no longer knows this machine.
+    pub fn list_is_old(&self) -> bool {
+        self.read.as_ref().is_some_and(|read| read.forgotten())
+    }
+
+    pub fn look_is_open(&self) -> bool {
+        self.looking.is_some()
     }
 
     pub fn rename_is_open(&self) -> bool {
@@ -244,6 +291,7 @@ impl MachinesSection {
             (Asked::Pair, Ok(())) => {
                 self.connecting = false;
                 self.connect_open = false;
+                self.connect_replaces = false;
                 if let Some(code) = &self.connect_code {
                     code.update(cx, |field, cx| field.set_value("", window, cx));
                 }
@@ -264,24 +312,55 @@ impl MachinesSection {
                     Err(why) => toast(Toast::failure("Remote was not changed").detail(why), cx),
                 }
             }
-            (Asked::Rename(name), Ok(_)) => toast(Toast::success(format!("Renamed {name}")), cx),
-            (Asked::Rename(name), Err(why)) => toast(
-                Toast::failure(format!("Not renamed {name}")).detail(why),
-                cx,
-            ),
-            (Asked::Remove(name), Ok(_)) => toast(Toast::success(format!("Removed {name}")), cx),
-            (Asked::Remove(name), Err(why)) => toast(
-                Toast::failure(format!("{name} was not removed")).detail(why),
-                cx,
-            ),
+            (Asked::Rename(name), Ok(_)) => {
+                self.changing = false;
+                toast(Toast::success(format!("Renamed {name}")), cx)
+            }
+            (Asked::Rename(name), Err(why)) => {
+                self.changing = false;
+                toast(
+                    Toast::failure(format!("Not renamed {name}")).detail(why),
+                    cx,
+                )
+            }
+            (Asked::Remove(name), Ok(_)) => {
+                self.changing = false;
+                toast(Toast::success(format!("Removed {name}")), cx)
+            }
+            (Asked::Remove(name), Err(why)) => {
+                self.changing = false;
+                toast(
+                    Toast::failure(format!("{name} was not removed")).detail(why),
+                    cx,
+                )
+            }
+            (Asked::Look(name), Ok(_)) => {
+                self.changing = false;
+                toast(Toast::success(format!("Changed the look of {name}")), cx)
+            }
+            (Asked::Look(name), Err(why)) => {
+                self.changing = false;
+                toast(
+                    Toast::failure(format!("The look of {name} was not changed")).detail(why),
+                    cx,
+                )
+            }
         }
         cx.notify();
     }
 
     // ── What the user does ────────────────────────────────────────────────────────────────
 
+    /// Opens Pair again: the same dialog as Connect to your hub, for a machine the hub forgot.
+    pub fn pair_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_connect(window, cx);
+        self.connect_replaces = true;
+        cx.notify();
+    }
+
     /// Opens Connect to your hub, its card as this machine proposes it.
     pub fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connect_replaces = false;
         let proposed = self
             .read
             .as_ref()
@@ -348,6 +427,7 @@ impl MachinesSection {
             name,
             icon: ICONS[self.connect_icon].0.to_owned(),
             role: ROLES[self.connect_role].0.to_owned(),
+            replace: self.connect_replaces,
         });
         cx.notify();
     }
@@ -361,7 +441,10 @@ impl MachinesSection {
 
     fn confirm_removal(&mut self, cx: &mut Context<Self>) {
         match self.removal.take() {
-            Some(Removal::Member(name)) => self.remote.ask(Ask::Remove { name }),
+            Some(Removal::Member(name)) => {
+                self.changing = true;
+                self.remote.ask(Ask::Remove { name })
+            }
             Some(Removal::Remote) => self.configure(false, cx),
             None => {}
         }
@@ -397,7 +480,57 @@ impl MachinesSection {
             return;
         }
         self.renaming = None;
+        self.changing = true;
         self.remote.ask(Ask::Rename { name, new_name });
+        cx.notify();
+    }
+
+    /// Opens Change look: the icon and colour the device has now, chosen already.
+    pub fn ask_look(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(member) = self
+            .read
+            .as_ref()
+            .and_then(|read| read.members.iter().find(|member| member.name == name))
+        else {
+            return;
+        };
+        let (icon, colour) = member.look();
+        self.look_icon = ICONS.iter().position(|(key, _)| *key == icon).unwrap_or(0);
+        self.look_colour = COLOURS
+            .iter()
+            .position(|(key, _, _)| *key == colour)
+            .unwrap_or(0);
+        self.looking = Some(name);
+        self.modals
+            .update(cx, |modals, cx| modals.open(LOOK_MODAL, cx));
+        cx.notify();
+    }
+
+    pub fn choose_look_icon(&mut self, icon: usize, cx: &mut Context<Self>) {
+        if self.look_icon != icon {
+            self.look_icon = icon;
+            cx.notify();
+        }
+    }
+
+    pub fn choose_look_colour(&mut self, colour: usize, cx: &mut Context<Self>) {
+        if self.look_colour != colour {
+            self.look_colour = colour;
+            cx.notify();
+        }
+    }
+
+    /// Saves the look chosen: a change of the list, signed with this device's key.
+    fn save_look(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.looking.take() else {
+            return;
+        };
+        self.changing = true;
+        self.remote.ask(Ask::Look {
+            name,
+            icon: ICONS[self.look_icon].0.to_owned(),
+            colour: COLOURS[self.look_colour].0.to_owned(),
+        });
         cx.notify();
     }
 
@@ -450,8 +583,12 @@ impl MachinesSection {
                 ),
             )
         });
-        Modal::new(CONNECT_MODAL, "Connect to your hub")
-            .sentence(CONNECT_SAID)
+        let (title, said, save) = match self.connect_replaces {
+            true => ("Pair again", PAIR_AGAIN_SAID, "Pair again"),
+            false => ("Connect to your hub", CONNECT_SAID, "Connect"),
+        };
+        Modal::new(CONNECT_MODAL, title)
+            .sentence(said)
             .open(self.connect_open)
             .takes_focus()
             .on_close(move |_, cx| {
@@ -481,7 +618,7 @@ impl MachinesSection {
                     )),
             )
             .action(
-                Button::primary("connect-save", "Connect")
+                Button::primary("connect-save", save)
                     .disabled(self.connecting)
                     .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
             )
@@ -510,7 +647,97 @@ impl MachinesSection {
             .children(field)
             .action(
                 Button::primary("member-rename-save", "Rename")
+                    .disabled(self.changing)
                     .on_click(cx.listener(|this, _, _, cx| this.rename(cx))),
+            )
+    }
+
+    /// Change look: the five icons as a select, the eight colours as swatches, and the row as it
+    /// will be, which follows the choice before anything is saved.
+    pub fn look_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Modal {
+        let said = self.looking.clone().unwrap_or_default();
+        let this = cx.entity().downgrade();
+        let chosen = cx.entity().downgrade();
+        let icons = Select::new(
+            "look-icon",
+            ICONS
+                .iter()
+                .map(|(key, title)| SelectOption::new(*key, *title)),
+            self.look_icon,
+        )
+        .on_choose(move |at, _, cx| {
+            chosen
+                .update(cx, |this, cx| this.choose_look_icon(at, cx))
+                .ok();
+        });
+        let chosen = cx.entity().downgrade();
+        let colours = COLOURS
+            .iter()
+            .fold(
+                Swatches::new("look-colour", "This device's colour"),
+                |swatches, (key, title, _)| swatches.swatch(Swatch::new(*key, *title, shade(key))),
+            )
+            .chosen(self.look_colour)
+            .on_choose(move |at, _, cx| {
+                chosen
+                    .update(cx, |this, cx| this.choose_look_colour(at, cx))
+                    .ok();
+            });
+        let words = SharedString::from(format!(
+            "{} in {}",
+            ICONS[self.look_icon].0, COLOURS[self.look_colour].0
+        ));
+        let p = palette(cx);
+        let name = SharedString::from(said.clone());
+        let preview = changing("look-preview-fade", words, move |words| {
+            let (icon, colour) = words.split_once(" in ").unwrap_or(("desktop", "grey"));
+            div()
+                .id("look-preview")
+                .aria_label(words.clone())
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .child(mark(icon, colour))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(p.text)
+                        .child(name.clone()),
+                )
+                .test_support()
+                .into_any_element()
+        });
+        let _ = window;
+        Modal::new(LOOK_MODAL, format!("Change the look of {said}"))
+            .sentence("How this device is drawn here and on your other machines.")
+            .open(self.looking.is_some())
+            .takes_focus()
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.looking = None;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .child(
+                stack(space::LG)
+                    .child(spaced(
+                        space::LG,
+                        Field::new("look-icon-field", "Icon", icons),
+                    ))
+                    .child(spaced(
+                        space::LG,
+                        Field::new("look-colour-field", "Colour", colours),
+                    ))
+                    .child(spaced(
+                        space::LG,
+                        Field::new("look-preview-field", "Preview", preview),
+                    )),
+            )
+            .action(
+                Button::primary("member-look-save", "Save")
+                    .disabled(self.changing)
+                    .on_click(cx.listener(|this, _, _, cx| this.save_look(cx))),
             )
     }
 
@@ -599,19 +826,32 @@ impl MachinesSection {
         )
     }
 
-    fn member_row(
-        &mut self,
-        member: &Member,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> ListRow {
-        let name = member.name.clone();
-        let this = cx.entity().downgrade();
-        let menu = menu_of(&mut self.menus, "member", &name, cx, move |key, menu| {
-            let (renamed, removed) = (key.to_owned(), key.to_owned());
-            let (renaming, removing) = (this.clone(), this);
-            menu.entry(
-                ElementId::Name(format!("member-rename-{key}").into()),
+    /// The "⋯" menu of a device: Rename, Change look… and Remove…, each waiting, with its reason,
+    /// while the hub refuses or a change is being made. Made again when that reason changes.
+    fn member_menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
+        let reason = match (&self.read, self.changing) {
+            (Some(read), _) if read.hub.as_ref().is_some_and(|hub| !hub.usable()) => {
+                read.hub.as_ref().map(|hub| hub.waits_words().to_owned())
+            }
+            (_, true) => Some("A change is being made".to_owned()),
+            _ => None,
+        };
+        if let Some((kept, menu)) = self.menus.get(name)
+            && *kept == reason
+        {
+            return menu.clone();
+        }
+        let id = ElementId::Name(format!("member-more-{name}").into());
+        let (renaming, looking, removing) = (
+            cx.entity().downgrade(),
+            cx.entity().downgrade(),
+            cx.entity().downgrade(),
+        );
+        let (renamed, looked, removed) = (name.to_owned(), name.to_owned(), name.to_owned());
+        let waits = reason.clone();
+        let menu = cx.new(|cx| {
+            let mut menu = Menu::new(id, "More", cx).entry(
+                ElementId::Name(format!("member-rename-{renamed}").into()),
                 "Rename",
                 Some(Icon::Edit),
                 move |window, cx| {
@@ -619,9 +859,25 @@ impl MachinesSection {
                         .update(cx, |this, cx| this.ask_rename(renamed.clone(), window, cx))
                         .ok();
                 },
-            )
-            .danger(
-                ElementId::Name(format!("member-remove-{key}").into()),
+            );
+            if let Some(why) = &waits {
+                menu = menu.disabled(why.clone());
+            }
+            menu = menu.entry(
+                ElementId::Name(format!("member-look-{looked}").into()),
+                "Change look…",
+                Some(crate::glyphs::LOOK),
+                move |_, cx| {
+                    looking
+                        .update(cx, |this, cx| this.ask_look(looked.clone(), cx))
+                        .ok();
+                },
+            );
+            if let Some(why) = &waits {
+                menu = menu.disabled(why.clone());
+            }
+            menu = menu.danger(
+                ElementId::Name(format!("member-remove-{removed}").into()),
                 "Remove…",
                 move |_, cx| {
                     removing
@@ -630,8 +886,24 @@ impl MachinesSection {
                         })
                         .ok();
                 },
-            )
+            );
+            if let Some(why) = &waits {
+                menu = menu.disabled(why.clone());
+            }
+            menu
         });
+        self.menus.insert(name.to_owned(), (reason, menu.clone()));
+        menu
+    }
+
+    fn member_row(
+        &mut self,
+        member: &Member,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ListRow {
+        let name = member.name.clone();
+        let menu = self.member_menu(&name, cx);
         let read = self.read.clone().unwrap_or_default();
         let this_one = read.this.as_deref() == Some(member.name.as_str());
         let state = if this_one {
@@ -651,22 +923,31 @@ impl MachinesSection {
             .iter()
             .find(|(key, _, _)| *key == member.role)
             .map_or(member.role.as_str(), |(_, words, _)| words);
-        // Where a machine is reached, or why not: said for each machine this one links to.
-        let address = (!this_one)
+        // How a machine is reached, or why not: said for each machine this one links to.
+        let link = (!this_one)
             .then(|| read.seen(member))
             .flatten()
             .map(|machine| {
-                address_line(
-                    format!("member-address-{name}"),
-                    machine.address_words().into(),
+                link_line(
+                    format!("member-link-{name}"),
+                    machine.link_words().into(),
                     window,
                     cx,
                 )
             });
+        let (icon, colour) = member.look();
+        let words = SharedString::from(member.look_words());
+        let leading = div()
+            .id(ElementId::Name(format!("member-icon-{name}").into()))
+            .aria_label(words)
+            .flex_none()
+            .child(mark(&icon, &colour))
+            .test_support();
         ListRow::new(ElementId::Name(format!("member-{name}").into()), name)
+            .leading(leading)
             .tag(state)
             .line(format!("{said}. {added}"))
-            .when_some(address, |row, address| row.below(address))
+            .when_some(link, |row, link| row.below(link))
             .more(menu)
     }
 
@@ -698,16 +979,58 @@ impl MachinesSection {
             );
         }
         let count = self.members.len();
+        let forgotten = self.read.as_ref().is_some_and(|read| read.forgotten());
+        // Said once: a hub that forgot this machine says it in the banner, not in this line too.
         let hub_down = self
             .read
             .as_ref()
             .and_then(|read| read.hub.as_ref())
+            .filter(|hub| !hub.forgotten)
             .and_then(|hub| hub.needs_words());
+        // The list a hub that forgot this machine left is old: it fades to say so.
+        let old = fade("member-list-old", forgotten, PANEL, window, cx);
+        let list = div().opacity(1.0 - 0.5 * old).child(list);
+        let banner = div()
+            .flex()
+            .items_center()
+            .gap(space::MD)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(
+                        div()
+                            .id("devices-forgotten")
+                            .aria_label(FORGOTTEN)
+                            .text_size(px(13.))
+                            .text_color(p.text)
+                            .child(FORGOTTEN)
+                            .test_support(),
+                    )
+                    .child(
+                        div()
+                            .id("devices-forgotten-sentence")
+                            .aria_label(FORGOTTEN_SENTENCE)
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child(FORGOTTEN_SENTENCE)
+                            .test_support(),
+                    ),
+            )
+            .child(
+                Button::primary("pair-again", "Pair again")
+                    .disabled(self.connecting)
+                    .on_click(cx.listener(|this, _, window, cx| this.pair_again(window, cx))),
+            );
         Section::new("devices", "Devices")
             .count(count.to_string())
             .sentence(DEVICES_SENTENCE)
             .child(
                 stack(space::MD)
+                    .child(presence("devices-forgotten-block", forgotten, banner).space(space::MD))
                     .child(
                         presence_of(
                             "devices-hub-down",
@@ -734,6 +1057,16 @@ impl MachinesSection {
 
     fn removal_confirm(&self, cx: &mut Context<Self>) -> Confirm {
         let (question, sentence, action) = match &self.removal_said {
+            Removal::Member(name)
+                if self.read.as_ref().and_then(|read| read.this.as_deref()) == Some(name) =>
+            {
+                (
+                    format!("Remove {name}, this machine?"),
+                    "This machine leaves the hub and its links close; it comes back only paired \
+                     again on your hub.",
+                    "Remove device",
+                )
+            }
             Removal::Member(name) => (
                 format!("Remove {name}?"),
                 "Its links are cut on every machine at once; it comes back only paired again on \
@@ -760,7 +1093,8 @@ impl MachinesSection {
     }
 
     /// The sections of the tab, top to bottom, each entering on its own: whether remote is on, then
-    /// (while it is) the hub and the devices. They
+    /// (while it is) the hub and the devices: every link goes through the hub, so no address
+    /// is shown. They
     /// fold away, as they were, when remote is turned off.
     pub fn blocks(
         &mut self,
@@ -806,7 +1140,8 @@ impl MachinesSection {
     ) -> Vec<(&'static str, gpui_kit::AnyElement)> {
         let read = self.read.clone().unwrap_or_default();
         let mut blocks = Vec::new();
-        if !read.member() {
+        // A hub that forgot this machine keeps its old list on the page, and Pair again.
+        if !read.member() && !read.forgotten() {
             blocks.push(("hub-connect", self.connect_section(cx).into_any_element()));
             return blocks;
         }
@@ -875,10 +1210,10 @@ impl Render for RemovalDialog {
     }
 }
 
-/// The line under a machine's row that says where it is reached, or why it is not: the text
+/// The line under a machine's row that says it is linked through the hub, or why it is not: the text
 /// fades back in when it changes, and is cut with its whole text in a tooltip when it is wider
 /// than the row.
-fn address_line(
+fn link_line(
     id: String,
     said: SharedString,
     window: &mut Window,
@@ -898,4 +1233,12 @@ fn address_line(
         .text_ellipsis()
         .child(said.clone());
     tipped_when_cut(line, said, window, cx)
+}
+
+/// A device's mark: its icon in its colour, saying both for what the colour cannot (`server in
+/// teal`). The element is the caller's to name.
+fn mark(icon: &str, colour: &str) -> impl IntoElement {
+    gpui_design_system::icon(crate::glyphs::device(icon))
+        .size(px(16.))
+        .text_color(shade(colour))
 }

@@ -1858,6 +1858,33 @@ impl SessionRow {
         tipped(line, SharedString::from(tip), LINE, window, cx).into_any_element()
     }
 
+    /// The mark of the machine a session runs on: its icon in its colour, as the member list signs
+    /// them, a plain mark while that list is not read. It says both in words.
+    fn machine_mark(&self, p: &gpui_design_system::Palette) -> gpui_kit::AnyElement {
+        let look = self.elsewhere.as_ref().and_then(|there| there.look.clone());
+        let (icon, colour) = look
+            .as_deref()
+            .and_then(|look| look.split_once(" in "))
+            .unwrap_or(("", ""));
+        let (glyph, ink) = match look {
+            Some(_) => (crate::glyphs::device(icon), crate::machines::shade(colour)),
+            None => (Icon::Service, p.faint),
+        };
+        div()
+            .id(ElementId::Name(
+                format!("session-machine-icon-{}", self.id).into(),
+            ))
+            .aria_label(SharedString::from(look.unwrap_or_default()))
+            .flex_none()
+            .child(
+                gpui_design_system::icon(glyph)
+                    .size(px(11.))
+                    .text_color(ink),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
     /// The second line of a session of another machine in the one list: the machine's name, and
     /// since when it is off while it is, whose words fade as they change.
     fn tag_line(
@@ -1887,13 +1914,7 @@ impl SessionRow {
             .overflow_hidden()
             .text_size(px(11.5))
             .text_color(p.faint)
-            .child(
-                div().flex_none().child(
-                    gpui_design_system::icon(Icon::Service)
-                        .size(px(11.))
-                        .text_color(p.faint),
-                ),
-            )
+            .child(self.machine_mark(&p))
             .child(div().flex_none().whitespace_nowrap().child(tag))
             .child(changing(
                 ElementId::Name(format!("session-machine-off-{}", self.id).into()),
@@ -1939,13 +1960,7 @@ impl SessionRow {
             .overflow_hidden()
             .text_size(px(11.5))
             .text_color(p.faint)
-            .child(
-                div().flex_none().child(
-                    gpui_design_system::icon(Icon::Service)
-                        .size(px(11.))
-                        .text_color(p.faint),
-                ),
-            )
+            .child(self.machine_mark(&p))
             .child(
                 div()
                     .flex_none()

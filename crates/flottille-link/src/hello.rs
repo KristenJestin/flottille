@@ -42,17 +42,30 @@ pub fn choose(ours: &Hello, theirs: &Hello, peer: &str) -> Result<u32, NeedsUpda
         .copied()
         .max()
         .ok_or_else(|| NeedsUpdate {
-            peer: peer.to_owned(),
+            peer: Some(peer.to_owned()),
             theirs: theirs.clone(),
             ours: ours.clone(),
         })
+}
+
+/// [`choose`] for a device and its hub: the same refusal, said as the hub is said (`The hub runs
+/// 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its host.`), which side
+/// to update named by the newer protocol. `ours` is the device's side, whoever says it: the hub
+/// makes the sentence its device reads from the device's hello and its own.
+pub fn choose_hub(ours: &Hello, theirs: &Hello) -> Result<u32, NeedsUpdate> {
+    choose(ours, theirs, "the hub").map_err(|mut refusal| {
+        refusal.peer = None;
+        refusal
+    })
 }
 
 /// The refusal: no protocol in common. It displays as the sentence of the doc, which says which
 /// side runs what, so that the user knows which to update.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NeedsUpdate {
-    peer: String,
+    /// The other side as the user knows it; `None` for the hub, which is told to update on its
+    /// host.
+    peer: Option<String>,
     theirs: Hello,
     ours: Hello,
 }
@@ -66,12 +79,29 @@ impl NeedsUpdate {
 
 impl fmt::Display for NeedsUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(peer) = &self.peer else {
+            // The side with the older protocol is the one to update: the hub, on its host, or
+            // this machine.
+            let update = match self.theirs.newest() < self.ours.newest() {
+                true => "the hub on its host",
+                false => "this machine",
+            };
+            return write!(
+                f,
+                "The hub runs {} (protocol {}), this machine {} (protocol {}): update {update}.",
+                // Read before the hub has proven its key: anyone at its address writes it.
+                crate::serial::shown(&self.theirs.flottille, 32),
+                self.theirs.newest(),
+                self.ours.flottille,
+                self.ours.newest(),
+            );
+        };
         write!(
             f,
             "{} runs Flottille {} (protocol {}), this machine {} (protocol {}): update one of \
              them (flottille update)",
-            self.peer,
-            self.theirs.flottille,
+            peer,
+            crate::serial::shown(&self.theirs.flottille, 32),
             self.theirs.newest(),
             self.ours.flottille,
             self.ours.newest(),
@@ -141,6 +171,48 @@ mod tests {
             choose(&hello("0.4.1", &[5, 6]), &hello("0.4.3", &[8, 9]), "server").unwrap_err();
         assert!(refusal.to_string().contains("(protocol 9)"), "{refusal}");
         assert!(refusal.to_string().contains("(protocol 6)"), "{refusal}");
+    }
+
+    #[test]
+    fn an_old_hub_is_told_to_update_on_its_host() {
+        let ours = hello("0.4.0", &[2]);
+        let theirs = hello("0.1.0", &[1]);
+        let refusal = choose_hub(&ours, &theirs).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "The hub runs 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on \
+             its host."
+        );
+        assert_eq!(refusal.state(), PeerState::NeedsUpdate);
+    }
+
+    #[test]
+    fn a_version_said_before_the_hub_is_proven_is_cut_and_shows_no_control() {
+        // The hub's hello is read before it has proven its key: whoever answers at its address
+        // writes it, so the sentence keeps 32 characters of it and no control character.
+        let forged = format!("9.9.9\u{202e}\x1b[2J{}", "x".repeat(4000));
+        let refusal = choose_hub(&hello("0.4.0", &[2]), &hello(&forged, &[1])).unwrap_err();
+        let said = refusal.to_string();
+        assert!(
+            !said.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{said:?}"
+        );
+        assert!(said.len() < 200, "{} characters", said.len());
+        assert!(said.starts_with("The hub runs 9.9.9"), "{said}");
+    }
+
+    #[test]
+    fn a_newer_hub_is_told_to_update_this_machine() {
+        let refusal = choose_hub(&hello("0.4.0", &[2]), &hello("0.5.0", &[3])).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "The hub runs 0.5.0 (protocol 3), this machine 0.4.0 (protocol 2): update this \
+             machine."
+        );
+        assert_eq!(
+            choose_hub(&hello("0.4.0", &[2]), &hello("0.4.1", &[2])),
+            Ok(2)
+        );
     }
 
     #[test]
