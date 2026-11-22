@@ -7,7 +7,7 @@ use crate::routine::{Left, ResultItem, Routine, Run};
 use crate::{Error, Result};
 
 const ROUTINE: &str = "id, name, project, prompt, provider, model, effort, schedule, zone, mode, \
-    rings, paused, missed_hours, next_at, delayed, created_at, updated_at, event";
+    rings, paused, missed_hours, next_at, delayed, created_at, updated_at, event, made_by";
 /// The most events held for a routine: the newest, the earlier ones only counted.
 pub const HELD: usize = 20;
 const EARLIER_START: &str = "(and ";
@@ -59,6 +59,7 @@ fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
         event: row
             .get::<_, Option<String>>(17)?
             .and_then(|text| serde_json::from_str(&text).ok()),
+        made_by: row.get(18)?,
     })
 }
 
@@ -119,40 +120,45 @@ impl Store {
     }
 
     fn write_routine(&self, r: &Routine, new: bool) -> Result<()> {
-        let sql = match new {
-            true => format!(
-                "INSERT INTO routines ({ROUTINE}) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
-            ),
-            false => "UPDATE routines SET name = ?2, project = ?3, prompt = ?4, provider = ?5, \
+        let event = r.event.as_ref().map(|event| event.to_string());
+        let fields = params![
+            r.id,
+            r.name,
+            r.project,
+            r.prompt,
+            r.provider,
+            r.model,
+            r.effort,
+            r.schedule,
+            r.zone,
+            r.mode,
+            r.rings,
+            r.paused,
+            r.missed_hours,
+            r.next_at,
+            r.delayed,
+            r.created_at,
+            r.updated_at,
+            event,
+            r.made_by
+        ];
+        match new {
+            true => self.connection.execute(
+                &format!(
+                    "INSERT INTO routines ({ROUTINE}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
+                     ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
+                ),
+                fields,
+            )?,
+            // Who made it is said once, when it is made: no edit changes it.
+            false => self.connection.execute(
+                "UPDATE routines SET name = ?2, project = ?3, prompt = ?4, provider = ?5, \
                  model = ?6, effort = ?7, schedule = ?8, zone = ?9, mode = ?10, rings = ?11, \
                  paused = ?12, missed_hours = ?13, next_at = ?14, delayed = ?15, \
-                 created_at = ?16, updated_at = ?17, event = ?18 WHERE id = ?1"
-                .to_owned(),
+                 created_at = ?16, updated_at = ?17, event = ?18 WHERE id = ?1",
+                &fields[..18],
+            )?,
         };
-        self.connection.execute(
-            &sql,
-            params![
-                r.id,
-                r.name,
-                r.project,
-                r.prompt,
-                r.provider,
-                r.model,
-                r.effort,
-                r.schedule,
-                r.zone,
-                r.mode,
-                r.rings,
-                r.paused,
-                r.missed_hours,
-                r.next_at,
-                r.delayed,
-                r.created_at,
-                r.updated_at,
-                r.event.as_ref().map(|event| event.to_string())
-            ],
-        )?;
         Ok(())
     }
 

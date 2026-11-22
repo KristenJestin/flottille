@@ -39,7 +39,7 @@ use crate::{agents, providers, roles, tree};
 pub mod events;
 
 /// The runs `routine.show` gives, the last first.
-const HISTORY: usize = 50;
+pub(crate) const HISTORY: usize = 50;
 /// The most characters of a result's summary: one line.
 const SUMMARY_CHARS: usize = 300;
 /// The delivery that reminds a run's session to give its result.
@@ -235,7 +235,7 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             let mut listed = Vec::new();
             for routine in routines {
                 let last = daemon.read(|store| store.routine_runs(&routine.id, 1))?;
-                let mut shown = routine.to_json();
+                let mut shown = shown(daemon, &routine);
                 shown["last"] = last.first().map_or(Value::Null, Run::to_json);
                 shown["unread"] = json!(daemon.read(|store| store.routine_unread(&routine.id))?);
                 listed.push(shown);
@@ -246,7 +246,7 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             let asked: Named = serde_json::from_value(params)?;
             let routine = find(daemon, &asked.routine)?;
             let runs = daemon.read(|store| store.routine_runs(&routine.id, HISTORY))?;
-            let mut shown = routine.to_json();
+            let mut shown = shown(daemon, &routine);
             shown["unread"] = json!(daemon.read(|store| store.routine_unread(&routine.id))?);
             json!({"routine": shown,
                 "runs": runs.iter().map(Run::to_json).collect::<Vec<_>>()})
@@ -268,43 +268,7 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
                 .map_err(|error| Failure::new("unavailable", error.to_string()))?;
             json!({"run": run.to_json()})
         }
-        "routine.add" => {
-            let asked: Add = serde_json::from_value(params)?;
-            let event = trigger(asked.schedule.as_deref(), asked.event.as_ref())?;
-            if asked.schedule.is_none() && event.is_none() {
-                return Err(Failure::new(
-                    "invalid-params",
-                    "a routine runs on a schedule or on an event: give one of them",
-                ));
-            }
-            let now = now_ms();
-            let mut routine = Routine {
-                id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
-                name: asked.name,
-                project: asked.project,
-                prompt: asked.prompt,
-                provider: asked.provider,
-                model: asked.model,
-                effort: asked.effort,
-                schedule: asked.schedule.unwrap_or_default(),
-                event,
-                zone: asked.zone,
-                mode: asked.mode.unwrap_or_else(|| routine::READ_ONLY.to_owned()),
-                rings: asked
-                    .rings
-                    .unwrap_or_else(|| routine::RINGS_SOMETHING.to_owned()),
-                paused: false,
-                missed_hours: asked.missed_hours.unwrap_or(routine::MISSED_HOURS),
-                next_at: None,
-                delayed: None,
-                created_at: now,
-                updated_at: now,
-            };
-            checked(daemon, &mut routine)?;
-            routine.next_at = next_of(&routine, now);
-            daemon.read(|store| store.add_routine(&routine))?;
-            changed(daemon, &routine)?
-        }
+        "routine.add" => add(daemon, params, None)?,
         "routine.edit" => {
             let asked: Edit = serde_json::from_value(params)?;
             let mut routine = find(daemon, &asked.routine)?;
@@ -417,6 +381,62 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
     Ok(answer)
 }
 
+/// `routine.add`: a new routine, made by the user (`made_by` none) or by the agent of that
+/// session with the tool `routine`.
+pub(crate) fn add(daemon: &Daemon, params: Value, made_by: Option<&str>) -> Result<Value, Failure> {
+    let asked: Add = serde_json::from_value(params)?;
+    let event = trigger(asked.schedule.as_deref(), asked.event.as_ref())?;
+    if asked.schedule.is_none() && event.is_none() {
+        return Err(Failure::new(
+            "invalid-params",
+            "a routine runs on a schedule or on an event: give one of them",
+        ));
+    }
+    let now = now_ms();
+    let mut routine = Routine {
+        id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
+        name: asked.name,
+        project: asked.project,
+        prompt: asked.prompt,
+        provider: asked.provider,
+        model: asked.model,
+        effort: asked.effort,
+        schedule: asked.schedule.unwrap_or_default(),
+        event,
+        zone: asked.zone,
+        mode: asked.mode.unwrap_or_else(|| routine::READ_ONLY.to_owned()),
+        rings: asked
+            .rings
+            .unwrap_or_else(|| routine::RINGS_SOMETHING.to_owned()),
+        paused: false,
+        missed_hours: asked.missed_hours.unwrap_or(routine::MISSED_HOURS),
+        next_at: None,
+        delayed: None,
+        created_at: now,
+        updated_at: now,
+        made_by: made_by.map(str::to_owned),
+    };
+    checked(daemon, &mut routine)?;
+    routine.next_at = next_of(&routine, now);
+    daemon.read(|store| store.add_routine(&routine))?;
+    changed(daemon, &routine)
+}
+
+/// The routine as the clients are given it, with the title of the session that made it, read
+/// now: a session is named after it starts.
+pub(crate) fn shown(daemon: &Daemon, routine: &Routine) -> Value {
+    let mut shown = routine.to_json();
+    if let Some(session) = &routine.made_by {
+        let title = daemon
+            .read(|store| store.agent(session))
+            .ok()
+            .flatten()
+            .and_then(|agent| agent.title);
+        shown["made_by"] = json!({"session": session, "title": title});
+    }
+    shown
+}
+
 /// The event given, as it is kept: refused when a schedule is given beside it.
 fn trigger(schedule: Option<&str>, event: Option<&Value>) -> Result<Option<Value>, Failure> {
     let invalid = |why: String| Failure::new("invalid-params", why);
@@ -429,7 +449,7 @@ fn trigger(schedule: Option<&str>, event: Option<&Value>) -> Result<Option<Value
     }
 }
 
-fn find(daemon: &Daemon, key: &str) -> Result<Routine, Failure> {
+pub(crate) fn find(daemon: &Daemon, key: &str) -> Result<Routine, Failure> {
     daemon
         .read(|store| store.routine(key))?
         .ok_or_else(|| Failure::new("not-found", format!("there is no routine {key}")))
@@ -502,7 +522,7 @@ fn said(schedule: &str) -> String {
 /// Tells the clients the routine changed, and the sweep to read the next run due again.
 fn changed(daemon: &Daemon, routine: &Routine) -> Result<Value, Failure> {
     daemon.routine_due.store(0, Ordering::Relaxed);
-    let shown = routine.to_json();
+    let shown = shown(daemon, routine);
     daemon
         .emit(
             "routine.changed",
