@@ -2659,10 +2659,42 @@ async fn a_device_hello_changed_on_the_way_never_lowers_the_hub_s_protocol() {
         .await;
     assert_hello_not_taken(said, "the device's protocols made [1]");
 
-    // Made [999], the hub refuses it: no verdict either.
-    let (middle, _) = relay(hub, device_hello_made(serde_json::json!([999]))).await;
+    // A hub of protocol 1 the device's [1, 2] made [2] on its way refuses it, its refusal signed
+    // over the [2] it received: the device, which sent [1, 2], takes it for no verdict.
+    let older = hub_saying(hub_signer(&place.hub_folder()), old_hello()).await;
+    let (middle, _) = relay(older, device_hello_made(serde_json::json!([2]))).await;
     let said = pinned_to(middle, &key)
-        .connect(&machine, &hello(), &Tls::System)
+        .connect(&machine, &both, &Tls::System)
         .await;
-    assert_hello_not_taken(said, "the device's protocols made [999]");
+    assert_hello_not_taken(
+        said,
+        "the device's protocols made [2], the hub's refusal for it",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_signed_by_another_key_than_the_pinned_one_is_no_verdict() {
+    // The hub the device pinned, and another hub, or a man in the middle with a key of its own:
+    // it signs a refusal over the real keys and nonces of the handshake, and says its own key.
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let other = Place::new();
+    let middle = hub_saying(hub_signer(&other.hub_folder()), old_hello()).await;
+    assert_ne!(
+        key.public(),
+        hub_signer(&other.hub_folder()).public(),
+        "two hubs, two keys"
+    );
+    let said = pinned_to(middle, &key)
+        .connect(&place.machine("pc"), &hello(), &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "a refusal signed by another key");
+
+    // Pinned to that key, the same refusal is the hub's word: update it.
+    let Err(ControlError::NeedsUpdate(_)) = pinned_to(middle, &hub_signer(&other.hub_folder()))
+        .connect(&place.machine("pc"), &hello(), &Tls::System)
+        .await
+    else {
+        panic!("a refusal signed by the pinned key is a verdict");
+    };
 }

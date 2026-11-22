@@ -2648,7 +2648,11 @@ mod tests {
         let trusted = remote.trusted(&keys[1]).is_some();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        assert_eq!(kept, vec![keys[0]], "the machine removed is back by the file");
+        assert_eq!(
+            kept,
+            vec![keys[0]],
+            "the machine removed is back by the file"
+        );
         assert!(!trusted, "the machine removed is trusted again");
     }
 
