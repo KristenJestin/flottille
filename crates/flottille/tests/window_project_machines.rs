@@ -396,8 +396,12 @@ fn group_by_machine_shows_a_section_per_machine_and_back(cx: &mut TestAppContext
 
     // Off again, the rows come back to the one list as they were.
     switch_grouping(&shell, cx);
+    // Both sections fold away before a row is looked for: while one is still folding, its row and
+    // the one list's carry the same id.
     until(&shell, cx, "the one list", |cx| {
-        present(cx, project_id("app")) && !present(cx, machine_id("pc"))
+        !present(cx, machine_id("pc"))
+            && !present(cx, machine_id("server"))
+            && present(cx, project_id("app"))
     });
     assert!(!shell.read_with(cx, |s, _| s.is_by_machine()));
     assert_eq!(homes(&shell, "app", cx), ["pc", "server"]);
