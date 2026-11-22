@@ -7,9 +7,16 @@
 //!
 //! What a tunnel may reach is decided by the machine, never by the phone: a port the run listens
 //! on, nothing else.
+//!
+//! The listener is the one door a tunnel has on the phone, and it has no token: any app of the phone
+//! can connect to it. So its port is a random one (never the run's own, which is easy to guess), a
+//! tunnel of the in-app browser ends with its panel, and a tunnel of "Open in browser", which the
+//! user's browser reaches for as long as it likes, ends after [`BROWSER_IDLE`] with no connection.
 
+use std::future::Future;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flottille_link::{Answers, Link};
 use flottille_protocol::address;
@@ -17,9 +24,19 @@ use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::MobileError;
 use crate::mobile::Inner;
+
+/// How long a tunnel for the user's browser stays open with no connection at all.
+pub(crate) const BROWSER_IDLE: Duration = Duration::from_secs(600);
+
+/// The connections one tunnel carries at once, as the daemon's does; one past it is closed.
+const MOST_CONNECTIONS: usize = 64;
+
+/// How long the accept loop waits after an error (no file left, say), rather than spin on it.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// A tunnel the phone holds, as the view says it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -58,6 +75,8 @@ pub(crate) struct Held {
     pub(crate) view: TunnelView,
     /// The port the user asked for; none for the run's own address.
     pub(crate) asked: Option<u16>,
+    /// Whether it is for the user's browser (it has an idle end) rather than the in-app one.
+    pub(crate) browser: bool,
     pub(crate) close: watch::Sender<Option<String>>,
 }
 
@@ -87,11 +106,14 @@ pub(crate) fn run_for_port(
 impl Inner {
     /// Opens (or finds, when it is open already) the tunnel to the run of `machine` that `url`
     /// names: `run`'s own address when a run is given, else the port a `localhost` link writes.
+    /// `browser` says the tunnel is for the user's browser: the in-app browser and the user's one
+    /// never share a tunnel, since the first closes its own with its panel.
     pub(crate) async fn open_address(
         self: &Arc<Self>,
         machine: &str,
         run: Option<String>,
         url: &str,
+        browser: bool,
     ) -> Result<Opened, MobileError> {
         let port = address::local_port(url);
         if run.is_none() && port.is_none() {
@@ -107,19 +129,28 @@ impl Inner {
                 (run_for_port(&listed, port, machine)?, Some(port))
             }
         };
-        if let Some(held) = self.reaching(machine, &run, asked) {
+        if let Some(held) = self.reaching(machine, &run, asked, browser) {
             return Ok(through(held, url));
         }
-        self.open(machine, run, asked, url).await
+        self.open(machine, run, asked, browser, url).await
     }
 
-    /// The tunnel already held to `run` of `machine`, for the same asked port.
-    fn reaching(&self, machine: &str, run: &str, asked: Option<u16>) -> Option<TunnelView> {
+    /// The tunnel already held to `run` of `machine`, for the same asked port and the same use.
+    fn reaching(
+        &self,
+        machine: &str,
+        run: &str,
+        asked: Option<u16>,
+        browser: bool,
+    ) -> Option<TunnelView> {
         self.state()
             .tunnels
             .values()
             .find(|held| {
-                held.view.machine == machine && held.view.run == run && held.asked == asked
+                held.view.machine == machine
+                    && held.view.run == run
+                    && held.asked == asked
+                    && held.browser == browser
             })
             .map(|held| held.view.clone())
     }
@@ -129,6 +160,7 @@ impl Inner {
         machine: &str,
         run: String,
         asked: Option<u16>,
+        browser: bool,
         url: &str,
     ) -> Result<Opened, MobileError> {
         let link = self.link_of(machine)?;
@@ -168,7 +200,7 @@ impl Inner {
                 "{machine} answered what is not a tunnel"
             )));
         };
-        let (listener, local_port) = bind_local(port).map_err(|why| {
+        let (listener, local_port) = bind_local().map_err(|why| {
             MobileError::new(format!("cannot listen on 127.0.0.1 on this phone: {why}"))
         })?;
         let view = TunnelView {
@@ -187,14 +219,16 @@ impl Inner {
                 Held {
                     view: view.clone(),
                     asked,
+                    browser,
                     close,
                 },
             );
         }
         let held = self.clone();
         let task_view = view.clone();
+        let idle = browser.then(|| self.browser_idle());
         self.handle.spawn(async move {
-            let reason = hold(listener, link, answers, &task_view, closing).await;
+            let reason = hold(listener, link, answers, &task_view, closing, idle).await;
             held.tunnel_ended(&task_view, reason);
         });
         self.note(crate::mobile::Note::Changed);
@@ -233,14 +267,22 @@ fn through(tunnel: TunnelView, url: &str) -> Opened {
 }
 
 /// Holds the tunnel until it ends, carrying its connections meanwhile: the reason it ended.
+/// `idle` is how long it may go with no connection, when it may not stay open for ever.
 async fn hold(
     listener: TcpListener,
     link: Link,
     mut answers: Answers,
     view: &TunnelView,
     mut closing: watch::Receiver<Option<String>>,
+    idle: Option<Duration>,
 ) -> String {
-    let accepting = tokio::spawn(accept(listener, link.clone(), view.tunnel.clone()));
+    let tunnel = view.tunnel.clone();
+    let carried = link.clone();
+    let mut accepting = tokio::spawn(accept(
+        listener,
+        move |tcp| carry(carried.clone(), tunnel.clone(), tcp),
+        idle,
+    ));
     let reason = tokio::select! {
         // The machine ended it, saying why, or its stream ended with the link.
         frame = answers.next() => match frame {
@@ -250,6 +292,8 @@ async fn hold(
         },
         why = link.closed() => why,
         _ = closing.changed() => closing.borrow().clone().unwrap_or_default(),
+        // No connection for as long as it may go.
+        ended = &mut accepting => ended.unwrap_or_else(|_| "the tunnel failed".to_owned()),
     };
     // The listener and what it carries go; the request's stream is dropped with `answers`, which
     // tells the machine.
@@ -257,40 +301,82 @@ async fn hold(
     reason
 }
 
-/// Takes the connections of the local port: each one is a stream of the link.
-async fn accept(listener: TcpListener, link: Link, tunnel: String) {
+/// What an accept loop listens on: a TCP listener, or what a test plays.
+trait Listen: Send + 'static {
+    fn accept(&self) -> impl Future<Output = std::io::Result<TcpStream>> + Send;
+}
+
+impl Listen for TcpListener {
+    async fn accept(&self) -> std::io::Result<TcpStream> {
+        TcpListener::accept(self).await.map(|(tcp, _)| tcp)
+    }
+}
+
+/// Takes the connections of the local port and `carry`s each one, up to [`MOST_CONNECTIONS`] at
+/// once. It returns only when the tunnel has been idle for `idle` (no connection open, none
+/// taken): the reason.
+async fn accept<F>(
+    listener: impl Listen,
+    carry: impl Fn(TcpStream) -> F,
+    idle: Option<Duration>,
+) -> String
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let mut connections = JoinSet::new();
+    let mut quiet_since = Instant::now();
     loop {
+        // Counted only while nothing is open: a page that keeps a socket open is in use.
+        let deadline = idle
+            .filter(|_| connections.is_empty())
+            .map(|idle| quiet_since + idle);
         tokio::select! {
-            accepted = listener.accept() => {
-                let Ok((tcp, _)) = accepted else { continue };
-                let (link, tunnel) = (link.clone(), tunnel.clone());
-                connections.spawn(async move { carry(link, &tunnel, tcp).await });
+            accepted = listener.accept() => match accepted {
+                Ok(tcp) => {
+                    quiet_since = Instant::now();
+                    if connections.len() >= MOST_CONNECTIONS {
+                        continue;
+                    }
+                    connections.spawn(carry(tcp));
+                }
+                Err(_) => tokio::time::sleep(ACCEPT_BACKOFF).await,
+            },
+            Some(_) = connections.join_next(), if !connections.is_empty() => {
+                quiet_since = Instant::now();
             }
-            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            () = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let minutes = idle.map_or(0, |idle| idle.as_secs() / 60);
+                return if minutes >= 1 {
+                    format!("no connection for {minutes} minutes")
+                } else {
+                    "no connection for a while".to_owned()
+                };
+            }
         }
     }
 }
 
 /// One TCP connection, as one stream of the link; no word of why when it fails: the machine's log
 /// says.
-async fn carry(link: Link, tunnel: &str, mut tcp: TcpStream) {
+async fn carry(link: Link, tunnel: String, mut tcp: TcpStream) {
     let _ = tcp.set_nodelay(true);
-    let Ok(mut stream) = link.tunnel(tunnel).await else {
+    let Ok(mut stream) = link.tunnel(&tunnel).await else {
         return;
     };
     let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
 }
 
-/// Listens on `127.0.0.1` only: `port` when it is free, another one otherwise. The port it got.
-fn bind_local(port: u16) -> std::io::Result<(TcpListener, u16)> {
-    let bind = |port| {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
-        listener.set_nonblocking(true)?;
-        let port = listener.local_addr()?.port();
-        Ok::<_, std::io::Error>((TcpListener::from_std(listener)?, port))
-    };
-    bind(port).or_else(|_| bind(0))
+/// Listens on `127.0.0.1` only, on a port the system picks at random: the port it got.
+fn bind_local() -> std::io::Result<(TcpListener, u16)> {
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    Ok((TcpListener::from_std(listener)?, port))
 }
 
 #[cfg(test)]
@@ -303,6 +389,28 @@ mod tests {
             {"run": "r2", "state": "running", "url": null},
             {"run": "r3", "state": "exited", "url": "http://localhost:3000/"},
         ]})
+    }
+
+    /// A listener that fails every time it is asked, and counts how often.
+    struct Failing(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Listen for Failing {
+        async fn accept(&self) -> std::io::Result<TcpStream> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Err(std::io::Error::other("no file left"))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_accept_error_is_waited_out_not_spun_on() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let looping = tokio::spawn(accept(Failing(asked.clone()), |_| async {}, None));
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        looping.abort();
+        let asked = asked.load(std::sync::atomic::Ordering::SeqCst);
+        // One try each 100 ms: five at most in 450 ms, a spin makes thousands.
+        assert!((1..=6).contains(&asked), "{asked} accepts in 450 ms");
     }
 
     #[test]

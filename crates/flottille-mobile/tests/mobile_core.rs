@@ -169,6 +169,8 @@ struct Runner {
     tunnel_gone: Arc<AtomicUsize>,
     /// The connections of a tunnel it took.
     tunnel_connections: Arc<AtomicUsize>,
+    /// The tunnels it opened: each is `t<n>`.
+    tunnels_opened: Arc<AtomicUsize>,
     /// What it says first on a link: another protocol than the phone's makes it a runner that needs
     /// an update.
     hello: Hello,
@@ -197,6 +199,7 @@ impl Runner {
             tunnel_ends: tokio::sync::broadcast::channel(8).0,
             tunnel_gone: Arc::default(),
             tunnel_connections: Arc::default(),
+            tunnels_opened: Arc::default(),
             hello: hello(),
             name: name.to_owned(),
             machine,
@@ -403,7 +406,8 @@ impl Runner {
                         // tunnel ends, and its last frame says why.
                         let mut ends = runner.tunnel_ends.subscribe();
                         let gone = stream.gone();
-                        let shown = json!({"tunnel": "t1", "run": accepted.params["run"],
+                        let number = runner.tunnels_opened.fetch_add(1, Ordering::SeqCst) + 1;
+                        let shown = json!({"tunnel": format!("t{number}"), "run": accepted.params["run"],
                             "port": accepted.params["port"].as_u64().unwrap_or(result["port"].as_u64().unwrap_or(5173))});
                         if !stream
                             .send(&line(json!({"id": accepted.id, "result": shown})))
@@ -2535,6 +2539,7 @@ async fn a_run_s_address_opens_through_a_tunnel_on_the_phone() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/app?x=1#top".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2573,6 +2578,7 @@ async fn the_tunnel_listens_on_the_loopback_only() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2591,6 +2597,7 @@ async fn a_link_an_agent_shows_names_the_run_that_serves_its_port() {
             "server".to_owned(),
             None,
             "http://localhost:8080/docs".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2617,6 +2624,7 @@ async fn an_address_of_the_web_opens_through_no_tunnel() {
             "server".to_owned(),
             None,
             "https://example.org/a".to_owned(),
+            false,
         )
         .await
         .unwrap_err();
@@ -2640,6 +2648,7 @@ async fn a_second_tap_on_the_same_address_makes_no_second_tunnel() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2648,6 +2657,7 @@ async fn a_second_tap_on_the_same_address_makes_no_second_tunnel() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/other".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2672,6 +2682,7 @@ async fn a_refused_tunnel_says_the_machine_s_reason_and_opens_nothing() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:22/".to_owned(),
+            false,
         )
         .await
         .unwrap_err();
@@ -2689,6 +2700,7 @@ async fn the_tunnel_ends_with_its_run_and_the_view_says_why() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2725,6 +2737,7 @@ async fn closing_a_tunnel_stops_its_listener_and_tells_the_machine() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2765,6 +2778,7 @@ async fn the_tunnel_ends_with_its_link() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2872,6 +2886,7 @@ async fn the_tunnel_listens_on_a_random_port_never_the_run_s_own() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2890,6 +2905,7 @@ async fn a_tunnel_carries_at_most_64_connections_at_once() {
             "server".to_owned(),
             Some("r1".to_owned()),
             "http://localhost:5173/".to_owned(),
+            false,
         )
         .await
         .unwrap();
@@ -2928,5 +2944,132 @@ async fn a_tunnel_carries_at_most_64_connections_at_once() {
         }
     }
     assert!(carried, "a connection is carried again once one went");
+    place.served.stop().await;
+}
+
+/// A tunnel the machine stops being asked about: for how long the view still holds it.
+async fn still_held(phone: &Core, tunnel: &str, for_how_long: Duration) -> bool {
+    let end = tokio::time::Instant::now() + for_how_long;
+    while tokio::time::Instant::now() < end {
+        if !phone.view().tunnels.iter().any(|held| held.tunnel == tunnel) {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tunnel_for_the_browser_ends_when_it_is_idle_and_the_view_says_why() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    phone.set_browser_idle(Duration::from_millis(300));
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+            true,
+        )
+        .await
+        .unwrap();
+    // One page load, then nothing: ended 300 ms after it.
+    assert!(fetch(opened.tunnel.local_port).await.contains("hello"));
+    let view = until(&phone, "the idle tunnel to end", |view| {
+        view.tunnels.is_empty()
+    })
+    .await;
+    assert!(
+        view.tunnels_ended[0].reason.starts_with("no connection for"),
+        "{:?}",
+        view.tunnels_ended
+    );
+    for _ in 0..500 {
+        if place.runner.tunnel_gone.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(place.runner.tunnel_gone.load(Ordering::SeqCst), 1);
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", opened.tunnel.local_port))
+            .await
+            .is_err()
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tunnel_for_the_browser_is_not_idle_while_a_connection_is_open() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    *place.runner.tunnel_target.lock().unwrap() = Some(holding_run().await);
+    phone.set_browser_idle(Duration::from_millis(300));
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+            true,
+        )
+        .await
+        .unwrap();
+    let held = tokio::net::TcpStream::connect(("127.0.0.1", opened.tunnel.local_port))
+        .await
+        .unwrap();
+    assert!(still_held(&phone, &opened.tunnel.tunnel, Duration::from_millis(900)).await);
+    // Its last connection goes: the idle time runs from then.
+    drop(held);
+    until(&phone, "the tunnel to end once idle", |view| {
+        view.tunnels.is_empty()
+    })
+    .await;
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tunnel_of_the_app_has_no_idle_end() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    phone.set_browser_idle(Duration::from_millis(200));
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(still_held(&phone, &opened.tunnel.tunnel, Duration::from_millis(800)).await);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_app_and_the_browser_never_share_a_tunnel() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let open = |browser| {
+        phone.open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+            browser,
+        )
+    };
+    let app = open(false).await.unwrap();
+    let browser = open(true).await.unwrap();
+    assert_ne!(app.tunnel.tunnel, browser.tunnel.tunnel);
+    assert_ne!(app.tunnel.local_port, browser.tunnel.local_port);
+    // Each use finds its own again.
+    assert_eq!(open(false).await.unwrap().tunnel, app.tunnel);
+    assert_eq!(open(true).await.unwrap().tunnel, browser.tunnel);
+    // The app closes its own: the browser's stays.
+    phone.close_tunnel(app.tunnel.tunnel.clone()).unwrap();
+    until(&phone, "the app's tunnel to close", |view| {
+        view.tunnels.len() == 1
+    })
+    .await;
+    assert!(still_held(&phone, &browser.tunnel.tunnel, Duration::from_millis(200)).await);
     place.served.stop().await;
 }

@@ -109,6 +109,8 @@ pub(crate) struct Inner {
     ids: AtomicU64,
     /// The number of the next connection.
     connections: AtomicU64,
+    /// How long a tunnel for the user's browser may go with no connection, in milliseconds.
+    browser_idle: AtomicU64,
 }
 
 pub(crate) struct State {
@@ -124,6 +126,23 @@ pub(crate) struct State {
     /// The number of the last event handed over to the app of each runner, by its machine key
     /// (`machine_id`): a name may be another runner's tomorrow.
     seen: BTreeMap<String, u64>,
+}
+
+impl Core {
+    /// How long the tunnels opened from now on for the user's browser may go with no connection
+    /// (ten minutes by default). Not part of the bindings: for the tests.
+    #[doc(hidden)]
+    pub fn set_browser_idle(&self, idle: std::time::Duration) {
+        self.inner
+            .browser_idle
+            .store(idle.as_millis() as u64, Ordering::SeqCst);
+    }
+}
+
+impl Inner {
+    pub(crate) fn browser_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.browser_idle.load(Ordering::SeqCst))
+    }
 }
 
 /// What `connect` started.
@@ -223,6 +242,7 @@ impl Core {
             }),
             ids: AtomicU64::new(1),
             connections: AtomicU64::new(1),
+            browser_idle: AtomicU64::new(crate::tunnel::BROWSER_IDLE.as_millis() as u64),
         });
         Ok(Arc::new(Core {
             inner,
@@ -590,16 +610,20 @@ impl Core {
     /// Opens the address `url` of `machine` through a tunnel: `run`'s own address when a run is
     /// named, else the run that serves the port a `localhost` link writes. The tunnel lives while
     /// the core stays connected, until the machine ends it (the run ended), the link goes, or
-    /// `close_tunnel`. A tunnel already held to the same run is the one answered: no second one.
+    /// `close_tunnel`. A tunnel already held to the same run, for the same use, is the one
+    /// answered: no second one. `browser` says the address goes to the user's browser, which no
+    /// panel of the app closes: that tunnel ends on its own after ten minutes with no connection.
+    /// The phone listens on a random port of `127.0.0.1`, which any app of the phone can reach.
     pub async fn open_address(
         &self,
         machine: String,
         run: Option<String>,
         url: String,
+        browser: bool,
     ) -> Result<Opened, MobileError> {
         let inner = self.inner.clone();
         self.inner
-            .on(async move { inner.open_address(&machine, run, &url).await })
+            .on(async move { inner.open_address(&machine, run, &url, browser).await })
             .await
     }
 
