@@ -2069,6 +2069,48 @@ fn ask_alone(
     connected(connect)?.ask_within(method, params, bound)
 }
 
+/// `method` with `params`, whose pictures and pasted texts `files` are, as [`ask_alone`] asks it;
+/// when, signed for another machine, it would not fit one frame of the link, its files go first in
+/// chunks (`agent.upload`) and the message names their upload (`docs/remote.md`, "Pictures sent
+/// to another machine"). A chunk refused is the message's refusal: it says which picture and why.
+fn ask_with_files(
+    connect: &Connect,
+    method: &str,
+    mut params: Value,
+    (images, texts): (&[Picture], &[Pasted]),
+    bound: Duration,
+) -> Result<Result<Value, String>, String> {
+    if (images.is_empty() && texts.is_empty()) || flottille_link::fits(method, &params) {
+        return ask_alone(connect, method, params, bound);
+    }
+    let files: Vec<flottille_link::Attached> = images
+        .iter()
+        .map(|picture| flottille_link::Attached::Picture {
+            mime: &picture.mime,
+            bytes: &picture.bytes,
+        })
+        .chain(
+            texts
+                .iter()
+                .map(|pasted| flottille_link::Attached::Text(&pasted.text)),
+        )
+        .collect();
+    let upload = flottille_link::upload_name()?;
+    let mut conn = connected(connect)?;
+    for chunk in flottille_link::upload_chunks(&upload, &files) {
+        match conn.ask_within("agent.upload", chunk, bound) {
+            Ok(Ok(_)) => {}
+            refused => return refused,
+        }
+    }
+    if let Some(params) = params.as_object_mut() {
+        params.remove("images");
+        params.remove("texts");
+    }
+    params["upload"] = json!(upload);
+    conn.ask_within(method, params, bound)
+}
+
 /// What the user does to a command, and what the daemon answered.
 fn ask_run(connect: &Connect, act: RunAct, run: &str, bound: Duration) -> RunAnswer {
     run_answer(
@@ -2128,7 +2170,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Target::Main => None,
                 Target::Workspace(name) => Some(name),
             };
-            match ask_alone(
+            match ask_with_files(
                 connect,
                 "agent.start",
                 start_params(
@@ -2139,6 +2181,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                     (&images, &texts),
                     &mode,
                 ),
+                (&images, &texts),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -3192,7 +3235,13 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             if let Some(compact) = compact {
                 params["compact"] = json!(compact);
             }
-            let answer = match ask_alone(connect, "agent.send", params, bounds.quick) {
+            let answer = match ask_with_files(
+                connect,
+                "agent.send",
+                params,
+                (&images, &texts),
+                bounds.quick,
+            ) {
                 Ok(Ok(taken)) => Ok(crate::session::Accepted {
                     delivery: taken["delivery"].as_str().unwrap_or_default().to_owned(),
                     after: taken["after"].as_u64().unwrap_or_default(),
@@ -3948,6 +3997,127 @@ mod tests {
         // No empty list to ask a confirmation about: the toast says what the daemon said.
         assert_eq!(needed, None);
         assert_eq!(answer, Err("db is needed by app's api".to_owned()));
+    }
+
+    /// A daemon on socket pairs that keeps every request, answers `agent.send` with a delivery,
+    /// and refuses the chunks of the picture `refused`.
+    fn recording(refused: Option<u64>) -> (Connect, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keeping = asked.clone();
+        let connect: Connect = Arc::new(move || {
+            let (window, daemon) = UnixStream::pair()?;
+            let asked = keeping.clone();
+            std::thread::spawn(move || {
+                let mut writer = daemon.try_clone().unwrap();
+                for line in BufReader::new(daemon).lines() {
+                    let Ok(line) = line else { return };
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    asked.lock().unwrap().push(request.clone());
+                    let answer = match request["method"].as_str().unwrap() {
+                        "agent.upload"
+                            if Some(request["params"]["file"].as_u64().unwrap()) == refused =>
+                        {
+                            json!({"id": request["id"], "error": {"code": "refused",
+                                "message": "picture 2 is empty or over 5 MiB"}})
+                        }
+                        "agent.send" => json!({"id": request["id"],
+                            "result": {"delivery": "d1", "after": 3}}),
+                        _ => json!({"id": request["id"], "result": {}}),
+                    };
+                    writeln!(writer, "{answer}").unwrap();
+                }
+            });
+            Ok(window)
+        });
+        (connect, asked)
+    }
+
+    fn reply_with(images: Vec<Picture>) -> Command {
+        Command::Reply {
+            session: "s1".into(),
+            key: 1,
+            message: "look".into(),
+            images,
+            texts: Vec::new(),
+            compact: None,
+        }
+    }
+
+    fn photo(size: usize) -> Picture {
+        Picture {
+            mime: "image/jpeg".into(),
+            bytes: (0..size).map(|n| (n % 251) as u8).collect(),
+        }
+    }
+
+    #[test]
+    fn a_picture_larger_than_a_frame_goes_in_chunks_before_its_message() {
+        let (connect, asked) = recording(None);
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        let big = photo(3 * 1024 * 1024);
+        actions.send(reply_with(vec![big.clone()]));
+
+        let Some(Outcome::Replied { answer, .. }) = next(&mut updates, Duration::from_secs(10))
+        else {
+            panic!("no answer");
+        };
+        assert!(answer.is_ok(), "{answer:?}");
+        let asked = asked.lock().unwrap();
+        let (chunks, sent) = asked.split_at(asked.len() - 1);
+        assert_eq!(chunks.len(), 6, "3 MiB in chunks of 512 KiB");
+        let mut arrived = Vec::new();
+        for chunk in chunks {
+            use base64::Engine as _;
+            assert_eq!(chunk["method"], "agent.upload");
+            assert_eq!(chunk["params"]["upload"], sent[0]["params"]["upload"]);
+            arrived.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(chunk["params"]["data"].as_str().unwrap())
+                    .unwrap(),
+            );
+        }
+        assert!(arrived == big.bytes);
+        assert_eq!(sent[0]["method"], "agent.send");
+        assert!(sent[0]["params"].get("images").is_none(), "{}", sent[0]);
+    }
+
+    #[test]
+    fn a_small_picture_goes_with_its_message() {
+        let (connect, asked) = recording(None);
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        actions.send(reply_with(vec![photo(1000)]));
+
+        assert!(next(&mut updates, Duration::from_secs(5)).is_some());
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["params"]["images"][0]["mime"], "image/jpeg");
+    }
+
+    #[test]
+    fn a_chunk_refused_is_the_message_s_refusal() {
+        let (connect, asked) = recording(Some(2));
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        actions.send(reply_with(vec![photo(600_000), photo(600_000)]));
+
+        let Some(Outcome::Replied { answer, .. }) = next(&mut updates, Duration::from_secs(10))
+        else {
+            panic!("no answer");
+        };
+        // Said in the composer as a local refusal is: which picture, and why.
+        assert_eq!(
+            answer.err().as_deref(),
+            Some("picture 2 is empty or over 5 MiB")
+        );
+        let asked = asked.lock().unwrap();
+        assert!(
+            asked
+                .iter()
+                .all(|request| request["method"] != "agent.send"),
+            "the message is never sent"
+        );
     }
 
     #[test]
