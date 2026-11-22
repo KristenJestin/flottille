@@ -806,17 +806,35 @@ local child's work; nothing moves your branch.*
   marked `from_machine = "pc"`. The words of the launch say which project it runs in, and when it
   makes one.
 - **The project's settings travel with each launch**: its branch rules (`branch_prefix`,
-  `branch_format`), `never`, its `variables`, its tasks and services (`tasks`), its `setup`, its
-  `message_checks`, its pull request conventions, its `rules` and `rules_alone`, and each
-  repository's `base`, `depends_on` and `commit_checks`. A project Flottille made takes them, each
-  replaced by the caller's at every launch, **once the launch is allowed** (by the gate at once or
-  by the user's answer): a launch held or refused lays nothing. The words of the launch name what
-  they run by themselves (the setup's steps, the message and commit checks), for the judge and the
-  user. Every other key, its folder, its workspaces' folder, its caps, its provider, its forges and
-  its tracker, stays that machine's own. A project the user registered by hand keeps the settings
-  the user gave it there: the caller's are not laid over them, and the launch's words say so.
-  Settings that cannot be used there (a task needing a service that machine lacks) refuse the
-  launch, saying why.
+  `branch_format`), `never`, its tasks and services (`tasks`), its `setup`, its `message_checks`,
+  its pull request conventions, its `rules` and `rules_alone`, and each repository's `base`,
+  `depends_on` and `commit_checks`. A project Flottille made takes them, each replaced by the
+  caller's at every launch, **once the launch is allowed** (by the gate at once or by the user's
+  answer): a launch held or refused lays nothing. Every other key, its folder, its workspaces'
+  folder, its caps, its provider, its forges, its tracker and its `variables` (whose values may be
+  secrets: they never travel, and a launch that sends them is refused), stays that machine's own.
+  A project the user registered by hand keeps the settings the user gave it there: the caller's
+  are not laid over them, and the launch's words say so. A project made for one machine's launches
+  takes only that machine's: another machine's launch runs in it and leaves its settings as they
+  are, its words saying whose they keep. Settings that cannot be used there (a task needing a
+  service that machine lacks) refuse the launch, saying why.
+- **What the settings change is classed as the same writes of an agent there** (`docs/tools.md`,
+  "The project"), by the receiving machine's gate, against the project as it is there: each task
+  added or changed as `tasks add` or `edit` (its line judged as a run of it: `sudo`, a never-listed
+  line or a sensitive path is base; asking turned off, `check` or `read_only` set are base), each
+  setup step as `setup add`, the rules and `rules_alone` as `set_rules` (base), each repository's
+  base branches and dependencies as `set_settings`; what no agent's tool writes there is the
+  user's word, base: an entry removed from `never`, the message checks and the commit checks. The
+  launch takes the strongest class: one base change makes it the user's to decide, never the
+  judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
+  Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
+  turns off asking before the task deploy runs`, `It empties the never list, which was `rm -rf``),
+  and the request the reasons of each.
+- **A project made for a launch that does not start goes with it**: refused by the user, its agent
+  ended while held, or swept for its code that never came, the project made for it is removed,
+  its file and its folder, once its workspace is gone, unless another launch of the same machine
+  may still start in it. Two launches of a new project at once make it once: the second takes the
+  project the first made.
 - Not yet (#1188's follow-up): the folder for projects from other machines as a setting of that
   machine; a setup that needs ignored files or vault entries the receiving machine lacks holding
   the first launch until the user shares them; the making shown on the launch's row; the refusals
@@ -878,9 +896,11 @@ For each repository of the caller's place, before the session starts:
   `refs/flottille/machines/*`), and the bundle holds only the missing ones (a bundle with those as
   prerequisites); otherwise it holds the whole history of the branch. The receiver verifies the
   bundle (`git bundle verify`) and fetches it.
-- **Ignored files do not travel**, nor secrets: a `.env` is the machine's own, taken by its setup's
-  `copy` steps as today. A setup that misses one fails as it does today, saying which. Nothing is
-  ever copied as a file between machines; a secret goes only through the vault's sharing.
+- **Ignored files do not travel**, nor the project's `variables`: a `.env` is the machine's own,
+  taken by its setup's `copy` steps as today. A setup that misses one fails as it does today,
+  saying which. Nothing is ever copied as a file between machines; a secret goes only through the
+  vault's sharing. The settings that travel are sent as the caller's file writes them: a secret
+  written by hand into a task's line would travel with it.
 - **An uncommitted file holding a secret that is not ignored** (an `.env` missing from `.gitignore`)
   travels to the other machine with the rest of the uncommitted work, as it would in a commit:
   nothing refuses it nor warns.
