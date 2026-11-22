@@ -1923,19 +1923,78 @@ async fn the_window_s_limits_on_pictures_hold_before_anything_is_sent() {
     );
     assert!(refused(send("x", vec![picture("image/bmp", 1)]).await).contains("image/bmp"));
     assert!(refused(send("", vec![]).await).contains("empty"));
-    // A message travels in one frame of the link (1 MiB, pictures in base64 included): what cannot
-    // fit is refused here with its reason, never sent to end the link.
     assert!(
-        refused(send("x", vec![picture("image/webp", 5 * 1024 * 1024)]).await).contains("link")
+        place.runner.taken("agent.send").is_empty()
+            && place.runner.taken("agent.upload").is_empty(),
+        "nothing was sent"
     );
-    assert!(refused(send("x", vec![picture("image/png", 400_000); 2]).await).contains("link"));
-    send("x", vec![picture("image/webp", 600_000)])
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phone_sends_a_full_size_picture() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    // 5 MiB, the most a message's picture is: far more than a frame of the link (1 MiB).
+    let photo: Vec<u8> = (0..5 * 1024 * 1024).map(|n| (n % 253) as u8).collect();
+    phone
+        .send(
+            "server".to_owned(),
+            "a1".to_owned(),
+            "the whole photo".to_owned(),
+            vec![Picture {
+                mime: "image/jpeg".to_owned(),
+                data: photo.clone(),
+            }],
+        )
         .await
         .unwrap();
+
+    // In chunks, each a signed request of its own, before the message that names them.
+    let chunks = place.runner.taken("agent.upload");
+    assert!(chunks.len() >= 10, "{} chunks", chunks.len());
+    let mut arrived = Vec::new();
+    let upload = params_of(&chunks[0])["upload"].clone();
+    for chunk in &chunks {
+        assert!(chunk.1.is_ok(), "signed as a member's");
+        let params = params_of(chunk);
+        assert_eq!(params["upload"], upload);
+        assert_eq!(params["file"], 1);
+        assert_eq!(params["kind"], "image");
+        assert_eq!(params["mime"], "image/jpeg");
+        assert_eq!(params["size"], photo.len());
+        assert_eq!(params["offset"], arrived.len());
+        arrived.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(params["data"].as_str().unwrap())
+                .unwrap(),
+        );
+    }
+    assert!(arrived == photo, "the photo as it was, never shrunk");
+    let sent = place.runner.taken("agent.send");
+    assert_eq!(sent.len(), 1);
+    let params = params_of(&sent[0]);
+    assert_eq!(params["upload"], upload);
+    assert_eq!(params["message"], "the whole photo");
+    assert!(params.get("images").is_none(), "{params}");
+
+    // A small one still goes with its message.
+    phone
+        .send(
+            "server".to_owned(),
+            "a1".to_owned(),
+            "small".to_owned(),
+            vec![Picture {
+                mime: "image/png".to_owned(),
+                data: png(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(place.runner.taken("agent.upload").len(), chunks.len());
     assert_eq!(
-        place.runner.taken("agent.send").len(),
-        1,
-        "only the last was sent"
+        params_of(&place.runner.taken("agent.send")[1])["images"][0]["mime"],
+        "image/png"
     );
     place.served.stop().await;
 }
