@@ -430,6 +430,16 @@ pub enum Command {
         project: String,
         write: CommandWrite,
     },
+    /// The programs and whether each is signed in (`signin.list`, #1185).
+    SignIns,
+    /// A program's own sign-in, started by its daemon (`signin.start`).
+    SignInStart(String),
+    /// The code the user pasted for that program's sign-in (`signin.code`), sent once.
+    SignInCode(String, PastedCode),
+    /// A program's sign-in stopped (`signin.cancel`).
+    SignInCancel(String),
+    /// A program's own sign-out, confirmed (`signin.sign_out`).
+    SignOut(String),
     /// The vault's entries, their metadata (`vault.list`).
     Vault,
     /// An entry set or removed (`vault.set`, `vault.remove`).
@@ -775,6 +785,22 @@ impl std::fmt::Debug for VaultWrite {
     }
 }
 
+/// A code the user pasted for a program's sign-in: a debug line never says it.
+#[derive(Clone, PartialEq)]
+pub struct PastedCode(String);
+
+impl From<String> for PastedCode {
+    fn from(code: String) -> Self {
+        PastedCode(code)
+    }
+}
+
+impl std::fmt::Debug for PastedCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PastedCode(..)")
+    }
+}
+
 /// The setting of Sessions a choice wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionsSetting {
@@ -1065,6 +1091,19 @@ pub enum Outcome {
         project: String,
         name: String,
         read: Result<CommandInfo, String>,
+    },
+    /// The programs' sign-in states, as `signin.list` answers them, or why they cannot be read.
+    SignIns(Result<Value, String>),
+    /// What a program's sign-in said it needs, or why it did not start.
+    SignInStarted {
+        program: String,
+        answer: Result<Value, String>,
+    },
+    /// A code, a cancel or a sign-out (`what`) was done, or refused with why.
+    SignInAnswered {
+        program: String,
+        what: &'static str,
+        refused: Option<String>,
     },
     /// The vault's entries, or why they cannot be read.
     Vault {
@@ -2125,6 +2164,25 @@ fn run_answer(
     }
 }
 
+/// A step of a program's sign-in that answers nothing but whether it was done.
+fn sign_in_step(
+    connect: &Connect,
+    method: &str,
+    what: &'static str,
+    program: String,
+    time: Duration,
+) -> Outcome {
+    let refused = match ask_alone(connect, method, json!({"program": program}), time) {
+        Ok(Ok(_)) => None,
+        Ok(Err(why)) | Err(why) => Some(why),
+    };
+    Outcome::SignInAnswered {
+        program,
+        what,
+        refused,
+    }
+}
+
 fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Bounds) -> Outcome {
     match command {
         Command::Details(_) => unreachable!("the details have their own thread"),
@@ -2686,6 +2744,45 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 name,
             }
         }
+        Command::SignIns => Outcome::SignIns(
+            ask_alone(connect, "signin.list", json!({}), bounds.quick).and_then(|listed| listed),
+        ),
+        Command::SignInStart(program) => Outcome::SignInStarted {
+            answer: ask_alone(
+                connect,
+                "signin.start",
+                json!({"program": program}),
+                bounds.quick,
+            )
+            .and_then(|started| started),
+            program,
+        },
+        Command::SignInCode(program, PastedCode(code)) => {
+            let refused = match ask_alone(
+                connect,
+                "signin.code",
+                json!({"program": program, "code": code}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SignInAnswered {
+                program,
+                what: "code",
+                refused,
+            }
+        }
+        Command::SignInCancel(program) => {
+            sign_in_step(connect, "signin.cancel", "cancel", program, bounds.quick)
+        }
+        Command::SignOut(program) => sign_in_step(
+            connect,
+            "signin.sign_out",
+            "sign_out",
+            program,
+            bounds.quick,
+        ),
         Command::Vault => {
             let listed = ask_alone(connect, "vault.list", json!({}), bounds.quick);
             Outcome::Vault {

@@ -43,6 +43,9 @@
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
+//!
+//! `codex login status`, `codex login --device-auth` and `codex logout` play the scripted
+//! sign-in every fake shares (`crates/flottille-fake-gh/src/sign_in.rs`, #1185).
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
@@ -52,6 +55,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+
+#[path = "../../flottille-fake-gh/src/sign_in.rs"]
+mod sign_in;
 
 /// The version the bridge was checked against: `codex --version` prints it.
 const VERSION: &str = "0.162.0";
@@ -77,6 +83,43 @@ fn models() -> Value {
     ])
 }
 
+/// `codex login status`, `codex login --device-auth` and `codex logout`, as the sign-in every fake
+/// shares (`crates/flottille-fake-gh/src/sign_in.rs`) plays them, in Codex's words (its device
+/// code flow: the address, then the code, each on a line of its own); none for an app-server.
+fn login(dir: &std::path::Path, args: &[String]) -> Option<i32> {
+    let script = std::fs::read_to_string(dir.join("script.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    // `-c key=value` overrides come before the subcommand.
+    let mut at = 0;
+    while words.get(at) == Some(&"-c") {
+        at += 2;
+    }
+    Some(match &words[at.min(words.len())..] {
+        ["login", "status", ..] => match sign_in::signed_in(dir, &script) {
+            true => {
+                eprintln!("Logged in using ChatGPT");
+                0
+            }
+            false => {
+                eprintln!("Not logged in");
+                1
+            }
+        },
+        ["login", ..] => sign_in::login(dir, &script, args, |address, code| {
+            eprintln!(
+                "\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n\
+                 1. Open this link in your browser and sign in to your account\n   {address}\n\n\
+                 2. Enter this one-time code (expires in 15 minutes)\n   {code}\n"
+            );
+        }),
+        ["logout", ..] => sign_in::logout(dir, args),
+        _ => return None,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--version") {
@@ -86,6 +129,9 @@ fn main() {
     let dir = PathBuf::from(
         std::env::var_os("FLOTTILLE_FAKE_CODEX_DIR").expect("FLOTTILLE_FAKE_CODEX_DIR is not set"),
     );
+    if let Some(code) = login(&dir, &args) {
+        std::process::exit(code);
+    }
     let record = Record(dir.join("received.jsonl"));
     let env: Map<String, Value> = std::env::vars().map(|(k, v)| (k, v.into())).collect();
     let cwd = std::env::current_dir().unwrap();
