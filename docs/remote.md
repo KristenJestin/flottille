@@ -1191,19 +1191,25 @@ recreated.
   (`run.started`, `run.ready`, `run.ended` of the page's events), and a link an agent showed
   (`agent.link_shown`, a `url`) is a card of the conversation, each with **Open** and **Open in
   browser**. The phone's core does what a client's daemon does: it signs `tunnel.open {run, port?}`
-  for the machine, listens on `127.0.0.1` of the phone (the run's port when free, another
-  otherwise), opens one stream of the link per connection, and holds the tunnel with the request's
+  for the machine, listens on `127.0.0.1` of the phone (a port the system picks at random, never
+  the run's own), opens one stream of the link per connection (64 at once, one past it is closed),
+  and holds the tunnel with the request's
   stream, which the machine ends with its run and the phone ends by dropping it (`Core.open_address`,
   `Core.close_tunnel`; the view says the tunnels held and, for each that ended, why). A link names
   no run: the core asks `run.list`, takes the run that reports its port, else the only one that
   runs, and the machine checks the port again. A page of the web opens as it is, in the user's
   browser. The in-app browser is a web view that loads that tunnel's origin only (any other link
-  goes to the user's browser), enters and leaves over the panel's duration, and says when its
-  tunnel ended. **Open in browser** starts a foreground service (type `specialUse`) that holds the
+  is dropped, unless it is an `http(s)` address its main frame goes to on a tap, which goes to the
+  user's browser: a page starts no other app), enters and leaves over the panel's duration, says
+  when its tunnel ended, **closes its tunnel with its panel** and forgets the page's cookies and
+  storage then. **Open in browser** starts a foreground service (type `specialUse`) that holds the
   core's connection, so that the links stay up with the app in the background, and shows one
   notification, "Tunnel kept open", with **Close**; the service ends when its tunnels have, and an
   end that is not the user's own (the run ended, the link dropped) is a notice of its own that says
-  why. A `viewer`'s page draws no tunnel control (the machine would refuse it).
+  why. A tunnel of **Open in browser** has an idle end: with no connection open for 10 minutes it
+  closes, and the notice says so (`no connection for 10 minutes`); the in-app browser's tunnels
+  and those of the two uses are never shared (`open_address(…, browser)`). A `viewer`'s page draws
+  no tunnel control (the machine would refuse it).
 - **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
   <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
   the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
@@ -1590,6 +1596,17 @@ on a real phone, by hand, and reported.
   the events it holds (the commands of the session's own agent), so a run a child started, or one
   that started before the page's latest events, is not listed; the links an agent showed are in
   the conversation as they are for any message. Reversible: the core can ask `run.list {tree}`.
+- **What remains exposed on the phone (#831).** The phone's listener has no token: any app of the
+  phone (one with the INTERNET permission, or a page in the user's browser by cross-site requests
+  or DNS rebinding) can connect to `127.0.0.1:<port>` and read the run's page with the phone's
+  identity, for as long as a tunnel is open. What bounds it: the port is random (an app has to
+  scan for it), the in-app browser's tunnel closes with its panel, and an **Open in browser**
+  tunnel, which the user's browser needs for as long as it likes, ends after 10 minutes with no
+  connection and when the user closes it from the notification. Another app that scans the
+  loopback in that time can still reach the page. Serving the in-app web view without a listener
+  (`shouldInterceptRequest` over a stream of the link) would remove it for the in-app view, but
+  needs a raw-stream API in the core and the web view's own request handling (cookies, redirects,
+  websockets) rebuilt over it: not done. Reversible: the listener is `bind_local`.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
