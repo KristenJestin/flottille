@@ -16,13 +16,13 @@ import org.flottille.core.Reply
 import org.flottille.core.Tunnel
 import org.flottille.core.TunnelEnd
 
+/** What the real core listens on: `127.0.0.1`, never another address. */
+val IPV4_LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+
 /**
  * A fake server standing for a run's port on a machine: it answers each request with a page and
  * keeps what it was asked, and by whom (the web view's `User-Agent` says it was the app's).
  */
-/** What the real core listens on: `127.0.0.1`, never another address. */
-val IPV4_LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
-
 class FakeRunServer : AutoCloseable {
     private val socket = ServerSocket(0, 50, IPV4_LOOPBACK)
     val port: Int get() = socket.localPort
