@@ -270,6 +270,49 @@ fn chunks_without_their_message_are_dropped() {
     assert!(error_of(&answer).contains("dropped"), "{answer}");
 }
 
+#[test]
+fn a_chunk_is_not_held_up_by_the_read_of_another_upload() {
+    // Each file of an upload takes 3 s to read, as on a slow disk.
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_UPLOAD_READ_MS", "3000");
+    let (_hub, pc, server, agent) = machines(user);
+    let shot = picture(CHUNK + 100);
+    upload(&pc, "read", 1, PNG, &shot);
+    // The upload that is still arriving while the other is read.
+    let more = chunk("arriving", 1, PNG, shot.len(), 0, &shot[..CHUNK]);
+    assert_eq!(ask(&pc, "agent.upload", more)["result"]["received"], CHUNK);
+
+    let ((sent, sending), waited) = std::thread::scope(|scope| {
+        let sending = scope.spawn(|| {
+            let begun = Instant::now();
+            let sent = ask(
+                &pc,
+                "agent.send",
+                json!({"agent": agent, "message": "look", "upload": "read"}),
+            );
+            (sent, begun.elapsed())
+        });
+        // Long enough for the message to be in the middle of its read.
+        std::thread::sleep(Duration::from_millis(1000));
+        let begun = Instant::now();
+        let next = chunk("arriving", 1, PNG, shot.len(), CHUNK, &shot[CHUNK..]);
+        let answer = ask(&pc, "agent.upload", next);
+        let waited = begun.elapsed();
+        assert_eq!(answer["result"]["received"], shot.len(), "{answer}");
+        (sending.join().unwrap(), waited)
+    });
+    assert!(sent["result"]["delivery"].is_string(), "{sent}");
+    assert!(
+        sending >= Duration::from_millis(2500),
+        "the read was not slow: {sending:?}"
+    );
+    assert!(
+        waited < Duration::from_millis(1500),
+        "a chunk waited {waited:?} for the read of another upload"
+    );
+    // Both are taken or kept as before: the read upload leaves nothing, the other waits.
+    assert_eq!(kept(&server), 1);
+}
+
 /// The folder an upload of the device that signs for `pc` has on the server: the name of the
 /// sender's folder is its key, then `-` and the upload's name.
 fn folder_of(server: &Machine, name: &str) -> std::path::PathBuf {
