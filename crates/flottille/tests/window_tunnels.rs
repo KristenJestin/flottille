@@ -70,6 +70,7 @@ fn script(port: u16) -> Value {
     json!({"turns": [
         {"when": "lead the work", "do": [{"say": "On it."}]},
         {"when": "SHOW LOCAL", "do": [link(&format!("http://localhost:{port}/docs"))]},
+        {"when": "SAY LOCAL", "do": [{"say": format!("[app](http://localhost:{port}/docs)")}]},
         {"when": "SHOW NOWHERE", "do": [link("http://localhost:1/nothing")]},
         {"when": "SHOW PUBLIC", "do": [link("https://example.org/t/42")]},
         {"when": "SHOW FILE", "do": [file("shot.png")]},
@@ -463,6 +464,50 @@ fn a_localhost_link_of_another_machine_opens_through_a_tunnel(cx: &mut TestAppCo
         *opened.lock().unwrap(),
         [PathBuf::from(format!("http://localhost:{local}/docs"))],
         "the path of the link is kept, its host and port are the tunnel's"
+    );
+}
+
+#[gpui_kit::test]
+fn a_localhost_link_written_in_markdown_opens_through_a_tunnel(cx: &mut TestAppContext) {
+    let (_turn, machines) = machines();
+    let url = format!("http://127.0.0.1:{}", machines.port);
+    let run = web(&machines.server.user, &url, machines.port);
+    let (shell, cx, opened) = window(&machines.pc, cx);
+    on_the_server(&shell, cx);
+    open_session(&shell, &machines.agent, cx);
+    let page = session_page(&shell, cx);
+    tell(&machines.server, &machines.agent, "SAY LOCAL");
+    let reply = |block: &Block| matches!(block, Block::Text { text } if text.starts_with('['));
+    let at = |cx: &mut VisualTestContext| {
+        page.read_with(cx, |page, cx| {
+            page.conversation().read(cx).blocks().iter().position(reply)
+        })
+    };
+    until(&shell, cx, "the reply is in the conversation", |cx| {
+        at(cx).is_some()
+    });
+    settle(&shell, cx);
+    let at = at(cx).unwrap();
+
+    cx.update(|window, cx| {
+        window.click_at(
+            format!("row-{at}-text-region"),
+            gpui_kit::point(px(4.), px(4.)),
+            cx,
+        )
+    });
+    until(&shell, cx, "the window opened the local address", |_| {
+        !opened.lock().unwrap().is_empty()
+    });
+
+    let tunnels = carried(&machines.pc);
+    assert_eq!(tunnels.len(), 1, "{tunnels:?}");
+    assert_eq!(tunnels[0]["run"], run.as_str());
+    let local = tunnels[0]["local_port"].as_u64().unwrap();
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [PathBuf::from(format!("http://localhost:{local}/docs"))],
+        "the machine's own address is opened through its tunnel, not as written"
     );
 }
 
