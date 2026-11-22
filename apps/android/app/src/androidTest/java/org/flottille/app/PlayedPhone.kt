@@ -117,7 +117,13 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
 
     /** What a tunnel does with a connection: the bytes go to the run's port, and come back. */
     private fun pipe(local: Socket) {
-        val remote = Socket(InetAddress.getLoopbackAddress(), server.port)
+        // A probe of the listener, or a test that ended with the server: the connection just ends.
+        val remote = try {
+            Socket(InetAddress.getLoopbackAddress(), server.port)
+        } catch (refused: java.io.IOException) {
+            local.close()
+            return
+        }
         fun copy(from: Socket, to: Socket) = thread(isDaemon = true) {
             try {
                 from.getInputStream().copyTo(to.getOutputStream())
