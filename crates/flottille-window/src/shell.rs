@@ -5371,6 +5371,7 @@ impl Render for BellList {
         let (on_shell, how_shell) = (self.shell.clone(), cx.entity().downgrade());
         let how = self.how_long;
         let dnd = crate::notification_settings::DoNotDisturb::block(
+            cx,
             self.settings.as_ref(),
             how,
             |until| {

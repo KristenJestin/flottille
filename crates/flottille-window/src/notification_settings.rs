@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use flottille_core::notification_settings::{DAYS, KINDS, label, may_be_off, next_morning};
 use gpui_design_system::{
     CheckState, Checkbox, Field, Section, Segmented, Select, SelectOption, Skeleton, Switch, Toast,
-    awaiting, palette, presence, space, toast,
+    awaiting, changing, palette, presence, space, toast,
 };
 use gpui_kit::{
     App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -630,6 +630,7 @@ impl DoNotDisturb {
     /// user's clock. `on_switch` is called with the state a click asks for, `on_how` with the
     /// choice picked.
     pub fn block(
+        cx: &App,
         shown: Option<&Shown>,
         how: usize,
         at: impl Fn(u64) -> (u32, u32),
@@ -638,8 +639,8 @@ impl DoNotDisturb {
     ) -> impl IntoElement {
         let on = shown.is_some_and(|shown| shown.dnd_on);
         let line = shown.map_or_else(String::new, |shown| shown.dnd_line(at));
+        let p = palette(cx);
         let switch = Switch::new("bell-dnd-switch", on, "Do not disturb")
-            .hint(line)
             .disabled(shown.is_none())
             .on_click(move |_, _, cx| on_switch(!on, cx));
         let options = HOW_LONG
@@ -655,6 +656,18 @@ impl DoNotDisturb {
             .flex()
             .flex_col()
             .child(switch)
+            // What it says under the switch fades when it changes (a time, then none).
+            .child(changing("bell-dnd-line-change", line, move |line| {
+                div()
+                    .id("bell-dnd-line")
+                    .aria_label(line.clone())
+                    .pl(space::XXXL - space::XS)
+                    .text_size(px(12.))
+                    .text_color(p.mute)
+                    .child(line)
+                    .test_support()
+                    .into_any_element()
+            }))
             .child(
                 presence(
                     "bell-dnd-how-block",

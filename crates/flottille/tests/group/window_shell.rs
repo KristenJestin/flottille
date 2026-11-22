@@ -47,6 +47,8 @@ mod window_link;
 mod window_machines;
 #[path = "../window_menus.rs"]
 mod window_menus;
+#[path = "../window_notification_settings.rs"]
+mod window_notification_settings;
 #[path = "../window_notifications.rs"]
 mod window_notifications;
 #[path = "../window_one_list.rs"]

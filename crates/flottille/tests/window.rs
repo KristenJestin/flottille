@@ -3966,6 +3966,9 @@ fn settings_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
             "appearance",
             "workspaces",
             "developer",
+            "notifications-kinds",
+            "notifications-sound",
+            "notifications-quiet",
         ]
         .into_iter()
         .filter(|key| {
@@ -4035,7 +4038,7 @@ fn opening_settings_shows_the_agents_tab_alone(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
@@ -4045,6 +4048,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             ("vault", "Vault"),
             ("machines", "Machines"),
             ("general", "General"),
+            ("notifications", "Notifications"),
         ]
     );
     let user = providers_user();
@@ -4059,7 +4063,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 6);
+        assert_eq!(lefts.len(), 7);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -4199,6 +4203,11 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
             // Machines, remote off: a notice and a button, no section title (`window_machines.rs`).
             "features" | "machines" => &[],
             "vault" => &["vault"],
+            "notifications" => &[
+                "notifications-kinds",
+                "notifications-sound",
+                "notifications-quiet",
+            ],
             _ => &["appearance", "workspaces", "developer"],
         };
         assert_eq!(settings_shown(cx), wanted, "{key} alone");

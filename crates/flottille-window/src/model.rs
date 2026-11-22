@@ -1591,6 +1591,41 @@ mod tests {
         );
     }
 
+    fn rang(data: Value) -> Rang {
+        Rang::of(&flottille_protocol::Event {
+            seq: 3,
+            at: 30,
+            name: "notification.rang".into(),
+            data,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_first_toast_after_the_quiet_says_how_many_waited() {
+        let toast = rang(json!({"id": 4, "in": "window", "title": "Reported",
+            "excerpt": "Login fixed.", "waited": 3}));
+        assert_eq!(toast.waited, 3);
+        assert_eq!(
+            toast.detail().as_deref(),
+            Some("Login fixed.\n3 new while quiet")
+        );
+        let bare = rang(
+            json!({"id": 5, "in": "window", "title": "Reported", "excerpt": "",
+            "waited": 1}),
+        );
+        assert_eq!(bare.detail().as_deref(), Some("1 new while quiet"));
+    }
+
+    #[test]
+    fn a_toast_that_followed_no_quiet_says_only_what_it_is_about() {
+        let toast = rang(json!({"id": 4, "in": "window", "title": "Reported",
+            "excerpt": "Login fixed.", "waited": 0}));
+        assert_eq!(toast.detail().as_deref(), Some("Login fixed."));
+        let empty = rang(json!({"id": 4, "in": "window", "title": "Reported"}));
+        assert_eq!(empty.detail(), None);
+    }
+
     fn served(tool: &str, arguments: Value, outcome: &str) -> flottille_protocol::Event {
         flottille_protocol::Event {
             seq: 9,

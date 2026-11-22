@@ -867,6 +867,9 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
         ("machines", "remote-notice"),
         ("general", "about-title"),
         ("general", "appearance-title"),
+        // What rings and when (#1003): the kinds, the sound and the quiet hours.
+        ("notifications", "notifications-kinds-title"),
+        ("notifications", "notifications-quiet-title"),
     ] {
         cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
         until(&shell, cx, "the tab is shown", |cx| {
