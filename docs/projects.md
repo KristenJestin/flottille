@@ -204,6 +204,7 @@ never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading argumen
 provider = "claude"                   # the provider of its agents that name none; default: the first one enabled
 model = "sonnet"                      # the model of its agents on that provider that name none; default: the provider's
 windows = true                        # its agents' runs may open windows on your screen (docs/tools.md); the user's alone, default false
+from_machine = "pc"                   # written by Flottille alone, on a project it made for a launch of another machine: its settings that travel follow that machine's (docs/remote.md, "Which project")
 
 [[repositories]]                      # at least one
 path = "."                            # relative to the folder; "." is the folder itself
