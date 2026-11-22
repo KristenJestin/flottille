@@ -2478,6 +2478,26 @@ async fn fake_run() -> SocketAddr {
     address
 }
 
+/// A server that stands for a run's port and keeps every connection open, saying nothing.
+async fn holding_run() -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 64];
+                // Until the phone's end goes.
+                while let Ok(read) = tokio::io::AsyncReadExt::read(&mut tcp, &mut buffer).await {
+                    if read == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    address
+}
+
 /// What the phone reads at `127.0.0.1:<port>`: the whole answer.
 async fn fetch(port: u16) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2838,5 +2858,75 @@ async fn the_page_lists_the_runs_that_have_an_address_and_the_links_shown() {
             .is_some_and(|page| page.runs.is_empty())
     })
     .await;
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tunnel_listens_on_a_random_port_never_the_run_s_own() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    // The run's port is a guessable one (5173), free on this machine: it is still not the one taken,
+    // for another app of the phone would find it first.
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.tunnel.port, 5173);
+    assert_ne!(opened.tunnel.local_port, 5173);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tunnel_carries_at_most_64_connections_at_once() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    *place.runner.tunnel_target.lock().unwrap() = Some(holding_run().await);
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    let port = opened.tunnel.local_port;
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        held.push(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap());
+    }
+    for _ in 0..500 {
+        if place.runner.tunnel_connections.load(Ordering::SeqCst) == 64 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(place.runner.tunnel_connections.load(Ordering::SeqCst), 64);
+    // The 65th is closed at once, and never reaches the machine.
+    let mut past = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::io::AsyncReadExt::read(&mut past, &mut byte),
+    )
+    .await
+    .expect("the connection past 64 is closed, not kept");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    assert_eq!(place.runner.tunnel_connections.load(Ordering::SeqCst), 64);
+    // One of the 64 goes: a place is free again.
+    drop(held.pop());
+    let mut carried = false;
+    for _ in 0..250 {
+        let _again = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if place.runner.tunnel_connections.load(Ordering::SeqCst) > 64 {
+            carried = true;
+            break;
+        }
+    }
+    assert!(carried, "a connection is carried again once one went");
     place.served.stop().await;
 }
