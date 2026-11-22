@@ -161,6 +161,14 @@ struct Runner {
     watching: Arc<AtomicUsize>,
     /// The phone's links that ended.
     ended: Arc<AtomicUsize>,
+    /// Where a tunnel's connections go on this machine: a fake server standing for the run's port.
+    tunnel_target: Arc<Mutex<Option<SocketAddr>>>,
+    /// Says `closed` with the reason to every tunnel it serves: the run ended.
+    tunnel_ends: tokio::sync::broadcast::Sender<String>,
+    /// The `tunnel.open` streams the phone dropped (it closed the tunnel).
+    tunnel_gone: Arc<AtomicUsize>,
+    /// The connections of a tunnel it took.
+    tunnel_connections: Arc<AtomicUsize>,
     /// What it says first on a link: another protocol than the phone's makes it a runner that needs
     /// an update.
     hello: Hello,
@@ -185,6 +193,10 @@ impl Runner {
             requests: Arc::new(Mutex::new(Requests::new(SystemTime::now()))),
             watching: Arc::default(),
             ended: Arc::default(),
+            tunnel_target: Arc::default(),
+            tunnel_ends: tokio::sync::broadcast::channel(8).0,
+            tunnel_gone: Arc::default(),
+            tunnel_connections: Arc::default(),
             hello: hello(),
             name: name.to_owned(),
             machine,
@@ -311,6 +323,23 @@ impl Runner {
 
     async fn serve_link(&self, link: Link) {
         while let Some(received) = link.next().await {
+            // A tunnel's connection: raw bytes to the fake server that stands for the run's port.
+            let received = match received.take_tunnel() {
+                Ok((_id, stream)) => {
+                    self.tunnel_connections.fetch_add(1, Ordering::SeqCst);
+                    let target = *self.tunnel_target.lock().unwrap();
+                    tokio::spawn(async move {
+                        let Some(target) = target else { return };
+                        let Ok(mut tcp) = tokio::net::TcpStream::connect(target).await else {
+                            return;
+                        };
+                        let mut stream = stream;
+                        let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+                    });
+                    continue;
+                }
+                Err(received) => *received,
+            };
             let Message::Client(request) = received.message().clone() else {
                 received.answer(Err(
                     "a machine's message is not taken on a client link".into()
@@ -369,6 +398,31 @@ impl Runner {
                         .get(&accepted.method)
                         .cloned()
                         .unwrap_or_else(|| json!({}));
+                    if accepted.method == "tunnel.open" {
+                        // As the daemon does: the answer, then the stream stays open until the
+                        // tunnel ends, and its last frame says why.
+                        let mut ends = runner.tunnel_ends.subscribe();
+                        let gone = stream.gone();
+                        let shown = json!({"tunnel": "t1", "run": accepted.params["run"],
+                            "port": accepted.params["port"].as_u64().unwrap_or(result["port"].as_u64().unwrap_or(5173))});
+                        if !stream
+                            .send(&line(json!({"id": accepted.id, "result": shown})))
+                            .await
+                        {
+                            return;
+                        }
+                        tokio::select! {
+                            reason = ends.recv() => {
+                                let reason = reason.unwrap_or_default();
+                                stream.send(&line(json!({"closed": reason}))).await;
+                                stream.end().await;
+                            }
+                            _ = gone => {
+                                runner.tunnel_gone.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        return;
+                    }
                     stream
                         .send(&line(json!({"id": accepted.id, "result": result})))
                         .await;
@@ -2400,5 +2454,389 @@ async fn a_viewer_s_writes_are_refused_by_the_machine() {
     }
     place.runner.show(a1("auto", "idle"), None);
     phone.follow(server, agent).await.unwrap();
+    place.served.stop().await;
+}
+
+// ---- Tunnels on the phone (#831): a run's page, reached through the machine's link ----
+
+/// A server that stands for a run's port: it answers every request with `hello from the run`.
+async fn fake_run() -> SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0u8; 512];
+                let _ = tcp.read(&mut request).await;
+                let _ = tcp
+                    .write_all(b"HTTP/1.0 200 OK\r\n\r\nhello from the run")
+                    .await;
+            });
+        }
+    });
+    address
+}
+
+/// What the phone reads at `127.0.0.1:<port>`: the whole answer.
+async fn fetch(port: u16) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    tcp.write_all(b"GET / HTTP/1.0\r\n\r\n").await.unwrap();
+    let mut body = String::new();
+    tokio::time::timeout(Duration::from_secs(10), tcp.read_to_string(&mut body))
+        .await
+        .expect("the run answers within 10 s")
+        .unwrap();
+    body
+}
+
+/// A runner whose run `r1` listens on the fake server, and a phone linked to it.
+async fn with_a_run(place: &Place) -> (Arc<Core>, Arc<Taken>) {
+    *place.runner.tunnel_target.lock().unwrap() = Some(fake_run().await);
+    place.runner.answer(
+        "run.list",
+        json!({"commands": [
+            {"run": "r1", "state": "running", "url": "http://localhost:5173/app?x=1#top"},
+            {"run": "r2", "state": "running", "url": "http://localhost:8080/"},
+        ]}),
+    );
+    place.linked().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_s_address_opens_through_a_tunnel_on_the_phone() {
+    let place = Place::new().await;
+    let (phone, taken) = with_a_run(&place).await;
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/app?x=1#top".to_owned(),
+        )
+        .await
+        .unwrap();
+    // The request is the one the command line signs: the run, no port.
+    let asked = place.runner.taken("tunnel.open");
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].1.is_ok(), "{:?}", asked[0].1);
+    assert_eq!(params_of(&asked[0]), json!({"run": "r1"}));
+    // The address is read on the phone, its path, query and fragment kept.
+    assert_eq!(
+        opened.url,
+        format!("http://localhost:{}/app?x=1#top", opened.tunnel.local_port)
+    );
+    assert_eq!(opened.tunnel.run, "r1");
+    // The bytes cross: what the phone's local port says is what the run says.
+    assert_eq!(
+        fetch(opened.tunnel.local_port).await,
+        "HTTP/1.0 200 OK\r\n\r\nhello from the run"
+    );
+    assert_eq!(place.runner.tunnel_connections.load(Ordering::SeqCst), 1);
+    let view = until(&phone, "the tunnel in the view", |view| {
+        view.tunnels.len() == 1
+    })
+    .await;
+    assert_eq!(view.tunnels[0], opened.tunnel);
+    drop(taken);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tunnel_listens_on_the_loopback_only() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    let port = opened.tunnel.local_port;
+    // Reachable on 127.0.0.1, and on no other address of the phone's.
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_an_agent_shows_names_the_run_that_serves_its_port() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            None,
+            "http://localhost:8080/docs".to_owned(),
+        )
+        .await
+        .unwrap();
+    // `run.list` was asked, then the run that reports port 8080 was named with that port.
+    assert_eq!(place.runner.taken("run.list").len(), 1);
+    assert_eq!(
+        params_of(&place.runner.taken("tunnel.open")[0]),
+        json!({"run": "r2", "port": 8080})
+    );
+    assert_eq!(opened.tunnel.run, "r2");
+    assert_eq!(
+        opened.url,
+        format!("http://localhost:{}/docs", opened.tunnel.local_port)
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_address_of_the_web_opens_through_no_tunnel() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let why = phone
+        .open_address(
+            "server".to_owned(),
+            None,
+            "https://example.org/a".to_owned(),
+        )
+        .await
+        .unwrap_err();
+    assert!(why.to_string().contains("open it as it is"), "{why}");
+    assert!(place.runner.taken("tunnel.open").is_empty());
+    assert!(!flottille_mobile::address_is_local(
+        "https://example.org/a".to_owned()
+    ));
+    assert!(flottille_mobile::address_is_local(
+        "http://127.0.0.1:3000".to_owned()
+    ));
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_tap_on_the_same_address_makes_no_second_tunnel() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let first = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    let again = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/other".to_owned(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.tunnel, first.tunnel);
+    assert_eq!(
+        again.url,
+        format!("http://localhost:{}/other", first.tunnel.local_port)
+    );
+    assert_eq!(place.runner.taken("tunnel.open").len(), 1);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_tunnel_says_the_machine_s_reason_and_opens_nothing() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    place
+        .runner
+        .refuse("tunnel.open", "refused: port 22 is none of run r1's");
+    let why = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:22/".to_owned(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(why.to_string(), "refused: port 22 is none of run r1's");
+    assert!(phone.view().tunnels.is_empty());
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tunnel_ends_with_its_run_and_the_view_says_why() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    place
+        .runner
+        .tunnel_ends
+        .send("run r1 ended".to_owned())
+        .unwrap();
+    let view = until(&phone, "the tunnel to end", |view| view.tunnels.is_empty()).await;
+    assert_eq!(
+        view.tunnels_ended,
+        [flottille_mobile::TunnelEnd {
+            tunnel: opened.tunnel.tunnel.clone(),
+            machine: "server".to_owned(),
+            run: "r1".to_owned(),
+            reason: "run r1 ended".to_owned(),
+        }]
+    );
+    // Nothing listens any more.
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", opened.tunnel.local_port))
+            .await
+            .is_err()
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_tunnel_stops_its_listener_and_tells_the_machine() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    phone.close_tunnel(opened.tunnel.tunnel.clone()).unwrap();
+    let view = until(&phone, "the tunnel to close", |view| {
+        view.tunnels.is_empty()
+    })
+    .await;
+    assert_eq!(view.tunnels_ended[0].reason, "closed by the user");
+    for _ in 0..500 {
+        if place.runner.tunnel_gone.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        place.runner.tunnel_gone.load(Ordering::SeqCst),
+        1,
+        "the machine saw it closed"
+    );
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", opened.tunnel.local_port))
+            .await
+            .is_err()
+    );
+    // A tunnel that is not held is said.
+    let why = phone.close_tunnel(opened.tunnel.tunnel).unwrap_err();
+    assert!(why.to_string().contains("no tunnel"), "{why}");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tunnel_ends_with_its_link() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let opened = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+        )
+        .await
+        .unwrap();
+    place.runner.cut();
+    let view = until(&phone, "the tunnel to end with its link", |view| {
+        view.tunnels.is_empty()
+    })
+    .await;
+    assert_eq!(view.tunnels_ended.len(), 1);
+    assert_eq!(view.tunnels_ended[0].tunnel, opened.tunnel.tunnel);
+    assert!(!view.tunnels_ended[0].reason.is_empty());
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_lists_the_runs_that_have_an_address_and_the_links_shown() {
+    let place = Place::new().await;
+    let runner = &place.runner;
+    runner.emit(
+        "run.started",
+        json!({"agent": "a1", "run": "r1", "name": null, "line": "pnpm dev", "folder": "/w",
+            "ready": "starting", "url": null, "url_error": null}),
+    );
+    runner.emit(
+        "run.started",
+        json!({"agent": "a1", "run": "r2", "name": null, "line": "cargo test", "folder": "/w",
+            "ready": null, "url": null, "url_error": null}),
+    );
+    runner.emit(
+        "run.ready",
+        json!({"agent": "a1", "run": "r1", "url": "http://localhost:5173/"}),
+    );
+    runner.emit(
+        "agent.tool_call",
+        json!({"agent": "a1", "id": "w", "title": "mcp__flottille__web", "update": false,
+            "raw_input": {"action": "show_link", "url": "http://localhost:5173/"}}),
+    );
+    runner.emit(
+        "agent.link_shown",
+        json!({"agent": "a1", "kind": "url", "target": "http://localhost:5173/", "title": "The app",
+            "host": "localhost", "shown": null}),
+    );
+    runner.emit(
+        "agent.link_shown",
+        json!({"agent": "a1", "kind": "file", "target": "/w/report.html", "title": null,
+            "host": null, "shown": "report.html"}),
+    );
+    runner.show(a1("auto", "idle"), None);
+    runner.answer(
+        "agent.tree",
+        tree_of(json!([{"agent": a1("auto", "idle"), "doing": "idle",
+        "waiting_on": null, "needs_user": false, "questions": []}])),
+    );
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+    let view = phone.view();
+    let page = the_page(&view);
+    // Only the run with an address, and the link of the web as an entry of its own (the step that
+    // showed it is not drawn, the file of the machine is not on the phone).
+    assert_eq!(
+        page.runs,
+        [flottille_mobile::RunView {
+            run: "r1".to_owned(),
+            line: "pnpm dev".to_owned(),
+            url: "http://localhost:5173/".to_owned(),
+        }]
+    );
+    let links: Vec<(&str, &str, &str)> = page
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.kind.as_str(),
+                entry.text.as_str(),
+                entry.link.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(links, [("link", "The app", "http://localhost:5173/")]);
+    // The run ends: it is no longer on the page.
+    runner.emit(
+        "run.ended",
+        json!({"agent": "a1", "run": "r1", "state": "exited", "exit_code": 0}),
+    );
+    until(&phone, "the run to leave the page", |view| {
+        view.conversation
+            .as_ref()
+            .is_some_and(|page| page.runs.is_empty())
+    })
+    .await;
     place.served.stop().await;
 }

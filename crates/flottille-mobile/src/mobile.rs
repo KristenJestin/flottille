@@ -25,6 +25,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::join::pair;
 use crate::keys::{Sealed, Sealer, endpoint_key, write_private};
+use crate::tunnel::Opened;
 use crate::view::{View, ViewState};
 use crate::{MobileError, link};
 
@@ -103,19 +104,21 @@ pub struct Core {
 pub(crate) struct Inner {
     pub(crate) folder: PathBuf,
     pub(crate) sealed: Sealed,
-    handle: tokio::runtime::Handle,
+    pub(crate) handle: tokio::runtime::Handle,
     state: Mutex<State>,
     ids: AtomicU64,
     /// The number of the next connection.
     connections: AtomicU64,
 }
 
-struct State {
+pub(crate) struct State {
     /// The key of the phone's endpoint, its machine in the list: a new one each join.
     endpoint: Arc<MachineKey>,
     device: Option<Device>,
     key: Option<Arc<DeviceKey>>,
-    view: View,
+    pub(crate) view: View,
+    /// The tunnels the phone holds, by id: what closes each.
+    pub(crate) tunnels: HashMap<String, crate::tunnel::Held>,
     /// The connection: what `disconnect` ends.
     connection: Option<Connection>,
     /// The number of the last event handed over to the app of each runner, by its machine key
@@ -152,7 +155,7 @@ impl Drop for Connection {
 }
 
 /// What reaches the batches, in order.
-enum Note {
+pub(crate) enum Note {
     Event {
         machine: String,
         key: PublicKey,
@@ -214,6 +217,7 @@ impl Core {
                 device,
                 key,
                 view,
+                tunnels: HashMap::new(),
                 connection: None,
                 seen,
             }),
@@ -583,6 +587,27 @@ impl Core {
             .await
     }
 
+    /// Opens the address `url` of `machine` through a tunnel: `run`'s own address when a run is
+    /// named, else the run that serves the port a `localhost` link writes. The tunnel lives while
+    /// the core stays connected, until the machine ends it (the run ended), the link goes, or
+    /// `close_tunnel`. A tunnel already held to the same run is the one answered: no second one.
+    pub async fn open_address(
+        &self,
+        machine: String,
+        run: Option<String>,
+        url: String,
+    ) -> Result<Opened, MobileError> {
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move { inner.open_address(&machine, run, &url).await })
+            .await
+    }
+
+    /// Closes the tunnel `tunnel`.
+    pub fn close_tunnel(&self, tunnel: String) -> Result<(), MobileError> {
+        self.inner.close_tunnel(&tunnel)
+    }
+
     /// The view state as it is now.
     pub fn view(&self) -> ViewState {
         self.inner.state().view.state()
@@ -600,7 +625,7 @@ impl Drop for Core {
 }
 
 impl Inner {
-    fn state(&self) -> MutexGuard<'_, State> {
+    pub(crate) fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap()
     }
 
@@ -638,7 +663,7 @@ impl Inner {
         Ok(())
     }
 
-    fn note(&self, note: Note) {
+    pub(crate) fn note(&self, note: Note) {
         if let Some(connection) = &self.state().connection {
             let _ = connection.notes.send(note);
         }
@@ -747,7 +772,7 @@ impl Inner {
     }
 
     /// The link to `machine`, or why there is none.
-    fn link_of(&self, machine: &str) -> Result<Link, MobileError> {
+    pub(crate) fn link_of(&self, machine: &str) -> Result<Link, MobileError> {
         let mut state = self.state();
         let why = state
             .view
@@ -774,7 +799,7 @@ impl Inner {
 
     /// Sends `method` with `params` to `machine` on `link`, signed with the device key: what comes
     /// back on its stream.
-    async fn ask(
+    pub(crate) async fn ask(
         &self,
         machine: &str,
         link: &Link,
@@ -804,7 +829,12 @@ impl Inner {
     }
 
     /// `method` on `machine`: its result, or its refusal.
-    async fn call(&self, machine: &str, method: &str, params: Value) -> Result<Value, MobileError> {
+    pub(crate) async fn call(
+        &self,
+        machine: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, MobileError> {
         let link = self.link_of(machine)?;
         self.call_on(machine, &link, method, params).await
     }
