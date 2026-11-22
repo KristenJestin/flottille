@@ -204,7 +204,7 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   them. Setting a model is no free probe: `claude` may check a model id it has not checked yet
   with a one-token request to the API (`set_model`'s check of 2.1.312). While a Claude model's
   efforts are `null` for the version there is now, the daemon lists its models again, once per
-  state of the provider; the window shows the effort picker's skeleton while a listing runs
+  state of the provider; the window's agent picker says no effort until a listing ran
   (`models_learning` of `provider.list`, `provider.models_learning`). An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
   lets it go at its start, said (`agent.options_replaced`).

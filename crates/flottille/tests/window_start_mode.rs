@@ -124,9 +124,7 @@ fn shown(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> (Option<Str
 fn on_auto_in_the_bar(composer: &Entity<Composer>, cx: &mut VisualTestContext) {
     assert_eq!(shown(composer, cx), (Some("auto".into()), false));
     cx.update(|window, _| {
-        assert_eq!(window.find("start-mode-auto").selected(), Some(true));
-        assert_eq!(window.find("start-mode-ask").selected(), Some(false));
-        assert_eq!(window.find("start-mode-full").selected(), Some(false));
+        assert_eq!(window.find("start-mode").label(), Some("Auto"));
         assert_eq!(
             window.find("start-mode-warning").label(),
             Some(flottille_window::mode::NO_JUDGE)
@@ -139,6 +137,14 @@ fn on_auto_in_the_bar(composer: &Entity<Composer>, cx: &mut VisualTestContext) {
             "in the bar of Start: {control:?} {send:?}"
         );
     });
+}
+
+/// Chooses `mode` (`ask`, `auto` or `full`) in the select: open it, pick the entry.
+fn choose_mode(mode: &str, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("start-mode", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("start-mode-{mode}"), cx));
+    settle(cx);
 }
 
 fn type_task(text: &str, cx: &mut VisualTestContext) {
@@ -193,12 +199,29 @@ fn the_composer_that_starts_a_session_offers_ask_auto_full_on_auto(cx: &mut Test
     settle(cx);
     on_auto_in_the_bar(&composer, cx);
 
-    // Full is drawn in the alarm colour.
+    // Each entry says its meaning in a line; Full is drawn in the alarm colour.
+    cx.update(|window, cx| window.click("start-mode", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        for mode in ["ask", "auto", "full"] {
+            let line = window
+                .find(format!("start-mode-{mode}-line"))
+                .label()
+                .map(str::to_owned);
+            assert!(
+                line.is_some_and(|line| !line.is_empty()),
+                "{mode} says what it does"
+            );
+        }
+        assert_eq!(window.find("start-mode-auto").selected(), Some(true));
+        assert_eq!(window.find("start-mode-ask").selected(), Some(false));
+        assert_eq!(window.find("start-mode-full").selected(), Some(false));
+    });
     cx.update(|window, cx| window.click("start-mode-full", cx));
     settle(cx);
     assert_eq!(shown(&composer, cx), (Some("full".into()), true));
     cx.update(|window, _| {
-        assert_eq!(window.find("start-mode-full").selected(), Some(true));
+        assert_eq!(window.find("start-mode").label(), Some("Full"));
         assert!(window.try_find("start-mode-warning").is_none());
     });
     // Choosing it starts nothing and asks the daemon nothing.
@@ -217,7 +240,7 @@ fn after_a_start_the_composer_is_back_on_auto(cx: &mut TestAppContext) {
     let user = user();
     let (shell, composer, cx) = atlas(&user, cx);
 
-    cx.update(|window, cx| window.click("start-mode-full", cx));
+    choose_mode("full", cx);
     type_task("Fix the login", cx);
     cx.update(|window, cx| window.click("send", cx));
     until(&shell, cx, "the session started", |cx| {
