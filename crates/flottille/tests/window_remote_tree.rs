@@ -703,14 +703,15 @@ fn the_session_header_names_its_machine_by_its_icon(cx: &mut TestAppContext) {
         label(cx, "session-machine".into()).as_deref() == Some("pc")
     });
     let mark = label(cx, "session-machine-mark".into()).unwrap_or_default();
-    assert!(mark.contains(" in "), "its icon and colour, in words: {mark:?}");
+    assert!(
+        mark.contains(" in "),
+        "its icon and colour, in words: {mark:?}"
+    );
     assert!(present(cx, "session-place".into()), "the place stays");
 }
 
 #[gpui_kit::test]
-fn a_session_led_on_another_machine_is_in_the_rail_with_its_machine_icon(
-    cx: &mut TestAppContext,
-) {
+fn a_session_led_on_another_machine_is_in_the_rail_with_its_machine_icon(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     let (pilot, mcp) = root(&pc, "auto");
     let agent = led_on_server(&mcp);
