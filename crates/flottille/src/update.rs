@@ -685,6 +685,22 @@ pub fn stage(paths: &Paths, progress: &dyn Fn(u64, Option<u64>)) -> Result<Versi
     stage_from(&binary()?, &url, progress)
 }
 
+/// The version of the binary at `binary`, as its `--version` says it; none when it does not.
+fn installed_version(binary: &Path) -> Option<Version> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = crate::children::spawn_std(&mut command)
+        .ok()?
+        .wait_with_output()
+        .ok()?;
+    let said = String::from_utf8(output.stdout).ok()?;
+    Version::parse(said.split_whitespace().nth(1)?).ok()
+}
+
 /// Downloads the archive at `url` and its sum, checks the sum, and unpacks it into the staging of
 /// `binary`, with its manifest. Nothing that runs is touched; a wrong sum stages nothing, and
 /// nothing is left beside the binary but the staging.
@@ -695,6 +711,13 @@ fn stage_from(binary: &Path, url: &str, progress: &dyn Fn(u64, Option<u64>)) -> 
     // Before anything is read: a link there is refused, and left for the user to see.
     if is_link(&staging) {
         return Err(not_followed(&staging));
+    }
+    // What is staged is compared with the binary at the install path, not with this process: a
+    // process still on the version an update replaced would stage the build already installed.
+    if let Some(installed) = installed_version(binary)
+        && (version == installed || is_older(&version, &installed))
+    {
+        return Err(format!("{version} is not newer than the {installed} installed").into());
     }
     let dir = binary.parent().ok_or("the binary has no folder")?;
     let work = tempfile_dir(dir)?;
@@ -880,6 +903,9 @@ pub enum Staged {
     Applied(PathBuf),
     /// What was staged was removed, for the reason said.
     Refused(String),
+    /// What was staged is the version that runs: what an update left behind it, removed without
+    /// a word to the window.
+    Leftover(String),
 }
 
 /// `$XDG_STATE_HOME/flottille/updated.json`: the last build applied, the version it replaced and
@@ -904,14 +930,16 @@ pub fn apply_staged(paths: &Paths) -> Staged {
         }
         Ok(meta) => meta,
     };
-    let refuse = |why: String| {
-        // A link is removed, never what it names.
-        let removed = if meta.is_dir() {
+    // A link is removed, never what it names.
+    let remove = || {
+        if meta.is_dir() {
             std::fs::remove_dir_all(&staging)
         } else {
             std::fs::remove_file(&staging)
-        };
-        let removed = match removed {
+        }
+    };
+    let refuse = |why: String| {
+        let removed = match remove() {
             Ok(()) => "removed".to_owned(),
             Err(error) => format!("not removed ({error})"),
         };
@@ -939,6 +967,18 @@ pub fn apply_staged(paths: &Paths) -> Staged {
     let this = Version::parse(VERSION);
     match (Version::parse(&manifest.version), &this) {
         (Ok(version), Ok(this)) if version != *this && !is_older(&version, this) => {}
+        (Ok(version), Ok(this)) if version == *this => {
+            return match remove() {
+                Ok(()) => Staged::Leftover(format!(
+                    "the build staged at {} is {this}, the version that runs: removed",
+                    staging.display()
+                )),
+                Err(error) => Staged::Refused(format!(
+                    "the build staged at {} is {this}, the version that runs, and was not removed ({error})",
+                    staging.display()
+                )),
+            };
+        }
         (_, Ok(this)) => {
             return refuse(format!(
                 "{} is not newer than this {this}",

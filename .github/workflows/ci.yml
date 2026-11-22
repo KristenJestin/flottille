@@ -540,14 +540,19 @@ jobs:
         continue-on-error: true
 
   # The release key signs the APK here and nowhere else (`docs/releases.md`, "The version"). The
-  # job runs on a push to a protected branch only, in the environment `android-release`, whose
-  # deployment branches are the maintainer's to set: no other branch's code, no pull request and no
-  # run started by hand reaches the key. It runs no third-party action and no script of the
-  # repository: it takes the unsigned APK of `android`, signs it with the runner's own
-  # `apksigner`, and keeps it for `publish`. Without the secrets it signs nothing and says so.
+  # job runs on a push to a protected branch, and on the release build of main (the `Release`
+  # workflow starts ci.yml on main by workflow_dispatch, and a commit main holds is always a
+  # released commit of dev), in the environment `android-release`, whose deployment branches are
+  # the maintainer's to set: no other branch's code, no pull request and no run started by hand on
+  # another ref reaches the key. It runs no third-party action and no script of the repository: it
+  # takes the unsigned APK of `android`, signs it with the runner's own `apksigner`, and keeps it
+  # for `publish`. Without the secrets it signs nothing and says so.
   android-sign:
     needs: [android]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.android.result == 'success' }}
+    if: >-
+      ${{ !cancelled() && needs.android.result == 'success'
+      && (github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     environment: android-release
     permissions:
@@ -959,11 +964,11 @@ jobs:
           pattern: hub-assets-*
           path: hub
           merge-multiple: true
-      # The app's APK: the signed one of `android-sign`, which only a push run has (its job runs on
-      # a push, in its environment). A pull request's run, or one without the release key,
-      # attaches none: no APK of a build job is ever attached.
+      # The app's APK: the signed one of `android-sign`, which only a push run and the release
+      # build of main have (its job runs on those, in its environment). A pull request's run, or
+      # one without the release key, attaches none: no APK of a build job is ever attached.
       - name: The signed APK
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:

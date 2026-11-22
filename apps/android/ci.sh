@@ -2,7 +2,7 @@
 # The Android job of CI (`docs/remote.md`, "The Android app"), from the repository's root on a
 # GitHub runner (ubuntu, the Android SDK and NDK, KVM): the core built with cargo ndk, the Gradle
 # unit tests (the bindings on the JVM, the libraries' 16 KB alignment, the app's screens played by
-# Robolectric against a fake core), then the instrumentation tests of both modules on an emulator.
+# Robolectric against a fake core, offline), then the instrumentation tests of both modules on an emulator.
 # The APK is `apk.sh`'s, the next step of the job.
 #   apps/android/ci.sh
 set -euo pipefail
@@ -34,6 +34,17 @@ emulator=$ANDROID_HOME/emulator/emulator
 adb=$ANDROID_HOME/platform-tools/adb
 "$emulator" -avd core -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect \
   -camera-back none -camera-front none >"$out/emulator.log" 2>&1 &
+
+# Robolectric loads an `android-all` jar per SDK its tests run on; resolved here, as the Gradle
+# dependency it is, the tests fetch nothing (`app/build.gradle.kts`: `robolectric.offline`). The one
+# step that needs Maven's network is this one, so a hiccup of it is retried.
+step "the Robolectric jars, fetched before any test"
+for attempt in 1 2 3; do
+  "$android/gradle.sh" :app:fetchRobolectricJars >"$out/robolectric-jars.log" 2>&1 && break
+  [ "$attempt" -lt 3 ] || { tail -40 "$out/robolectric-jars.log"; exit 1; }
+  echo "attempt $attempt failed, again in 20 s"
+  sleep 20
+done
 
 step "the core and the app, the unit tests and the test APKs, while it boots"
 "$android/gradle.sh" :core:testDebugUnitTest :app:testDebugUnitTest :core:assembleDebugAndroidTest \
