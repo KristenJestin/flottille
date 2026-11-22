@@ -7,8 +7,22 @@ use crate::routine::{Routine, Run};
 use crate::{Error, Result};
 
 const ROUTINE: &str = "id, name, project, prompt, provider, model, effort, schedule, zone, mode, \
-    rings, paused, missed_hours, next_at, delayed, created_at, updated_at";
-const RUN: &str = "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why";
+    rings, paused, missed_hours, next_at, delayed, created_at, updated_at, event";
+/// The most events held for a routine: the newest, the earlier ones only counted.
+pub const HELD: usize = 20;
+const EARLIER_START: &str = "(and ";
+const EARLIER_END: &str = " earlier events, not kept)";
+
+/// The count of the line that says how many earlier events were let go.
+fn earlier_of(line: &str) -> Option<u64> {
+    line.strip_prefix(EARLIER_START)?
+        .strip_suffix(EARLIER_END)?
+        .parse()
+        .ok()
+}
+
+const RUN: &str =
+    "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why, trigger";
 
 fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
     Ok(Routine {
@@ -29,6 +43,9 @@ fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
         delayed: row.get(14)?,
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
+        event: row
+            .get::<_, Option<String>>(17)?
+            .and_then(|text| serde_json::from_str(&text).ok()),
     })
 }
 
@@ -44,6 +61,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Run> {
         outcome: row.get(7)?,
         summary: row.get(8)?,
         why: row.get(9)?,
+        trigger: row.get(10)?,
     })
 }
 
@@ -55,6 +73,7 @@ pub struct NewRun<'a> {
     pub mode: &'a str,
     pub outcome: &'a str,
     pub why: Option<&'a str>,
+    pub trigger: Option<&'a str>,
 }
 
 impl Store {
@@ -86,12 +105,12 @@ impl Store {
         let sql = match new {
             true => format!(
                 "INSERT INTO routines ({ROUTINE}) VALUES \
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
             ),
             false => "UPDATE routines SET name = ?2, project = ?3, prompt = ?4, provider = ?5, \
                  model = ?6, effort = ?7, schedule = ?8, zone = ?9, mode = ?10, rings = ?11, \
                  paused = ?12, missed_hours = ?13, next_at = ?14, delayed = ?15, \
-                 created_at = ?16, updated_at = ?17 WHERE id = ?1"
+                 created_at = ?16, updated_at = ?17, event = ?18 WHERE id = ?1"
                 .to_owned(),
         };
         self.connection.execute(
@@ -113,7 +132,8 @@ impl Store {
                 r.next_at,
                 r.delayed,
                 r.created_at,
-                r.updated_at
+                r.updated_at,
+                r.event.as_ref().map(|event| event.to_string())
             ],
         )?;
         Ok(())
@@ -143,7 +163,8 @@ impl Store {
     /// The earliest run due of every routine not paused: what the daemon waits for.
     pub fn next_routine_due(&self) -> Result<Option<u64>> {
         Ok(self.connection.query_row(
-            "SELECT min(next_at) FROM routines WHERE paused = 0",
+            "SELECT min(coalesce(min(next_at, held_at), next_at, held_at)) FROM routines \
+             WHERE paused = 0",
             [],
             |row| row.get(0),
         )?)
@@ -176,8 +197,8 @@ impl Store {
     pub fn add_routine_run(&self, new: &NewRun) -> Result<Run> {
         Ok(self.connection.query_row(
             &format!(
-                "INSERT INTO routine_runs (routine, due_at, started_at, mode, outcome, why) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING {RUN}"
+                "INSERT INTO routine_runs (routine, due_at, started_at, mode, outcome, why, \
+                 trigger) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING {RUN}"
             ),
             params![
                 new.routine,
@@ -185,7 +206,8 @@ impl Store {
                 new.started_at,
                 new.mode,
                 new.outcome,
-                new.why
+                new.why,
+                new.trigger
             ],
             run_row,
         )?)
@@ -263,6 +285,120 @@ impl Store {
         ))?;
         let rows = statement.query_map([], run_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// What the routine's watch of an event last saw (the workflow runs it read), none before
+    /// its first read.
+    pub fn routine_seen(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        let seen: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT seen FROM routines WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(seen
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
+    pub fn set_routine_seen(&self, id: &str, seen: &serde_json::Value) -> Result<()> {
+        self.connection.execute(
+            "UPDATE routines SET seen = ?2 WHERE id = ?1",
+            params![id, seen.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets what the routine's event saw and held: its event changed.
+    pub fn reset_routine_event(&self, id: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE routines SET seen = NULL, held_at = NULL, held = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Holds what an event said until `at` (its `not_before`), with what was held already: one
+    /// held earlier keeps its time. The newest `HELD` are kept, and a first line says how many
+    /// earlier ones were let go.
+    pub fn hold_routine_event(&self, id: &str, at: u64, said: &str) -> Result<()> {
+        let held: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT held FROM routines WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut held: Vec<String> = held
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let mut earlier = match held.first().and_then(|first| earlier_of(first)) {
+            Some(earlier) => {
+                held.remove(0);
+                earlier
+            }
+            None => 0,
+        };
+        held.push(said.to_owned());
+        if held.len() > HELD {
+            let over = held.len() - HELD;
+            held.drain(..over);
+            earlier += over as u64;
+        }
+        if earlier > 0 {
+            held.insert(0, format!("{EARLIER_START}{earlier}{EARLIER_END}"));
+        }
+        self.connection.execute(
+            "UPDATE routines SET held_at = coalesce(held_at, ?2), held = ?3 WHERE id = ?1",
+            params![id, at, serde_json::to_string(&held)?],
+        )?;
+        Ok(())
+    }
+
+    /// How many of the routine's runs started a session since `since`.
+    pub fn routine_started_since(&self, routine: &str, since: u64) -> Result<u64> {
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM routine_runs WHERE routine = ?1 AND session IS NOT NULL \
+             AND started_at >= ?2",
+            params![routine, since],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The routines whose held events are due at `now`, with when they were.
+    pub fn routines_held_due(&self, now: u64) -> Result<Vec<(String, u64)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, held_at FROM routines WHERE held_at <= ?1 AND paused = 0",
+        )?;
+        let rows = statement.query_map(params![now], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Takes what was held until `at`: none when another took it first.
+    pub fn take_routine_held(&self, id: &str, at: u64) -> Result<Option<Vec<String>>> {
+        let held: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT held FROM routines WHERE id = ?1 AND held_at = ?2",
+                params![id, at],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(held) = held else {
+            return Ok(None);
+        };
+        let taken = self.connection.execute(
+            "UPDATE routines SET held_at = NULL, held = NULL WHERE id = ?1 AND held_at = ?2",
+            params![id, at],
+        )? == 1;
+        Ok(taken.then(|| {
+            held.and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default()
+        }))
     }
 
     /// The session may write nothing from now on: a read-only run's. Never cleared.
