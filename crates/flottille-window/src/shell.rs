@@ -537,14 +537,6 @@ impl Shell {
                 MachinesSection::rename_focus,
                 cx,
             );
-            modals.add(
-                crate::machines_page::ADDRESS_MODAL,
-                &machines,
-                MachinesSection::address_dialog,
-                MachinesSection::address_is_open,
-                MachinesSection::address_focus,
-                cx,
-            );
             modals.add_view(
                 crate::machines_page::REMOVAL_DIALOG,
                 &removal,

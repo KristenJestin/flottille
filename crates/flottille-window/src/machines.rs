@@ -85,8 +85,6 @@ pub struct Machine {
     pub role: Option<String>,
     /// The address its live link goes to or came from; `None` while it is not linked.
     pub reached: Option<Reached>,
-    /// The addresses it is known at, as the hub, the user or it told them.
-    pub addresses: Vec<String>,
 }
 
 /// Where a live link to another machine goes.
@@ -110,13 +108,6 @@ impl Machine {
                 address: address.to_owned(),
                 dialled: value["reached"]["dialled"].as_bool().unwrap_or(true),
             }),
-            addresses: value["addresses"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect(),
         }
     }
 
@@ -131,9 +122,8 @@ impl Machine {
     }
 
     /// How it is reached, in words: the address of its link (the host only when it dialled this
-    /// machine: its port is the one it dialled from), or how it failed; with the hub out of
-    /// reach, the address it was last known at, which only the hub could have told.
-    pub fn address_words(&self, hub_usable: bool) -> String {
+    /// machine: its port is the one it dialled from), or how it failed.
+    pub fn address_words(&self) -> String {
         if let Some(reached) = &self.reached {
             return if reached.dialled {
                 format!("Reached at {}", reached.address)
@@ -141,17 +131,9 @@ impl Machine {
                 format!("Linked from {}", host_of(&reached.address))
             };
         }
-        let reason = self.reason.as_deref().map(how_it_failed);
-        let last = self
-            .addresses
-            .first()
-            .filter(|address| !hub_usable && !reason.is_some_and(|r| r.contains(*address)))
-            .map(|address| format!("Last known address {address}."));
-        match (reason, last) {
-            (Some(reason), Some(last)) => format!("{reason} {last}"),
-            (Some(reason), None) => reason.to_owned(),
-            (None, Some(last)) => last,
-            (None, None) => "Not reached yet".to_owned(),
+        match self.reason.as_deref().map(how_it_failed) {
+            Some(reason) => reason.to_owned(),
+            None => "Not reached yet".to_owned(),
         }
     }
 
@@ -175,13 +157,6 @@ pub struct Member {
     pub added_by: String,
     /// The fingerprint of the machine it declared.
     pub machine: Option<String>,
-}
-
-/// An address this machine may be reached at: `found` or `declared` by hand.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Address {
-    pub address: String,
-    pub how: String,
 }
 
 /// The hub this machine is set up with.
@@ -338,7 +313,6 @@ pub struct Machines {
     pub off: Option<String>,
     /// This machine's member's name, when it is one.
     pub this: Option<String>,
-    pub addresses: Vec<Address>,
     pub hub: Option<Hub>,
     pub machines: Vec<Machine>,
     pub members: Vec<Member>,
@@ -397,8 +371,6 @@ pub enum Ask {
     Remove {
         name: String,
     },
-    AddressAdd(String),
-    AddressRemove(String),
     /// Turns remote on or off (`remote.configure`).
     Configure {
         on: bool,
@@ -411,8 +383,6 @@ impl Ask {
             Ask::Pair { .. } => Asked::Pair,
             Ask::Rename { new_name, .. } => Asked::Rename(new_name.clone()),
             Ask::Remove { name } => Asked::Remove(name.clone()),
-            Ask::AddressAdd(address) => Asked::AddressAdd(address.clone()),
-            Ask::AddressRemove(address) => Asked::AddressRemove(address.clone()),
             Ask::Configure { on } => Asked::Configure { on: *on },
         }
     }
@@ -424,8 +394,6 @@ pub enum Asked {
     Pair,
     Rename(String),
     Remove(String),
-    AddressAdd(String),
-    AddressRemove(String),
     Configure { on: bool },
 }
 
@@ -677,14 +645,6 @@ impl Remote {
                 request("remote.change", json!({"change": change}))?;
                 Ok(())
             }
-            Ask::AddressAdd(address) => {
-                request("remote.address.add", json!({"address": address}))?;
-                Ok(())
-            }
-            Ask::AddressRemove(address) => {
-                request("remote.address.remove", json!({"address": address}))?;
-                Ok(())
-            }
             Ask::Configure { on } => {
                 request("remote.configure", json!({"on": on}))?;
                 Ok(())
@@ -713,15 +673,6 @@ fn read(conn: &mut Conn) -> Result<Machines> {
     let mut read = Machines {
         off: None,
         this: None,
-        addresses: machines["this"]["addresses"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|address| Address {
-                address: text(&address["address"]),
-                how: text(&address["how"]),
-            })
-            .collect(),
         machines: machines["machines"]
             .as_array()
             .into_iter()

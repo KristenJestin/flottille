@@ -3,8 +3,8 @@
 //! it on a runtime of its own.
 //!
 //! Behind `connect`: the control session to the hub, which says the phone is present and sends
-//! the member list (checked back to the pinned root, a list that does not check refused) and the
-//! runners' addresses; a link to each runner, through which every request goes signed with the
+//! the member list (checked back to the pinned root, a list that does not check refused); a link
+//! to each runner through the hub, through which every request goes signed with the
 //! device key; on each link, `events.watch` resumed after the last event seen of that runner, so
 //! that a new link misses nothing and repeats nothing. The events go to the view state in
 //! batches: what arrives together is drawn together.
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
     Action, Ask, Change, Device, DeviceKey, Endpoint, Link, MachineKey, Message, PeerState,
-    PublicKey, Pushed, Request, Role, Session, Tls, Told,
+    PublicKey, Pushed, Request, Role, Session, Tls,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -78,8 +78,6 @@ pub(crate) struct Inner {
     ids: AtomicU64,
     /// The number of the next connection.
     connections: AtomicU64,
-    /// Rings when the hub told new addresses: a runner waiting to dial again tries at once.
-    told_again: tokio::sync::Notify,
 }
 
 struct State {
@@ -105,9 +103,6 @@ struct Connection {
     links: HashMap<String, Link>,
     /// The runners a task links to, by name: the machine key it links to, and the task.
     linking: HashMap<String, (PublicKey, tokio::task::AbortHandle)>,
-    /// The addresses the hub told, none before its first telling: a runner is linked to once it
-    /// came, so that the addresses are tried before the hub (`docs/remote.md`, "The transport").
-    told: Option<HashMap<[u8; 32], Vec<String>>>,
     tasks: Vec<tokio::task::AbortHandle>,
 }
 
@@ -199,7 +194,6 @@ impl Core {
             }),
             ids: AtomicU64::new(1),
             connections: AtomicU64::new(1),
-            told_again: tokio::sync::Notify::new(),
         });
         Ok(Arc::new(Core {
             inner,
@@ -520,19 +514,6 @@ impl Inner {
         gone
     }
 
-    /// The addresses the hub told for the members' machines.
-    fn told(self: &Arc<Self>, told: Vec<Told>) {
-        if let Some(connection) = &mut self.state().connection {
-            connection.told = Some(
-                told.into_iter()
-                    .map(|told| (*told.key.as_bytes(), told.addresses))
-                    .collect(),
-            );
-        }
-        self.told_again.notify_waiters();
-        self.link_runners();
-    }
-
     /// The runners of the list, by name, with their machine keys.
     fn runners(state: &State) -> Vec<(String, PublicKey)> {
         let (Some(device), Some(key)) = (&state.device, &state.key) else {
@@ -556,9 +537,6 @@ impl Inner {
         let Some(connection) = &mut state.connection else {
             return;
         };
-        if connection.told.is_none() {
-            return;
-        }
         for (name, machine) in runners {
             if let std::collections::hash_map::Entry::Vacant(vacant) =
                 connection.linking.entry(name)
@@ -726,7 +704,8 @@ impl Inner {
             }
             return;
         }
-        let through_hub = link.as_ref().is_some_and(Link::through_hub);
+        // Every link goes through the hub.
+        let through_hub = link.is_some();
         state.view.online(machine, peer, through_hub, why);
         if let Some(connection) = &mut state.connection {
             match link {
@@ -774,10 +753,8 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         })
         .await
         .map_err(said)?;
-    let endpoint =
-        Endpoint::dialler(&machine).map_err(|error| MobileError::new(error.to_string()))?;
-    // The phone listens nowhere: its links to the runners go through this session to the hub,
-    // after any address the hub told, as a daemon's do.
+    let endpoint = Endpoint::new(&machine).map_err(|error| MobileError::new(error.to_string()))?;
+    // Its links to the runners go through this session to the hub, as a daemon's do.
     if let Some(port) = session.relay() {
         endpoint.through(port);
     }
@@ -798,7 +775,6 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
             endpoint,
             links: HashMap::new(),
             linking: HashMap::new(),
-            told: None,
             tasks: vec![pump.abort_handle(), control.abort_handle()],
         });
     }
@@ -812,7 +788,6 @@ async fn control(inner: Arc<Inner>, mut session: Session) {
     while let Some(pushed) = session.next().await {
         match pushed {
             Pushed::List(list) => inner.took_list(list),
-            Pushed::Addresses(told) => inner.told(told),
             Pushed::Presence(_) | Pushed::Facts(_) => {}
         }
     }
@@ -829,22 +804,15 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
     loop {
         let found = {
             let state = inner.state();
-            state.connection.as_ref().map(|connection| {
-                (
-                    connection.endpoint.clone(),
-                    connection
-                        .told
-                        .as_ref()
-                        .and_then(|told| told.get(machine.as_bytes()))
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            })
+            state
+                .connection
+                .as_ref()
+                .map(|connection| connection.endpoint.clone())
         };
-        let Some((endpoint, told)) = found else {
+        let Some(endpoint) = found else {
             return;
         };
-        match link::dial(&endpoint, machine, &told, &name).await {
+        match link::dial(&endpoint, machine, &name).await {
             Ok(linked) => {
                 wait = FIRST_WAIT;
                 inner.online(&name, machine, Some(linked.clone()), PeerState::Online, "");
@@ -870,9 +838,10 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
             }
             return;
         }
+        // A runner that comes online is dialled at once.
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
-            _ = inner.told_again.notified() => {}
+            _ = endpoint.online_changed() => {}
         }
         wait = (wait * 2).min(LONGEST_WAIT);
     }

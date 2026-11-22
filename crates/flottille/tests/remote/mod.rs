@@ -13,7 +13,10 @@ use std::process::Output;
 use std::time::{Duration, Instant, SystemTime};
 
 use flottille_hub::{Hub, Served, SystemClock};
-use flottille_link::{DeviceKey, Hello, Keyring, KeyringError, Request};
+use flottille_link::{
+    Device, DeviceKey, Endpoint, Hello, Keyring, KeyringError, Link, LinkError, MachineKey,
+    PublicKey, Request, Tls, Traffic,
+};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -96,11 +99,11 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// `user`'s machine, with remote on, its link on loopback.
+    /// `user`'s machine, with remote on: its links go through the hub.
     pub fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
-            "[remote]\non = true\nlisten = \"127.0.0.1:0\"\n",
+            "[remote]\non = true\n",
         )
         .unwrap();
         user.status();
@@ -261,4 +264,46 @@ pub fn eventually(what: &str, mut check: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "{what} never happened");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The endpoint of the machine key in the key folder `folder` through its hub, as the machine's
+/// daemon holds it, for a test that speaks as that machine: its daemon stopped first, since the
+/// hub keeps one session a key. Within a Tokio runtime; the session lasts while the runtime does.
+pub async fn endpoint_of(folder: &std::path::Path) -> Endpoint {
+    let key = MachineKey::load_or_make(folder).unwrap();
+    let pinned: Device =
+        serde_json::from_str(&std::fs::read_to_string(folder.join("hub.json")).unwrap()).unwrap();
+    let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
+    let mut session = pinned.connect(&key, &hello, &Tls::System).await.unwrap();
+    let endpoint = Endpoint::new(&key).unwrap();
+    endpoint.through(session.relay().expect("the session's relay"));
+    tokio::spawn(async move { while session.next().await.is_some() {} });
+    endpoint
+}
+
+/// A link of `traffic` from `endpoint` to the machine whose key is `peer`, named `name`, dialled
+/// again while the hub does not say it online yet.
+pub async fn dial(
+    endpoint: &Endpoint,
+    peer: PublicKey,
+    traffic: Traffic,
+    name: &str,
+) -> Result<Link, LinkError> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match endpoint
+            .connect(peer, traffic, &Hello::ours("0.4.1"), name)
+            .await
+        {
+            Err(LinkError::Offline(_) | LinkError::NoHub(_)) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            made => return made,
+        }
+    }
+}
+
+/// The machine key of `machine`, as `remote.machines` says it.
+pub fn key_of(machine: &Machine) -> PublicKey {
+    serde_json::from_value(machine.remote()["this"]["key"].clone()).unwrap()
 }

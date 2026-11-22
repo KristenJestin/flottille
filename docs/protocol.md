@@ -221,8 +221,6 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
 | `remote.machines` | read |
-| `remote.address.add` | drive |
-| `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
 | `remote.sessions` | read |
@@ -1352,36 +1350,25 @@ The link to the user's other machines (`docs/remote.md`, "Architecture", "The tr
 remote on (Settings, Machines, or `flottille remote on`, which write `[remote] on = true` in
 `daemon.toml`). With it off, each is `refused` (`remote is off: turn it on in Settings, Machines,
 or with flottille remote on`), but `remote.settings` and `remote.configure`; with a link that could
-not listen, `unavailable`, with the reason. No method answers a private key.
+not start, `unavailable`, with the reason. No method answers a private key. Every link goes through
+the hub: nothing listens, and no method takes or answers an address of a machine (the direct link
+was removed on 2026-11-21).
 
-- `remote.settings` (local) answers `{"on", "listen", "listening", "waits", "port", "problem",
-  "interfaces": [{"name", "address", "tailnet"}]}`: whether remote is on, where `daemon.toml` says
-  the link listens (`"100.64.0.7:7447"`, `null` for nowhere), where it listens now (`null` while
-  it listens nowhere or remote is off), whether a change of `listen` `waits` for the next start
-  (an agent ran when it was made), the port an address is given without one (7447), why `listen`
-  cannot be read when it cannot (`problem`), and the addresses of this machine's own interfaces
-  (IPv4, loopback and interfaces that are down left out), a Tailscale or WireGuard one first
-  (`tailnet`: an address of 100.64.0.0/10, or an interface named `tailscale*` or `wg*`).
-- `remote.configure {on?, listen?}` (local) changes either and answers `remote.settings`'. `listen`
-  is `nowhere`, `tailnet` (this machine's first tailnet address, `invalid-params` when it has
-  none) or an address, its port 7447 when it gives none. It writes `daemon.toml` itself, every
-  other key and comment kept, and takes the change without a restart: the link starts, stops, or
-  listens elsewhere. Closing a link cuts what it carries, so a new `listen` on a running link is
-  only written, and `waits` says so, while an agent runs. A change that cannot be taken (an
-  address no interface holds, a file that is not TOML) is `refused` and leaves the file as it was.
-  Turning remote off keeps the pairing with the hub and the keys; turned on again, the same hub.
+- `remote.settings` (local) answers `{"on"}`: whether remote is on.
+- `remote.configure {on?}` (local) turns it on or off and answers `remote.settings`'. It writes
+  `daemon.toml` itself, every other key and comment kept, and takes the change without a restart:
+  the link starts or stops. A file that is not TOML is `refused` and left as it was. A `listen`
+  given is not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing
+  with the hub and the keys; turned on again, the same hub.
 
-- `remote.machines` answers `{"this": {"name", "key", "fingerprint", "listening", "addresses": [{"address",
-  "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
-  "addresses"}]}`: this machine's member name (`null` until it is set up), its public key, the socket its link listens on (`null` until
-  `[remote] listen` is set), and its addresses,
-  `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
-  `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
+- `remote.machines` answers `{"this": {"name", "key", "fingerprint"}, "machines": [{"name",
+  "key", "fingerprint", "state", "since", "reason", "reached"}]}`: this machine's member name
+  (`null` until it is set up) and its public key; then each machine it trusts, its
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
-  `docs/remote.md`, "The version"), or `null`, `reached` where its live link goes or came from
-  (`{"address", "dialled"}`, `address` being `the hub` for a link through it, `dialled` saying
-  whether this machine dialled it; `null` while it is not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
+  `docs/remote.md`, "The version"), or `null`, and `reached` its live link (`{"address",
+  "dialled"}`, `address` being `the hub`, which every link goes through, `dialled` saying whether
+  this machine dialled it; `null` while it is not linked). `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
   hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
   `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net is
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
@@ -1401,12 +1388,6 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   `offered`: the names of the runners linked (this machine first) that would take a session of
   `project` on `agent` (any agent signed in, when none is named): the project there, the agent
   signed in, a slot free.
-- `remote.address.add {address}` declares an address of this machine: a host name or an IP
-  address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
-  It answers `this` as above, and is told at once to the machines linked to this one.
-  `invalid-params` for what is not an address; one declared already changes nothing.
-- `remote.address.remove {address}` removes one, answers and tells as `add` does; `not-found` when
-  it was not declared.
 - `remote.members` answers the member list as this machine last checked it: `{"hub", "root",
   "head", "this", "members": [{"name", "key", "fingerprint", "role", "icon", "colour", "added_by",
   "machine", "kind", "system", "version", "paired_at", "last_seen"}]}`, `head` the hash of its last
