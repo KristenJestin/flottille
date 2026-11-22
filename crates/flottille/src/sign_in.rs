@@ -423,7 +423,10 @@ impl Reading {
         if self.address.is_none()
             && let Some(at) = line.find("https://").or_else(|| line.find("http://"))
         {
-            self.address = line[at..].split_whitespace().next().map(str::to_owned);
+            self.address = line[at..]
+                .split_whitespace()
+                .next()
+                .map(|address| masked(&declared::without_credentials(address)));
         }
         if self.code.is_none() && line.to_ascii_lowercase().contains("one-time code") {
             let after = line.rsplit_once(':').map(|(_, after)| after.trim());
