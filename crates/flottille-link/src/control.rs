@@ -18,7 +18,8 @@
 //! hub → device   {"hub": H, "nonce": Nh, "hello": {…}, "proof": sign_H(session, 1, K, Nd, Nh)}
 //! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false,
-//!                                                 "proof": sign_H(refused, K, Nd, Nh, reset, reason)}}
+//!                                                 "proof": sign_H(refused, K, Nd, Nh, P, pair,
+//!                                                                 reset, reason)}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
 //!                {"list": […]}, {"presence": […]}, {"facts": […]}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
@@ -44,9 +45,15 @@
 //! The welcome or the refusal is said over a connection nothing protects on an `http://` hub. The
 //! refusal is a verdict a device acts on (it forgets the hub, or says its list was reset), so the
 //! hub signs it over the handshake: `refused` is `flottille-hub-refused-v1` and a zero byte, then
-//! the device's key, both nonces, `reset` as one byte and the reason's bytes. A refusal whose
-//! proof is missing (a hub of before 2026-11-22) or does not check (said by something on the way,
-//! or caught in another session) changes nothing: the device says the hub could not be reached.
+//! the device's key, both nonces, what the hub received of the device's proof, `reset` as one byte
+//! and the reason's bytes. What it received is `pinned` (a zero byte when there is none, else a one
+//! and the hash) and `pair` (a zero byte, else a one, the pairing's proof and `Proposed::bytes`):
+//! the device's signature covers neither, so something on the way could add a `pair` to a member's
+//! proof, or change `pinned`, to have the hub refuse it; the device checks the refusal against what
+//! it sent, and such a refusal does not check. A refusal whose proof is missing (a hub of before
+//! 2026-11-22) or does not check (said by something on the way, answering a request changed on the
+//! way, or caught in another session) changes nothing: the device says the hub could not be
+//! reached.
 //!
 //! A device that pairs (`docs/remote.md`, "Pairing") is no member yet: its proof carries `pair`,
 //! the card it proposes (`Proposed`) and its proof that it holds the pair code's secret, which
@@ -365,12 +372,37 @@ impl Transcript {
     }
 
     /// What the hub signs when it refuses the device of this handshake: bound to its keys and
-    /// nonces, so that a refusal caught in one session says nothing in another.
-    fn refusal_bytes(&self, reason: &str, reset: bool) -> Vec<u8> {
+    /// nonces, so that a refusal caught in one session says nothing in another, and to what the
+    /// hub received of the device's proof (`pinned`, `pair`), which the device's own signature
+    /// does not cover: a refusal answering a request changed on the way does not check for the
+    /// device that sent another one.
+    fn refusal_bytes(
+        &self,
+        pinned: Option<ChangeHash>,
+        pair: Option<&Pairing>,
+        reason: &str,
+        reset: bool,
+    ) -> Vec<u8> {
         let mut bytes = REFUSED.to_vec();
         bytes.extend_from_slice(self.device.as_bytes());
         bytes.extend_from_slice(&self.device_nonce.0);
         bytes.extend_from_slice(&self.hub_nonce.0);
+        match pinned {
+            Some(pinned) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&pinned.0);
+            }
+            None => bytes.push(0),
+        }
+        match pair {
+            // `Proposed::bytes` says its own length, so the reason after it reads one way only.
+            Some(pairing) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&pairing.proof.0);
+                bytes.extend_from_slice(&pairing.proposed.bytes());
+            }
+            None => bytes.push(0),
+        }
         bytes.push(u8::from(reset));
         bytes.extend_from_slice(reason.as_bytes());
         bytes
@@ -1144,7 +1176,7 @@ impl Session {
                 &DeviceProof {
                     proof,
                     pinned: pinned_list,
-                    pair,
+                    pair: pair.clone(),
                 },
             )
             .await
@@ -1152,9 +1184,9 @@ impl Session {
             let welcome: ToDevice = read_frame(&mut reader, HANDSHAKE_LIMIT)
                 .await
                 .map_err(lost)?;
-            Ok((transcript, protocol, welcome))
+            Ok((transcript, protocol, welcome, pair))
         };
-        let (transcript, protocol, welcome) =
+        let (transcript, protocol, welcome, pair) =
             tokio::time::timeout(WAIT, handshake).await.map_err(|_| {
                 lost(format!(
                     "it did not finish its handshake in {} s",
@@ -1182,12 +1214,13 @@ impl Session {
                 reset,
                 proof,
             } => {
-                // Anything on the way to an `http://` hub can say a refusal: only the hub's
-                // signature over this handshake makes it the hub's verdict.
+                // Anything on the way to an `http://` hub can say a refusal, or change what the
+                // device asked: only the hub's signature over this handshake and over what this
+                // device sent makes it the hub's verdict on this device.
                 let signed = proof.is_some_and(|proof| {
                     verify(
                         &transcript.hub,
-                        &transcript.refusal_bytes(&reason, reset),
+                        &transcript.refusal_bytes(pinned_list, pair.as_ref(), &reason, reset),
                         &proof,
                     )
                 });
@@ -1524,7 +1557,12 @@ impl Arriving {
     /// Refuses the device, saying why, and whether the list it pinned was reset, signed over the
     /// handshake.
     pub async fn refuse(mut self, reason: &str, reset: bool) {
-        let proof = sign(&self.key, &self.transcript.refusal_bytes(reason, reset));
+        let proof = sign(
+            &self.key,
+            &self
+                .transcript
+                .refusal_bytes(self.pinned, self.pair.as_ref(), reason, reset),
+        );
         let _ = write_line(
             &mut self.writer,
             &ToDevice::Refused {

@@ -1651,10 +1651,10 @@ async fn a_pairing_whose_card_is_changed_on_the_way_is_refused() {
     )
     .await
     .unwrap_err();
+    // The hub refused the card it got, not the device's: its refusal is no verdict on this
+    // device, which says the hub could not be reached.
     assert!(
-        refused
-            .to_string()
-            .contains("did not prove it holds the pair code"),
+        matches!(refused, ControlError::Unreachable { .. }),
         "{refused}"
     );
     served.with_hub(|hub| {
@@ -2251,5 +2251,156 @@ async fn a_signed_refusal_sets_forgotten() {
     for refusal in refusals {
         assert!(refusal.contains(r#""proof":""#), "{refusal}");
     }
+    served.stop().await;
+}
+
+/// The device's proof, `{"proof": …, "pinned": …}`, changed by `change` on its way to the hub.
+fn proof_changed(
+    change: impl Fn(&mut serde_json::Map<String, serde_json::Value>) + Send + Sync + 'static,
+) -> std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> {
+    std::sync::Arc::new(move |line: &str| {
+        if !line.starts_with(r#"{"proof":"#) {
+            return line.to_owned();
+        }
+        let mut proof: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(line).unwrap();
+        change(&mut proof);
+        format!("{}\n", serde_json::Value::Object(proof))
+    })
+}
+
+/// What a device says of a refusal it received that the hub's signature does not make a verdict
+/// on it: a refusal was said, and it is taken as the hub not reached.
+fn assert_refusal_not_taken(refused: &ControlError, case: &str) {
+    assert!(
+        matches!(refused, ControlError::Unreachable { .. }),
+        "{case}: {refused}"
+    );
+    let said = refused.to_string();
+    assert!(
+        said.contains("refused this device without the hub's signature")
+            && said.contains("could not be reached"),
+        "{case}: {said}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pair_added_on_the_way_to_a_members_proof_is_no_verdict() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let pc = device_key(1);
+    let pc_machine = place.machine("pc");
+    let (pc_device, _session) = pair_device(&served, &pc, &pc_machine, "pc", Role::Runner)
+        .await
+        .unwrap();
+
+    // A pairing made up on the way, added to the member's own proof: the hub takes the session
+    // for a pairing and refuses it, signed, pair mode closed, then open with another code. It
+    // answers a request the device did not send: no verdict on the device, which neither forgets
+    // the hub nor takes its list as reset.
+    let made_up = serde_json::to_value(flottille_link::Pairing {
+        proposed: proposed(&device_key(9), "made up", Role::Runner),
+        proof: flottille_link::PairProof([7; 32]),
+    })
+    .unwrap();
+    for pair_mode in [false, true] {
+        if pair_mode {
+            code_at(&served, served.address());
+        }
+        let made_up = made_up.clone();
+        let (middle, _) = relay(
+            served.address(),
+            proof_changed(move |proof| {
+                proof.insert("pair".to_owned(), made_up.clone());
+            }),
+        )
+        .await;
+        let lied_to = Device {
+            url: url(middle),
+            ..pc_device.clone()
+        };
+        let refused = lied_to
+            .connect(&pc_machine, &hello(), &Tls::System)
+            .await
+            .unwrap_err();
+        assert_refusal_not_taken(&refused, &format!("pair mode open: {pair_mode}"));
+        assert_eq!(lied_to.list, pc_device.list);
+    }
+
+    // The hub itself still welcomes the member.
+    pc_device
+        .connect(&pc_machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_list_changed_on_the_way_is_no_verdict() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let (_device, _session) = pair_device(
+        &served,
+        &device_key(1),
+        &place.machine("pc"),
+        "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap();
+    let hubs_root =
+        serde_json::to_value(served.with_hub(|hub| hub.list().changes().first().unwrap().hash()))
+            .unwrap();
+
+    // A device that pinned another list, which the hub would tell it was reset: its `pinned`
+    // removed, or made the hub's own, the hub says it is no member. A stranger that pinned
+    // nothing, given a `pinned`, would be told its list was reset. Each refusal answers what the
+    // device did not send.
+    let elsewhere = device_key(8);
+    let pinned_elsewhere = Device {
+        list: MemberList::start("elsewhere", &elsewhere).unwrap(),
+        ..stranger_at(&served, &elsewhere)
+    };
+    let stranger = stranger_at(&served, &device_key(7));
+    let cases = [
+        (&pinned_elsewhere, serde_json::Value::Null),
+        (&pinned_elsewhere, hubs_root),
+        (&stranger, serde_json::json!("ab".repeat(32))),
+    ];
+    for (device, pinned) in cases {
+        let case = format!("pinned made {pinned}");
+        let (middle, _) = relay(
+            served.address(),
+            proof_changed(move |proof| {
+                proof.insert("pinned".to_owned(), pinned.clone());
+            }),
+        )
+        .await;
+        let lied_to = Device {
+            url: url(middle),
+            ..device.clone()
+        };
+        let refused = lied_to
+            .connect(&place.machine("lied-to"), &hello(), &Tls::System)
+            .await
+            .unwrap_err();
+        assert_refusal_not_taken(&refused, &case);
+        assert_eq!(lied_to.list, device.list);
+    }
+
+    // Untouched, each is told the hub's verdict.
+    let refused = pinned_elsewhere
+        .connect(&place.machine("lied-to"), &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, ControlError::Reset), "{refused}");
+    let refused = stranger
+        .connect(&place.machine("lied-to"), &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ControlError::NotMember { .. }),
+        "{refused}"
+    );
     served.stop().await;
 }

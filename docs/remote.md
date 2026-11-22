@@ -385,11 +385,16 @@ it proves anything. The hub then welcomes a member's device, a member's machine,
 pairing it took, and refuses any other key; the refusal says the list was reset when the device
 pinned a list that starts otherwise, and nothing else of the list: a stranger learns neither its
 root nor its members. **What a refusal proves**: the hub signs it with its key, over
-`flottille-hub-refused-v1`, a zero byte, the device's key, both nonces, `reset` and the reason, so
-that it holds for this session only. A device acts on a refusal (it forgets the hub, or says its
-list was reset) only once that signature checks; an unsigned refusal, or one whose signature does
-not check (said by something on the way to an `http://` hub, or caught in another session), changes
-nothing, and the device says the hub could not be reached. A hub of before 2026-11-22 signs no
+`flottille-hub-refused-v1`, a zero byte, the device's key, both nonces, what it received of the
+device's proof (the hash it pinned, or none; the pairing it asked, or none), `reset` and the
+reason, so that it holds for this session, and this request, only. The device's own signature
+covers neither the hash nor the pairing: something on the way could add a pairing to a member's
+proof, or change the hash, to have the hub refuse it; the device checks the refusal against what it
+sent, and such a refusal does not check. A device acts on a refusal (it forgets the hub, or says
+its list was reset) only once that signature checks; an unsigned refusal, or one whose signature
+does not check (said by something on the way to an `http://` hub, answering a request changed on
+the way, or caught in another session), changes nothing, and the device says the hub could not be
+reached. A hub of before 2026-11-22 signs no
 refusal: a device of this version that it refuses says it cannot reach it, and keeps trying, until
 the hub is updated; a device of before takes this hub's signed refusal as it took an unsigned one.
 A refusal later in a session (a member removed meanwhile) only ends the session. Once welcomed, a device asks (a member's change, what it is, its presence)
