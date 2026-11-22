@@ -1,6 +1,7 @@
 //! A routine (`docs/design.md`, "Routines"): work the daemon starts by itself, as a new root
 //! session, when its trigger comes; and its runs, each a session but a skipped one.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// The modes of a routine: what its run's session may do.
@@ -13,7 +14,9 @@ pub const MODES: [&str; 3] = [READ_ONLY, ASK, AUTO];
 /// never (its history only).
 pub const RINGS_SOMETHING: &str = "something";
 pub const RINGS_NEVER: &str = "never";
-pub const RINGS: [&str; 2] = [RINGS_SOMETHING, RINGS_NEVER];
+/// Only when its result has an item that was not in the last run's.
+pub const RINGS_NEW: &str = "new";
+pub const RINGS: [&str; 3] = [RINGS_SOMETHING, RINGS_NEW, RINGS_NEVER];
 
 /// A run missed while the daemon was off is still run this many hours after it was due.
 pub const MISSED_HOURS: u64 = 12;
@@ -93,6 +96,32 @@ impl Routine {
     }
 }
 
+/// One item of a run's list (`routine_result`, `docs/tools.md`): what the agent said of it,
+/// masked, and whether the last run's list had it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResultItem {
+    /// Stable from one run to the next (a ticket's key): what the runs are compared by.
+    pub id: String,
+    pub title: String,
+    /// A web link, opened by the system's handler, never fetched.
+    pub link: Option<String>,
+    /// One sentence.
+    pub text: Option<String>,
+    /// Short labels.
+    pub tags: Vec<String>,
+    /// The heading it is listed under.
+    pub group: Option<String>,
+    /// Not in the last run's list.
+    pub new: bool,
+}
+
+/// An item the last run's list had and this one has not.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Left {
+    pub id: String,
+    pub title: String,
+}
+
 /// One run of a routine.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
@@ -119,6 +148,12 @@ pub struct Run {
     /// When the user opened its result, if they did: a result with something to say that was not
     /// opened is unread.
     pub opened_at: Option<u64>,
+    /// The list its result gave, in the agent's order.
+    pub items: Vec<ResultItem>,
+    /// What the last run's list had that this one has not, said once, with this run.
+    pub left: Vec<Left>,
+    /// Markdown the result gave beside its items.
+    pub body: Option<String>,
 }
 
 impl Run {
@@ -136,6 +171,9 @@ impl Run {
             "why": self.why,
             "trigger": self.trigger,
             "opened": self.opened_at.is_some(),
+            "items": self.items,
+            "left": self.left,
+            "body": self.body,
         })
     }
 }

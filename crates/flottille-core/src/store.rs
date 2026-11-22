@@ -23,7 +23,7 @@ use crate::{Error, Result};
 
 /// The code of one repository that travelled for a launch (`travels`).
 mod routines;
-pub use routines::NewRun;
+pub use routines::{Listed, NewRun};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Travel {
@@ -1091,6 +1091,16 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[
     -- is not opened yet. The runs that ended before this column are taken as opened.
     ALTER TABLE routine_runs ADD COLUMN opened_at INTEGER;
     UPDATE routine_runs SET opened_at = COALESCE(ended_at, started_at);
+"#,
+    ),
+    (
+        "routine_items",
+        r#"
+    -- The list a run's result gave (#1124): its items in the agent's order (JSON), each marked
+    -- new or not against the last run's, what left since it, and the markdown given beside them.
+    ALTER TABLE routine_runs ADD COLUMN items TEXT;
+    ALTER TABLE routine_runs ADD COLUMN left_items TEXT;
+    ALTER TABLE routine_runs ADD COLUMN body TEXT;
 "#,
     ),
 ];

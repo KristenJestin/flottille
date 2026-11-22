@@ -3,7 +3,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use super::Store;
-use crate::routine::{Routine, Run};
+use crate::routine::{Left, ResultItem, Routine, Run};
 use crate::{Error, Result};
 
 const ROUTINE: &str = "id, name, project, prompt, provider, model, effort, schedule, zone, mode, \
@@ -22,7 +22,20 @@ fn earlier_of(line: &str) -> Option<u64> {
 }
 
 const RUN: &str = "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why, trigger, \
-    opened_at";
+    opened_at, items, left_items, body";
+
+/// What a run's result listed, beside its summary.
+#[derive(Default)]
+pub struct Listed<'a> {
+    pub items: &'a [ResultItem],
+    pub left: &'a [Left],
+    pub body: Option<&'a str>,
+}
+
+fn list_of<T: serde::de::DeserializeOwned>(text: Option<String>) -> Vec<T> {
+    text.and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
 
 fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
     Ok(Routine {
@@ -63,6 +76,9 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Run> {
         why: row.get(9)?,
         trigger: row.get(10)?,
         opened_at: row.get(11)?,
+        items: list_of(row.get(12)?),
+        left: list_of(row.get(13)?),
+        body: row.get(14)?,
     })
 }
 
@@ -232,14 +248,48 @@ impl Store {
         why: Option<&str>,
         at: u64,
     ) -> Result<Option<Run>> {
+        self.end_routine_run_listing(run, outcome, summary, why, at, &Listed::default())
+    }
+
+    /// `end_routine_run`, with the list the result gave.
+    pub fn end_routine_run_listing(
+        &self,
+        run: u64,
+        outcome: &str,
+        summary: Option<&str>,
+        why: Option<&str>,
+        at: u64,
+        listed: &Listed,
+    ) -> Result<Option<Run>> {
+        let (items, left) = (
+            serde_json::to_string(listed.items)?,
+            serde_json::to_string(listed.left)?,
+        );
         Ok(self
             .connection
             .query_row(
                 &format!(
-                    "UPDATE routine_runs SET outcome = ?2, summary = ?3, why = ?4, ended_at = ?5 \
+                    "UPDATE routine_runs SET outcome = ?2, summary = ?3, why = ?4, ended_at = ?5, \
+                     items = ?6, left_items = ?7, body = ?8 \
                      WHERE id = ?1 AND outcome = 'running' RETURNING {RUN}"
                 ),
-                params![run, outcome, summary, why, at],
+                params![run, outcome, summary, why, at, items, left, listed.body],
+                run_row,
+            )
+            .optional()?)
+    }
+
+    /// The last result the routine gave before the run `before`: the run it is compared with.
+    /// A run that failed or was skipped gave none.
+    pub fn routine_last_result(&self, routine: &str, before: u64) -> Result<Option<Run>> {
+        Ok(self
+            .connection
+            .query_row(
+                &format!(
+                    "SELECT {RUN} FROM routine_runs WHERE routine = ?1 AND id < ?2 \
+                     AND outcome IN ('something', 'nothing', 'goes_on') ORDER BY id DESC LIMIT 1"
+                ),
+                params![routine, before],
                 run_row,
             )
             .optional()?)
