@@ -17,6 +17,20 @@ pub const PICTURE: Icon = Icon::Lucide("image");
 /// A large pasted text of a message, attached as a file: its chip in the text.
 pub const TEXT_FILE: Icon = Icon::Lucide("file-text");
 pub const MILESTONE: Icon = Icon::Lucide("milestone");
+/// Changing how a device is drawn.
+pub const LOOK: Icon = Icon::Lucide("palette");
+/// A device's icon, by its word in the member list (`desktop`, `laptop`, `server`, `phone`,
+/// `tablet`): a desktop that is none of them is the monitor.
+pub fn device(word: &str) -> Icon {
+    match word {
+        "laptop" => Icon::Lucide("laptop"),
+        "server" => Icon::Lucide("server"),
+        "phone" => Icon::Lucide("smartphone"),
+        "tablet" => Icon::Lucide("tablet"),
+        _ => Icon::Lucide("monitor"),
+    }
+}
+
 /// The stop action: a small filled square, not Lucide's square in a circle, which blurs into a
 /// muddy ring when it is drawn at 14 px.
 pub const STOP: Icon = Icon::Filled(STOP_PATH);
@@ -38,7 +52,13 @@ gpui_kit::assets::icon_assets!(
         LogIn,
         Blocks,
         Image,
-        Milestone
+        Milestone,
+        Monitor,
+        Laptop,
+        Server,
+        Smartphone,
+        Tablet,
+        Palette
     ]
 );
 
@@ -88,6 +108,12 @@ mod tests {
             STOP,
             Icon::Lucide("power"),
             Icon::Lucide("log-in"),
+            device("desktop"),
+            device("laptop"),
+            device("server"),
+            device("phone"),
+            device("tablet"),
+            LOOK,
         ] {
             assert!(
                 Assets.load(&icon.path()).unwrap().is_some(),

@@ -2,6 +2,7 @@
 //! client speaks it without the store or the daemon.
 
 mod catalogue;
+pub mod words;
 
 use std::collections::BTreeMap;
 

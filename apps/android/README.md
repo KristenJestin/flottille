@@ -12,7 +12,18 @@ a UniFFI library) for everything that talks to a daemon.
   with a JDK 17 or 21, the Android SDK and NDK (`ANDROID_HOME`, `ANDROID_NDK_HOME`), Rust's targets
   `aarch64-linux-android` and `x86_64-linux-android`, and `cargo-ndk`.
   `apps/android/gradle.sh :core:testDebugUnitTest` runs the unit tests.
-- `ci.sh`: CI's `android` job, from the repository's root on a GitHub runner: the unit tests, then
-  the instrumentation tests on an emulator.
+- `ci.sh`: CI's `android` job, from the repository's root on a GitHub runner: the unit tests (both
+  modules), then the instrumentation tests on an emulator.
 
-The screens come with #826.
+- `app/`: the screens (Jetpack Compose): joining, the sessions in one list, the machines, Settings.
+  They see `Phone` (the module's own types), never the bindings; their tests play it with a fake
+  (`app/src/test`, Robolectric). `ui/Tokens.kt` holds the kit's colours, durations and easing.
+- `version-code.sh`, `apk.sh`: the APK as CI builds it, with the repository's version
+  (`docs/releases.md`, "The version"). Never by hand.
+
+- the session page (`SessionPage.kt`, `Cards.kt`, `Pictures.kt`): the conversation live, the composer
+  with pictures (gallery, camera through a `FileProvider`, the share sheet), the ask card, the
+  requests, the mode, Stop and the tree read only; `SessionKey` is the one entry point, by machine
+  and session id (a notification's intent carries `org.flottille.app.MACHINE` and `AGENT`).
+
+Needs you and the notifications come with the issues after #826.

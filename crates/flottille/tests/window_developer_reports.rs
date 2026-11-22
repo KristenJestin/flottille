@@ -288,3 +288,97 @@ fn a_finding_that_arrives_unfolds_and_fades_in_and_the_list_folds_with_the_mode(
         !present(cx, "finding-1")
     });
 }
+
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn a_finding_is_marked_filed_with_its_address(cx: &mut TestAppContext) {
+    let (user, _mcp) = user_with_findings(&[
+        "Tickets list answers empty",
+        "A refusal that makes no sense",
+    ]);
+    let (shell, cx) = window(&user, cx);
+    let page = open_developer(&shell, cx);
+    until(&shell, cx, "the findings are listed", |cx| {
+        present(cx, "finding-1") && present(cx, "finding-2")
+    });
+    settle(cx);
+    let order = |page: &Entity<SettingsPage>, cx: &mut VisualTestContext| -> Vec<u64> {
+        page.read_with(cx, |p, _| p.findings().iter().map(|f| f.id).collect())
+    };
+    // The newest first, both open.
+    assert_eq!(order(&page, cx), [2, 1]);
+
+    // Mark filed… is in the finding's ⋯, and asks the address in a dialog over the page.
+    click(cx, "finding-2-more");
+    assert!(present(cx, "finding-2-mark-filed"));
+    click(cx, "finding-2-mark-filed");
+    until(&shell, cx, "the dialog opens", |cx| {
+        present(cx, "finding-filed-modal")
+    });
+    assert_eq!(
+        label(cx, "finding-filed-address-field-label").as_deref(),
+        Some("Address of its issue")
+    );
+    // No address, nothing is sent: the dialog says so under its field.
+    click(cx, "finding-filed-save");
+    assert!(present(cx, "finding-filed-modal"));
+    let reports = user.call("developer.reports", json!({})).unwrap();
+    assert!(
+        reports["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["filed"].is_null())
+    );
+
+    let address = page.read_with(cx, |p, cx| p.filing().read(cx).address().clone());
+    cx.update(|window, cx| {
+        address.update(cx, |field, cx| {
+            field.set_value("https://example.com/acme/app/issues/12", window, cx)
+        })
+    });
+    click(cx, "finding-filed-save");
+    until(&shell, cx, "the daemon answers", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|toast| toast == "Finding #2 is marked filed")
+    });
+    // The dialog folds away over its motion.
+    settle(cx);
+    assert!(!present(cx, "finding-filed-modal"), "the dialog closes");
+    // The daemon holds what `developer reports filed` writes.
+    let reports = user.call("developer.reports", json!({})).unwrap();
+    let filed = reports["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["id"] == 2)
+        .unwrap()["filed"]
+        .clone();
+    assert_eq!(filed, "https://example.com/acme/app/issues/12");
+    // Its toast, and the finding leaves the open ones: the row says where it went.
+    until(&shell, cx, "the toast says it", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|toast| toast == "Finding #2 is marked filed")
+    });
+    until(&shell, cx, "the finding leaves the open list", |cx| {
+        order(&page, cx) == [1, 2]
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "finding-2-filed").as_deref(),
+        Some("Filed: https://example.com/acme/app/issues/12")
+    );
+    // A filed finding is filed: it has no ⋯ to offer it again.
+    assert!(!present(cx, "finding-2-more"));
+}

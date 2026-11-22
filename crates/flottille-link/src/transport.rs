@@ -3,11 +3,10 @@
 //! only module that names the libraries it is made of: the rest of the crate, and everything
 //! above it, sees Flottille's types, so that changing the transport changes this file.
 //!
-//! Two ways under QUIC: a UDP socket, which listens on the address it is configured with and
-//! dials the addresses its caller names for a key (the direct path, kept, unused by default); and
-//! the relay (`RelaySocket`), whose packets travel in the control session to the user's hub, each
-//! tagged with the key of the device it is for. QUIC's TLS runs end to end over either: the hub
-//! forwards packets it can neither read nor change. No NAT traversal, no discovery.
+//! Under QUIC, the relay (`RelaySocket`): its packets travel in the control session to the user's
+//! hub, each tagged with the key of the device it is for. QUIC's TLS runs end to end over it: the
+//! hub forwards packets it can neither read nor change. No socket of the network is opened, none
+//! listens, and there is no NAT traversal and no discovery.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -57,11 +56,10 @@ pub(crate) enum Failure {
     Lost(String),
 }
 
-/// One machine's endpoint: a UDP socket that accepts links and dials them; or, when it listens
-/// nowhere, a socket opened at its first dial, which accepts nothing.
+/// A machine's key, and, for a transport through the hub, the endpoint on its relay: one that has
+/// no relay opens nothing, takes nothing in and dials nothing.
 pub(crate) struct Transport {
     endpoint: std::sync::Mutex<Option<quinn::Endpoint>>,
-    listens: bool,
     key: Arc<CertifiedKey>,
     provider: Arc<CryptoProvider>,
     /// The relay its packets go through, for a transport through the hub.
@@ -69,35 +67,12 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
-    /// Listens nowhere: it only dials, with the key whose private half is `seed`.
-    pub(crate) fn dialler(seed: &[u8; 32], public: &[u8; 32]) -> Result<Transport, String> {
+    /// The key whose private half is `seed`, which the transports through the hub are made with.
+    pub(crate) fn keyed(seed: &[u8; 32], public: &[u8; 32]) -> Result<Transport, String> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let key = certified(seed, public, &provider)?;
         Ok(Transport {
             endpoint: std::sync::Mutex::new(None),
-            listens: false,
-            key,
-            provider,
-            relay: None,
-        })
-    }
-
-    /// Listens at `listen` with the key whose private half is `seed`, for the protocol names
-    /// `alpns`.
-    pub(crate) fn bind(
-        seed: &[u8; 32],
-        public: &[u8; 32],
-        listen: SocketAddr,
-        alpns: &[&[u8]],
-    ) -> Result<Transport, String> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let key = certified(seed, public, &provider)?;
-        let server = server_config(&key, &provider, alpns)?;
-        let endpoint = quinn::Endpoint::server(server, listen)
-            .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
-        Ok(Transport {
-            endpoint: std::sync::Mutex::new(Some(endpoint)),
-            listens: true,
             key,
             provider,
             relay: None,
@@ -121,7 +96,6 @@ impl Transport {
         .map_err(|error| format!("cannot carry links through the hub: {error}"))?;
         Ok(Transport {
             endpoint: std::sync::Mutex::new(Some(endpoint)),
-            listens: true,
             key: self.key.clone(),
             provider: self.provider.clone(),
             relay: Some(socket),
@@ -129,31 +103,9 @@ impl Transport {
     }
 
     /// The address a relayed transport dials the key `peer` at: one of its own making, which the
-    /// relay knows the key of. `None` for a transport on a socket, or past the relay's bound.
+    /// relay knows the key of. `None` for a transport with no relay, or past the relay's bound.
     pub(crate) fn address_for(&self, peer: &[u8; 32]) -> Option<SocketAddr> {
         self.relay.as_ref()?.address_of(peer)
-    }
-
-    /// The socket it listens on.
-    pub(crate) fn local(&self) -> Option<SocketAddr> {
-        if !self.listens {
-            return None;
-        }
-        self.endpoint.lock().unwrap().as_ref()?.local_addr().ok()
-    }
-
-    /// The endpoint, its socket opened now when it listens nowhere and never dialled yet.
-    fn endpoint(&self) -> Result<quinn::Endpoint, String> {
-        let mut endpoint = self.endpoint.lock().unwrap();
-        if let Some(endpoint) = endpoint.as_ref() {
-            return Ok(endpoint.clone());
-        }
-        // Both families when the system allows it, IPv4 alone otherwise.
-        let opened = quinn::Endpoint::client(SocketAddr::from(([0u16; 8], 0)))
-            .or_else(|_| quinn::Endpoint::client(SocketAddr::from(([0u8; 4], 0))))
-            .map_err(|error| format!("cannot open a socket to dial: {error}"))?;
-        *endpoint = Some(opened.clone());
-        Ok(opened)
     }
 
     /// A connection to the key `peer` at `address`, for the protocol name `alpn`: refused unless
@@ -181,31 +133,24 @@ impl Transport {
             QuicClientConfig::try_from(tls).map_err(|error| Failure::Lost(error.to_string()))?;
         let mut client = quinn::ClientConfig::new(Arc::new(quic));
         client.transport_config(Arc::new(transport_config()));
-        let connecting = self
-            .endpoint()
-            .map_err(Failure::Lost)?
+        let endpoint = self.endpoint.lock().unwrap().clone();
+        let connecting = endpoint
+            .ok_or_else(|| Failure::Lost("no session to the hub to go through".to_owned()))?
             .connect_with(client, address, SERVER_NAME)
             .map_err(|error| Failure::Lost(error.to_string()))?;
-        let relayed = self.relay.is_some();
-        connecting
-            .await
-            .map(|connection| Conn::new(connection, relayed))
-            .map_err(failure)
+        connecting.await.map(Conn::new).map_err(failure)
     }
 
     /// The next connection that comes from an address that proved it is the sender's, `None`
-    /// once the endpoint is closed or when it listens nowhere. One from an address not proved yet
-    /// is asked to prove it (a QUIC retry) and is not handed over: a forged source costs nothing
-    /// but one packet.
+    /// once the endpoint is closed or for a transport with no relay. One from an address not
+    /// proved yet is asked to prove it (a QUIC retry) and is not handed over: a forged source
+    /// costs nothing but one packet.
     pub(crate) async fn accept(&self) -> Option<Incoming> {
-        if !self.listens {
-            return None;
-        }
         let endpoint = self.endpoint.lock().unwrap().clone()?;
         loop {
             let incoming = endpoint.accept().await?;
             if incoming.remote_address_validated() {
-                return Some(Incoming(incoming, self.relay.is_some()));
+                return Some(Incoming(incoming));
             }
             if let Err(error) = incoming.retry() {
                 error.into_incoming().ignore();
@@ -449,8 +394,8 @@ fn key_of(der: &[u8]) -> Option<[u8; 32]> {
     der.strip_prefix(SPKI_PREFIX.as_slice())?.try_into().ok()
 }
 
-/// A connection that came in, its TLS not done yet, and whether it came through the hub.
-pub(crate) struct Incoming(quinn::Incoming, bool);
+/// A connection that came in, its TLS not done yet.
+pub(crate) struct Incoming(quinn::Incoming);
 
 impl Incoming {
     /// The address it came from, proved by the retry.
@@ -464,11 +409,7 @@ impl Incoming {
     }
 
     pub(crate) async fn finish(self) -> Result<Conn, Failure> {
-        let relayed = self.1;
-        self.0
-            .await
-            .map(|connection| Conn::new(connection, relayed))
-            .map_err(failure)
+        self.0.await.map(Conn::new).map_err(failure)
     }
 }
 
@@ -478,7 +419,7 @@ impl Incoming {
 /// that is slow to say what it is (or never does) holds up no other, and is given up on after
 /// `OPENING`.
 #[derive(Clone)]
-pub(crate) struct Conn(quinn::Connection, Arc<Inbox>, bool);
+pub(crate) struct Conn(quinn::Connection, Arc<Inbox>);
 
 /// What the other side opened, read, and not taken yet.
 struct Inbox(tokio::sync::Mutex<mpsc::Receiver<Inbound>>);
@@ -487,8 +428,7 @@ struct Inbox(tokio::sync::Mutex<mpsc::Receiver<Inbound>>);
 const WAITING: usize = 16;
 
 impl Conn {
-    /// The connection, `relayed` when it goes through the hub.
-    fn new(connection: quinn::Connection, relayed: bool) -> Conn {
+    fn new(connection: quinn::Connection) -> Conn {
         let (inbound, queue) = mpsc::channel(WAITING);
         let accepting = connection.clone();
         tokio::spawn(async move {
@@ -508,17 +448,7 @@ impl Conn {
                 });
             }
         });
-        Conn(
-            connection,
-            Arc::new(Inbox(tokio::sync::Mutex::new(queue))),
-            relayed,
-        )
-    }
-
-    /// Whether it goes through the hub: its transport's, not its address's to say, as a host of
-    /// a real network may hold an address of the relay's range.
-    pub(crate) fn through_hub(&self) -> bool {
-        self.2
+        Conn(connection, Arc::new(Inbox(tokio::sync::Mutex::new(queue))))
     }
 
     /// The other side's key.
@@ -526,11 +456,6 @@ impl Conn {
         let identity = self.0.peer_identity()?;
         let shown = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
         key_of(shown.first()?)
-    }
-
-    /// The address of the other side: the one that was dialled, or the one the link came from.
-    pub(crate) fn remote(&self) -> SocketAddr {
-        self.0.remote_address()
     }
 
     /// The protocol name both sides agreed on.

@@ -22,9 +22,21 @@ type Answer = Result<Value, Failure>;
 /// The folder a pull request's number is a page of.
 const PULLS: &str = "https://github.com/KristenJestin/flottille/pull";
 
-/// The groups of a changelog (`tools/changelog.sh`), in its order: the key a client draws by,
-/// and the title of the heading the notes carry.
-const GROUPS: [(&str, &str); 5] = [
+/// The areas of the notes (`tools/changelog.sh`), in the order of the page, the fixes last: the key
+/// a client draws by, and the title of the heading a release's body carries.
+const AREAS: [(&str, &str); 7] = [
+    ("remote", "Remote"),
+    ("window", "Window"),
+    ("agents", "Agents"),
+    ("tools", "Tools"),
+    ("projects", "Projects"),
+    ("other", "Other"),
+    ("fixed", "Fixed"),
+];
+
+/// The groups of the raw list of subjects (`### All changes` of a body, and the whole body of a
+/// release made before the notes), in the changelog's order.
+const RAW: [(&str, &str); 5] = [
     ("breaking", "Breaking changes"),
     ("features", "Features"),
     ("fixes", "Fixes"),
@@ -177,7 +189,7 @@ struct State {
     failed: Option<String>,
 }
 
-/// One change of the changelog.
+/// One line of the changelog: a subject with its scope, or a note.
 #[derive(Clone, Debug, PartialEq)]
 struct Change {
     scope: Option<String>,
@@ -185,23 +197,100 @@ struct Change {
     pr: Option<u64>,
 }
 
-/// The changes a release's notes list, under the group each heading names, as `tools/changelog.sh`
-/// writes them: `### Features`, then `- **scope**: text (#123)`.
-fn parse(body: &str) -> Vec<(&'static str, Change)> {
-    let mut group = None;
-    let mut found = Vec::new();
+/// What a release's body says.
+#[derive(Default)]
+struct Body {
+    /// The few lines written by hand at the top of a version's notes.
+    highlights: Vec<String>,
+    /// The notes, under the area each heading names.
+    notes: Vec<(&'static str, Change)>,
+    /// The raw list of subjects, under the group each heading names.
+    raw: Vec<(&'static str, Change)>,
+    /// A body made before the notes: its `### Features` are the raw list itself.
+    legacy: bool,
+}
+
+/// Reads a release's body, as `tools/changelog.sh` writes it: `### Remote`, then `- A sentence.
+/// (#123)`, the areas in turn, `### All changes` and its `#### Features`, then `- **scope**: text
+/// (#123)`; `### Highlights` holds the lines written by hand. A body of before the notes lists
+/// the subjects under `### Features`: they are said as notes of Other, with a capital and no scope.
+fn parse(body: &str) -> Body {
+    enum In {
+        Nothing,
+        Highlights,
+        Area(&'static str),
+        Raw(&'static str),
+    }
+    let mut at = In::Nothing;
+    let mut found = Body::default();
     for line in body.lines() {
         let line = line.trim_end();
-        if let Some(title) = line.strip_prefix("### ") {
-            group = GROUPS
-                .iter()
-                .find(|(_, name)| *name == title.trim())
-                .map(|(key, _)| *key);
-        } else if let (Some(key), Some(change)) = (group, line.strip_prefix("- ")) {
-            found.push((key, change_of(change)));
+        let heading = line
+            .strip_prefix("#### ")
+            .map(|title| (title, false))
+            .or_else(|| line.strip_prefix("### ").map(|title| (title, true)));
+        if let Some((title, top)) = heading {
+            let title = title.trim();
+            let raw = RAW.iter().find(|(_, name)| *name == title);
+            at = if top && title == "Highlights" {
+                In::Highlights
+            } else if let (true, Some(&(key, _))) = (top, AREAS.iter().find(|(_, t)| *t == title)) {
+                In::Area(key)
+            } else if let Some(&(key, _)) = raw {
+                found.legacy |= top;
+                In::Raw(key)
+            } else {
+                In::Nothing
+            };
+        } else if let Some(item) = line.strip_prefix("- ") {
+            match at {
+                In::Nothing => {}
+                In::Highlights => found.highlights.push(item.trim().to_owned()),
+                In::Area(key) => found.notes.push((key, with_pr(item))),
+                In::Raw(key) => found.raw.push((key, change_of(item))),
+            }
         }
     }
+    if found.legacy {
+        found.notes = found
+            .raw
+            .iter()
+            .map(|(_, change)| {
+                let mut chars = change.text.chars();
+                let text = chars
+                    .next()
+                    .map(|first| first.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default();
+                (
+                    "other",
+                    Change {
+                        scope: None,
+                        text,
+                        pr: change.pr,
+                    },
+                )
+            })
+            .collect();
+    }
     found
+}
+
+/// A line with the number of its pull request at the end: `Said. (#12)`.
+fn with_pr(line: &str) -> Change {
+    let text = line.trim();
+    let (text, pr) = match text
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once("(#"))
+        .and_then(|(rest, number)| Some((rest.trim_end(), number.parse::<u64>().ok()?)))
+    {
+        Some((text, pr)) => (text, Some(pr)),
+        None => (text, None),
+    };
+    Change {
+        scope: None,
+        text: text.to_owned(),
+        pr,
+    }
 }
 
 fn change_of(line: &str) -> Change {
@@ -212,39 +301,61 @@ fn change_of(line: &str) -> Change {
         Some((scope, text)) => (Some(scope.to_owned()), text),
         None => (None, line),
     };
-    let text = text.trim();
-    // The pull request the squash kept, at the end.
-    let (text, pr) = match text
-        .strip_suffix(')')
-        .and_then(|rest| rest.rsplit_once("(#"))
-        .and_then(|(rest, number)| Some((rest.trim_end(), number.parse::<u64>().ok()?)))
-    {
-        Some((text, pr)) => (text, Some(pr)),
-        None => (text, None),
-    };
     Change {
         scope,
-        text: text.to_owned(),
-        pr,
+        ..with_pr(text)
     }
 }
 
-/// The changes of every note, oldest first, each once, as the changelog groups them and then by
-/// scope (the changes without one last): `[{"key", "title", "scopes": [{"scope", "changes":
-/// [{"text", "pr", "url"}]}]}]`, the groups that hold something.
-fn groups(notes: &[Value]) -> Vec<Value> {
-    let mut all: Vec<(&'static str, Change)> = Vec::new();
+fn said(change: &Change) -> Value {
+    json!({
+        "text": change.text,
+        "pr": change.pr,
+        "url": change.pr.map(|pr| format!("{PULLS}/{pr}")),
+    })
+}
+
+/// What the notes of the versions say, each line once, oldest first: `{"groups": [{"key", "title",
+/// "changes": [{"text", "pr", "url"}]}]}` (the areas that hold a note, in the order of the page),
+/// `"highlights"` (lines) and `"all"`, the raw list as the changelog groups it and then by scope
+/// (the changes without one last): `[{"key", "title", "scopes": [{"scope", "changes": [..]}]}]`.
+fn digest(notes: &[Value]) -> (Vec<Value>, Vec<String>, Vec<Value>) {
+    let mut highlights: Vec<String> = Vec::new();
+    let mut said_notes: Vec<(&'static str, Change)> = Vec::new();
+    let mut raw: Vec<(&'static str, Change)> = Vec::new();
     for note in notes {
-        for change in parse(note["body"].as_str().unwrap_or_default()) {
-            if !all.contains(&change) {
-                all.push(change);
+        let body = parse(note["body"].as_str().unwrap_or_default());
+        for line in body.highlights {
+            if !highlights.contains(&line) {
+                highlights.push(line);
+            }
+        }
+        for note in body.notes {
+            if !said_notes.contains(&note) {
+                said_notes.push(note);
+            }
+        }
+        for change in body.raw {
+            if !raw.contains(&change) {
+                raw.push(change);
             }
         }
     }
-    GROUPS
+    let areas = AREAS
         .iter()
         .filter_map(|(key, title)| {
-            let mut mine: Vec<&Change> = all
+            let mine: Vec<Value> = said_notes
+                .iter()
+                .filter(|(area, _)| area == key)
+                .map(|(_, change)| said(change))
+                .collect();
+            (!mine.is_empty()).then(|| json!({"key": key, "title": title, "changes": mine}))
+        })
+        .collect();
+    let all = RAW
+        .iter()
+        .filter_map(|(key, title)| {
+            let mut mine: Vec<&Change> = raw
                 .iter()
                 .filter(|(group, _)| group == key)
                 .map(|(_, change)| change)
@@ -261,16 +372,11 @@ fn groups(notes: &[Value]) -> Vec<Value> {
             });
             let mut scopes: Vec<(Option<&str>, Vec<Value>)> = Vec::new();
             for change in mine {
-                let said = json!({
-                    "text": change.text,
-                    "pr": change.pr,
-                    "url": change.pr.map(|pr| format!("{PULLS}/{pr}")),
-                });
                 match scopes.last_mut() {
                     Some((scope, changes)) if *scope == change.scope.as_deref() => {
-                        changes.push(said)
+                        changes.push(said(change))
                     }
-                    _ => scopes.push((change.scope.as_deref(), vec![said])),
+                    _ => scopes.push((change.scope.as_deref(), vec![said(change)])),
                 }
             }
             Some(json!({
@@ -282,10 +388,12 @@ fn groups(notes: &[Value]) -> Vec<Value> {
                     .collect::<Vec<_>>(),
             }))
         })
-        .collect()
+        .collect();
+    (areas, highlights, all)
 }
 
-/// What `whatsnew.show` answers: `{"version", "since", "seen", "fetching", "failed", "groups"}`.
+/// What `whatsnew.show` answers: `{"version", "since", "seen", "fetching", "failed", "groups",
+/// "highlights", "all"}`, the last three null while the notes were not read.
 fn shown(daemon: &Daemon, notes: Option<(&str, &[Value])>) -> Value {
     let kept = read(&daemon.paths).unwrap_or_default();
     let state = daemon.whatsnew.state.lock().unwrap();
@@ -293,13 +401,16 @@ fn shown(daemon: &Daemon, notes: Option<(&str, &[Value])>) -> Value {
         Some((since, notes)) => (Some(since.to_owned()), Some(notes.to_vec())),
         None => (kept.since.clone(), kept.notes.clone()),
     };
+    let read = since.as_ref().and(notes.as_deref().map(digest));
     json!({
         "version": update::VERSION,
         "since": since,
         "seen": kept.seen,
         "fetching": state.fetching,
         "failed": state.failed,
-        "groups": since.as_ref().and(notes.as_deref().map(groups)),
+        "groups": read.as_ref().map(|(groups, _, _)| groups),
+        "highlights": read.as_ref().map(|(_, highlights, _)| highlights),
+        "all": read.as_ref().map(|(_, _, all)| all),
     })
 }
 
@@ -469,36 +580,76 @@ mod tests {
     }
 
     #[test]
-    fn the_notes_of_a_release_are_read_by_the_changelog_s_headings() {
-        let found = parse(
-            "Intro\n\n### Features\n\n- **gui**: one (#1)\n\n### Unknown\n\n- skipped (#2)\n\n### Other changes\n\n- two (#3)\nafter",
+    fn a_body_is_read_by_the_headings_the_changelog_writes() {
+        let body = parse(
+            "### Highlights\n\n- By hand.\n\n### Window\n\n- A note. (#1)\n\n### Unknown\n\n- skipped (#2)\n\n### Fixed\n\n- Fixed. (#3)\n\n### All changes\n\n#### Features\n\n- **gui**: one (#1)\n\n#### Other changes\n\n- two (#4)\nafter",
+        );
+        assert_eq!(body.highlights, ["By hand."]);
+        assert_eq!(
+            body.notes.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            ["window", "fixed"]
         );
         assert_eq!(
-            found.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            body.raw.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
             ["features", "other"]
+        );
+        assert!(!body.legacy);
+    }
+
+    #[test]
+    fn a_body_of_before_the_notes_says_its_subjects_as_notes_of_other() {
+        let body = parse("### Features\n\n- **gui**: a link opens (#1)\n- no scope (#2)");
+        assert!(body.legacy);
+        assert_eq!(
+            body.notes,
+            [
+                (
+                    "other",
+                    Change {
+                        scope: None,
+                        text: "A link opens".into(),
+                        pr: Some(1)
+                    }
+                ),
+                (
+                    "other",
+                    Change {
+                        scope: None,
+                        text: "No scope".into(),
+                        pr: Some(2)
+                    }
+                ),
+            ]
         );
     }
 
     #[test]
-    fn several_betas_are_one_list_each_change_once_grouped_then_by_scope() {
-        let listed = groups(&[
-            note("1", "### Fixes\n\n- **gui**: b (#2)\n- **cli**: a (#1)"),
+    fn several_betas_are_one_list_each_note_once_the_fixes_last() {
+        let (areas, highlights, all) = digest(&[
+            note(
+                "1",
+                "### Fixed\n\n- B. (#2)\n\n### Remote\n\n- A. (#1)\n\n### All changes\n\n#### Fixes\n\n- **gui**: b (#2)\n- **cli**: a (#1)",
+            ),
             note(
                 "2",
-                "### Fixes\n\n- **gui**: b (#2)\n- **cli**: c (#3)\n\n### Features\n\n- z (#4)",
+                "### Highlights\n\n- One.\n\n### Fixed\n\n- B. (#2)\n- C. (#3)\n\n### All changes\n\n#### Fixes\n\n- **gui**: b (#2)\n- **cli**: c (#3)\n\n#### Features\n\n- z (#4)",
             ),
         ]);
-        let keys: Vec<&str> = listed.iter().map(|g| g["key"].as_str().unwrap()).collect();
-        assert_eq!(keys, ["features", "fixes"]);
-        let fixes = &listed[1]["scopes"];
-        assert_eq!(fixes[0]["scope"], "cli");
-        assert_eq!(fixes[0]["changes"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            fixes[0]["changes"][0]["text"], "a",
-            "oldest first in a scope"
-        );
-        assert_eq!(fixes[1]["scope"], "gui");
-        assert_eq!(fixes[1]["changes"].as_array().unwrap().len(), 1);
+        let keys: Vec<&str> = areas.iter().map(|g| g["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, ["remote", "fixed"]);
+        let texts: Vec<&str> = areas[1]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, ["B.", "C."], "oldest first, each once");
+        assert_eq!(highlights, ["One."]);
+        // The raw list: the changelog's groups, then by scope.
+        assert_eq!(all[0]["key"], "features");
+        assert_eq!(all[1]["scopes"][0]["scope"], "cli");
+        assert_eq!(all[1]["scopes"][0]["changes"].as_array().unwrap().len(), 2);
+        assert_eq!(all[1]["scopes"][1]["scope"], "gui");
     }
 
     #[test]

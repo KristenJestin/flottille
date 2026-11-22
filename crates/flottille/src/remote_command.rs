@@ -1,8 +1,7 @@
 //! `flottille remote`: Flottille on the user's other machines (`docs/remote.md`). Here, pairing
 //! with the hub (`pair`, with the code `flottille-hub pair` printed on the hub's host), the members
-//! (`members`, `rename`, `icon`, `colour`, `remove`), and the addresses this machine may be reached
-//! at: those its link listens on, and those the user declares by hand (a VPN address, a DNS name, a
-//! forwarded port), which it tells the machines it is linked to.
+//! (`members`, `rename`, `icon`, `colour`, `remove`), and turning remote on and off. Every link
+//! goes through the hub: nothing listens, and no address is given.
 //!
 //! The device key that signs the user's actions is this command's, never the daemon's: it is
 //! made and read here, in the session's keyring (or `remote/device.key` without one), and only
@@ -21,26 +20,13 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum RemoteAction {
-    /// Turn remote on: this machine can join a hub and link to your other machines. Nothing is
-    /// opened until you say where it is reached
+    /// Turn remote on: this machine can join a hub and link to your other machines through it
     On {
-        /// Where this machine is reached: an address and its port (7447 when it has none),
-        /// `tailnet` (its first Tailscale or WireGuard address) or `nowhere` (the default: it
-        /// dials the others, nobody dials it)
-        #[arg(long)]
-        listen: Option<String>,
         #[arg(long)]
         json: bool,
     },
     /// Turn remote off: the links close, this machine stays paired with its hub
     Off {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Say where this machine is reached: an address and its port (7447 when it has none),
-    /// `tailnet` or `nowhere`
-    Listen {
-        address: String,
         #[arg(long)]
         json: bool,
     },
@@ -110,11 +96,6 @@ pub enum RemoteAction {
         #[arg(long)]
         json: bool,
     },
-    /// This machine's addresses: those its link listens on, and those declared by hand
-    Address {
-        #[command(subcommand)]
-        action: AddressAction,
-    },
 }
 
 /// What a device paired may do (`docs/remote.md`, "Roles").
@@ -170,28 +151,6 @@ impl ColourArg {
     }
 }
 
-#[derive(Subcommand)]
-pub enum AddressAction {
-    /// The addresses, found or declared
-    List {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Declare an address another machine reaches this one at: a host name or an IP address,
-    /// and its port when it is not the link's own
-    Add {
-        address: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove an address declared by hand
-    Remove {
-        address: String,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
 pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
     let mut client = Client::connect_or_start(paths)?;
     let mut ask = |method: &str, params: Value| {
@@ -199,16 +158,15 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             .request(method, params)
             .map_err(|error| Box::<dyn std::error::Error>::from(in_full(paths, &error.to_string())))
     };
-    let action = match action {
-        RemoteAction::Address { action } => action,
-        RemoteAction::On { listen, json } => {
-            let mut params = json!({"on": true});
-            if let Some(listen) = listen {
-                params["listen"] = json!(listen);
-            }
-            let settings = ask("remote.configure", params)?;
-            say_settings(&settings, "Remote is on.", json);
-            return Ok(ExitCode::SUCCESS);
+    match action {
+        RemoteAction::On { json } => {
+            let settings = ask("remote.configure", json!({"on": true}))?;
+            say_settings(
+                &settings,
+                "Remote is on: its links go through the hub.",
+                json,
+            );
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Off { json } => {
             let settings = ask("remote.configure", json!({"on": false}))?;
@@ -217,12 +175,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 "Remote is off: the links are closed, this machine stays paired with its hub.",
                 json,
             );
-            return Ok(ExitCode::SUCCESS);
-        }
-        RemoteAction::Listen { address, json } => {
-            let settings = ask("remote.configure", json!({"listen": address}))?;
-            say_settings(&settings, "", json);
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Members {
             runners: true,
@@ -248,7 +201,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     println!("{name}  {}", offer_line(machine));
                 }
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Members { json, .. } => {
             let members = ask("remote.members", json!({}))?;
@@ -270,7 +223,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     );
                 }
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Rename {
             name,
@@ -294,15 +247,15 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             } else {
                 println!("{name} is now {new_name}");
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Icon { name, icon, json } => {
             look(paths, &mut ask, &name, Some(icon.icon()), None, json)?;
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Colour { name, colour, json } => {
             look(paths, &mut ask, &name, None, Some(colour.colour()), json)?;
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Remove { name, json } => {
             let device = device_key(paths)?;
@@ -318,7 +271,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                      the hub"
                 );
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Pair {
             name,
@@ -385,32 +338,9 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     paired["role"].as_str().unwrap_or_default(),
                 );
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
-    };
-    let (this, json) = match action {
-        AddressAction::List { json } => (ask("remote.machines", json!({}))?["this"].clone(), json),
-        AddressAction::Add { address, json } => (
-            ask("remote.address.add", json!({"address": address}))?,
-            json,
-        ),
-        AddressAction::Remove { address, json } => (
-            ask("remote.address.remove", json!({"address": address}))?,
-            json,
-        ),
-    };
-    if json {
-        println!("{this}");
-        return Ok(ExitCode::SUCCESS);
     }
-    for address in this["addresses"].as_array().into_iter().flatten() {
-        println!(
-            "{}  {}",
-            address["address"].as_str().unwrap_or_default(),
-            address["how"].as_str().unwrap_or_default()
-        );
-    }
-    Ok(ExitCode::SUCCESS)
 }
 
 /// A member's icon or colour changed, the other kept, signed with this device's key.
@@ -494,29 +424,13 @@ fn offer_line(machine: &Value) -> String {
     )
 }
 
-/// What `remote.configure` answered, as `--json` prints it or in words: what was done, then where
-/// this machine is reached.
+/// What `remote.configure` answered, as `--json` prints it or in words: what was done.
 fn say_settings(settings: &Value, done: &str, json: bool) {
     if json {
         println!("{settings}");
-        return;
+    } else {
+        println!("{done}");
     }
-    let mut line = done.to_owned();
-    if settings["on"] == true {
-        let at = match settings["listen"].as_str() {
-            Some(at) => format!("This machine is reached at {at}."),
-            None => {
-                "This machine is reached nowhere: it dials the others, nobody dials it.".to_owned()
-            }
-        };
-        line = format!("{line} {at}").trim().to_owned();
-        if settings["waits"] == true {
-            line.push_str(" An agent runs: the change waits for the next start of Flottille.");
-        }
-    } else if line.is_empty() {
-        line = "Remote is off: the choice is kept for when it is turned on.".to_owned();
-    }
-    println!("{line}");
 }
 
 /// The key of the member named `name` in `remote.members`' answer.

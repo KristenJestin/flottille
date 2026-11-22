@@ -19,17 +19,26 @@ mod mobile;
 mod panic;
 mod view;
 
+pub use join::{HubCard, hub_card};
 pub use keys::Sealer;
-pub use mobile::{Batch, Core, Event, Listener};
+pub use mobile::{Batch, Core, Event, Listener, Picture, Reply};
 pub use panic::{PANIC_FILE, keep_panics, last_panic};
 pub use view::{
-    AskView, ConversationView, Entry, MachineView, ProjectView, RequestView, SessionView, ViewState,
+    AskOption, AskQuestion, AskView, ChildView, ConversationView, Entry, MachineView, MemberView,
+    ProjectView, RequestView, SessionView, ViewState,
 };
 
 /// Why the core could not do what it was asked: a sentence for the user.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum MobileError {
-    Refused { why: String },
+    Refused {
+        why: String,
+    },
+    /// What was answered is no longer waiting: the request or the question is decided already,
+    /// or the machine has none of that number. Its card folds; any other refusal keeps it.
+    Gone {
+        why: String,
+    },
 }
 
 impl MobileError {
@@ -41,7 +50,7 @@ impl MobileError {
 impl std::fmt::Display for MobileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MobileError::Refused { why } => f.write_str(why),
+            MobileError::Refused { why } | MobileError::Gone { why } => f.write_str(why),
         }
     }
 }

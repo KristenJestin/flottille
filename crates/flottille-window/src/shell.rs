@@ -441,6 +441,8 @@ impl Shell {
             let reading = connections.clone();
             cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
         }
+        let filing = cx.new(|cx| crate::findings::Filing::new(this.clone(), window, cx));
+        let check = cx.new(|_| crate::check::CheckSection::new(this.clone()));
         let settings = cx.new(|_| {
             SettingsPage::new(
                 this.clone(),
@@ -453,6 +455,8 @@ impl Shell {
                 connections.clone(),
                 machines.clone(),
                 version.clone(),
+                filing.clone(),
+                check.clone(),
             )
         });
         let services = {
@@ -538,11 +542,11 @@ impl Shell {
                 cx,
             );
             modals.add(
-                crate::machines_page::ADDRESS_MODAL,
+                crate::machines_page::LOOK_MODAL,
                 &machines,
-                MachinesSection::address_dialog,
-                MachinesSection::address_is_open,
-                MachinesSection::address_focus,
+                MachinesSection::look_dialog,
+                MachinesSection::look_is_open,
+                |_, _| None,
                 cx,
             );
             modals.add_view(
@@ -2429,6 +2433,48 @@ impl Shell {
                     self.review_connection(&name, cx);
                 }
             }
+            Outcome::Asked {
+                then: crate::extensions::Then::Findings(crate::findings::Then::Filed { id }),
+                answer,
+            } => {
+                let filing = self.settings.read(cx).filing().clone();
+                filing.update(cx, |filing, cx| filing.answered(id, answer, cx));
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::Check(then),
+                answer,
+            } => {
+                let check = self.settings.read(cx).check().clone();
+                check.update(cx, |check, cx| check.answered(then, answer, cx));
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::Runners { project },
+                answer,
+            } => {
+                // `offered` names every machine that would take the session, this one too.
+                let runners: Vec<String> = answer
+                    .map(|read| {
+                        let this = read["this"]["name"].as_str().unwrap_or_default().to_owned();
+                        read["offered"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|name| name.as_str())
+                            .filter(|name| *name != this)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(composer) = self.composer_of(&project).cloned() {
+                    composer.update(cx, |composer, cx| composer.set_runners(runners, cx));
+                }
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::Tunnels(then),
+                answer,
+            } => self
+                .services
+                .update(cx, |page, cx| page.tunnels_answered(then, answer, cx)),
             Outcome::Asked { then, answer } => {
                 let page = match &then {
                     crate::extensions::Then::Specs(specs) => specs.for_page(),

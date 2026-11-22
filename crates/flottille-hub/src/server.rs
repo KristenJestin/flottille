@@ -2,11 +2,10 @@
 //! plain (behind a reverse proxy that holds the certificate) or with TLS on a certificate given,
 //! and keeps a control session with each device that proves its key (`flottille_link::arrive`).
 //!
-//! A session sends the device the member list, the addresses the members' machines told, what the
-//! hub knows of each member's device, and, to a runner, the presence of the members' clients; then
-//! sends them again whenever they change. The device's asks (a member's change, what it says of
-//! itself, its addresses, its presence) go through the hub's rules (`Hub`), each checked again
-//! against the members as they are when it comes in.
+//! A session sends the device the member list, what the hub knows of each member's device, and,
+//! to a runner, the presence of the members' clients; then sends them again whenever they change.
+//! The device's asks (a member's change, what it says of itself, its presence) go through the hub's
+//! rules (`Hub`), each checked again against the members as they are when it comes in.
 //!
 //! A session also carries the links between the user's devices (`relay.rs`): each packet a
 //! member's device sends for another member's device goes to that device's session, if it is open;
@@ -44,8 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Address, Ask, Facts, Hello, HubSession, KEEPALIVE, LinkPacket, MemberList, PresenceOf,
-    PublicKey, Role, ToDevice, Told, arrive,
+    Ask, Facts, Hello, HubSession, KEEPALIVE, LinkPacket, MemberList, PresenceOf, PublicKey, Role,
+    ToDevice, arrive,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -81,9 +80,6 @@ const LONGEST_ACCEPT_WAIT: Duration = Duration::from_secs(1);
 /// How long a connection that came in may take for its TLS handshake and the hub's together: a
 /// device needs a few round trips, a stranger that says nothing holds its place no longer.
 const ARRIVAL_WAIT: Duration = Duration::from_secs(5);
-/// The most addresses one machine may tell, and the longest one.
-const MOST_ADDRESSES: usize = 64;
-const LONGEST_ADDRESS: usize = 300;
 
 /// The waits of the server: how long a connection may take to arrive, how long a pairing's
 /// session lasts, and how long a session may stay silent before it is let go. The production's
@@ -410,7 +406,8 @@ async fn accept<C: Clock + Send + 'static>(
 #[derive(Default)]
 struct Sent {
     list: Option<MemberList>,
-    addresses: Option<Vec<Told>>,
+    /// Whether the empty list of addresses a device of before 2026-11-21 waits for was sent.
+    no_addresses: bool,
     presence: Option<Vec<PresenceOf>>,
     facts: Option<Vec<Facts>>,
     online: Option<Vec<PublicKey>>,
@@ -609,20 +606,12 @@ fn news<C: Clock>(
     let Some(members) = hub.members() else {
         return frames;
     };
-    let addresses: Vec<Told> = members
-        .members()
-        .iter()
-        .filter_map(|member| member.machine)
-        .filter_map(|machine| {
-            Some(Told {
-                key: machine,
-                addresses: hub.addresses(&machine)?.to_vec(),
-            })
-        })
-        .collect();
-    if sent.addresses.as_ref() != Some(&addresses) {
-        frames.push(ToDevice::Addresses(addresses.clone()));
-        sent.addresses = Some(addresses);
+    // A phone's core of before 2026-11-21 links to its runners only once the hub told the
+    // addresses of the direct link, removed then: told none, once a session, it links through the
+    // hub. A device of since reads it and ignores it.
+    if !sent.no_addresses {
+        frames.push(ToDevice::Addresses(serde_json::Value::Array(Vec::new())));
+        sent.no_addresses = true;
     }
     let facts = hub.facts().to_vec();
     if sent.facts.as_ref() != Some(&facts) {
@@ -675,19 +664,10 @@ fn handle<C: Clock>(
             Some(member) => hub.about(&member, &kind, &system),
             None => Err(not_member()),
         },
-        Ask::Addresses { addresses } => {
-            if addresses.len() > MOST_ADDRESSES
-                || addresses.iter().any(|address| {
-                    address.len() > LONGEST_ADDRESS || Address::parse(address).is_err()
-                })
-            {
-                Err(HubError(format!(
-                    "these are not addresses: at most {MOST_ADDRESSES}, each a host and a port"
-                )))
-            } else {
-                hub.tell_addresses(device, addresses)
-            }
-        }
+        // A machine of the previous version tells its addresses, for the direct link removed
+        // on 2026-11-21: answered, so that it keeps its session until it is updated, and
+        // nothing of them kept nor told.
+        Ask::Addresses { .. } => Ok(()),
         Ask::Presence { active, last_input } => match member {
             Some(member) => hub.tell_presence(&member, Presence { active, last_input }),
             None => Err(not_member()),
