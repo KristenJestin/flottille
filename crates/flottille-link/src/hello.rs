@@ -186,6 +186,21 @@ mod tests {
     }
 
     #[test]
+    fn a_version_said_before_the_hub_is_proven_is_cut_and_shows_no_control() {
+        // The hub's hello is read before it has proven its key: whoever answers at its address
+        // writes it, so the sentence keeps 32 characters of it and no control character.
+        let forged = format!("9.9.9\u{202e}\x1b[2J{}", "x".repeat(4000));
+        let refusal = choose_hub(&hello("0.4.0", &[2]), &hello(&forged, &[1])).unwrap_err();
+        let said = refusal.to_string();
+        assert!(
+            !said.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{said:?}"
+        );
+        assert!(said.len() < 200, "{} characters", said.len());
+        assert!(said.starts_with("The hub runs 9.9.9"), "{said}");
+    }
+
+    #[test]
     fn a_newer_hub_is_told_to_update_this_machine() {
         let refusal = choose_hub(&hello("0.4.0", &[2]), &hello("0.5.0", &[3])).unwrap_err();
         assert_eq!(
