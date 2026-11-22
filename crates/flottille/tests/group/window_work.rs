@@ -37,6 +37,8 @@ mod window_progress;
 mod window_quota;
 #[path = "../window_review.rs"]
 mod window_review;
+#[path = "../window_routines.rs"]
+mod window_routines;
 #[path = "../window_skeletons.rs"]
 mod window_skeletons;
 #[path = "../window_specs.rs"]

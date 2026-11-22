@@ -126,6 +126,9 @@ pub enum Update {
         project: String,
         item: Option<crate::items::ItemKey>,
     },
+    /// A routine of the project changed, a run of it ended, or a result of it was opened: the
+    /// Routines tab reads them again.
+    Routines { project: String },
     /// A part of Flottille the window draws in its places was switched or changed what it keeps
     /// (`extension.changed`, `spec.*`), or a project changed: what it shows is read again.
     Extensions,
@@ -452,6 +455,9 @@ fn follow(
         if let Some(link) = model::LinkShown::of(event) {
             let _ = updates.unbounded_send(Update::Link(link));
         }
+        if let Some(project) = routines_of(event) {
+            let _ = updates.unbounded_send(Update::Routines { project });
+        }
         if let Some(rang) = model::Rang::of(event) {
             let _ = updates.unbounded_send(Update::Rang(rang));
         }
@@ -496,6 +502,17 @@ fn follow(
             }
         }
     }
+}
+
+/// The project whose routines an event says changed: a routine changed, a run ended or a result
+/// was opened.
+fn routines_of(event: &Event) -> Option<String> {
+    matches!(
+        event.name.as_str(),
+        "routine.changed" | "routine.ran" | "routine.opened"
+    )
+    .then(|| event.data["project"].as_str().map(str::to_owned))
+    .flatten()
 }
 
 /// The project whose pull requests and tickets an event says changed, and the item when it names

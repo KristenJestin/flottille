@@ -467,6 +467,16 @@ pub enum Command {
         repository: Option<String>,
         asked: u64,
     },
+    /// What Flottille knows of the session of a routine's run whose work goes on: its state, its
+    /// branch and pull requests, the requests that wait, what the agent last said. `branch` is
+    /// the project folder's, for a session that works there; `asked` numbers the reads.
+    RunStatus {
+        project: String,
+        session: String,
+        branch: Option<String>,
+        run: u64,
+        asked: u64,
+    },
     /// A change to the tasks: `task.add`, `task.edit` or `task.remove`, with its parameters.
     TaskWrite {
         project: String,
@@ -1226,6 +1236,12 @@ pub enum Outcome {
         repository: Option<String>,
         asked: u64,
         shown: Result<Value, String>,
+    },
+    RunStatus {
+        project: String,
+        run: u64,
+        asked: u64,
+        read: Result<crate::routines::Status, String>,
     },
     /// A change to the tasks was made, or refused with why.
     TaskWritten {
@@ -2067,6 +2083,96 @@ fn ask_alone(
     bound: Duration,
 ) -> Result<Result<Value, String>, String> {
     connected(connect)?.ask_within(method, params, bound)
+}
+
+/// What Flottille knows of a routine's session: its tree's state and the requests that wait, the
+/// agent's last message, and the branch and pull requests of the place it works in.
+fn run_status(
+    connect: &Connect,
+    bound: Duration,
+    project: &str,
+    session: &str,
+    folder_branch: Option<String>,
+) -> Result<crate::routines::Status, String> {
+    let ask = |method: &str, params: Value| {
+        ask_alone(connect, method, params, bound).and_then(|answer| answer)
+    };
+    let tree = ask("agent.tree", json!({"agent": session}))?;
+    let root = tree["agents"]
+        .as_array()
+        .and_then(|agents| agents.iter().find(|agent| agent["id"] == session))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let waits = tree["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|agent| agent["needs_user"] == true);
+    let requests = ask("approval.list", json!({"tree": session}))
+        .map(|answer| {
+            answer["requests"].as_array().map_or(0, |requests| {
+                requests.iter().filter(|r| r["resolved"] != true).count()
+            })
+        })
+        .unwrap_or(0);
+    let state = match (
+        root["state"].as_str().unwrap_or_default(),
+        waits || requests > 0,
+    ) {
+        ("ended" | "failed", _) => "Ended",
+        (_, true) | ("idle", _) => "Waiting for you",
+        _ => "Running",
+    };
+    let shown = ask(
+        "agent.show",
+        json!({"agent": session, "before": 9_007_199_254_740_991_u64}),
+    )?;
+    let workspace = shown["agent"]["workspace"].as_str().map(str::to_owned);
+    // The last message: the pieces of a reply follow each other, and share an id when the
+    // provider gives one; a piece after something else, or of another id, starts a message.
+    let mut last: Vec<String> = Vec::new();
+    let mut last_id: Option<String> = None;
+    let mut after_piece = false;
+    for event in shown["events"].as_array().into_iter().flatten() {
+        if event["name"] != "agent.message" {
+            after_piece = false;
+            continue;
+        }
+        let id = event["data"]["message_id"].as_str().map(str::to_owned);
+        if !after_piece || (id.is_some() && id != last_id) {
+            last.clear();
+        }
+        after_piece = true;
+        last_id = id;
+        last.push(
+            event["data"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    let last = last.concat().trim().to_owned();
+    let (branch, pulls) = match workspace {
+        Some(workspace) => {
+            let forge = ask(
+                "workspace.forge",
+                json!({"project": project, "name": workspace}),
+            )
+            .unwrap_or(Value::Null);
+            (
+                forge["branch"].as_str().map(str::to_owned),
+                crate::session_link::pull_requests(&forge).0,
+            )
+        }
+        None => (folder_branch, Vec::new()),
+    };
+    Ok(crate::routines::Status {
+        state: state.to_owned(),
+        branch,
+        pulls,
+        requests,
+        last: Some(last).filter(|last| !last.is_empty()),
+    })
 }
 
 /// What the user does to a command, and what the daemon answered.
@@ -2946,6 +3052,18 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 read,
             }
         }
+        Command::RunStatus {
+            project,
+            session,
+            branch,
+            run,
+            asked,
+        } => Outcome::RunStatus {
+            read: run_status(connect, bounds.quick, &project, &session, branch),
+            project,
+            run,
+            asked,
+        },
         Command::Item {
             project,
             kind,

@@ -49,6 +49,7 @@ pub mod question_card;
 pub mod queued;
 pub mod rename;
 pub mod repositories;
+pub mod routines;
 pub mod rules;
 pub mod runs;
 pub mod services;

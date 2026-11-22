@@ -513,6 +513,58 @@ fn nothing_to_say_does_not_ring_and_is_kept() {
 }
 
 #[test]
+fn a_result_opened_is_no_longer_unread() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "Tickets to review", "prompt": LIST_REVIEWS,
+            "schedule": "every day 07:00", "zone": "UTC"}),
+    );
+    add(
+        &user,
+        json!({"name": "Nightly", "prompt": NIGHTLY, "schedule": "every day 08:00",
+            "zone": "UTC"}),
+    );
+    let unread = |name: &str| {
+        let listed = user.call("routine.list", json!({})).unwrap();
+        listed["routines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|routine| routine["name"] == name)
+            .unwrap()["unread"]
+            .clone()
+    };
+    assert_eq!(unread("Tickets to review"), 0, "no run yet");
+
+    move_clock_to(&user, "UTC", None, 7, 0);
+    let run = ended_run(&user, "Tickets to review");
+    assert_eq!(run["outcome"], "something", "{run}");
+    assert_eq!(run["opened"], false, "{run}");
+    assert_eq!(unread("Tickets to review"), 1);
+    let shown = show(&user, "Tickets to review");
+    assert_eq!(shown["routine"]["unread"], 1, "{shown}");
+
+    // A result with nothing to say is never one to open.
+    move_clock_to(&user, "UTC", None, 8, 0);
+    let nothing = ended_run(&user, "Nightly");
+    assert_eq!(nothing["outcome"], "nothing", "{nothing}");
+    assert_eq!(unread("Nightly"), 0);
+
+    let opened = user
+        .call("routine.open", json!({"run": run["id"]}))
+        .unwrap();
+    assert_eq!(opened["run"]["opened"], true, "{opened}");
+    assert_eq!(unread("Tickets to review"), 0);
+    assert_eq!(runs(&user, "Tickets to review")[0]["opened"], true);
+    let again = user.call("routine.open", json!({"run": run["id"]}));
+    assert!(again.is_ok(), "opening it again is no error: {again:?}");
+    let missing = user.call("routine.open", json!({"run": 99_999}));
+    assert_eq!(missing.unwrap_err().0, "not-found");
+}
+
+#[test]
 fn something_to_say_is_one_notification_with_its_summary() {
     let user = user();
     project(&user);

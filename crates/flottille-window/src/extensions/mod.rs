@@ -268,6 +268,8 @@ pub enum Then {
     Check(crate::check::Then),
     /// The tunnels' own: the shell gives the answer to the Tunnels section of the services page.
     Tunnels(crate::tunnels::Then),
+    /// The Routines tab of a project: the shell gives the answer to the open page's tab.
+    Routines(crate::routines::Then),
 }
 
 /// How long the events that change what is listed must stop before it is read again: a switch
@@ -630,7 +632,8 @@ impl Registry {
             | Then::Findings(_)
             | Then::Runners { .. }
             | Then::Check(_)
-            | Then::Tunnels(_) => {}
+            | Then::Tunnels(_)
+            | Then::Routines(_) => {}
         }
     }
 

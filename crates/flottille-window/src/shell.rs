@@ -1795,6 +1795,11 @@ impl Shell {
             Update::Link(link) => self.linked(link, cx),
             Update::Rang(rang) => self.rang(rang, window, cx),
             Update::Prompted(agent) => self.spoke(&agent),
+            Update::Routines { project } => {
+                if let Some(routines) = self.project_routines_of(&project, cx) {
+                    routines.update(cx, |routines, cx| routines.changed(cx));
+                }
+            }
             Update::Items { project, item } => {
                 if let Some(page) = self.main.read(cx).progress_page(cx)
                     && page.read(cx).project() == project
@@ -2387,6 +2392,24 @@ impl Shell {
                 section.update(cx, |section, cx| section.answered(then, answer, window, cx));
             }
             Outcome::Asked {
+                then: crate::extensions::Then::Routines(then),
+                answer,
+            } => {
+                if let Some(routines) = self.project_routines_of(then.project(), cx) {
+                    routines.update(cx, |routines, cx| routines.answered(then, answer, cx));
+                }
+            }
+            Outcome::RunStatus {
+                project,
+                run,
+                asked,
+                read,
+            } => {
+                if let Some(routines) = self.project_routines_of(&project, cx) {
+                    routines.update(cx, |routines, cx| routines.statused(run, asked, read, cx));
+                }
+            }
+            Outcome::Asked {
                 then: crate::extensions::Then::ConnectionRequest(then),
                 answer,
             } => {
@@ -2862,6 +2885,16 @@ impl Shell {
     ) -> Option<Entity<crate::items::ProjectItems>> {
         let page = self.main.read(cx).project_page()?.read(cx);
         (page.name() == project).then(|| page.items().clone())
+    }
+
+    /// The Routines tab of the open project page, when it is `project`'s.
+    fn project_routines_of(
+        &self,
+        project: &str,
+        cx: &App,
+    ) -> Option<Entity<crate::routines::RoutinesTab>> {
+        let page = self.main.read(cx).project_page()?.read(cx);
+        (page.name() == project).then(|| page.routines().clone())
     }
 
     /// The tasks of the open project page, when it is `project`'s.
@@ -4093,6 +4126,45 @@ impl Shell {
         self.settings.update(cx, |page, cx| page.reveal(at, cx));
     }
 
+    /// Opens the result of a routine's run: the project's page on its Routines tab (what a
+    /// notification of a routine's run leads to).
+    pub fn open_routine_result(
+        &mut self,
+        project: &str,
+        routine: &str,
+        run: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Project(project.to_owned()), window, cx);
+        if let Some(page) = self.main.read(cx).project_page().cloned()
+            && page.read(cx).name() == project
+        {
+            page.update(cx, |page, cx| page.show_routine_result(routine, run, cx));
+        }
+        self.history.show_tab(project, Some(PageTab::Routines));
+    }
+
+    /// Opens the result of the run a routine's notification is about, in place of its session's
+    /// page: the notification is read, as opening the session would read it.
+    fn open_routine_notified(
+        &mut self,
+        project: &str,
+        session: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Project(project.to_owned()), window, cx);
+        self.read_session(session);
+        if let Some(page) = self.main.read(cx).project_page().cloned()
+            && page.read(cx).name() == project
+        {
+            page.update(cx, |page, cx| page.show_routine_notified(session, name, cx));
+        }
+        self.history.show_tab(project, Some(PageTab::Routines));
+    }
+
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         self.select(selection, window, cx);
@@ -4124,10 +4196,10 @@ impl Shell {
         if matches!(visit.selection, Selection::Project(_))
             && let Some(page) = self.main.read(cx).project_page().cloned()
         {
-            let tab = match (visit.progress, page.read(cx).tab()) {
-                (true, _) => Some(PageTab::Progress),
-                (false, PageTab::Progress) => Some(PageTab::Work),
-                (false, _) => None,
+            let tab = match (visit.tab, page.read(cx).tab()) {
+                (Some(tab), _) => Some(tab),
+                (None, PageTab::Progress | PageTab::Routines) => Some(PageTab::Work),
+                (None, _) => None,
             };
             if let Some(tab) = tab {
                 page.update(cx, |page, cx| page.choose(tab, cx));
@@ -4200,10 +4272,14 @@ impl Shell {
         self.refresh_project(cx);
     }
 
-    /// The tab of the open project's page was chosen by the user: Progress is a place of the
-    /// history, and its page gets the sessions and workspaces of its project.
-    pub fn tab_chosen(&mut self, project: &str, progress: bool, cx: &mut Context<Self>) {
-        self.history.show_progress(project, progress);
+    /// The tab of the open project's page was chosen by the user: Progress and Routines are
+    /// places of the history, and the Progress page gets the sessions and workspaces of its
+    /// project.
+    pub fn tab_chosen(&mut self, project: &str, tab: PageTab, cx: &mut Context<Self>) {
+        self.history.show_tab(
+            project,
+            matches!(tab, PageTab::Progress | PageTab::Routines).then_some(tab),
+        );
         self.feed_progress(cx);
     }
 
@@ -4372,10 +4448,17 @@ impl Shell {
         else {
             return;
         };
-        match item.session {
-            Some(session) if self.snapshot.session(&session).is_some() => {
-                self.open(Selection::Session(session), window, cx)
+        let project = item
+            .session
+            .as_deref()
+            .and_then(|id| self.snapshot.session(id))
+            .map(|s| s.project.clone());
+        match (item.session, project) {
+            // A routine's run is read on its result page, not in the conversation.
+            (Some(session), Some(project)) if item.kind == "routine" => {
+                self.open_routine_notified(&project, &session, &item.label, window, cx)
             }
+            (Some(session), Some(_)) => self.open(Selection::Session(session), window, cx),
             _ if !item.read && self.marked.insert(item.id) => {
                 self.perform(Command::ReadNotifications(Reading::Ids(vec![item.id])))
             }

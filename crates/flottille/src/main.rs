@@ -223,7 +223,7 @@ enum Command {
     /// Routines: sessions the daemon starts by itself on a schedule, their runs and results
     Routine {
         #[command(subcommand)]
-        action: routine_command::RoutineAction,
+        action: Box<routine_command::RoutineAction>,
     },
     /// The services of the machine, shared by every project: listed, written, started, stopped
     Service {
@@ -660,7 +660,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Runs { action } => runs_command::run(&paths, action)?,
         Command::Tunnel { action } => tunnel_command::run(&paths, action, machine)?,
         Command::Service { action } => service_command::run(&paths, action)?,
-        Command::Routine { action } => routine_command::run(&paths, action)?,
+        Command::Routine { action } => routine_command::run(&paths, *action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,

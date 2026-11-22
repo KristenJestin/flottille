@@ -639,7 +639,7 @@ root waits: a child's limit is its parent's to read (§5.3).
 Work that starts by itself: every weekday morning, the list of tickets waiting for the user's
 review, read from the tracker without changing anything. A **routine** is kept by the daemon: a
 name, a project, a prompt (the user's own words), an agent with its provider, model and effort, a
-**schedule**, a **mode** and where its result **rings** (`docs/protocol.md`, "The routine
+**schedule** or an **event**, a **mode** and where its result **rings** (`docs/protocol.md`, "The routine
 methods"; `flottille routine`, `docs/cli.md`).
 
 - **Each run is a new root session** of the project, in its folder, started by the daemon as a
@@ -658,6 +658,48 @@ methods"; `flottille routine`, `docs/cli.md`).
   run due of every routine is one deadline, read by the sweep that already runs every few
   seconds (which also reads the runs under way, to fail one whose session ended without its
   result), so the daemon stays at rest between runs.
+- **Or an event** instead of a schedule, never both, read from what Flottille already watches of
+  the forges and the tracker (§5.6, `docs/forges.md`, "Routines"): **a workflow run ends** (the
+  workflow, the branch, how it started: by its `schedule`, a `push`, by hand, `manual`, a
+  `pull_request`, or `any`, which is the first three only, what the repository's own people
+  start; "the nightly" is the run its schedule started, even when the same workflow also runs on
+  pushes; a fork's run never counts;
+  its outcome: `failed` or `any`); **a pull request asks the user's review** (the repository, any
+  by default); **the user is mentioned in the tracker** (`@login` in a new comment of a ticket;
+  the tracker's project); **a ticket is assigned to the user** (the tracker's project, its type,
+  any by default). A run that ended, a review asked, a comment, an assignment that were so before
+  the routine first read them are no event, and **an event routine runs only when its event
+  comes**: a green night leaves no row. A user who wants green nights kept chooses the outcome
+  `any`: the agent then answers "nothing", which costs a session. What the event says (the
+  workflow's name, the branch, the comment) comes from outside: each field one line and cut, it is
+  masked, kept with the run (`trigger`), and given to the session as data, never as an instruction
+  of Flottille's: in a `<routine-event>` block after every word of Flottille's, where no `<` of
+  the outside text is left to close it. The user's own comment, and Flottille's posts, are no
+  mention.
+  - **Not before** an hour (`not_before: "08:00"`, in the routine's zone): an event that comes
+    earlier in the day is held until that hour, kept in the store with every event held beside
+    it, so that a restart of the daemon loses none; the run that starts then is told all of them.
+    An event later than the hour runs at once. The newest 20 events held are kept, the earlier
+    ones only counted ("and 5 earlier events"). A paused routine lets go of what it held, and what
+    ends while it is paused is no event once it resumes; one moved to another project forgets
+    what it held and saw.
+  - **At most once** a day or an hour (`at_most_once`, in the routine's zone): an event that comes
+    once a run started in that day or hour is let go, with no row. Together, a night of failures
+    makes one run in the morning.
+  - **At most four runs an hour**, whatever `at_most_once` says: an event past them is let go,
+    and the history says why (a skipped run), so that a forge that says much cannot spend the
+    user's quota.
+  - **No duplicate**: an event that comes while the session of the routine's last run is open (a
+    run under way, or one whose work goes on) is **delivered to that session** (a `routine-event`
+    delivery: what came again, framed as data) instead of starting another, and the history keeps
+    it as a skipped run, `delivered to its session still open, <session>`, only while that session
+    has the routine's mode: one started before the mode changed gets nothing, and a new run starts.
+    An event that comes while the last run's session is still being made waits for it. With `new_session:
+    true` it starts a new session beside one whose work goes on; one still running skips it.
+  - Jira says no one: a mention on Jira is not read yet, and a work item assigned to the user is
+    one that became theirs (`mine`, `docs/items.md`) as its assignee changed, or one first seen
+    theirs with an assignee (one the user reported and gave to someone else at its creation counts
+    too).
 - **A run missed** while the machine was off runs **once** at the next start of the daemon: the
   last time the schedule names before now, when it was less than 12 hours before (the routine's
   `missed_hours`), never once for each missed day (off from Saturday to Monday 07:30, Monday's
@@ -1220,9 +1262,23 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   message; its place's menu ends with New workspace…; with no provider ready it says "No provider
   is ready. **Open Settings**", which opens Agents, Providers); then its tabs, **Work**, **Pull
   requests** and **Tickets**, **Specs** while Specs is on in the project, and **Progress** while
-  the project declares a tracker (the fifth), the chosen one alone below them (`reference/gpui.md`,
-  rule 13). **Progress** is a project's milestones and their tickets (`tickets.md`, "Progress"),
-  read when the tab opens. Creating a
+  the project declares a tracker (the fifth), and **Routines** in every project, after Progress,
+  the chosen one alone below them (`reference/gpui.md`, rule 13). **Progress** is a project's
+  milestones and their tickets (`tickets.md`, "Progress"), read when the tab opens. **Routines**
+  (§5.10) lists the project's routines, each with its trigger, its mode and its last run, and a
+  dot while its last result with something to say is not opened; the tab's label counts the
+  results not opened (hidden at zero). A routine opens its page in the tab (`Routines / Tickets to
+  review`): its trigger, mode, agent and prompt, **Run now**, **Pause** or **Resume**, **Edit**,
+  **Remove…** and its history, each run a session, ended ones too. A run's **result** page,
+  opened from the tab, the history or a notification, shows its report as a reply is drawn, with
+  **Open the session** (read only once it ended); a skipped run has no session and says so; a
+  run whose work goes on shows, read live, only what Flottille knows of its session (its state,
+  its branch, its pull request with its checks, the requests that wait, the agent's last
+  message). A routine is made and edited in the kit's dialog: name, project, prompt; the agent,
+  model and effort side by side; the trigger (a schedule, or an event and the fields of its
+  kind); the mode, each with its line; where the result rings; and one sentence that says the
+  next run. A project without a routine says what one is and offers **New routine**. No entry in
+  the sidebar: a run whose session goes on shows there as any session. Creating a
   workspace shows the preparation's progress and failure output, removing one asks first.
   **Work** is one column of the project's places: `main` first, then the workspaces from the
   newest to the oldest, in an order nothing changes (activity orders the sidebar, never this
@@ -1769,4 +1825,10 @@ nothing built, in [`extensions.md`](extensions.md).
 - Routines (§5.10): read only by default; a run missed while the daemon was off runs within 12
   hours of its time; the schedule is read in the machine's time zone unless the routine names
   one; a spent quota delays a run only when its reset is known (an unknown reset starts it, and
-  its session then waits as any session); a routine's name is unique among all routines.
+  its session then waits as any session); a routine's name is unique among all routines. An event
+  beyond `at_most_once` is let go rather than kept for the next day or hour; `not_before` holds
+  only the events that come earlier in the day than its hour; a routine's first read of the
+  workflow runs is no event; at most four runs of a routine an hour; a review asked of a team is
+  not the user's, and Bitbucket's reviews asked are not read (its reviewers are named by display
+  name, not an account); an event routine's runs are not given a `missed_hours` (an event
+  held across a restart runs at its hour, however late the daemon starts).
