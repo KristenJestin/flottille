@@ -660,14 +660,42 @@ pub fn staged(binary: &Path) -> Option<String> {
     Some(manifest.version)
 }
 
-/// The channel's latest build, when it is newer than this one: what the daemon checks.
-pub fn latest(paths: &Paths) -> Result<Option<Version>> {
+/// What a check of the channel found.
+pub struct Checked {
+    /// The channel's latest build, when it is newer than this one.
+    pub latest: Option<Version>,
+    /// The channel's latest build, when this one is newer than it (a beta installed above the
+    /// latest stable): it stays until a newer one is out.
+    pub ahead_of: Option<Version>,
+}
+
+/// The channel's latest build against this one: what the daemon checks.
+pub fn checked(paths: &Paths) -> Result<Checked> {
     let (channel, branch) = followed(&remembered(paths), None, None);
     let url = archive_url(&channel, branch.as_deref())?;
     let new = version_of(url.rsplit('/').next().unwrap_or_default())
         .ok_or("the latest release holds no archive of Flottille")?;
     let this = Version::parse(VERSION)?;
-    Ok((new != this && !is_older(&new, &this)).then_some(new))
+    let older = is_older(&new, &this);
+    Ok(Checked {
+        latest: (new != this && !older).then(|| new.clone()),
+        ahead_of: older.then_some(new),
+    })
+}
+
+/// Remembers `channel`, stable or beta, for the updates to come, as `--channel` does once an update
+/// succeeds: what the window's choice does, the branch of an alpha forgotten with it.
+pub fn choose(paths: &Paths, channel: &str) -> Result<()> {
+    if !matches!(channel, "stable" | "beta") {
+        return Err("the channel is stable or beta".into());
+    }
+    remember(
+        paths,
+        &Choice {
+            channel: Some(channel.to_owned()),
+            branch: None,
+        },
+    )
 }
 
 /// Downloads the channel's latest build, when it is newer than this one, and stages it beside

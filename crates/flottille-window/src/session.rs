@@ -5175,6 +5175,7 @@ impl Render for MarkdownPiece {
                 TextView::new(&self.state)
                     .style(style)
                     .image_source(no_image)
+                    .on_link_click(|url, _, _, cx| crate::tunnels::open_markdown_link(url, cx))
                     .code_block_actions(move |block, _, _| code_actions(block, &p)),
             )
             .text_selection_scope(scope)

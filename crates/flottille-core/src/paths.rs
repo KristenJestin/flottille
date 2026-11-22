@@ -121,6 +121,12 @@ impl Paths {
         self.data.join("images").join(agent)
     }
 
+    /// The pictures and pasted texts of messages that came in chunks and wait for their message
+    /// (`agent.upload`), one folder per upload: never the project's.
+    pub fn uploads(&self) -> PathBuf {
+        self.data.join("uploads")
+    }
+
     /// The places Review reads the pull requests it reviews in, one folder each: never a
     /// workspace's, never the project's.
     pub fn reviews(&self) -> PathBuf {

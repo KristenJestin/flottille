@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import java.io.File
 import java.io.InputStream
+import org.flottille.core.Picture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -102,18 +103,28 @@ class PicturesTest {
         val over = readPictures(listOf(uri(1)), reader)
         assertTrue(over.pictures.isEmpty())
         assertTrue(over.refused!!.contains("5 MiB"))
-        // Exactly the cap is a picture the window takes; the composer judges the frame.
+        // Exactly the cap is a picture the window takes.
         val exact = readPictures(listOf(uri(2)), reader)
         assertEquals(PictureLimits.BYTES, exact.pictures.single().bytes.size)
     }
 
     @Test
-    fun the_pictures_of_a_share_are_read_until_the_link_frame_is_full() {
-        val reader = Reader((1..8).associate { uri(it) to of(300_000) })
+    fun the_pictures_of_a_share_are_read_whole_whatever_their_size() {
+        // They travel to the machine in chunks (#1187): no frame of the link bounds them any more.
+        val reader = Reader((1..8).associate { uri(it) to of(PictureLimits.BYTES) }, type = "image/jpeg")
         val read = readPictures((1..8).map(::uri), reader)
-        // 300 + 300 + 300 KB passes 700 KB at the third: no other is opened to be buffered.
-        assertEquals(3, reader.opened.size)
-        assertEquals(3, read.pictures.size)
+        assertEquals(8, reader.opened.size)
+        assertEquals(8, read.pictures.size)
+        assertTrue("never shrunk", read.pictures.all { it.bytes.size == PictureLimits.BYTES })
+        assertNull(read.refused)
+    }
+
+    @Test
+    fun the_composer_takes_full_size_pictures_up_to_the_window_s_limits() {
+        val full = Picture("image/jpeg", ByteArray(PictureLimits.BYTES) { 7 }, "photo.jpg")
+        val held = List(PictureLimits.MOST - 1) { full }
+        assertNull(PictureLimits.refusal(held, full))
+        assertTrue(PictureLimits.refusal(held + full, full)!!.contains("20"))
     }
 
     @Test

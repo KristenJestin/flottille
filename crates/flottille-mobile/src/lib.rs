@@ -17,15 +17,17 @@ mod keys;
 mod link;
 mod mobile;
 mod panic;
+mod tunnel;
 mod view;
 
 pub use join::{HubCard, hub_card};
 pub use keys::Sealer;
 pub use mobile::{Batch, Core, Event, Listener, Picture, Reply};
 pub use panic::{PANIC_FILE, keep_panics, last_panic};
+pub use tunnel::{Opened, TunnelEnd, TunnelView};
 pub use view::{
     AskOption, AskQuestion, AskView, ChildView, ConversationView, Entry, MachineView, MemberView,
-    ProjectView, RequestView, SessionView, ViewState,
+    ProjectView, RequestView, RunView, SessionView, ViewState,
 };
 
 /// Why the core could not do what it was asked: a sentence for the user.
@@ -69,4 +71,12 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for MobileError {
 /// it speaks.
 pub(crate) fn hello() -> flottille_link::Hello {
     flottille_link::Hello::ours(env!("CARGO_PKG_VERSION"))
+}
+
+/// Whether `url` names the machine it is read on (`localhost`, a name under it, `127.0.0.1`,
+/// `[::1]`, `0.0.0.0`): such an address of another machine's run opens through a tunnel, any
+/// other opens as it is.
+#[uniffi::export]
+pub fn address_is_local(url: String) -> bool {
+    flottille_protocol::address::is_local(&url)
 }

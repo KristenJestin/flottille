@@ -3097,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-alpha.feat-tinted-option.10#e981fc7bb8d294cd17da9e7466805f2eef16d2b5"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.10#bba87e0b84ffdbb881428feaf23f9f638e05e2a4"
 dependencies = [
  "gpui-kit",
  "qrcodegen",

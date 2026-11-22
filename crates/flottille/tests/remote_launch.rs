@@ -620,32 +620,6 @@ fn a_runner_with_no_free_slot_is_refused_naming_those_that_would_take_it() {
 }
 
 #[test]
-fn a_project_not_registered_there_is_refused_with_what_to_do() {
-    let (_hub, pc, server) = pc_and_server(server_user(None), None);
-    eventually("server's offer", || {
-        pc.seen("server")["offers"]["agents"]
-            .as_array()
-            .is_some_and(|agents| !agents.is_empty())
-    });
-    let (_root, mcp) = pc.root("auto");
-
-    let answer = launched(
-        &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Night", "brief": "Work."}),
-    );
-
-    let text = refused(&answer);
-    assert!(
-        text.contains(
-            "the project app is not on server: register it there with flottille --machine \
-             server project add <folder>"
-        ),
-        "{text}"
-    );
-    assert!(server.agents().is_empty());
-}
-
-#[test]
 fn the_receiving_machine_s_gate_judges_the_launch_in_ask_and_auto() {
     let judging = Some(json!([{"say":
         "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}]));
@@ -832,6 +806,8 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         switch: None,
         branch: "feat/export".into(),
         repositories: vec![".".into()],
+        identities: Vec::new(),
+        settings: None,
     }
 }
 

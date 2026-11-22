@@ -2,15 +2,24 @@
 //! it names that machine's own loopback, and the port it writes. The daemon takes the port of a
 //! tunnel from it (`docs/remote.md`, "Tunnels"), and the window decides from it whether a link of
 //! another machine opens through one.
+//!
+//! An address is read as the web view of the phone reads it, which is as a browser does: a `\`
+//! ends the authority like a `/` (`http://evil.example\@localhost:5173/` is `evil.example`), and
+//! one that holds a login (`@`) is none of ours. A run's address is not normalised on its way here:
+//! the daemon keeps the line the run printed once it parses as an `http(s)` address.
+
+/// What ends an address's authority: a browser reads `\` as `/` in an `http(s)` address.
+const AUTHORITY_ENDS: [char; 4] = ['/', '\\', '?', '#'];
 
 /// The host and the port written in an address, the host without its brackets and in lower
-/// case; the port is none when it is not written or is no number.
+/// case; the port is none when it is not written or is no number. None for an authority that
+/// holds a login: it is not worth guessing who the host is.
 fn authority(url: &str) -> Option<(String, Option<u16>)> {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
+    let authority = rest.split(AUTHORITY_ENDS).next()?;
+    if authority.contains('@') {
+        return None;
+    }
     let (host, port) = match authority.strip_prefix('[') {
         Some(bracketed) => {
             let (host, after) = bracketed.split_once(']')?;
@@ -25,6 +34,19 @@ fn authority(url: &str) -> Option<(String, Option<u16>)> {
         host.to_ascii_lowercase(),
         port.and_then(|port| port.parse().ok()),
     ))
+}
+
+/// The authority (host, and port when written) of a web address (`http` or `https`) that has no
+/// userinfo. An address with one (`https://github.com@evil.example/`) reads as another place than
+/// it goes to, so it is none, as is any other scheme and an authority with a backslash, which a
+/// browser reads as the slash that ends it (`https://evil.example\.github.com/` goes to
+/// evil.example).
+pub fn web_authority(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    (!authority.is_empty() && !authority.contains(['@', '\\'])).then_some(authority)
 }
 
 /// Whether the host is a name of the machine it is read on: `localhost`, a name under it,
@@ -56,7 +78,7 @@ pub fn through(url: &str, local_port: u16) -> String {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
         None => (String::new(), url),
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let end = rest.find(AUTHORITY_ENDS).unwrap_or(rest.len());
     let (authority_text, tail) = rest.split_at(end);
     let (login, host_part) = match authority_text.rsplit_once('@') {
         Some((login, host)) => (format!("{login}@"), host),
@@ -80,6 +102,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_web_address_names_its_authority_and_no_userinfo() {
+        assert_eq!(
+            web_authority("https://example.org:8443/a?b#c"),
+            Some("example.org:8443")
+        );
+        assert_eq!(web_authority("http://example.org"), Some("example.org"));
+        assert_eq!(web_authority("https://github.com@evil.example/x"), None);
+        assert_eq!(web_authority("http://user:pw@host.example/"), None);
+        assert_eq!(
+            web_authority("https://host.example?next=a@b"),
+            Some("host.example")
+        );
+        assert_eq!(web_authority("javascript:alert(1)"), None);
+        assert_eq!(web_authority("https:///path"), None);
+        // A browser reads a backslash as a slash: this goes to evil.example.
+        assert_eq!(web_authority("https://evil.example\\.github.com/"), None);
+        assert_eq!(
+            web_authority("http://host.example/a\\b"),
+            Some("host.example")
+        );
+    }
+
+    #[test]
     fn a_run_s_address_is_a_port_of_this_machine_or_none() {
         assert_eq!(local_port("http://localhost:3000/"), Some(3000));
         assert_eq!(local_port("http://127.0.0.1:8080"), Some(8080));
@@ -92,6 +137,27 @@ mod tests {
         assert_eq!(local_port("http://evil-localhost:80/"), None);
         assert_eq!(local_port("http://user@example.org:8443/"), None);
         assert_eq!(local_port("not a url"), None);
+    }
+
+    #[test]
+    fn a_backslash_ends_the_authority_as_the_web_view_reads_it() {
+        // A web view reads `\` as `/`: this host is `evil.example`, whatever follows.
+        assert!(!is_local("http://evil.example\\@localhost:5173/"));
+        assert_eq!(local_port("http://evil.example\\@localhost:5173/"), None);
+        assert!(!is_local("http://evil.example\\localhost:5173/"));
+        // And the host before it is the address's own.
+        assert_eq!(local_port("http://localhost:5173\\docs"), Some(5173));
+        assert_eq!(
+            through("http://localhost:5173\\docs?a=1", 41000),
+            "http://localhost:41000\\docs?a=1"
+        );
+    }
+
+    #[test]
+    fn an_address_with_a_login_names_no_machine_of_ours() {
+        assert!(!is_local("http://user@localhost:5173/"));
+        assert_eq!(local_port("http://user:pw@127.0.0.1:8080/"), None);
+        assert!(!is_local("http://localhost@evil.example/"));
     }
 
     #[test]

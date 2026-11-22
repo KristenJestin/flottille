@@ -190,11 +190,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     match method {
         // `agent.run` is the name it had before the pilot door; both stay.
         "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?).await,
+        "agent.upload" => crate::uploads::chunk(daemon, params).await,
         "agent.send" => {
-            let asked: AgentSend = serde_json::from_value(params)?;
+            let mut asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "writes to it")?;
             refuse_final(&agent)?;
+            let upload = asked.upload.take();
+            take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
             // `/<word>` of an active extension is Flottille's to run, never the agent's to read.
             if asked.images.is_empty()
                 && asked.texts.is_empty()
@@ -750,8 +753,29 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
+/// The pictures and texts of the upload a message names, as if it carried them inline
+/// (`uploads`): with an upload, the message carries none of its own.
+async fn take_upload(
+    daemon: &Arc<Daemon>,
+    (images, texts): (&mut Vec<ImageUpload>, &mut Vec<TextUpload>),
+    upload: Option<String>,
+) -> Result<(), Failure> {
+    let Some(upload) = upload else {
+        return Ok(());
+    };
+    if !images.is_empty() || !texts.is_empty() {
+        return Err(Failure::refused(
+            "a message carries its pictures and texts inline or in an upload, not both",
+        ));
+    }
+    (*images, *texts) = crate::uploads::take(daemon, &upload).await?;
+    Ok(())
+}
+
+async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
+    let upload = asked.upload.take();
+    take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
     // Pictures alone are a first message, as they are a later one.
     if asked.images.is_empty() && asked.texts.is_empty() {
         refuse_empty(&asked.message)?;
