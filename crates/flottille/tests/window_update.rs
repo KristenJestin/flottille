@@ -217,11 +217,25 @@ fn the_download_s_progress_moves_its_amount_not_its_lines() {
     // The sidebar's foot says it once, not every amount.
     assert_eq!(start.foot_line().as_deref(), Some("Downloading…"));
     assert_eq!(later.foot_line(), start.foot_line());
-    // The section says the amount, in place: what fades is the state, not each amount.
-    assert_eq!(start.state_line(), "Downloading… 1.0 MB of 40.0 MB");
-    assert_eq!(later.state_line(), "Downloading… 20.0 MB of 40.0 MB");
-    assert_eq!(start.state_said(), "Downloading…");
-    assert_eq!(later.state_said(), start.state_said());
+    // The section's line says the state alone; the amount is beside the bar.
+    assert_eq!(start.state_line(), "Downloading…");
+    assert_eq!(later.state_line(), start.state_line());
+    assert_eq!(start.amount_line().as_deref(), Some("1.0 MB of 40.0 MB"));
+    assert_eq!(later.amount_line().as_deref(), Some("20.0 MB of 40.0 MB"));
+    // The share received, when the server said the size.
+    assert_eq!(later.share(), Some(0.5));
+}
+
+#[test]
+fn a_download_of_unknown_size_says_the_bytes_and_no_share() {
+    let shown = flottille_window::version::Shown::of(&json!({
+        "latest": NEWER,
+        "downloading": {"done": 5_000_000, "total": null},
+    }));
+    assert_eq!(shown.amount_line().as_deref(), Some("5.0 MB"));
+    assert_eq!(shown.share(), None);
+    let none = flottille_window::version::Shown::of(&json!({"latest": NEWER}));
+    assert_eq!(none.amount_line(), None);
 }
 
 #[gpui_kit::test]
@@ -419,4 +433,239 @@ fn a_window_of_the_daemon_s_build_does_not_start_again(cx: &mut TestAppContext) 
     });
 
     assert_eq!(*asked.lock().unwrap(), 0);
+}
+
+// ── The download's bar ─────────────────────────────────────────────────────────────────────────
+
+/// The Version section of Settings open on a window whose daemon has read the update.
+fn version_open<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the window reads the update", |cx| {
+        shell.read_with(cx, |s, cx| s.version().read(cx).shown().is_some())
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_settings_at(flottille_window::settings::Reveal::Version, window, cx)
+    });
+    settle(cx);
+    (shell, cx)
+}
+
+/// What the daemon says while it downloads `done` bytes of `total`.
+fn downloading(done: u64, total: Option<u64>) -> flottille_window::version::Shown {
+    flottille_window::version::Shown::of(&json!({
+        "latest": NEWER,
+        "downloading": {"done": done, "total": total},
+    }))
+}
+
+fn say(shell: &Entity<Shell>, shown: flottille_window::version::Shown, cx: &mut VisualTestContext) {
+    shell.update(cx, |shell, cx| {
+        shell
+            .version()
+            .update(cx, |section, cx| section.set_shown(shown, cx))
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+fn advance(cx: &mut VisualTestContext, by: Duration) {
+    let mut gone = Duration::ZERO;
+    while gone < by {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        gone += Duration::from_millis(16);
+    }
+}
+
+fn width(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .map(|found| f32::from(found.bounds().size.width))
+    })
+}
+
+fn left(cx: &mut VisualTestContext, id: &str) -> f32 {
+    cx.update(|window, _| f32::from(window.find(id.to_owned()).bounds().origin.x))
+}
+
+/// How much of the bar `bar` is filled, 0 to 1.
+fn filled(cx: &mut VisualTestContext, bar: &str) -> f32 {
+    let track = width(cx, bar).expect("the bar is drawn");
+    width(cx, &format!("{bar}-fill")).expect("its fill is drawn") / track
+}
+
+#[gpui_kit::test]
+fn a_download_shows_a_bar_that_fills(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    assert!(!visible(cx, "version-bar-1"), "no bar before a download");
+
+    say(&shell, downloading(20_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+    assert!(visible(cx, "version-bar-1"));
+    assert!((filled(cx, "version-bar-1") - 0.5).abs() < 0.01);
+    assert_eq!(
+        label(cx, "version-download-amount").as_deref(),
+        Some("20.0 MB of 40.0 MB")
+    );
+    assert!(visible(cx, "version-download-cancel"));
+
+    // Between two readings the fill moves smoothly, and never back.
+    say(&shell, downloading(30_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(100));
+    let mid = filled(cx, "version-bar-1");
+    assert!(mid > 0.5 && mid < 0.75, "on its way: {mid}");
+    say(&shell, downloading(25_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+    assert!(
+        (filled(cx, "version-bar-1") - 0.75).abs() < 0.01,
+        "a lower reading does not take it back"
+    );
+    assert_eq!(
+        label(cx, "version-download-amount").as_deref(),
+        Some("25.0 MB of 40.0 MB"),
+        "the amount is the daemon's last word"
+    );
+}
+
+#[gpui_kit::test]
+fn a_download_of_unknown_size_shows_a_moving_bar(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+
+    say(&shell, downloading(5_000_000, None), cx);
+    advance(cx, Duration::from_millis(600));
+
+    assert!(visible(cx, "version-bar-1"));
+    assert_eq!(
+        label(cx, "version-download-amount").as_deref(),
+        Some("5.0 MB"),
+        "the bytes received, no total"
+    );
+    let track = width(cx, "version-bar-1").unwrap();
+    let stripe = width(cx, "version-bar-1-fill").unwrap();
+    assert!(stripe > 0. && stripe < track, "a stripe, not a fill");
+    let first = left(cx, "version-bar-1-fill");
+    advance(cx, Duration::from_millis(300));
+    assert_ne!(left(cx, "version-bar-1-fill"), first, "the stripe moves");
+}
+
+#[gpui_kit::test]
+fn a_finished_download_folds_the_bar_and_offers_restart(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    say(&shell, downloading(20_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+
+    let done = flottille_window::version::Shown::of(&json!({"latest": NEWER, "staged": NEWER}));
+    say(&shell, done, cx);
+    // The bar fills before it folds away.
+    advance(cx, Duration::from_millis(100));
+    assert!(visible(cx, "version-bar-1"));
+    advance(cx, Duration::from_millis(200));
+    assert!(
+        filled(cx, "version-bar-1") > 0.95,
+        "the bar fills: {}",
+        filled(cx, "version-bar-1")
+    );
+    advance(cx, Duration::from_millis(1000));
+
+    assert!(!visible(cx, "version-bar-1"), "the bar folded away");
+    assert!(!visible(cx, "version-download-cancel"));
+    assert_eq!(
+        label(cx, "version-state-text").as_deref(),
+        Some(flottille_window::version::READY)
+    );
+    assert!(visible(cx, "version-restart-button"));
+}
+
+#[gpui_kit::test]
+fn a_failed_download_folds_the_bar_and_says_why(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    say(&shell, downloading(20_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+
+    let failed = flottille_window::version::Shown::of(
+        &json!({"latest": NEWER, "download_failed": "cannot read the archive"}),
+    );
+    say(&shell, failed, cx);
+    advance(cx, Duration::from_millis(1000));
+
+    assert!(!visible(cx, "version-bar-1"));
+    assert_eq!(
+        label(cx, "version-message").as_deref(),
+        Some("cannot read the archive")
+    );
+    assert!(visible(cx, "version-download"), "it can be tried again");
+}
+
+#[gpui_kit::test]
+fn cancel_stops_the_download(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    say(&shell, downloading(20_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+    assert!(visible(cx, "version-download-cancel"));
+
+    // The daemon, which downloads nothing here, answers that it does not: the bar goes.
+    click(cx, "version-download-cancel");
+    until(&shell, cx, "the bar folds away", |cx| {
+        advance(cx, Duration::from_millis(300));
+        !visible(cx, "version-bar-1")
+    });
+
+    assert!(!visible(cx, "version-download-cancel"));
+    assert_eq!(label(cx, "version-message"), None, "a cancel is no failure");
+}
+
+#[gpui_kit::test]
+fn a_second_download_starts_from_nothing(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    say(&shell, downloading(36_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+    say(
+        &shell,
+        flottille_window::version::Shown::of(&json!({"latest": NEWER})),
+        cx,
+    );
+    advance(cx, Duration::from_millis(1000));
+    assert!(!visible(cx, "version-bar-1"));
+
+    say(&shell, downloading(2_000_000, Some(40_000_000)), cx);
+    advance(cx, Duration::from_millis(600));
+
+    assert!(
+        (filled(cx, "version-bar-2") - 0.05).abs() < 0.01,
+        "not the 90 % of the one before: {}",
+        filled(cx, "version-bar-2")
+    );
+}
+
+#[gpui_kit::test]
+fn the_what_s_new_row_is_a_link_aligned_with_the_other_values(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = version_open(&user, cx);
+    shell.update(cx, |shell, cx| {
+        shell.version().update(cx, |section, cx| {
+            section.set_whats_new(Some("0.4.0-beta.133".into()), cx)
+        })
+    });
+    advance(cx, Duration::from_millis(600));
+
+    assert_eq!(
+        label(cx, "version-whats-new-open").as_deref(),
+        Some("Since 0.4.0-beta.133")
+    );
+    assert_eq!(
+        left(cx, "version-whats-new-open"),
+        left(cx, "version-state-text"),
+        "it starts where the other values do, not indented like a button"
+    );
 }

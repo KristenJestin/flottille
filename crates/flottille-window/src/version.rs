@@ -4,19 +4,25 @@
 //! The window decides nothing: each action is a request of the daemon's (`update.*`), and the
 //! section shows what the daemon says next (`update.show`, `update.changed`).
 //!
-//! What moves: the version line and the state line fade when their text changes (`changing`;
-//! the amount a download read moves in place, at most once a second, and does not fade),
-//! the message of a download, a failure or a refusal unfolds and folds away (`presence_of`), the
-//! buttons are the kit's (their hover and press fade), the check's choice is the kit's
-//! `Segmented`, and the restart is asked in the one confirmation dialog (`Confirm`).
+//! What moves: the version line and the state line fade when their text changes (`changing`),
+//! a download's bar (the kit's `Progress`, its fill easing to each reading over `PANEL`) unfolds
+//! under the update line with the amount received and Cancel, fills when the download is done,
+//! then folds away (`presence`; the amount moves in place, at most once a second, and does not
+//! fade), the message of a failure or a refusal unfolds and folds away (`presence_of`), the
+//! What's new link's ink fades over `HOVER` (`hoverable`), the buttons are the kit's (their
+//! hover and press fade), the check's choice is the kit's `Segmented`, and the restart is asked
+//! in the one confirmation dialog (`Confirm`).
 
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Confirm, Section, Segmented, Skeleton, Toast, awaiting, changing, palette, presence_of,
-    space, toast,
+    Button, Confirm, Progress, Section, Segmented, Skeleton, Toast, awaiting, changing, hoverable,
+    palette, presence, presence_of, space, toast,
 };
 use gpui_kit::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window,
+    div, px,
 };
 use serde_json::{Value, json};
 
@@ -100,7 +106,8 @@ impl Shown {
         }
     }
 
-    /// The line of the update's state, with the amount downloaded.
+    /// The line of the update's state: a download is said once here, its amount and its bar
+    /// are beside it.
     pub fn state_line(&self) -> String {
         if self.when_idle {
             return "Restarts to update once no agent runs".to_owned();
@@ -108,13 +115,8 @@ impl Shown {
         if self.staged.is_some() {
             return READY.to_owned();
         }
-        if let Some((done, total)) = self.downloading {
-            return match total {
-                Some(total) if total > 0 => {
-                    format!("{DOWNLOADING} {} of {}", megabytes(done), megabytes(total))
-                }
-                _ => format!("{DOWNLOADING} {}", megabytes(done)),
-            };
+        if self.downloading.is_some() {
+            return DOWNLOADING.to_owned();
         }
         if let Some(latest) = &self.latest {
             return format!("{latest} is available");
@@ -128,13 +130,21 @@ impl Shown {
         "Up to date".to_owned()
     }
 
-    /// The state line without the amount downloaded: what fades when it changes, while the
-    /// amount moves in place.
-    pub fn state_said(&self) -> String {
-        if self.downloading.is_some() && !self.when_idle && self.staged.is_none() {
-            return DOWNLOADING.to_owned();
-        }
-        self.state_line()
+    /// The amount a download has read, beside its bar: `69.7 MB of 93.1 MB`, or the bytes alone
+    /// when the server does not say the size.
+    pub fn amount_line(&self) -> Option<String> {
+        let (done, total) = self.downloading?;
+        Some(match total {
+            Some(total) if total > 0 => format!("{} of {}", megabytes(done), megabytes(total)),
+            _ => megabytes(done),
+        })
+    }
+
+    /// The share of the download received, 0 to 1, when the server said the size.
+    pub fn share(&self) -> Option<f32> {
+        let (done, total) = self.downloading?;
+        let total = total.filter(|total| *total > 0)?;
+        Some((done as f64 / total as f64).min(1.0) as f32)
     }
 
     /// What the sidebar's foot says: only something to act on, and never the amount, which
@@ -143,7 +153,7 @@ impl Shown {
         if self.staged.is_some() && !self.when_idle {
             return Some("Ready to restart".to_owned());
         }
-        (self.latest.is_some() || self.staged.is_some()).then(|| self.state_said())
+        (self.latest.is_some() || self.staged.is_some()).then(|| self.state_line())
     }
 }
 
@@ -165,6 +175,19 @@ pub struct VersionSection {
     /// The version last run, once the daemon says something is new since it: the section then
     /// offers its page.
     whats_new: Option<String>,
+    /// The bar of the download last shown, kept while it folds away.
+    download: Option<Download>,
+    /// How many downloads the section has seen: each has a bar of its own, which starts empty.
+    downloads: u32,
+    /// A download is done: its bar is full and about to fold away.
+    finishing: bool,
+}
+
+/// What a download's bar says.
+struct Download {
+    n: u32,
+    done: u64,
+    total: Option<u64>,
 }
 
 impl VersionSection {
@@ -177,6 +200,9 @@ impl VersionSection {
             stopping: Vec::new(),
             confirming: false,
             whats_new: None,
+            download: None,
+            downloads: 0,
+            finishing: false,
         }
     }
 
@@ -195,10 +221,48 @@ impl VersionSection {
     }
 
     pub fn set_shown(&mut self, shown: Shown, cx: &mut Context<Self>) {
-        if self.shown.as_ref() != Some(&shown) {
-            self.shown = Some(shown);
-            cx.notify();
+        if self.shown.as_ref() == Some(&shown) {
+            return;
         }
+        let was = self
+            .shown
+            .as_ref()
+            .is_some_and(|was| was.downloading.is_some());
+        match shown.downloading {
+            Some((done, total)) => {
+                if !was {
+                    self.downloads += 1;
+                }
+                self.download = Some(Download {
+                    n: self.downloads,
+                    done,
+                    total,
+                });
+                self.finishing = false;
+            }
+            // Done: the bar fills before it folds away (at once with reduced motion, which
+            // has no fill to wait for).
+            None if was && shown.staged.is_some() && !cx.reduce_motion() => {
+                if let Some(download) = &mut self.download
+                    && let Some(total) = download.total
+                {
+                    download.done = total;
+                    self.finishing = true;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(PANEL).await;
+                        this.update(cx, |this, cx| {
+                            this.finishing = false;
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+            None => {}
+        }
+        self.shown = Some(shown);
+        cx.notify();
     }
 
     /// What the daemon says is new since `since`, the version last run; none when nothing is.
@@ -256,6 +320,7 @@ impl VersionSection {
             Err(why) if method != "update.show" => {
                 let what = match method {
                     "update.download" => "The update was not downloaded",
+                    "update.cancel" => "The download was not cancelled",
                     "update.restart" => "Flottille did not restart",
                     "update.set" => "The check was not changed",
                     _ => "Flottille did not check for an update",
@@ -273,6 +338,10 @@ impl VersionSection {
 
     pub fn download(&mut self, cx: &mut Context<Self>) {
         self.ask("update.download", json!({}), cx);
+    }
+
+    pub fn cancel_download(&mut self, cx: &mut Context<Self>) {
+        self.ask("update.cancel", json!({}), cx);
     }
 
     pub fn set_automatically(&mut self, automatically: bool, cx: &mut Context<Self>) {
@@ -419,6 +488,57 @@ impl VersionSection {
     }
 }
 
+impl VersionSection {
+    /// The row of a download: its bar, the amount received in the quiet ink, and Cancel, in the
+    /// column of the other values. Drawn from the download last shown, so that it keeps its
+    /// content while it folds away.
+    fn download_row(&self, p: gpui_design_system::Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some(Download { n, done, total }) = &self.download else {
+            return div().into_any_element();
+        };
+        let id = ElementId::Name(format!("version-bar-{n}").into());
+        let bar = match total.filter(|total| *total > 0) {
+            Some(total) => Progress::new(id, (*done as f64 / total as f64) as f32),
+            None => Progress::indeterminate(id),
+        };
+        let amount = SharedString::from(match total {
+            Some(total) if *total > 0 => format!("{} of {}", megabytes(*done), megabytes(*total)),
+            _ => megabytes(*done),
+        });
+        div()
+            .id("version-download")
+            .flex()
+            .gap(space::MD)
+            .child(div().w(px(96.)).flex_none())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(space::MD)
+                    .child(div().flex_1().min_w_0().child(bar))
+                    .child(
+                        div()
+                            .id("version-download-amount")
+                            .aria_label(amount.clone())
+                            .flex_none()
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child(amount)
+                            .test_support(),
+                    )
+                    .child(
+                        Button::quiet("version-download-cancel", "Cancel")
+                            .disabled(self.asking || self.finishing)
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_download(cx))),
+                    ),
+            )
+            .test_support()
+            .into_any_element()
+    }
+}
+
 impl Render for VersionSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -437,9 +557,9 @@ impl Render for VersionSection {
                 .into_any_element()
         })
         .into_any_element();
-        // The state fades when it changes; the amount downloaded moves in place.
+        // The state fades when it changes.
         let line = SharedString::from(shown.state_line());
-        let state = changing("version-state", shown.state_said(), move |_| {
+        let state = changing("version-state", shown.state_line(), move |_| {
             div()
                 .id("version-state-text")
                 .aria_label(line.clone())
@@ -511,6 +631,14 @@ impl Render for VersionSection {
                     .child(Self::line("version-latest", "Update", state, cx)),
             )
             .child(
+                presence(
+                    "version-download-line",
+                    shown.downloading.is_some() || self.finishing,
+                    self.download_row(p, cx),
+                )
+                .space(space::SM),
+            )
+            .child(
                 presence_of(
                     "version-whats-new-line",
                     self.whats_new
@@ -519,17 +647,23 @@ impl Render for VersionSection {
                     {
                         let this = cx.entity().downgrade();
                         move |since| {
-                            let open = Button::quiet("version-whats-new-open", since).on_click(
-                                move |_, window, cx| {
+                            // A quiet link: it reads as text, its ink fades to the accent.
+                            let link = div()
+                                .id("version-whats-new-open")
+                                .aria_label(since.clone())
+                                .cursor_pointer()
+                                .child(since)
+                                .on_click(move |_, window, cx| {
                                     this.update(cx, |this, cx| this.open_whats_new(window, cx))
                                         .ok();
-                                },
-                            );
+                                });
+                            let link =
+                                hoverable(link, move |d, t| d.text_color(mix(p.mute, p.acc, t)));
                             Self::line_in(
                                 p,
                                 "version-whats-new",
                                 "What's new",
-                                open.into_any_element(),
+                                link.into_any_element(),
                             )
                         }
                     },

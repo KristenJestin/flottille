@@ -571,7 +571,10 @@ is the old one or the new one, never half of one.
   setting.
 - **The window says it**: the foot of the sidebar (`0.4.0-beta.124 is available`, then
   `Downloading…`, then `Ready to restart`; it opens the section) and Settings, General, **Version**: this build's version, channel and commit, the
-  channel checked, the state of the update and its actions.
+  channel checked, the state of the update and its actions. While it downloads, the Update row
+  shows a progress bar (the share received, `69.7 MB of 93.1 MB` beside it, an indeterminate
+  stripe when the server does not say the size) and **Cancel** (`update.cancel`: the download
+  stops and nothing is staged; it is no failure); done, the bar fills and folds away.
 - **Download** (or `flottille update --stage`): the daemon downloads the archive and its sum,
   checks the sum (a wrong one stages nothing), and unpacks it, from the bytes it checked, in a
   folder of its own beside the binary (`.flottille-update-<pid>-<n>`, which no agent may write),
