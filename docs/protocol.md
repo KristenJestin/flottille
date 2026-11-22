@@ -160,6 +160,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `update.set` | drive |
 | `update.check` | drive |
 | `update.download` | local |
+| `update.cancel` | local |
 | `update.restart` | local |
 | `whatsnew.show` | read |
 | `whatsnew.seen` | drive |
@@ -800,12 +801,15 @@ at all), and downloads or applies nothing unless asked.
 - `update.check` checks once now, whatever `check` says.
 - `update.download` downloads the latest build and stages it beside the binary; it answers at once
   and says the rest in `update.changed`.
+- `update.cancel` stops the download that runs, leaving nothing staged, and answers as
+  `update.show`; a cancelled download is not a failure (`download_failed` stays empty). With no
+  download running it changes nothing.
 - `update.restart {when}`: `"now"` stops the daemon (its agents stop, and are resumed as after
   any restart) and starts it again from its binary, which applies the build staged; `"idle"` does
   it once no agent runs. `nothing-staged` when no build is staged.
 
-Each change emits `update.changed` with what `update.show` answers. `update.download` and
-`update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
+Each change emits `update.changed` with what `update.show` answers. `update.download`,
+`update.cancel` and `update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
 them: no tool of an agent does.
 
 ### The what's new methods

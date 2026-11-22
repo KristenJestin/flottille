@@ -60,6 +60,8 @@ struct State {
     checking: bool,
     /// The bytes read, and of how many when known.
     downloading: Option<(u64, Option<u64>)>,
+    /// The user cancelled the download that runs.
+    cancelling: bool,
     /// Why the last download failed.
     download_failed: Option<String>,
     /// A restart asked for once no agent runs.
@@ -223,14 +225,18 @@ async fn download(daemon: Arc<Daemon>) {
     let telling = daemon.clone();
     let told = Mutex::new(std::time::Instant::now());
     let staged = tokio::task::spawn_blocking(move || {
-        update::stage(&paths, &|done, total| {
-            telling.updates.state.lock().unwrap().downloading = Some((done, total));
-            let mut told = told.lock().unwrap();
-            if told.elapsed() >= PROGRESS_EVERY {
-                *told = std::time::Instant::now();
-                changed(&telling);
-            }
-        })
+        update::stage(
+            &paths,
+            &|done, total| {
+                telling.updates.state.lock().unwrap().downloading = Some((done, total));
+                let mut told = told.lock().unwrap();
+                if told.elapsed() >= PROGRESS_EVERY {
+                    *told = std::time::Instant::now();
+                    changed(&telling);
+                }
+            },
+            &|| telling.updates.state.lock().unwrap().cancelling,
+        )
         .map_err(|error| error.to_string())
     })
     .await
@@ -238,7 +244,9 @@ async fn download(daemon: Arc<Daemon>) {
     {
         let mut state = daemon.updates.state.lock().unwrap();
         state.downloading = None;
-        state.download_failed = staged.err();
+        // A download the user cancelled did not fail, whatever stopped it.
+        state.download_failed = staged.err().filter(|_| !state.cancelling);
+        state.cancelling = false;
     }
     changed(&daemon);
 }
@@ -287,7 +295,7 @@ struct Restart {
 }
 
 /// Answers an `update.*` request of the user: `update.show`, `update.set`, `update.check`,
-/// `update.download`, `update.restart`. No tool of an agent reaches them.
+/// `update.download`, `update.cancel`, `update.restart`. No tool of an agent reaches them.
 pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
     match method {
         "update.show" => {}
@@ -325,10 +333,19 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
                     return Ok(shown_unlocked(state, daemon));
                 }
                 state.downloading = Some((0, None));
+                state.cancelling = false;
                 state.download_failed = None;
             }
             changed(daemon);
             tokio::spawn(download(daemon.clone()));
+        }
+        "update.cancel" => {
+            {
+                let mut state = daemon.updates.state.lock().unwrap();
+                // Nothing to cancel is remembered for no download to come.
+                state.cancelling = state.downloading.is_some();
+            }
+            changed(daemon);
         }
         "update.restart" => {
             let Restart { when } = serde_json::from_value(params)?;
