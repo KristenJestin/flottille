@@ -293,6 +293,8 @@ pub struct SettingsPage {
     /// The daemon's refusal of the last switch, by provider.
     refused: HashMap<String, String>,
     narrow: bool,
+    /// The list of the machine chooser at the top is open.
+    machine_menu: bool,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
     /// What the user says of themselves, edited on this page.
@@ -442,6 +444,7 @@ impl SettingsPage {
             pending: HashMap::new(),
             refused: HashMap::new(),
             narrow: false,
+            machine_menu: false,
             judge_pending: false,
             judge_turning: None,
             judge_refused: None,
@@ -2593,7 +2596,7 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .children(self.machine_chooser(cx).map(|chooser| {
+            .children(self.machine_chooser(window, cx).map(|chooser| {
                 column(
                     enter(key("machine"), 1, div().pb(space::LG).child(chooser)).into_any_element(),
                 )
@@ -2636,7 +2639,11 @@ impl SettingsPage {
     /// that run agents, each with its state; choosing one shows it (`Shell::choose_machine`), as
     /// opening one of its sessions does. None while this machine is in no member list or knows no
     /// other runner.
-    fn machine_chooser(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn machine_chooser(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         let choices = crate::machines::choices(self.machines.read(cx).machines()?);
         if choices.len() < 2 {
             return None;
@@ -2646,21 +2653,36 @@ impl SettingsPage {
             .iter()
             .position(|choice| choice.name == shown)
             .unwrap_or(0);
-        let options = choices
-            .iter()
-            .map(|choice| SelectOption::new(choice.key(), choice.title.clone()).line(choice.line()))
-            .collect::<Vec<_>>();
-        let names: Vec<Option<String>> = choices.into_iter().map(|choice| choice.name).collect();
-        let shell = self.shell.clone();
-        let select = Select::new("settings-machine", options, chosen)
-            .fit()
-            .on_choose(move |at, _, cx| {
-                let name = names[at].clone();
+        let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
+        let toggle = page.clone();
+        let picker = crate::machines::picker(
+            "settings-machine",
+            "settings-machine",
+            &choices,
+            chosen,
+            self.machine_menu,
+            move |_, cx| {
+                toggle
+                    .update(cx, |page, cx| {
+                        page.machine_menu = !page.machine_menu;
+                        cx.notify();
+                    })
+                    .ok();
+            },
+            move |name, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.machine_menu = false;
+                    cx.notify();
+                })
+                .ok();
                 shell
                     .update(cx, |shell, cx| shell.choose_machine(name, cx))
                     .ok();
-            });
-        Some(Field::new("settings-machine-field", "Settings of", select))
+            },
+            window,
+            cx,
+        );
+        Some(Field::new("settings-machine-field", "Settings of", picker))
     }
 
     /// One line under the tabs while another machine is shown, whichever tab: the appearance and

@@ -110,6 +110,9 @@ pub struct Machine {
     pub role: Option<String>,
     /// Whether it has a live link to this machine, which always goes through the hub.
     pub linked: bool,
+    /// The projects it offered over its link, by name; `None` once the link ended or before it
+    /// offered: what it keeps for a project is then its light list of sessions.
+    pub projects: Option<Vec<String>>,
 }
 
 impl Machine {
@@ -122,6 +125,7 @@ impl Machine {
             reason: value["reason"].as_str().map(str::to_owned),
             role: value["role"].as_str().map(str::to_owned),
             linked: value["reached"].is_object(),
+            projects: offered(&value["offers"]),
         }
     }
 
@@ -380,6 +384,8 @@ pub struct Machines {
     pub launches: Vec<Launched>,
     /// The sessions of every machine.
     pub lists: Lists,
+    /// The projects this machine offers, by name, when it says them.
+    pub this_projects: Option<Vec<String>>,
 }
 
 impl Machines {
@@ -409,6 +415,16 @@ impl Machines {
             .iter()
             .find(|seen| seen.fingerprint == machine)
     }
+}
+
+/// The names of the projects an `offers` value holds, `None` when it holds none (no offer).
+fn offered(offers: &Value) -> Option<Vec<String>> {
+    offers["projects"].as_array().map(|projects| {
+        projects
+            .iter()
+            .filter_map(|project| project["name"].as_str().map(str::to_owned))
+            .collect()
+    })
 }
 
 fn text(value: &Value) -> String {
@@ -781,6 +797,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         },
         launches: Vec::new(),
         lists: Lists::default(),
+        this_projects: offered(&machines["this"]["offers"]),
     };
     if let Ok(lists) = conn.ask_within("remote.sessions", json!({}), BOUND)? {
         read.lists = Lists {
@@ -866,8 +883,8 @@ pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
         .map(|machine| format!("on {machine}"))
 }
 
-/// A machine the user may choose where a page is a machine's (Settings of, Add project): this one
-/// first, then the other machines that run agents.
+/// A machine the user may choose where a page is a machine's (Settings of, Add project, the
+/// composer): this one first, then the other machines that run agents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
     /// `None`: this machine.
@@ -876,6 +893,10 @@ pub struct Choice {
     pub role: Option<String>,
     /// Its state in words: `online`, `offline since 22:14`.
     pub state: String,
+    /// Its icon and its colour, as the member list signs them (`desktop`, `teal`).
+    pub icon: String,
+    pub colour: String,
+    pub online: bool,
 }
 
 impl Choice {
@@ -893,12 +914,34 @@ impl Choice {
         if self.name.is_none() {
             said.push("this machine");
         }
-        if let Some(role) = &self.role {
-            said.push(role);
-        }
+        said.extend(self.role.as_deref());
         said.push(&self.state);
         said.join(" · ").into()
     }
+
+    /// Its role and its state, without saying it is this machine: the second line of its row.
+    fn detail(&self) -> gpui_kit::SharedString {
+        let mut said: Vec<&str> = self.role.as_deref().into_iter().collect();
+        said.push(&self.state);
+        said.join(" · ").into()
+    }
+
+    /// How it is drawn, in words: `server in teal`.
+    pub fn look_words(&self) -> String {
+        format!("{} in {}", self.icon, self.colour)
+    }
+}
+
+/// The icon and the colour, as words, the member list signs `name` with (this machine's own when
+/// `None`): a grey desktop for a machine that is in no list.
+fn look_of(machines: &Machines, name: Option<&str>) -> (String, String) {
+    let name = name.or(machines.this.as_deref());
+    machines
+        .members
+        .iter()
+        .find(|member| Some(member.name.as_str()) == name)
+        .map(Member::look)
+        .unwrap_or_else(|| ("desktop".to_owned(), "grey".to_owned()))
 }
 
 /// The machines the user may choose, as `machines` says them: none but this one while it is in
@@ -912,23 +955,184 @@ pub fn choices(machines: &Machines) -> Vec<Choice> {
             .map(|member| member.role.clone())
     };
     let this = machines.this.clone();
+    let (icon, colour) = look_of(machines, None);
     let here = Choice {
         name: None,
         title: this.clone().unwrap_or_else(|| "This machine".to_owned()),
         role: this.as_deref().and_then(role_of),
         state: "online".to_owned(),
+        icon,
+        colour,
+        online: true,
     };
     if !machines.member() {
         return vec![here];
     }
     std::iter::once(here)
-        .chain(machines.runners().map(|machine| Choice {
-            name: Some(machine.name.clone()),
-            title: machine.name.clone(),
-            role: machine.role.clone(),
-            state: machine.state_words(),
+        .chain(machines.runners().map(|machine| {
+            let (icon, colour) = look_of(machines, Some(&machine.name));
+            Choice {
+                name: Some(machine.name.clone()),
+                title: machine.name.clone(),
+                role: machine.role.clone(),
+                state: machine.state_words(),
+                icon,
+                colour,
+                online: machine.online(),
+            }
         }))
         .collect()
+}
+
+impl Machines {
+    /// Keeps the projects the machines offered in `before` for those that offer none now: a
+    /// machine that is off still has its projects, and the composer's picker says it is off.
+    pub fn remember_offers(&mut self, before: &Machines) {
+        for machine in &mut self.machines {
+            if machine.projects.is_none() {
+                machine.projects = before
+                    .machine(&machine.name)
+                    .and_then(|machine| machine.projects.clone());
+            }
+        }
+        if self.this_projects.is_none() {
+            self.this_projects = before.this_projects.clone();
+        }
+    }
+
+    /// Whether the machine `name` (`None`: this one) has the project: what it offered over its
+    /// link, else its light list of sessions, which is kept while it is off.
+    pub fn has_project(&self, name: Option<&str>, project: &str) -> bool {
+        let named = |listed: &[Listed]| listed.iter().any(|session| session.project == project);
+        let offers = |offered: &Option<Vec<String>>| {
+            offered
+                .as_ref()
+                .is_some_and(|names| names.iter().any(|offered| offered == project))
+        };
+        match name {
+            None => offers(&self.this_projects) || named(&self.lists.this),
+            Some(name) => {
+                self.machine(name)
+                    .is_some_and(|machine| offers(&machine.projects))
+                    || self
+                        .lists
+                        .machines
+                        .iter()
+                        .any(|(machine, listed)| machine == name && named(listed))
+            }
+        }
+    }
+}
+
+/// The machines that have `project`, as the composer's picker lists them: this one first, each
+/// with its state. The machine in front (`front`, `None` for this one) is always one of them.
+pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {
+    choices(machines)
+        .into_iter()
+        .filter(|choice| {
+            choice.name.as_deref() == front || machines.has_project(choice.name.as_deref(), project)
+        })
+        .collect()
+}
+
+/// The machine in front as a choice, when the user has several machines: what the header of a
+/// session and the pickers say. `None` while this machine is alone.
+pub fn front_choice(machines: &Machines, front: Option<&str>) -> Option<Choice> {
+    let all = choices(machines);
+    if all.len() < 2 {
+        return None;
+    }
+    all.into_iter()
+        .find(|choice| choice.name.as_deref() == front)
+}
+
+/// A machine's mark: its icon in its colour, saying both in words for what the colour cannot
+/// (`server in teal`). It fades in over `HOVER` when another machine takes its place.
+pub fn mark(
+    id: impl Into<gpui_kit::ElementId>,
+    icon: &str,
+    colour: &str,
+    size: f32,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> impl gpui_kit::IntoElement {
+    use gpui_kit::{InteractiveElement as _, ParentElement as _, SharedString, Styled as _};
+    use gpui_kit::{StatefulInteractiveElement as _, TestSupportExt as _, div, px};
+    let id = id.into();
+    let said = SharedString::from(format!("{icon} in {colour}"));
+    let shown = gpui_design_system::changed(&id, &said, window, cx);
+    div()
+        .id(id)
+        .aria_label(said)
+        .flex_none()
+        .opacity(shown)
+        .child(
+            gpui_design_system::icon(crate::glyphs::device(icon))
+                .size(px(size))
+                .text_color(shade(colour)),
+        )
+        .test_support()
+}
+
+/// A picker of the machines: the machine chosen as its mark, in its colour, and its name, and
+/// the list of the machines, each with its icon, its role and its state, the machine chosen
+/// filled. One that is off or needs an update is greyed and says why; it is not picked. The
+/// owner keeps whether the list is open.
+#[allow(clippy::too_many_arguments)]
+pub fn picker(
+    id: &'static str,
+    entries: &'static str,
+    choices: &[Choice],
+    chosen: usize,
+    open: bool,
+    on_toggle: impl Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+    on_choose: impl Fn(Option<String>, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::AnyElement {
+    use gpui_design_system::{Dropdown, MenuItem, space};
+    use gpui_kit::{IntoElement as _, ParentElement as _, Styled as _, div};
+    let current = choices.get(chosen).or(choices.first());
+    let Some(current) = current else {
+        return div().into_any_element();
+    };
+    let on_choose = std::rc::Rc::new(on_choose);
+    let items = choices.iter().enumerate().map(|(at, choice)| {
+        let item = MenuItem::new(format!("{entries}-{}", choice.key()), choice.title.clone())
+            .leading(crate::glyphs::device(&choice.icon))
+            .detail(choice.detail())
+            .selected(at == chosen);
+        let item = match choice.name.is_none() {
+            true => item.note("this machine"),
+            false => item,
+        };
+        match choice.online {
+            false => item.disabled(choice.state.clone()),
+            true => {
+                let (name, on_choose) = (choice.name.clone(), on_choose.clone());
+                item.on_click(move |window, cx| on_choose(name.clone(), window, cx))
+            }
+        }
+    });
+    div()
+        .flex()
+        .items_center()
+        .gap(space::XS)
+        .child(mark(
+            format!("{id}-mark"),
+            &current.icon,
+            &current.colour,
+            14.,
+            window,
+            cx,
+        ))
+        .child(
+            Dropdown::new(id, current.title.clone())
+                .open(open)
+                .on_toggle(on_toggle)
+                .items(items),
+        )
+        .into_any_element()
 }
 
 /// Why the pages of the machine in front take no change now, when they take none: that machine
@@ -1029,10 +1233,30 @@ pub fn hold(
     window: &mut gpui_kit::Window,
     cx: &mut gpui_kit::App,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let holding = held(cx).is_some();
+    hold_when(page, holding, window, cx)
+}
+
+/// As [`hold`], but only for a machine that takes no change from this device (a viewer): one that
+/// is off leaves the page free, for what picks another machine to be reached.
+pub fn hold_unless_off(
+    page: gpui_kit::Stateful<gpui_kit::Div>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let holding = held(cx).is_some_and(|holding| !holding.offline);
+    hold_when(page, holding, window, cx)
+}
+
+fn hold_when(
+    page: gpui_kit::Stateful<gpui_kit::Div>,
+    holding: bool,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     use gpui_design_system::{fade, motion::HOVER};
     use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
     use gpui_kit::{TestSupportExt as _, div};
-    let holding = held(cx).is_some();
     let t = fade("page-held-fade", holding, HOVER, window, cx);
     page.opacity(1.0 - 0.45 * t).when(holding, |d| {
         d.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
@@ -1188,7 +1412,9 @@ fn carry(pair: &Pair, machine: Option<&(String, Arc<DeviceKey>)>) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
-    use super::{Holding, Machine, Machines, Member, holding};
+    use super::{
+        Holding, Listed, Lists, Machine, Machines, Member, front_choice, holding, project_choices,
+    };
     use serde_json::Value;
 
     fn machines(state: &str, role: &str) -> Machines {
@@ -1201,8 +1427,8 @@ mod tests {
                 since: None,
                 reason: None,
                 role: Some("runner".to_owned()),
-                reached: None,
-                addresses: Vec::new(),
+                linked: false,
+                projects: None,
             }],
             members: vec![Member {
                 name: "pc".to_owned(),
@@ -1211,6 +1437,8 @@ mod tests {
                 role: role.to_owned(),
                 added_by: "the hub".to_owned(),
                 machine: None,
+                icon: None,
+                colour: None,
             }],
             ..Machines::default()
         }
@@ -1245,5 +1473,88 @@ mod tests {
             holding(Some("server"), Some(&machines("online", "controller"))),
             None
         );
+    }
+    fn listing(project: &str) -> Listed {
+        Listed {
+            id: "s1".to_owned(),
+            title: "A session".to_owned(),
+            project: project.to_owned(),
+            state: "idle".to_owned(),
+            exchanged_at: 1,
+            created_at: 1,
+            pilot: None,
+        }
+    }
+
+    /// `pc` (this machine, the hub's member) and `server`, which kept a session of `site` in its
+    /// list and offered `app` while it was linked.
+    fn two(server_offers: Option<Vec<&str>>, state: &str) -> Machines {
+        let mut read = machines(state, "runner");
+        read.hub = Some(super::Hub {
+            url: "http://hub".to_owned(),
+            state: "connected".to_owned(),
+            since: None,
+            reason: None,
+            forgotten: false,
+        });
+        read.machines[0].projects =
+            server_offers.map(|names| names.into_iter().map(str::to_owned).collect());
+        read.this_projects = Some(vec!["app".to_owned(), "solo".to_owned()]);
+        read.lists = Lists {
+            this: Vec::new(),
+            machines: vec![("server".to_owned(), vec![listing("site")])],
+        };
+        read
+    }
+
+    #[test]
+    fn a_project_is_on_the_machines_that_offered_it_or_listed_a_session_of_it() {
+        let read = two(Some(vec!["app"]), "online");
+        assert!(read.has_project(None, "app"));
+        assert!(read.has_project(Some("server"), "app"), "offered");
+        assert!(
+            read.has_project(Some("server"), "site"),
+            "its list names it, as it does while it is off and offers nothing"
+        );
+        assert!(!read.has_project(Some("server"), "solo"));
+        assert!(!read.has_project(Some("nobody"), "app"));
+    }
+
+    #[test]
+    fn the_composer_lists_this_machine_first_then_those_that_have_the_project() {
+        let read = two(Some(vec!["app"]), "online");
+        let names = |project: &str| -> Vec<Option<String>> {
+            project_choices(&read, project, None)
+                .into_iter()
+                .map(|choice| choice.name)
+                .collect()
+        };
+        assert_eq!(names("app"), [None, Some("server".to_owned())]);
+        assert_eq!(names("solo"), [None], "one machine: no picker");
+    }
+
+    #[test]
+    fn a_machine_that_is_off_is_listed_as_off_and_the_one_in_front_always_is() {
+        let read = two(None, "offline");
+        let choices = project_choices(&read, "site", Some("server"));
+        assert_eq!(choices.len(), 2);
+        assert!(!choices[1].online);
+        assert_eq!(choices[1].state, "offline");
+        // In front, it is listed whatever its lists say.
+        assert_eq!(project_choices(&read, "app", Some("server")).len(), 2);
+    }
+
+    #[test]
+    fn the_header_names_a_machine_only_among_several() {
+        assert_eq!(front_choice(&Machines::default(), None), None);
+        let read = two(Some(vec!["app"]), "online");
+        assert_eq!(
+            front_choice(&read, Some("server")).map(|choice| choice.title),
+            Some("server".to_owned())
+        );
+        let (icon, colour) = front_choice(&read, None)
+            .map(|c| (c.icon, c.colour))
+            .unwrap();
+        assert_eq!((icon.as_str(), colour.as_str()), ("desktop", "grey"));
     }
 }

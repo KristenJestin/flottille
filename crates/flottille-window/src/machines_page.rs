@@ -245,11 +245,16 @@ impl MachinesSection {
     pub fn news(&mut self, news: News, window: &mut Window, cx: &mut Context<Self>) {
         match news {
             News::Read(read) => {
-                if read.off.is_none() {
-                    self.kept = Some((*read).clone());
+                let mut read = *read;
+                // A machine that is off offers nothing: what it offered while it was on is kept.
+                if let Some(before) = &self.read {
+                    read.remember_offers(before);
                 }
-                if self.read.as_ref() != Some(&*read) {
-                    self.read = Some(*read);
+                if read.off.is_none() {
+                    self.kept = Some(read.clone());
+                }
+                if self.read.as_ref() != Some(&read) {
+                    self.read = Some(read);
                     cx.notify();
                 }
             }

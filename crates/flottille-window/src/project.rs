@@ -674,7 +674,7 @@ impl Render for ProjectPage {
             .child(enter(
                 key("composer"),
                 1,
-                crate::machines::hold(
+                crate::machines::hold_unless_off(
                     div()
                         .id("project-composer-held")
                         .child(self.composer.clone()),

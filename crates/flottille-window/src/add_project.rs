@@ -437,7 +437,9 @@ impl AddProject {
                 .fold(
                     RadioChoices::new("add-project-machine", "On which machine?"),
                     |radios, choice| {
-                        radios.choice(choice.key(), choice.title.clone(), choice.line())
+                        radios
+                            .choice(choice.key(), choice.title.clone(), choice.line())
+                            .leading(crate::glyphs::device(&choice.icon))
                     },
                 )
                 .chosen(chosen)

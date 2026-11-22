@@ -851,6 +851,19 @@ impl Shell {
         self.choose_then(name, None, cx);
     }
 
+    /// Shows the machine `name` (`None`: this one) on the page of `project`: the composer's
+    /// picker chose where the session starts, and that machine's page of the project is where it
+    /// starts. One that is off is said so and not shown, as `choose_machine` does.
+    pub fn choose_machine_for(
+        &mut self,
+        name: Option<String>,
+        project: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let then = Some((name.clone(), There::Project(project.to_owned())));
+        self.choose_then(name, then, cx);
+    }
+
     /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
     /// once the switch starts, never for a machine that is off or whose key could not be read.
     fn choose_then(
@@ -2494,28 +2507,6 @@ impl Shell {
             } => {
                 let check = self.settings.read(cx).check().clone();
                 check.update(cx, |check, cx| check.answered(then, answer, cx));
-            }
-            Outcome::Asked {
-                then: crate::extensions::Then::Runners { project },
-                answer,
-            } => {
-                // `offered` names every machine that would take the session, this one too.
-                let runners: Vec<String> = answer
-                    .map(|read| {
-                        let this = read["this"]["name"].as_str().unwrap_or_default().to_owned();
-                        read["offered"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|name| name.as_str())
-                            .filter(|name| *name != this)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if let Some(composer) = self.composer_of(&project).cloned() {
-                    composer.update(cx, |composer, cx| composer.set_runners(runners, cx));
-                }
             }
             Outcome::Asked {
                 then: crate::extensions::Then::Tunnels(then),

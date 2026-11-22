@@ -615,6 +615,10 @@ fn every_request_of_a_page_goes_to_its_machine_signed(cx: &mut TestAppContext) {
     for tab in ["agents", "vault", "general"] {
         click(&shell, &format!("settings-tabs-{tab}"), cx);
     }
+    // The server's first read has come: what Settings shows is read from it.
+    until(&shell, cx, "the server's developer mode is asked", |_| {
+        server.log().contains("developer.show asked by pc")
+    });
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::ProjectSettings("app".into()), window, cx)
     });
@@ -680,7 +684,10 @@ fn the_composer_picks_the_machine_among_those_that_have_the_project(cx: &mut Tes
     });
     assert_eq!(label(cx, "machine-picker").as_deref(), Some("pc"));
     click(&shell, "machine-picker", cx);
-    assert_eq!(label(cx, "machine-choice-here-label").as_deref(), Some("pc"));
+    assert_eq!(
+        label(cx, "machine-choice-here-label").as_deref(),
+        Some("pc")
+    );
     assert_eq!(
         label(cx, "machine-choice-server-label").as_deref(),
         Some("server")
