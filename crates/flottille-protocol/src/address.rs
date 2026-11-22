@@ -95,6 +95,27 @@ mod tests {
     }
 
     #[test]
+    fn a_backslash_ends_the_authority_as_the_web_view_reads_it() {
+        // A web view reads `\` as `/`: this host is `evil.example`, whatever follows.
+        assert!(!is_local("http://evil.example\\@localhost:5173/"));
+        assert_eq!(local_port("http://evil.example\\@localhost:5173/"), None);
+        assert!(!is_local("http://evil.example\\localhost:5173/"));
+        // And the host before it is the address's own.
+        assert_eq!(local_port("http://localhost:5173\\docs"), Some(5173));
+        assert_eq!(
+            through("http://localhost:5173\\docs?a=1", 41000),
+            "http://localhost:41000\\docs?a=1"
+        );
+    }
+
+    #[test]
+    fn an_address_with_a_login_names_no_machine_of_ours() {
+        assert!(!is_local("http://user@localhost:5173/"));
+        assert_eq!(local_port("http://user:pw@127.0.0.1:8080/"), None);
+        assert!(!is_local("http://localhost@evil.example/"));
+    }
+
+    #[test]
     fn an_address_names_this_machine_with_a_port_or_without() {
         assert!(is_local("http://localhost/"));
         assert!(is_local("http://localhost:3000/x"));
