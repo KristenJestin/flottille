@@ -1536,7 +1536,8 @@ mod tests {
     #[test]
     fn a_machine_that_is_off_is_listed_as_off_and_the_one_in_front_always_is() {
         let read = two(None, "offline");
-        let choices = project_choices(&read, "site", Some("server"));
+        // Its list names `site`: it is listed, off, after this machine, which is in front.
+        let choices = project_choices(&read, "site", None);
         assert_eq!(choices.len(), 2);
         assert!(!choices[1].online);
         assert_eq!(choices[1].state, "offline");
