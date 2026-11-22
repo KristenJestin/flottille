@@ -89,7 +89,8 @@ impl fmt::Display for NeedsUpdate {
             return write!(
                 f,
                 "The hub runs {} (protocol {}), this machine {} (protocol {}): update {update}.",
-                self.theirs.flottille,
+                // Read before the hub has proven its key: anyone at its address writes it.
+                crate::serial::shown(&self.theirs.flottille, 32),
                 self.theirs.newest(),
                 self.ours.flottille,
                 self.ours.newest(),
@@ -100,7 +101,7 @@ impl fmt::Display for NeedsUpdate {
             "{} runs Flottille {} (protocol {}), this machine {} (protocol {}): update one of \
              them (flottille update)",
             peer,
-            self.theirs.flottille,
+            crate::serial::shown(&self.theirs.flottille, 32),
             self.theirs.newest(),
             self.ours.flottille,
             self.ours.newest(),
