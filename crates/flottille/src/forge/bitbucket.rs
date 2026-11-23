@@ -133,7 +133,7 @@ impl Contexts {
         if self.0.is_none() {
             self.0 = Some(list().await.map_err(|error| match error == missing() {
                 true => error,
-                false => super::unchecked("bkt", &error),
+                false => super::unchecked("bkt", &error, false),
             }));
         }
         let all = self.0.as_ref().unwrap().as_ref().map_err(Clone::clone)?;
