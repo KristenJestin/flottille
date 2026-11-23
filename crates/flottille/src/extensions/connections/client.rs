@@ -617,17 +617,13 @@ async fn start_with(
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(&folder, own, display.is_some())?
+                    super::adapters::start_options(own, display.is_some())?
                 }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
-            if adapter.is_some() {
-                super::adapters::display(
-                    &mut env,
-                    display.as_ref().map(|shown| &shown.env),
-                    &folder,
-                );
+            if let Some(vault) = &vault {
+                super::adapters::display(&mut env, display.as_ref().map(|shown| &shown.env), vault);
             }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();

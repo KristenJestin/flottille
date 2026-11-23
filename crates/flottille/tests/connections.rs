@@ -5429,7 +5429,15 @@ fn the_token_and_the_reason_are_gone_once_the_login_ends() {
     let failed = user();
     let (answer, token, why) = logged_in_with(&failed, json!({"token": "wrong"}));
     let said = refused(answer);
-    assert!(said.contains("Flottille refused"), "{said}");
+    // Anything that reached the socket may have sent it: not said to be the plugin's request.
+    assert!(
+        said.contains("a request without the token of this login was refused"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("Flottille refused agent-browser's request"),
+        "{said}"
+    );
     assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
 }
 
@@ -5569,34 +5577,18 @@ fn login_page() -> (String, std::sync::mpsc::Receiver<String>) {
 struct Closed {
     program: PathBuf,
     home: PathBuf,
-    state: PathBuf,
+    folder: PathBuf,
 }
 
 impl Drop for Closed {
     fn drop(&mut self) {
-        for folder in walk(&self.state) {
-            if folder.file_name().is_some_and(|name| name == "browser")
-                && folder.parent().and_then(|p| p.file_name()) == Some("connections".as_ref())
-            {
-                let _ = std::process::Command::new(&self.program)
-                    .arg("close")
-                    .env_clear()
-                    .env("HOME", &self.home)
-                    .env("AGENT_BROWSER_SOCKET_DIR", &folder)
-                    .output();
-            }
-        }
+        let _ = std::process::Command::new(&self.program)
+            .arg("close")
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("AGENT_BROWSER_SOCKET_DIR", &self.folder)
+            .output();
     }
-}
-
-fn walk(folder: &Path) -> Vec<PathBuf> {
-    let mut found = vec![folder.to_owned()];
-    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            found.extend(walk(&entry.path()));
-        }
-    }
-    found
 }
 
 #[test]
@@ -5623,7 +5615,7 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
     let _closed = Closed {
         program: program.clone(),
         home: user.path("home"),
-        state: user.path("state"),
+        folder: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
     turn_on(&user);
@@ -6772,8 +6764,7 @@ fn a_shown_browser_gets_the_display_variables() {
         json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": null,
             "XDG_RUNTIME_DIR": folder.to_str().unwrap(),
             "DBUS_SESSION_BUS_ADDRESS": null,
-            "AGENT_BROWSER_SOCKET_DIR": user.path("state/flottille/connections/browser")
-                .to_str().unwrap(),
+            "AGENT_BROWSER_SOCKET_DIR": vault_folder(&user).to_str().unwrap(),
             "runtime_files": ["wayland-test"]})
     );
     let started = logged(&user, "browser", "start");
@@ -6994,7 +6985,7 @@ fn the_server_and_its_login_share_one_browser_socket_folder() {
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    let shared = user.path("state/flottille/connections/browser");
+    let shared = vault_folder(&user);
     let server = display_of(&user, "browser");
     let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
     assert_eq!(
@@ -7097,7 +7088,7 @@ fn a_shown_server_cannot_link_the_socket_out_of_its_folder() {
 
 /// The browser on the connection's socket folder, as the fake keeps it: none once it is closed.
 fn browser_running(user: &User) -> Option<Value> {
-    std::fs::read_to_string(user.path("state/flottille/connections/browser/browser.json"))
+    std::fs::read_to_string(vault_folder(user).join("browser.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
 }

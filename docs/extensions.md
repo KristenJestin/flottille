@@ -1563,9 +1563,11 @@ way in:
   daemon says why, in its log and in the form, under the switch (kept there while a call runs),
   never with the real folder. Off, the server gets no display variable of the daemon's; **whether
   the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
-  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
-  (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
-  same browser and the removal of a display folder never takes a live socket. One browser per
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's vault folder (below;
+  agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
+  same browser, the removal of a display folder never takes a live socket, and no run reaches the
+  socket, which drives the browser with no gate (an init script, a route, the filled password
+  field read). One browser per
   connection, in the mode the switch says: a login uses the server's display folder (the running
   server's own, else made under the connection's name for the time of the login), and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
@@ -1644,8 +1646,10 @@ way in:
     The Hyprland lines are the wiki's forms for each version (the Lua one is the form of the
     default `hyprland.lua` of 0.56), not run by Flottille's tests either. The window's switch *Show
     the browser* says it, in a sentence that names this section.
-- **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
-  written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
+- **Its start** gains `--config $XDG_RUNTIME_DIR/flottille/vault/<name>/agent-browser.json`,
+  written by Flottille in the connection's vault folder (below), which no run reaches: a run that
+  rewrote it while a login starts would have its own program run as the plugin, by a browser that
+  reaches the vault. It is one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
   user's own. agent-browser reads **the first `--config`** of a command line (and never the form
   `--config=<file>`), and `AGENT_BROWSER_CONFIG` only when no `--config` is given: a configuration
@@ -1700,9 +1704,11 @@ way in:
   folder, which no run reaches (`docs/vault.md`, "The runtime folder"): a run of an agent that
   waits for the login cannot read the token nor reach the socket, where a folder of the user's
   under the state folder would give both to any of its processes. Only the connection's server,
-  its login's commands and the browser they start are given it (as a display folder is), and it
-  is made once per connection while the daemon runs: agent-browser's daemon outlives the server
-  and the login, confined with the folder's inode, and one made again would be out of its reach. `flottille vault provide` (hidden, needs no folder of
+  its login's commands, `agent-browser close` and the browser they start are given it (as a
+  display folder is). It is **kept**: made once, never made again nor removed, not even by a
+  daemon that starts after one died: agent-browser's daemon outlives the server, the login and
+  Flottille's daemon, confined with the folder's inode, and is found again by its socket there
+  (one made again would be out of its reach, and its browser left running). `flottille vault provide` (hidden, needs no folder of
   Flottille's) reads agent-browser's request on its standard input, sends the token and the item
   and the URL agent-browser asks for to that socket, and writes the answer on its standard output.
   agent-browser says of a plugin that failed only that it "exited unsuccessfully": the plugin also

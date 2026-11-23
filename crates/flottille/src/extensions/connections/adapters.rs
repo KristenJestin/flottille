@@ -142,11 +142,11 @@ const WHY_BYTES: u64 = 1024;
 /// How long a login has, as a call of the server has.
 const LOGIN_LIMIT: Duration = Duration::from_secs(120);
 
-/// [`LOGIN_LIMIT`], or the milliseconds of `FLOTTILLE_CONNECTION_LOGIN_MS` (as
-/// `FLOTTILLE_CONNECTION_LINGER_MS` is read).
+/// [`LOGIN_LIMIT`], or in a test build the milliseconds of `FLOTTILLE_CONNECTION_LOGIN_MS`.
 fn login_limit() -> Duration {
     std::env::var("FLOTTILLE_CONNECTION_LOGIN_MS")
         .ok()
+        .filter(|_| cfg!(debug_assertions))
         .and_then(|ms| ms.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(LOGIN_LIMIT)
@@ -409,7 +409,7 @@ const SENDS_ELSEWHERE: &[(&str, &[&str])] = &[
 
 // ── The start ────────────────────────────────────────────────────────────────────────────────
 
-/// The connection's folder, where its server runs and Flottille writes what it adds.
+/// The connection's folder, where its server runs and agent-browser keeps its state.
 pub fn folder(daemon: &Daemon, name: &str) -> PathBuf {
     daemon.paths.state.join("connections").join(name)
 }
@@ -424,9 +424,10 @@ fn socket_file(vault: &crate::display::Folder) -> PathBuf {
     vault.path().join("vault.sock")
 }
 
-/// Where the configuration it writes is, as the review names it.
+/// Where the configuration it writes is, as the review names it: in the connection's vault folder
+/// (`display::vault`), out of every run's reach, as the plugin it names is.
 pub fn config_of(daemon: &Daemon, name: &str) -> PathBuf {
-    config_file(&folder(daemon, name))
+    config_file(&daemon.paths.runtime.join("vault").join(name))
 }
 
 /// The site an entry's URL gives, its host: none for a URL that is no web address a password may
@@ -482,12 +483,10 @@ pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<Strin
 /// configuration that names Flottille as agent-browser's credential provider, and only it (an
 /// explicit one replaces agent-browser's discovery of the user's own). It is the file and not
 /// flags: agent-browser's MCP tool calls run in child processes that load only the `--config`
-/// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file.
-pub fn start_options(
-    folder: &Path,
-    vault: &crate::display::Folder,
-    headed: bool,
-) -> Result<Vec<String>, String> {
+/// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file. It is in the
+/// vault folder: a run that rewrote it while a login starts would have its own program run as the
+/// plugin, by a browser that reaches the vault.
+pub fn start_options(vault: &crate::display::Folder, headed: bool) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
@@ -503,7 +502,7 @@ pub fn start_options(
         // needs (`docs/extensions.md`, "Show the browser"). Only a shown browser has a window.
         config["args"] = json!(BROWSER_CLASS_ARG);
     }
-    let file = config_file(folder);
+    let file = config_file(vault.path());
     written(&file, config.to_string().as_bytes())
         .map_err(|error| format!("{}: {error}", file.display()))?;
     Ok(vec!["--config".into(), file.display().to_string()])
@@ -545,12 +544,13 @@ pub fn shown(
 /// whether the browser is shown or not, and the display folder's variables (`shown`, a
 /// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
 /// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
-/// name the connection's own `folder`, so they reach the same browser, and the removal of a
-/// display folder never takes a live socket.
+/// name the connection's vault folder, so they reach the same browser, the removal of a display
+/// folder never takes a live socket, and no run reaches the socket, which drives the browser with
+/// no gate.
 pub fn display(
     env: &mut BTreeMap<OsString, OsString>,
     shown: Option<&BTreeMap<OsString, OsString>>,
-    folder: &Path,
+    vault: &crate::display::Folder,
 ) {
     for name in [
         "WAYLAND_DISPLAY",
@@ -565,17 +565,18 @@ pub fn display(
     }
     env.insert(
         "AGENT_BROWSER_SOCKET_DIR".into(),
-        folder.as_os_str().to_owned(),
+        vault.path().as_os_str().to_owned(),
     );
 }
 
-/// How the browser agent-browser's daemon runs for a connection is closed: its command line and
-/// the socket folder the daemon answers on; and the display folder it was started with, kept
-/// until it is closed.
+/// How the browser agent-browser's daemon runs for a connection is closed: its command line, the
+/// connection's folder and its vault's, where the daemon answers; and the display folder it was
+/// started with, kept until it is closed.
 #[derive(Clone, Debug)]
 pub struct Browser {
     program: Vec<String>,
     folder: PathBuf,
+    vault: crate::display::Folder,
     pub(super) shown: Option<crate::display::Shown>,
 }
 
@@ -588,6 +589,7 @@ pub fn browser(
     Some(Browser {
         program: command_line(declaration)?,
         folder: folder(daemon, &declaration.name),
+        vault: super::client::vault_of(daemon, &declaration.name).ok()?,
         shown: shown.cloned(),
     })
 }
@@ -599,7 +601,7 @@ pub async fn close(daemon: &Daemon, browser: &Browser) {
     let Ok(mut env) = crate::runs::beside(daemon) else {
         return;
     };
-    display(&mut env, None, &browser.folder);
+    display(&mut env, None, &browser.vault);
     let mut command = tokio::process::Command::new(&browser.program[0]);
     command
         .args(&browser.program[1..])
@@ -611,8 +613,10 @@ pub async fn close(daemon: &Daemon, browser: &Browser) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let mut child = match crate::children::spawn(crate::landlock::confined(
+    // Its socket is in the vault folder, which it must reach.
+    let mut child = match crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
+        &[&browser.vault],
     )) {
         Ok(child) => child,
         Err(error) => {
@@ -808,6 +812,7 @@ fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
 }
 
 /// One login: the entry it may give, to whom.
+#[derive(Clone)]
 struct Login {
     connection: String,
     entry: String,
@@ -835,7 +840,7 @@ async fn run(
         None => shown(daemon, declaration, &declaration.name).0,
     };
     let vault = super::client::vault_of(daemon, &declaration.name)?;
-    let options = start_options(&folder, &vault, shown.is_some())?;
+    let options = start_options(&vault, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }
@@ -852,7 +857,7 @@ async fn run(
     let _why_gone = Removed(why_file.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
-    display(&mut env, shown.as_ref().map(|shown| &shown.env), &folder);
+    display(&mut env, shown.as_ref().map(|shown| &shown.env), &vault);
     // The folders the login's commands may reach: the daemon's own, never what a variable of the
     // connection (the vault's, below) names. The browser they may start runs the plugin, which
     // reaches the token and the socket in the vault's.
@@ -908,8 +913,17 @@ async fn run(
     let leader = child.id();
     let stdout = tokio::spawn(kept(child.stdout.take()));
     let stderr = tokio::spawn(kept(child.stderr.take()));
-    let mut token = Some(token);
+    let token = Arc::new(std::sync::Mutex::new(Some(token)));
+    let shared = Arc::new(login.clone());
     let mut refused = None;
+    let mut stray = false;
+    // Each request answered on its own: one that says nothing does not hold the plugin's.
+    let mut asks = tokio::task::JoinSet::new();
+    let mut heard = |done: Result<Option<Refused>, tokio::task::JoinError>| match done {
+        Ok(Some(Refused::Asked(why))) => refused = Some(why),
+        Ok(Some(Refused::Untokened)) => stray = true,
+        _ => {}
+    };
     let limit = login_limit();
     let ended = tokio::time::timeout(limit, async {
         loop {
@@ -917,14 +931,18 @@ async fn run(
                 status = child.wait() => return status,
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { continue };
-                    if let Some(why) = answer(daemon, stream, login, &mut token).await {
-                        refused = Some(why);
-                    }
+                    asks.spawn(answer(daemon.clone(), stream, shared.clone(), token.clone()));
                 }
+                Some(done) = asks.join_next() => heard(done),
             }
         }
     })
     .await;
+    // What was answered before agent-browser ended; the requests still waiting are dropped.
+    while let Some(done) = asks.try_join_next() {
+        heard(done);
+    }
+    drop(asks);
     let status = match ended {
         Ok(status) => status.map_err(|error| error.to_string())?,
         Err(_) => {
@@ -950,6 +968,10 @@ async fn run(
         Some(refused) => format!("Flottille refused agent-browser's request: {refused}"),
         None => "agent-browser could not sign in".to_owned(),
     };
+    // Not the plugin's, maybe: anything that reached the socket may have sent it.
+    if stray {
+        why.push_str("; a request without the token of this login was refused");
+    }
     let first = error.lines().find(|line| !line.trim().is_empty());
     if let Some(line) = first {
         why.push_str(&format!("; it said: {line}"));
@@ -1073,14 +1095,22 @@ async fn kept(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Why a request to the login's socket was refused.
+enum Refused {
+    /// The plugin's, with the token: why.
+    Asked(String),
+    /// Without the token: from anything that reached the socket.
+    Untokened,
+}
+
 /// Answers one request of the plugin: the credential, for the run's own token once and for its
 /// entry alone; why it refused otherwise. Nothing of the secret is said anywhere else.
 async fn answer(
-    daemon: &Daemon,
+    daemon: Arc<Daemon>,
     stream: tokio::net::UnixStream,
-    login: &Login,
-    token: &mut Option<String>,
-) -> Option<String> {
+    login: Arc<Login>,
+    token: Arc<std::sync::Mutex<Option<String>>>,
+) -> Option<Refused> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
     let mut reader = tokio::io::BufReader::new(read.take(OUTPUT_BYTES as u64));
@@ -1090,28 +1120,35 @@ async fn answer(
         _ => Value::Null,
     };
     let given = asked["token"].as_str().unwrap_or_default();
-    let (said, refused) = match token.as_deref() {
-        Some(own) if !given.is_empty() && same(own, given) => {
-            if asked["item"].as_str() != Some(login.entry.as_str()) {
-                let why = format!("this login gives the vault entry {} alone", login.entry);
-                (json!({"refused": why}), Some(why))
-            } else {
-                // Spent before the secret is read: a token is for one request.
-                *token = None;
-                match credential(daemon, login, asked["url"].as_str()).await {
-                    Ok(credential) => (json!({"credential": credential}), None),
-                    Err(why) => (json!({"refused": why}), Some(why)),
+    let allowed = {
+        let mut token = token.lock().unwrap();
+        match token.as_deref() {
+            Some(own) if !given.is_empty() && same(own, given) => {
+                if asked["item"].as_str() != Some(login.entry.as_str()) {
+                    let why = format!("this login gives the vault entry {} alone", login.entry);
+                    Err(Refused::Asked(why))
+                } else {
+                    // Spent before the secret is read: a token is for one request.
+                    *token = None;
+                    Ok(())
                 }
             }
+            Some(_) => Err(Refused::Untokened),
+            None => Err(Refused::Asked(
+                "the token of this login was used already".to_owned(),
+            )),
         }
-        Some(_) => {
-            let why = "the request does not carry the token of this login".to_owned();
-            (json!({"refused": why}), Some(why))
-        }
-        None => {
-            let why = "the token of this login was used already".to_owned();
-            (json!({"refused": why}), Some(why))
-        }
+    };
+    let (said, refused) = match allowed {
+        Ok(()) => match credential(&daemon, &login, asked["url"].as_str()).await {
+            Ok(credential) => (json!({"credential": credential}), None),
+            Err(why) => (json!({"refused": why}), Some(Refused::Asked(why))),
+        },
+        Err(Refused::Untokened) => (
+            json!({"refused": "the request does not carry the token of this login"}),
+            Some(Refused::Untokened),
+        ),
+        Err(Refused::Asked(why)) => (json!({"refused": why}), Some(Refused::Asked(why))),
     };
     let mut bytes = serde_json::to_vec(&said).expect("JSON");
     bytes.push(b'\n');

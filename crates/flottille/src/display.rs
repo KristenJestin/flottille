@@ -5,8 +5,9 @@
 //! leaves this folder alone within its reach. A connection's browser uses it
 //! (`docs/extensions.md`), and so does a run of a project that lets its runs open windows
 //! (`docs/tools.md`). A connection's browser also gets a folder of its vault here, kept out of
-//! every run's reach as the rest of the runtime folder is: its login's token and the credential
-//! plugin's socket (`docs/extensions.md`, "Adapters").
+//! every run's reach as the rest of the runtime folder is: agent-browser's configuration and its
+//! daemon's socket, its login's token and the credential plugin's socket (`docs/extensions.md`,
+//! "Adapters").
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -22,9 +23,10 @@ use flottille_core::paths::Paths;
 #[derive(Clone, Debug)]
 pub struct Folder(std::sync::Arc<Made>);
 
-/// The folder, and whether its owner is given X11's display (the session has no Wayland).
+/// The folder, whether its owner is given X11's display (the session has no Wayland), and whether
+/// it is kept when its last handle is dropped (a vault's).
 #[derive(Debug)]
-struct Made(PathBuf, bool);
+struct Made(PathBuf, bool, bool);
 
 impl Folder {
     pub fn path(&self) -> &Path {
@@ -40,6 +42,9 @@ impl Folder {
 
 impl Drop for Made {
     fn drop(&mut self) {
+        if self.2 {
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -57,19 +62,23 @@ pub struct Shown {
 /// lock, when it starts: nothing else makes them, so none is in use.
 pub fn clean(paths: &Paths) {
     let _ = std::fs::remove_dir_all(paths.runtime.join("display"));
-    let _ = std::fs::remove_dir_all(paths.runtime.join("vault"));
 }
 
-/// The folder `$XDG_RUNTIME_DIR/flottille/vault/<owner>` (mode 0700, made again if it was left),
-/// empty: where a connection's login puts what only its browser may reach. Its browser is
-/// confined with it, held by its inode, and outlives the server and the login: the caller keeps
-/// it for as long as a browser may run.
+/// The folder `$XDG_RUNTIME_DIR/flottille/vault/<owner>` (mode 0700): where a connection's
+/// browser keeps what only it, its server and its login may reach: agent-browser's configuration
+/// and its daemon's socket, the login's token and the credential plugin's socket. Its browser is
+/// confined with it, held by its inode, and outlives the server, the login and the daemon itself:
+/// the folder is kept, never made again nor removed, so that the browser a daemon that died left
+/// is found by its socket and reaches its plugin (`connections::close_left_at_start`).
 pub fn vault(paths: &Paths, owner: &str) -> Result<Folder, String> {
-    made(&paths.runtime.join("vault"), owner, false)
+    let folder = paths.runtime.join("vault").join(named(owner)?);
+    // A link planted at its place is refused, never followed.
+    flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
+    Ok(Folder(std::sync::Arc::new(Made(folder, false, true))))
 }
 
-/// The folder `owner` under `base`, made afresh.
-fn made(base: &Path, owner: &str, x11: bool) -> Result<Folder, String> {
+/// `owner`, when it is a plain name: letters, digits, `-` and `_`.
+fn named(owner: &str) -> Result<&str, String> {
     if owner.is_empty()
         || !owner
             .chars()
@@ -77,7 +86,12 @@ fn made(base: &Path, owner: &str, x11: bool) -> Result<Folder, String> {
     {
         return Err(format!("{owner:?} is no name for a display folder"));
     }
-    let folder = base.join(owner);
+    Ok(owner)
+}
+
+/// The folder `owner` under `base`, made afresh.
+fn made(base: &Path, owner: &str, x11: bool) -> Result<Folder, String> {
+    let folder = base.join(named(owner)?);
     // The folders above are made private and checked; the last one is made here and now, never
     // taken over: one that is there (a link planted in it) fails the creation.
     flottille_core::paths::ensure_private_dir(base).map_err(|error| error.to_string())?;
@@ -86,7 +100,7 @@ fn made(base: &Path, owner: &str, x11: bool) -> Result<Folder, String> {
         .mode(0o700)
         .create(&folder)
         .map_err(|error| error.to_string())?;
-    Ok(Folder(std::sync::Arc::new(Made(folder, x11))))
+    Ok(Folder(std::sync::Arc::new(Made(folder, x11, false))))
 }
 
 /// The folder `$XDG_RUNTIME_DIR/flottille/display/<owner>` (mode 0700, made again if it was left),

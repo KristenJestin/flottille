@@ -343,8 +343,9 @@ push the gate let through, and its checks' dry run, are the exception (below):
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
   An agent-browser connection's server, its login and its reload are granted its vault folder,
-  `$XDG_RUNTIME_DIR/flottille/vault/<connection>`, the same way: the login's one-time token and
-  the credential plugin's socket, which no run reaches. The folders are the ones the daemon made,
+  `$XDG_RUNTIME_DIR/flottille/vault/<connection>`, the same way (and `agent-browser close` too):
+  agent-browser's configuration and its daemon's socket, the login's one-time token and the
+  credential plugin's socket, which no run reaches. The folders are the ones the daemon made,
   never one a variable of the connection names;
 - Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
   process also starts in a **private mount namespace** of its own, where the kernel lets a user
@@ -678,7 +679,10 @@ The gaps, where the platform does not allow more:
 - where the kernel refuses user namespaces, a confined process has no private mount namespace:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
   by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
-  (`sandbox.private_mounts` false in `--json`);
+  (`sandbox.private_mounts` false in `--json`). That includes a connection's vault folder: it
+  cannot list it nor read the login's token or agent-browser's configuration, but it can connect
+  to agent-browser's daemon's socket, and drive the browser, if it guesses its name, and to the
+  login's, which refuses a request without the token;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then
