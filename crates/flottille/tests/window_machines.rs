@@ -1775,9 +1775,7 @@ fn a_server_paired_as_a_controller_still_shows_the_command_to_make_it_a_runner(
         label(cx, "member-role-server-command").as_deref(),
         Some("flottille-hub role server runner")
     );
-    assert!(
-        label(cx, "member-role-server-said").is_some_and(|said| said.contains("runs nothing"))
-    );
+    assert!(label(cx, "member-role-server-said").is_some_and(|said| said.contains("runs nothing")));
     // Beside it, the phone has neither.
     assert!(!present(cx, "member-role-phone-command"));
 }
