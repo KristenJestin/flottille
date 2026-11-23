@@ -1576,11 +1576,18 @@ way in:
   that runs, and a call that asks the other mode **restarts the server and closes the browser**,
   its profile kept: the user signs in shown, the agent goes on headless). **Flottille keeps the
   profile itself**: the configuration file it writes names `profile`, a folder of the
-  connection's own (`$XDG_STATE_HOME/flottille/connections/<connection>/profile`), so the cookies
-  and sign-ins of one browser are the next one's whatever the user's command says (without it,
-  agent-browser starts each browser on a profile of its own that is gone when it closes); a
-  `--profile` in the command, which agent-browser puts above its configuration, is the user's
-  choice of another kept profile. A command with `--allowed-domains` gets none, since
+  connection's own (`$XDG_STATE_HOME/flottille/browsers/<connection>/profile`), so the lasting
+  cookies and sign-ins of one browser are the next one's whatever the user's command says
+  (without it, agent-browser starts each browser on a profile of its own that is gone when it
+  closes). A cookie of the browser's session (one with no `Max-Age` nor `Expires`) and the
+  pages' `sessionStorage` are not kept: they are gone with the browser that closes at each
+  switch, as when the user quits their own. **No other command Flottille runs reaches that
+  folder** (a run, another connection's server, a project's service): it is a login's place for
+  the gate and out of every confined process's reach, but the connection's server and its login
+  (`docs/vault.md`, "The runtime folder"); it is removed with the connection, once its browser is
+  closed, so a connection made again under the same name starts signed out. A `--profile` in the
+  command, which agent-browser puts above its configuration, is the user's choice of another
+  kept profile, where they chose it: Flottille neither moves nor hides it. A command with `--allowed-domains` gets none, since
   agent-browser refuses a profile beside it (a page restored before its containment is in
   place); for the same reason agent-browser refuses a call's own `allowedDomains` while the
   profile is set, so a limit to domains is the user's, in the command. The `headed` of the call reaches the server as the mode that runs: `false`

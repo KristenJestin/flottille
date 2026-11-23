@@ -2387,7 +2387,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`,
      `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.local/share/keyrings`,
      `Library/Keychains`, `.local/share/opencode` wherever they sit along the path, `/etc/shadow`,
-     `/etc/sudoers`, `/etc/sudoers.d`. Inside the place only what sits below it counts; a path
+     `/etc/sudoers`, `/etc/sudoers.d`, and the folders `remote/` (Flottille's keys) and
+     `browsers/` (its browsers' profiles: their cookies and sign-ins) of Flottille's own folders,
+     in any case: `refused: X is in a login's place (the profiles of Flottille's browsers, its
+     browsers/ folder)`. Inside the place only what sits below it counts; a path
      outside is checked as written and where it leads, and without a leading `/proc/<process>/root`
      or `cwd`. The agents' own folders of the home (`~/.claude`, `~/.claude.json`, `~/.codex`)
      are a login's place whole (`refused: X is in a login's place (~/.claude)`), and so is a copy
