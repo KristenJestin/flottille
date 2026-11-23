@@ -553,7 +553,7 @@ fn last_known(
     if let Some(machine) = machine.filter(|machine| !machine.online()) {
         return (machine.state_words(), None);
     }
-    // Allowed there, a held launch is told nothing more here: what it sent since says it runs.
+    // A held launch is `held` until the user's answer there comes back: allowed, it is `started`.
     match launched.heard.as_deref() {
         None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
         // Nothing heard yet of a project made for it there: that machine is preparing it.

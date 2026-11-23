@@ -3548,6 +3548,17 @@ impl Store {
         Ok(())
     }
 
+    /// Settles the launch `out` `launch` to `machine`, held for the user there, as their answer
+    /// came: `started` or `refused`. Only a launch still held: an answer sent again changes nothing.
+    pub fn decide_launch(&mut self, machine: &str, launch: &str, state: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = ?3 WHERE way = 'out' AND machine = ?1 \
+             AND launch = ?2 AND state = 'held'",
+            params![machine, launch, state],
+        )?;
+        Ok(())
+    }
+
     /// Keeps `list`, the sessions the machine of key `machine` (named `name`) told at `at`, in
     /// place of the one it told before. The projects it told apart (`keep_machine_projects`) stay.
     pub fn keep_machine_sessions(

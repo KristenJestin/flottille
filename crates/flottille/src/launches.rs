@@ -378,10 +378,16 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
     };
     let back = format!("{back}{kept}");
     if let Some(number) = placed["request"].as_u64() {
+        let follows = runs_as(match asked.kind {
+            LaunchKind::Child => "child",
+            LaunchKind::Led => "led",
+            LaunchKind::Handed => "handed",
+        });
         return format!(
             "Not started yet: request #{number} on {machine} is waiting for the user, who allows \
-             or refuses it there. {named} will run on {machine} {place}, once allowed. {back} You \
-             are told nothing more here: go on with your own work."
+             or refuses it there. {named} will run on {machine} {place}, once allowed. {back} Once \
+             the user allows it there, it runs {follows}. You are told when the user decides, \
+             as the result of a held call comes: go on with your own work meanwhile."
         );
     }
     match asked.kind {
@@ -393,12 +399,32 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
         ),
         LaunchKind::Led => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
-             of {machine}, not your child: the user sees it there and may talk to it. {back}"
+             of {machine}, not your child: the user sees it there and may talk to it. It asks you \
+             its questions: a delivery [flottille:session-turn-ended] wakes you when it asks, \
+             reports or ends, with its last message. Answer with session_send, relay to the user \
+             with ask, or do nothing; session_read reads it. {back}"
         ),
         LaunchKind::Handed => format!(
             "Started a session for the user, {named}, on {machine}, {place}, handed over. It is \
              the user's. {back}"
         ),
+    }
+}
+
+/// How a session of `kind` runs on another machine once the user there allows it, and what of
+/// it comes back to the agent that launched it: what the held answer and the allowed delivery say.
+fn runs_as(kind: &str) -> &'static str {
+    match kind {
+        "child" => {
+            "as your child: its report, questions and failure come to you as a local child's, and \
+             agent_send, agent_status and agent_stop reach it"
+        }
+        "led" => {
+            "as a session led by you: its questions, reports and end wake you as a local led \
+             session's do, a delivery [flottille:session-turn-ended] with its last message, and \
+             session_send and session_read reach it"
+        }
+        _ => "as a session of the user's, handed over: nothing of it comes back to you",
     }
 }
 
@@ -1313,10 +1339,21 @@ fn finish(
                 )
             }
         };
-        // What it lacked is said to the agent that launched it, which would wait for nothing.
-        if !missing.is_empty() {
-            refused_for_missing(daemon, &launch, &missing, why.as_deref());
-        }
+        // The agent that launched it is told, and what it lacked, as a held call's result comes:
+        // it would wait for nothing.
+        let here = this_machine(daemon);
+        let asked = asked_of(&launch, request.number, &agent, &here);
+        let body = match (&why, missing.is_empty()) {
+            (_, false) => refused_for_missing(&asked, &here, &missing, why.as_deref()),
+            (Some(why), true) => format!(
+                "{asked} was allowed by the user of {here}, but it could not start there: {why}. \
+                 Nothing of it runs there."
+            ),
+            (None, true) => {
+                format!("{asked} was refused by the user of {here}. Nothing of it runs there.")
+            }
+        };
+        crate::across::tell_decided(daemon, &launch, &body, false);
         crate::tree::stop_tree(daemon, &agent, &reason);
         // Its setup never runs: the workspace made of its code goes once its agent ended, and
         // the project made for it then.
@@ -1337,43 +1374,54 @@ fn finish(
         );
     }
     go_on(daemon, &launch, &agent);
+    let here = this_machine(daemon);
+    let asked = asked_of(&launch, request.number, &agent, &here);
+    let follows = runs_as(&launch.kind);
+    crate::across::tell_decided(
+        daemon,
+        &launch,
+        &format!("{asked} was allowed by the user of {here}: it runs now there {follows}."),
+        true,
+    );
 }
 
-/// Tells the agent of the other machine that asked `launch` that it is refused for lacking
-/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
-fn refused_for_missing(
-    daemon: &Arc<Daemon>,
-    launch: &Launch,
-    missing: &[crate::travelled::Need],
-    why: Option<&str>,
-) {
-    let here = crate::link::remote_of(daemon)
+/// This machine's name among the user's, as the agents of the others know it.
+fn this_machine(daemon: &Daemon) -> String {
+    crate::link::remote_of(daemon)
         .ok()
         .and_then(|remote| remote.listed().ok().map(|(_, name)| name))
-        .unwrap_or_else(|| "the other machine".to_owned());
+        .unwrap_or_else(|| "the other machine".to_owned())
+}
+
+/// The held `launch`, its request `number` and its agent `agent`, as its caller is told of the
+/// user's answer: `Request #4 on server (agent_launch), your launch "Title" (agent a1b2),`.
+fn asked_of(launch: &Launch, number: u64, agent: &str, here: &str) -> String {
+    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
+    format!("Request #{number} on {here} (agent_launch), your launch \"{title}\" (agent {agent}),")
+}
+
+/// What the agent of the other machine that asked `asked` is told when it is refused for lacking
+/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
+fn refused_for_missing(
+    asked: &str,
+    here: &str,
+    missing: &[crate::travelled::Need],
+    why: Option<&str>,
+) -> String {
     let lacking: Vec<String> = missing
         .iter()
         .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
         .collect();
-    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
     let what = match why {
-        None => "the user refused it",
-        Some(_) => "it was allowed before what it needs there was shared",
+        None => format!("refused by the user of {here}"),
+        Some(_) => "allowed before what it needs there was shared".to_owned(),
     };
-    let body = format!(
-        "Your launch \"{title}\" on {here} is refused: {what}. Its setup copies what {here} \
-         lacks: {}, which the user shares from this machine through the vault. Nothing of it \
-         runs there; launch it again once they are shared.",
+    format!(
+        "{asked} was {what}. Its setup copies what {here} lacks: {}, which the user shares from \
+         this machine through the vault. Nothing of it runs there; launch it again once they are \
+         shared.",
         crate::travelled::listed(&lacking)
-    );
-    crate::across::tell_of(
-        daemon,
-        launch,
-        "child-failed",
-        &body,
-        approval::URGENT,
-        true,
-    );
+    )
 }
 
 /// The agent `agent` ended, its requests cancelled: a launch it was held for the user's answer
@@ -1397,6 +1445,18 @@ pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
         remove_workspace(daemon, workspace, Some(agent.to_owned()));
     }
     if matches!(settled, Ok(Some(_))) {
+        // Its caller would wait for the user's answer for ever.
+        let here = this_machine(daemon);
+        let asked = asked_of(&launch, launch.request.unwrap_or_default(), agent, &here);
+        crate::across::tell_decided(
+            daemon,
+            &launch,
+            &format!(
+                "{asked} was refused: its session there ended before the user of {here} \
+                 decided. Nothing of it runs there."
+            ),
+            false,
+        );
         crate::travelled::unmake(daemon, &launch);
     }
 }
