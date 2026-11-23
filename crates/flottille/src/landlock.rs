@@ -124,7 +124,7 @@ fn allowed(dir: &Path, denied: &[PathBuf], out: &mut Vec<CString>) {
 /// The command runs kept out of the user's runtime folders where the kernel has Landlock (its
 /// second ABI or later); elsewhere it runs as before (`docs/vault.md` says the gap).
 pub fn confined(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    confined_but(command, None)
+    confine(command, &[], false)
 }
 
 /// [`confined`], `open` (the display folder the daemon made for this command alone) left within
@@ -135,6 +135,15 @@ pub fn confined_but<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
+    confine(command, open.as_slice(), false)
+}
+
+/// [`confined_but`], each folder of `open` left within its reach: a connection's browser gets its
+/// display folder and its vault's (`display::vault`).
+pub fn confined_given<'a>(
+    command: &'a mut tokio::process::Command,
+    open: &[&crate::display::Folder],
+) -> &'a mut tokio::process::Command {
     confine(command, open, false)
 }
 
@@ -142,19 +151,19 @@ pub fn confined_but<'a>(
 /// daemon's start, and nothing else of the folder it is in. Never a path a variable or a
 /// request names. For the daemon's own fetch of an SSH remote (`git::remote`).
 pub fn confined_lent(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    confine(command, None, true)
+    confine(command, &[], true)
 }
 
 fn confine<'a>(
     command: &'a mut tokio::process::Command,
-    open: Option<&crate::display::Folder>,
+    open: &[&crate::display::Folder],
     lent: bool,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
     // The private mount namespace first: the runtime folders and, unless it is given X11,
     // X11's socket folder emptied, with what the daemon gives the command put back.
-    let given_x11 = open.is_some_and(crate::display::Folder::x11);
+    let given_x11 = open.iter().any(|folder| folder.x11());
     let namespace = crate::mounts::available()
         .then(|| {
             let emptied: Vec<PathBuf> = denied
@@ -163,8 +172,8 @@ fn confine<'a>(
                 .chain(x11_folder().filter(|_| !given_x11))
                 .collect();
             let kept: Vec<PathBuf> = open
-                .and_then(|folder| folder.path().canonicalize().ok())
-                .into_iter()
+                .iter()
+                .filter_map(|folder| folder.path().canonicalize().ok())
                 .chain(
                     crate::ssh_agent::socket()
                         .filter(|_| lent)
@@ -222,7 +231,10 @@ fn confine<'a>(
     }
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
-    let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
+    let open: Vec<CString> = open
+        .iter()
+        .filter_map(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok())
+        .collect();
     // A rule on the lent socket itself: Landlock checks connecting from the socket's own path up,
     // so the folder it is in stays denied. One outside the runtime folders is not denied at all.
     let lent = crate::ssh_agent::socket()
@@ -231,16 +243,7 @@ fn confine<'a>(
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
     unsafe {
-        command.pre_exec(move || {
-            restrict(
-                rights,
-                &paths,
-                open.as_deref(),
-                scoped,
-                &ways,
-                lent.as_deref(),
-            )
-        })
+        command.pre_exec(move || restrict(rights, &paths, &open, scoped, &ways, lent.as_deref()))
     }
 }
 
@@ -250,7 +253,7 @@ fn confine<'a>(
 fn restrict(
     rights: u64,
     paths: &[CString],
-    open: Option<&CStr>,
+    open: &[CString],
     scoped: u64,
     ways: &[CString],
     lent: Option<&CStr>,
@@ -273,7 +276,7 @@ fn restrict(
     let ruled = paths
         .iter()
         .map(|path| (path.as_c_str(), rights))
-        .chain(open.map(|path| (path, rights & !REFER)))
+        .chain(open.iter().map(|path| (path.as_c_str(), rights & !REFER)))
         .chain(
             ways.iter()
                 .map(|way| (way.as_c_str(), rights & !RESOLVE_UNIX)),
@@ -388,7 +391,11 @@ mod tests {
         ]);
         command.arg(path).stderr(std::process::Stdio::null());
         // SAFETY: as in `confined_but`.
-        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[], None)) };
+        unsafe {
+            command.pre_exec(move || {
+                restrict(rights, &paths, std::slice::from_ref(&open), 0, &[], None)
+            })
+        };
         command.status().unwrap().success()
     }
 
@@ -455,7 +462,11 @@ mod tests {
             .arg(&go)
             .stderr(std::process::Stdio::null());
         // SAFETY: as in `confined_but`.
-        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[], None)) };
+        unsafe {
+            command.pre_exec(move || {
+                restrict(rights, &paths, std::slice::from_ref(&open), 0, &[], None)
+            })
+        };
         let mut child = command.spawn().unwrap();
         // The folder made again, as `display::share` does at the next start.
         std::fs::remove_dir_all(&folder).unwrap();

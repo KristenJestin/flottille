@@ -342,7 +342,10 @@ push the gate let through, and its checks' dry run, are the exception (below):
   login (and its reload of the page), are also granted their display folder,
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
-  The folder is the one the daemon made, never one a variable of the connection names;
+  An agent-browser connection's server, its login and its reload are granted its vault folder,
+  `$XDG_RUNTIME_DIR/flottille/vault/<connection>`, the same way: the login's one-time token and
+  the credential plugin's socket, which no run reaches. The folders are the ones the daemon made,
+  never one a variable of the connection names;
 - Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
   process also starts in a **private mount namespace** of its own, where the kernel lets a user
   make one (an unprivileged user namespace): the user's runtime folders are empty folders there

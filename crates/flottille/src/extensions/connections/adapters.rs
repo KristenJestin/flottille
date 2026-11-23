@@ -137,8 +137,20 @@ const BROWSER_CLASS_ARG: &str = "--class=flottille-browser";
 /// failed only that it "exited unsuccessfully".
 const TOKEN_FILE: &str = "vault.token";
 const WHY_FILE: &str = "vault.why";
+/// How much of the plugin's reason the login reads.
+const WHY_BYTES: u64 = 1024;
 /// How long a login has, as a call of the server has.
 const LOGIN_LIMIT: Duration = Duration::from_secs(120);
+
+/// [`LOGIN_LIMIT`], or the milliseconds of `FLOTTILLE_CONNECTION_LOGIN_MS` (as
+/// `FLOTTILLE_CONNECTION_LINGER_MS` is read).
+fn login_limit() -> Duration {
+    std::env::var("FLOTTILLE_CONNECTION_LOGIN_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(LOGIN_LIMIT)
+}
 /// How long `agent-browser close` may take.
 const CLOSE_LIMIT: Duration = Duration::from_secs(10);
 /// How long the plugin has to say what it asks, once it reached the daemon.
@@ -406,8 +418,10 @@ fn config_file(folder: &Path) -> PathBuf {
     folder.join("agent-browser.json")
 }
 
-fn socket_file(folder: &Path) -> PathBuf {
-    folder.join("vault.sock")
+/// The plugin's socket, in the connection's vault folder (`display::vault`): out of every run's
+/// reach, as the token beside it is.
+fn socket_file(vault: &crate::display::Folder) -> PathBuf {
+    vault.path().join("vault.sock")
 }
 
 /// Where the configuration it writes is, as the review names it.
@@ -469,13 +483,17 @@ pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<Strin
 /// explicit one replaces agent-browser's discovery of the user's own). It is the file and not
 /// flags: agent-browser's MCP tool calls run in child processes that load only the `--config`
 /// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file.
-pub fn start_options(folder: &Path, headed: bool) -> Result<Vec<String>, String> {
+pub fn start_options(
+    folder: &Path,
+    vault: &crate::display::Folder,
+    headed: bool,
+) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
         "name": PLUGIN,
         "command": program,
-        "args": ["vault", "provide", socket_file(folder)],
+        "args": ["vault", "provide", socket_file(vault)],
         "capabilities": ["credential.read"],
     }]});
     if headed {
@@ -816,14 +834,16 @@ async fn run(
         Some(served) => Some(served),
         None => shown(daemon, declaration, &declaration.name).0,
     };
-    let options = start_options(&folder, shown.is_some())?;
+    let vault = super::client::vault_of(daemon, &declaration.name)?;
+    let options = start_options(&folder, &vault, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }
     let token = super::oauth::random(32)?;
-    let socket = socket_file(&folder);
-    // Left by a login that was killed: the folder is the user's alone (0700) and a connection runs
-    // one login at a time under its turn, so no one else's socket is there to be taken over.
+    let socket = socket_file(&vault);
+    // Left by a login that was killed: the folder is the daemon's alone (0700, out of every run's
+    // reach) and a connection runs one login at a time under its turn, so no one else's socket is
+    // there to be taken over.
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).map_err(|error| format!("{error}"))?;
     let _gone = Removed(socket.clone());
@@ -833,9 +853,15 @@ async fn run(
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
     display(&mut env, shown.as_ref().map(|shown| &shown.env), &folder);
-    // The one folder the login's commands may reach: the daemon's own, never what a variable of
-    // the connection (the vault's, below) names.
-    let reached = shown.as_ref().map(|shown| shown.folder.clone());
+    // The folders the login's commands may reach: the daemon's own, never what a variable of the
+    // connection (the vault's, below) names. The browser they may start runs the plugin, which
+    // reaches the token and the socket in the vault's.
+    let reached: Vec<&crate::display::Folder> = shown
+        .as_ref()
+        .map(|shown| &shown.folder)
+        .into_iter()
+        .chain([&vault])
+        .collect();
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
@@ -844,7 +870,7 @@ async fn run(
     // Loaded first, then filled without navigating: agent-browser then checks, before each field
     // and the submit, that the page is still of the URL's origin (scheme, host and port), so a
     // page that redirects elsewhere gets no secret. Its own navigation checks nothing after it.
-    reload(program, &options, &env, reached.as_ref(), &folder, url)
+    reload(program, &options, &env, &reached, &folder, url)
         .await
         .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
     // Written once the page is loaded, which needs no token: it asks for no secret.
@@ -874,9 +900,9 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined_but(
+    let mut child = crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
-        reached.as_ref(),
+        &reached,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
@@ -884,7 +910,8 @@ async fn run(
     let stderr = tokio::spawn(kept(child.stderr.take()));
     let mut token = Some(token);
     let mut refused = None;
-    let ended = tokio::time::timeout(LOGIN_LIMIT, async {
+    let limit = login_limit();
+    let ended = tokio::time::timeout(limit, async {
         loop {
             tokio::select! {
                 status = child.wait() => return status,
@@ -906,18 +933,9 @@ async fn run(
             }
             let mut why = format!(
                 "agent-browser did not sign in within {} seconds: it was stopped",
-                LOGIN_LIMIT.as_secs()
+                limit.as_secs()
             );
-            reloaded(
-                program,
-                &options,
-                &env,
-                reached.as_ref(),
-                &folder,
-                url,
-                &mut why,
-            )
-            .await;
+            reloaded(program, &options, &env, &reached, &folder, url, &mut why).await;
             return Err(why);
         }
     };
@@ -938,21 +956,12 @@ async fn run(
     }
     // The plugin's own reason, when it failed before the daemon could refuse it.
     if refused.is_none()
-        && let Ok(said) = std::fs::read_to_string(&why_file)
+        && let Some(said) = why_of(&why_file)
         && let Some(line) = said.lines().find(|line| !line.trim().is_empty())
     {
         why.push_str(&format!("; Flottille's credential plugin said: {line}"));
     }
-    reloaded(
-        program,
-        &options,
-        &env,
-        reached.as_ref(),
-        &folder,
-        url,
-        &mut why,
-    )
-    .await;
+    reloaded(program, &options, &env, &reached, &folder, url, &mut why).await;
     Err(why)
 }
 
@@ -963,7 +972,7 @@ async fn reloaded(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: Option<&crate::display::Folder>,
+    reached: &[&crate::display::Folder],
     folder: &Path,
     url: &str,
     why: &mut String,
@@ -979,7 +988,7 @@ async fn reload(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: Option<&crate::display::Folder>,
+    reached: &[&crate::display::Folder],
     folder: &Path,
     url: &str,
 ) -> Result<(), String> {
@@ -995,7 +1004,7 @@ async fn reload(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined_but(
+    let mut child = crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
         reached,
     ))
@@ -1023,6 +1032,24 @@ async fn reload(
         .find(|line| !line.trim().is_empty())
         .unwrap_or("it failed")
         .to_owned())
+}
+
+/// The plugin's reason, its first [`WHY_BYTES`]: never through a link, never a file that is not
+/// a plain one.
+fn why_of(file: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(file)
+        .ok()?;
+    if !opened.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    opened.take(WHY_BYTES).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Removes the plugin's socket once the login ends, however it ends.
@@ -1187,7 +1214,8 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
         }
     };
     if let Some(why) = answer["error"].as_str() {
-        let _ = std::fs::write(socket.with_file_name(WHY_FILE), why);
+        // As the token is written: a link left at its name is replaced, never written through.
+        let _ = written(&socket.with_file_name(WHY_FILE), why.as_bytes());
     }
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{answer}");

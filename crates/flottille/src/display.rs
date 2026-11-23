@@ -4,7 +4,9 @@
 //! other sockets. What keeps it from the real folder itself is Landlock's (`landlock.rs`), which
 //! leaves this folder alone within its reach. A connection's browser uses it
 //! (`docs/extensions.md`), and so does a run of a project that lets its runs open windows
-//! (`docs/tools.md`).
+//! (`docs/tools.md`). A connection's browser also gets a folder of its vault here, kept out of
+//! every run's reach as the rest of the runtime folder is: its login's token and the credential
+//! plugin's socket (`docs/extensions.md`, "Adapters").
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -55,6 +57,36 @@ pub struct Shown {
 /// lock, when it starts: nothing else makes them, so none is in use.
 pub fn clean(paths: &Paths) {
     let _ = std::fs::remove_dir_all(paths.runtime.join("display"));
+    let _ = std::fs::remove_dir_all(paths.runtime.join("vault"));
+}
+
+/// The folder `$XDG_RUNTIME_DIR/flottille/vault/<owner>` (mode 0700, made again if it was left),
+/// empty: where a connection's login puts what only its browser may reach. Its browser is
+/// confined with it, held by its inode, and outlives the server and the login: the caller keeps
+/// it for as long as a browser may run.
+pub fn vault(paths: &Paths, owner: &str) -> Result<Folder, String> {
+    made(&paths.runtime.join("vault"), owner, false)
+}
+
+/// The folder `owner` under `base`, made afresh.
+fn made(base: &Path, owner: &str, x11: bool) -> Result<Folder, String> {
+    if owner.is_empty()
+        || !owner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("{owner:?} is no name for a display folder"));
+    }
+    let folder = base.join(owner);
+    // The folders above are made private and checked; the last one is made here and now, never
+    // taken over: one that is there (a link planted in it) fails the creation.
+    flottille_core::paths::ensure_private_dir(base).map_err(|error| error.to_string())?;
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .map_err(|error| error.to_string())?;
+    Ok(Folder(std::sync::Arc::new(Made(folder, x11))))
 }
 
 /// The folder `$XDG_RUNTIME_DIR/flottille/display/<owner>` (mode 0700, made again if it was left),
@@ -86,24 +118,8 @@ fn share_with(
     wayland: Option<OsString>,
     x11: Option<OsString>,
 ) -> Result<Shown, String> {
-    if owner.is_empty()
-        || !owner
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(format!("{owner:?} is no name for a display folder"));
-    }
-    let folder = base.join(owner);
-    // The folders above are made private and checked; the last one is made here and now, never
-    // taken over: one that is there (a link planted in it) fails the creation.
-    flottille_core::paths::ensure_private_dir(base).map_err(|error| error.to_string())?;
-    let _ = std::fs::remove_dir_all(&folder);
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&folder)
-        .map_err(|error| error.to_string())?;
     let given_x11 = wayland.is_none() && x11.is_some();
-    let folder = Folder(std::sync::Arc::new(Made(folder, given_x11)));
+    let folder = made(base, owner, given_x11)?;
     let mut env = BTreeMap::new();
     env.insert(
         "XDG_RUNTIME_DIR".into(),

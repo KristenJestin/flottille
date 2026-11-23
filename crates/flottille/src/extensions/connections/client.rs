@@ -83,6 +83,9 @@ struct Server {
     headless: Mutex<Option<String>>,
     /// The browser its server or a login started, which outlives them: closed when it stops.
     browser: Mutex<Option<super::adapters::Browser>>,
+    /// Its vault's runtime folder, made once and kept while the daemon runs: every browser of the
+    /// connection is confined with it, held by its inode, and may outlive any server or login.
+    vault: Mutex<Option<crate::display::Folder>>,
 }
 
 #[derive(Default)]
@@ -277,6 +280,19 @@ pub(super) async fn exclusively_shown<T, F: std::future::Future<Output = T>>(
 /// The browser `browser` may now run for the connection, to close when its server stops.
 pub(super) fn browser_started(daemon: &Daemon, name: &str, browser: super::adapters::Browser) {
     *server_of(daemon, name).browser.lock().unwrap() = Some(browser);
+}
+
+/// The connection's vault folder (`display::vault`): the one its browsers were confined with,
+/// made the first time.
+pub(super) fn vault_of(daemon: &Daemon, name: &str) -> Result<crate::display::Folder, String> {
+    let server = server_of(daemon, name);
+    let mut vault = server.vault.lock().unwrap();
+    if let Some(folder) = vault.as_ref() {
+        return Ok(folder.clone());
+    }
+    let folder = crate::display::vault(&daemon.paths, name)?;
+    *vault = Some(folder.clone());
+    Ok(folder)
 }
 
 /// The display folder of the browser that may run for the connection, while it is not closed.
@@ -589,8 +605,11 @@ async fn start_with(
             let folder = super::adapters::folder(daemon, &declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
+            // The adapter's server gets its vault's folder, which its browser's plugin reaches.
+            let mut vault = None;
             let options = match adapter {
                 Some(_) => {
+                    let own = vault.insert(vault_of(daemon, &declaration.name)?);
                     (display, headless) =
                         super::adapters::shown(daemon, declaration, &declaration.name);
                     if let Some(browser) =
@@ -598,7 +617,7 @@ async fn start_with(
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(&folder, display.is_some())?
+                    super::adapters::start_options(&folder, own, display.is_some())?
                 }
                 None => Vec::new(),
             };
@@ -627,9 +646,15 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::landlock::confined_but(
+            let reached: Vec<&crate::display::Folder> = display
+                .as_ref()
+                .map(|shown| &shown.folder)
+                .into_iter()
+                .chain(vault.as_ref())
+                .collect();
+            let mut child = crate::children::spawn(crate::landlock::confined_given(
                 crate::children::in_own_session(&mut command),
-                display.as_ref().map(|shown| &shown.folder),
+                &reached,
             ))
             .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();

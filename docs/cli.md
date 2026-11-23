@@ -950,7 +950,8 @@ Not a command for the user: the credential plugin agent-browser starts during a 
 connection's adapter (`docs/extensions.md`, "Adapters"), named in the configuration Flottille
 writes for it. It reads one `agent-browser.plugin.v1` request on its standard input, asks the
 daemon's login that runs, at `<socket>`, with the one-time token of that run (the file
-`vault.token` beside the socket), and writes the answer on its standard output; why it failed is
+`vault.token` beside the socket, in the connection's vault folder under the runtime folder,
+out of every run's reach), and writes the answer on its standard output; why it failed is
 also written beside the socket, in `vault.why`, for the login to say. Without that token, it is
 refused before anything is asked. Hidden from `--help`.
 

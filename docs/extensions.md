@@ -1692,16 +1692,23 @@ way in:
   login's error is still returned, masked, and says that the page could not be loaded again.
 - **The plugin is Flottille.** The daemon refuses every client that descends from it, so the
   login does not go through its socket: for that run alone the daemon listens on
-  `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
-  and gives the run a **one-time token** in `connections/<name>/vault.token` (the user's alone,
-  written once the page is loaded, removed when the run ends). A file and not a variable:
-  agent-browser's session daemon, not the login's command line, starts the plugin, with the
-  environment it was started with. `flottille vault provide` (hidden, needs no folder of
+  `vault.sock` in the connection's **vault folder**, `$XDG_RUNTIME_DIR/flottille/vault/<name>`
+  (removed when the run ends), and gives the run a **one-time token** in `vault.token` beside it
+  (written once the page is loaded, temporary file and rename, removed when the run ends). A file
+  and not a variable: agent-browser's session daemon, not the login's command line, starts the
+  plugin, with the environment it was started with. The vault folder is in the user's runtime
+  folder, which no run reaches (`docs/vault.md`, "The runtime folder"): a run of an agent that
+  waits for the login cannot read the token nor reach the socket, where a folder of the user's
+  under the state folder would give both to any of its processes. Only the connection's server,
+  its login's commands and the browser they start are given it (as a display folder is), and it
+  is made once per connection while the daemon runs: agent-browser's daemon outlives the server
+  and the login, confined with the folder's inode, and one made again would be out of its reach. `flottille vault provide` (hidden, needs no folder of
   Flottille's) reads agent-browser's request on its standard input, sends the token and the item
   and the URL agent-browser asks for to that socket, and writes the answer on its standard output.
   agent-browser says of a plugin that failed only that it "exited unsuccessfully": the plugin also
-  writes why in `connections/<name>/vault.why`, and the login's error says it (masked) when the
-  daemon did not refuse the request itself. The daemon answers **only** the token of the run it started, **once**, only
+  writes why in `vault.why` of the vault folder (temporary file and rename: a link at its name is
+  replaced, never written through), and the login's error says it (masked) when the daemon did
+  not refuse the request itself, read without following a link and up to 1 KiB. The daemon answers **only** the token of the run it started, **once**, only
   for a URL of the entry's own host, and only for the entry that run is for, bound
   to this connection; without the token the plugin is refused before anything is asked. The
   secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or
