@@ -387,7 +387,7 @@ it proves anything. The hub then welcomes a member's device, a member's machine,
 pairing it took, and refuses any other key; the refusal says the list was reset when the device
 pinned a list that starts otherwise, and nothing else of the list: a stranger learns neither its
 root nor its members. **What a refusal proves**: the hub signs it with its key, over
-`flottille-hub-refused-v1`, a zero byte, the device's key, both nonces, what it received of the
+`flottille-hub-refused-v2`, a zero byte, the device's key, both nonces, what it received of the
 device's proof (the hash it pinned, or none; the pairing it asked, or none), `reset` and the
 reason, so that it holds for this session, and this request, only. The device's own signature
 covers neither the hash nor the pairing: something on the way could add a pairing to a member's
@@ -396,9 +396,10 @@ sent, and such a refusal does not check. A device acts on a refusal (it forgets 
 its list was reset) only once that signature checks; an unsigned refusal, or one whose signature
 does not check (said by something on the way to an `http://` hub, answering a request changed on
 the way, or caught in another session), changes nothing, and the device says the hub could not be
-reached. A refusal said before the handshake (`{"refused": "…"}` with no hello both can use) is
-unsigned too: the device says the hub could not be reached, and shows its words as what answered,
-not as the hub's. A hub of before 2026-11-22 signs no
+reached. A refusal said before the handshake (`{"refused": "…"}`) is the hub's word on the
+version only with its hello signed ("The version", "What the hub's hello proves"); otherwise the
+device says the hub could not be reached, and shows its words as what answered, not as the
+hub's. A hub of before 2026-11-22 signs no
 refusal: a device of this version that it refuses says it cannot reach it, and keeps trying, until
 the hub is updated; a device of before takes this hub's signed refusal as it took an unsigned one.
 A refusal later in a session (a member removed meanwhile) only ends the session. Once welcomed, a device asks (a member's change, what it is, its presence)
@@ -672,7 +673,26 @@ them (flottille update)`. The hub is said as the hub, with the side to update na
 protocol: `The hub runs 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its
 host.` or, the hub being the newer, `…: update this machine.`; the hub sends its own hello with its
 refusal so that a device it refuses says the same. The window and the app show the machine as **needs an update**, never as
-offline. At first each side speaks one version; the list lets the Android app, published apart,
+offline.
+
+**What the hub's hello proves.** On an `http://` hub, anything on the way could add a protocol to
+the hub's hello, to have the device say it needs an update, or take one out, to have both speak a
+lower one. So the hub signs its hello with its key, in its handshake and in its refusal before it,
+over `flottille-hub-hello-v1`, a zero byte, the device's key, both nonces, the device's hello as
+the hub received it (which it chose the protocol from) and its own, each its version and its
+protocols (`crates/flottille-link/src/control.rs`), so that it holds for this session only and
+does not check for a device whose hello was changed on the way; its
+refusal before the handshake carries its key and its nonce for it. A device says it needs an
+update, or the hub does, and speaks a lower protocol than its newest, only from a hello the key it
+pinned signed. A hello whose signature does not check (one of the two hellos was changed on the
+way) is the hub not reached. A hello unsigned opens a session only when it offers the device's
+newest protocol, nothing being lower then; otherwise the device says the hub could not be reached,
+and keeps trying. Something on the way that takes the signature out and changes the device's hello
+can still have a hub of this version speak a lower protocol than the device does: the two then
+disagree on the protocol, and the device draws no verdict from it. A hub of before 2026-11-22 signs nothing: a device of this
+version reaches it while it speaks the device's newest protocol, as before, and otherwise says it
+cannot reach it (its words say that an older hub is updated on its host) instead of that it needs
+an update; a device of before reads this hub's hello as it did, the signature beside it ignored. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 
 Pair mode (#1146) raised it from 1 to 2: its frames and its changes (`hub`, `pair`, `role`,
@@ -1574,6 +1594,12 @@ on a real phone, by hand, and reported.
   ignored; a hub of before that sends them, and a machine of before that asks the hub to keep them,
   keep their sessions (each side reads the field and ignores it). A setting of `listen` sent to
   `remote.configure` is not read.
+- **The hub's hello is signed, with two limits taken** (#1232): something on the way that strips
+  `signed` *and* rewrites the device's hello can still make a new hub choose a lower protocol than
+  the device speaks; harmless today, because neither the hub nor `hub_session.rs` reads
+  `protocol()`. And the refusal's signed layout went from `flottille-hub-refused-v1` to `v2`, so a
+  signed refusal between this version and v0.4.1-beta.23 or 24 does not check on either side: each
+  falls back to "unreachable", with no false verdict. Accepted for pre-releases.
 
 - The project must be registered by hand on the other machine, under the same name.
 - A launch on another machine is judged by the receiving machine's gate, `child` as `led`; a child
