@@ -480,7 +480,7 @@ fn changed(found: &Found, path: &Path) -> Option<String> {
         true => None,
         false => Some(format!(
             "{} is not the one the daemon found at its start (removed, or replaced): restart the \
-             daemon",
+             daemon, or work in Full",
             path.display()
         )),
     }
@@ -909,7 +909,11 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
 /// its folder or its branch), read from the files found at the daemon's start alone, in the
 /// order git reads them: what a push the gate let through is given of them, since it runs from a
 /// folder of the daemon's (`push_folder`), where git would read them otherwise. A file that is
-/// gone is none, as git reads it.
+/// gone is none, as git reads it. **An included file that was not there at the daemon's start
+/// (nor the same file) is left out**, with what it says, and so is a `hasconfig` include of such a
+/// file: the push is lent the user's sign-in, and a file a run in Full may have made since could
+/// say `http.proxy`, `http.sslVerify=false` or `http.sslCAInfo` for it. A top file of the
+/// settings is the user's own to change, as `~/.gitconfig` is for a dotfiles update.
 pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, String> {
     let mut settings = Vec::new();
     for file in found()
@@ -940,7 +944,29 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
                 read.stderr.trim()
             ));
         }
-        settings.extend(given(&read.stdout));
+        let start = found();
+        let protected = |path: &Path| {
+            start.is_some_and(|found| {
+                path.canonicalize().is_ok_and(|real| {
+                    found.read_only.iter().any(|(p, _)| *p == real)
+                        && changed(found, &real).is_none()
+                })
+            })
+        };
+        let top = |path: &Path| {
+            start.is_some_and(|found| {
+                path.canonicalize()
+                    .is_ok_and(|real| found.git.contains(&real))
+            }) || protected(path)
+        };
+        let home = start.and_then(|found| found.home.as_deref());
+        settings.extend(given(&read.stdout, &top, &|value| {
+            let value = match value.strip_prefix("~/") {
+                Some(rest) => home.map(|home| home.join(rest)).unwrap_or_default(),
+                None => PathBuf::from(value),
+            };
+            protected(&value)
+        }));
     }
     Ok(settings)
 }
@@ -951,10 +977,20 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
 /// the URLs of the push's own remotes, which git knows only once it reads them all: it is given
 /// as it is, its file named by its full path (a setting given to a command names no file
 /// relative to another), for git to include where it applies.
-fn given(listed: &str) -> Vec<(String, String)> {
+fn given(
+    listed: &str,
+    from_trusted_file: &dyn Fn(&Path) -> bool,
+    include_trusted: &dyn Fn(&str) -> bool,
+) -> Vec<(String, String)> {
     let mut parts = listed.split('\0');
     let mut given = Vec::new();
     while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+        if origin
+            .strip_prefix("file:")
+            .is_some_and(|file| !from_trusted_file(Path::new(file)))
+        {
+            continue;
+        }
         let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
         if key == "include.path" {
             continue;
@@ -973,6 +1009,9 @@ fn given(listed: &str) -> Vec<(String, String)> {
                     .into_owned(),
                 (None, _) => continue,
             };
+            if !include_trusted(&path) {
+                continue;
+            }
             given.push((key.to_owned(), path));
             continue;
         }
@@ -1090,7 +1129,7 @@ mod tests {
         .join("\0");
 
         assert_eq!(
-            given(&listed),
+            given(&listed, &|_| true, &|_| true),
             [
                 (
                     "includeif.hasconfig:remote.*.url:git@forge.invalid:**.path".to_owned(),
@@ -1102,6 +1141,35 @@ mod tests {
                 ),
                 ("user.name".to_owned(), "Work".to_owned()),
                 ("core.askpass".to_owned(), "true".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_settings_of_a_file_made_after_the_start_are_not_given() {
+        let listed = [
+            "file:/home/u/.gitconfig\0user.name\nKris",
+            "file:/home/u/later.gitconfig\0http.proxy\nhttp://127.0.0.1:9",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:https://a.invalid/**.path\nlater.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:https://b.invalid/**.path\nthen.gitconfig",
+            "",
+        ]
+        .join("\0");
+
+        let kept = given(
+            &listed,
+            &|file| file == Path::new("/home/u/.gitconfig"),
+            &|include| include == "/home/u/then.gitconfig",
+        );
+
+        assert_eq!(
+            kept,
+            [
+                ("user.name".to_owned(), "Kris".to_owned()),
+                (
+                    "includeif.hasconfig:remote.*.url:https://b.invalid/**.path".to_owned(),
+                    "/home/u/then.gitconfig".to_owned()
+                ),
             ]
         );
     }
@@ -1229,6 +1297,26 @@ mod tests {
             let why = checked(refused, Some(&found)).unwrap_err();
             assert!(why.contains("since the daemon's start"), "{refused}: {why}");
         }
+    }
+
+    #[test]
+    fn a_replaced_settings_file_says_to_restart_the_daemon_or_work_in_full() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join(".gitconfig");
+        std::fs::write(&settings, "").unwrap();
+        let mut found = found_now(temp.path());
+        found
+            .read_only
+            .push((settings.clone(), identity(&settings).unwrap()));
+        assert!(changed(&found, &settings).is_none());
+
+        // As `git config --global` in Full does: a new file renamed over the old.
+        let new = temp.path().join(".gitconfig.lock");
+        std::fs::write(&new, "[user]\n").unwrap();
+        std::fs::rename(&new, &settings).unwrap();
+
+        let why = changed(&found, &settings).unwrap();
+        assert!(why.contains("restart the daemon, or work in Full"), "{why}");
     }
 
     #[test]

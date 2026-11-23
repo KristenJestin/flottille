@@ -113,8 +113,15 @@ pub fn tell_switched_to_full(daemon: &crate::daemon::Daemon, root: &flottille_co
              refused, and `run` stays your only way. A command already running is not \
              touched.\n\n{map}"
         );
-        crate::deliveries::queue(daemon, &agent.id, "mode", None, &body);
+        queue_mode(daemon, &agent.id, &body);
     }
+}
+
+/// Queues a delivery of the mode: the newest replaces the older ones the agent has not read, so
+/// that Full, Auto, Full, Auto before its next turn tells it once, the last.
+fn queue_mode(daemon: &crate::daemon::Daemon, agent: &str, body: &str) {
+    let _ = daemon.write(|store| Ok(((), store.supersede_like(agent, &["mode-"])?)));
+    crate::deliveries::queue(daemon, agent, "mode", None, body);
 }
 
 /// What the agents of a tree switched out of Full are told, between turns: their commands are
@@ -131,7 +138,7 @@ pub fn tell_left_full(
              keyring. For a pull request or a ticket, use the tools `forge` and `tickets`. A \
              command started in Full and still running keeps what it started with."
         );
-        crate::deliveries::queue(daemon, &agent.id, "mode", None, &body);
+        queue_mode(daemon, &agent.id, &body);
     }
 }
 
