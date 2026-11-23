@@ -984,12 +984,21 @@ fn an_answer_nothing_awaits_holds_back_nothing_kept_behind_it() {
     let (_hub, pc, server, night) = night_lead("runner");
     let (_waiting, waits) = caller(&pc, &server, "ask");
     let awaited = held(&waits.call("session_read", json!({"session": night})));
-    // Another caller gives up its call before pc records the wait: nothing will ever await
-    // that answer.
-    let (_gone, gives_up) = caller(&pc, &server, "ask");
-    std::fs::write(pc.user.path("slow-call"), "").unwrap();
-    gives_up.call_given_up("session_read", json!({"session": night}), || {
-        server.requests().len() == 2
+    // Another call is held there, and pc stops before it records the wait, as when the call's
+    // answer is lost with the link: nothing will ever await that answer.
+    let (_gone, gone) = caller(&pc, &server, "ask");
+    let slow = pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+    std::thread::scope(|scope| {
+        let call = scope.spawn(|| gone.call("session_read", json!({"session": night})));
+        eventually("the second call held on the server", || {
+            server.requests().len() == 2
+        });
+        a_while();
+        let stopped = pc.user.run(&["daemon", "stop"]);
+        assert!(stopped.status.success(), "{}", pc.log());
+        std::fs::remove_file(&slow).unwrap();
+        let _ = call.join();
     });
     let never = server
         .requests()
@@ -997,19 +1006,17 @@ fn an_answer_nothing_awaits_holds_back_nothing_kept_behind_it() {
         .map(|request| request["number"].as_u64().unwrap())
         .find(|number| *number != awaited)
         .unwrap();
-    a_while();
 
     // Kept for pc in this order: the answer nothing awaits, then the one awaited.
     approve(&server, never);
     approve(&server, awaited);
+    pc.user.status();
 
-    prompted(&pc, "was approved by the user");
-    assert_eq!(prompts_with(&pc, "was approved by the user"), 1);
-    assert!(
+    eventually("the answer nothing awaits dropped", || {
         server
             .log()
-            .contains("refused a message kept for it, which is dropped"),
-        "{}",
-        server.log()
-    );
+            .contains("refused a message kept for it, which is dropped")
+    });
+    prompted(&pc, "was approved by the user");
+    assert_eq!(prompts_with(&pc, "was approved by the user"), 1);
 }
