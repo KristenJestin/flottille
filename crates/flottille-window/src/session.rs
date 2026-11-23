@@ -8924,6 +8924,7 @@ impl Render for SessionRail {
                 workspace_skeleton(),
                 div()
                     .id("rail-workspace-read")
+                    .test_support()
                     .flex()
                     .flex_col()
                     .child(presence(
