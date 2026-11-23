@@ -231,8 +231,7 @@ Flottille's own tools:
   `led` and `handed`, for a root only, start a session in a workspace (existing or new) or its own
   place, judged, in the tree's mode, its first message the agent's and never the user's, base when
   that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
-  session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
-  ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
+  session is piloted by the caller, asks it its questions and wakes it at each end of its turns; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
   with the id. With `project`, a `led` or `handed` session is started in another registered
   project, held for the user every time, in every mode (§7.2): a full lead of that project, in its
   places, with its tools, settings and vault entries; a child never is.
@@ -359,8 +358,8 @@ ends: the line, the exit code, the duration and the last lines of the output, ma
 (`docs/tools.md`, "Commands").
 
 An agent that pilots a session (`agent_launch` with `kind: led`) is woken, between turns, by
-`session-turn-ended` when a turn of that session asked it a question (`ask`) or reported, and when
-the session ends or fails; a plain turn's end wakes nobody. The delivery names the session, says
+`session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
+the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
@@ -459,7 +458,7 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **A following** is a subscription whose source is a session the agent leads (`agent_launch`
   with `kind: led`): it has no deadline, and ends when the agent unsubscribes (`forge unsubscribe`
   with `session`), when the session ends or fails, or when the agent ends. It wakes the agent at
-  the end of a turn of the session that asked it or reported, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
+  each end of a turn of the session, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
   unless it says `follow: false`: the rounds of the items read it, and it wakes the agent once
   when it waits on a manual step and when it ends, which ends the following (`docs/forges.md`,
   "Following a run").
@@ -1120,7 +1119,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
   sidebar's folds so that one window's fold never erases another's groups, read by a window when
   it opens and again at each change it makes (applied to what the daemon holds, so that a window
-  that was open before another made a group does not erase it), never in a project; a project is
+  that was open before another made a group does not erase it, but two windows changing it at the
+  very same instant can still lose one of the two changes: the daemon reads, then writes), never
+  in a project; a project is
   dragged from its own row, never from the sessions and buttons it holds; New group… is not offered while the projects are shown by machine
   (the entry says "Shown by machine"), and a project that a machine does not give for now keeps its
   place and group for when it is back; Group by machine shows the sections instead of
