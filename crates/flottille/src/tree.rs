@@ -98,6 +98,9 @@ fn failed(error: impl std::fmt::Display) -> Outcome {
 
 /// How an agent is named to another: its title and its id.
 pub fn named(agent: &Agent) -> String {
+    if let Some(named) = crate::across::stand_in_name(agent) {
+        return named;
+    }
     match &agent.title {
         Some(title) => format!("\"{title}\" (agent {})", agent.id),
         None => format!("agent {}", agent.id),
@@ -1029,7 +1032,8 @@ pub fn session_of(
                 "refused: {id} is one of your children: they are written to with agent_send"
             )));
         }
-        Some(agent) if agent.parent.is_some() => {
+        // A child an agent of another machine launched here has no parent here, and is one.
+        Some(agent) if agent.parent.is_some() || crate::across::remote_child(daemon, &agent) => {
             return Err(refused(format!(
                 "refused: {id} is a child of another session: it is written to by its parent, \
                  never with session_send"
@@ -1673,10 +1677,12 @@ fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome
         Some(agent) if agent.id == caller.id => Err(refused(format!(
             "refused: {id} is your own session: agent_stop ends another; end your turn instead"
         ))),
-        Some(agent) if agent.parent.is_some() => Err(refused(format!(
-            "refused: {id} is a child of another session: it is stopped by its parent, never by \
-             you"
-        ))),
+        Some(agent) if agent.parent.is_some() || crate::across::remote_child(daemon, &agent) => {
+            Err(refused(format!(
+                "refused: {id} is a child of another session: it is stopped by its parent, never \
+                 by you"
+            )))
+        }
         Some(agent) if agent.state.is_final() => Err(refused(format!(
             "refused: {} has {} already",
             named(&agent),

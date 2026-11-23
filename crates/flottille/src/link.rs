@@ -1081,7 +1081,12 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .collect();
     let mut sessions: Vec<flottille_link::LightSession> = agents
         .iter()
-        .filter(|agent| agent.parent.is_none() && !agent.state.is_final())
+        // A child an agent of another machine launched here is that agent's, no session to list.
+        .filter(|agent| {
+            agent.parent.is_none()
+                && !agent.state.is_final()
+                && !crate::across::remote_child(daemon, agent)
+        })
         .map(|agent| {
             let title = agent
                 .title
@@ -1668,6 +1673,41 @@ impl Remote {
                 .forget_machine_sessions_except(&runners)
                 .map(|()| ((), None))
         });
+    }
+
+    /// The keys of the other machines the member list trusts.
+    pub(crate) fn trusted_keys(&self) -> Vec<PublicKey> {
+        self.peers()
+            .machines
+            .into_iter()
+            .map(|peer| peer.key)
+            .collect()
+    }
+
+    /// The live root sessions each other machine of the user's last listed, without those whose
+    /// close waits to be sent: each with its machine's key, as hex, and name. It reads the store.
+    pub(crate) fn sessions_elsewhere(
+        &self,
+        daemon: &Daemon,
+    ) -> Vec<(String, String, flottille_link::LightSession)> {
+        let closing = crate::across::closing(daemon);
+        let kept = daemon
+            .read(|store| store.machine_sessions())
+            .unwrap_or_default();
+        let peers = self.peers().machines;
+        kept.into_iter()
+            .filter(|(machine, _, _, _)| peers.iter().any(|peer| hex_of(&peer.key) == *machine))
+            .flat_map(|(machine, name, list, _)| {
+                // The list kept may hold more than its sessions (its machine's projects).
+                let sessions: Vec<flottille_link::LightSession> =
+                    serde_json::from_value(list["sessions"].clone()).unwrap_or_default();
+                sessions
+                    .into_iter()
+                    .filter(|session| !closing.contains(&(machine.clone(), session.id.clone())))
+                    .map(|session| (machine.clone(), name.clone(), session))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// `remote.sessions`: this machine's live root sessions, and each other machine's as it last

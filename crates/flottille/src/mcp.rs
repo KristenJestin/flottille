@@ -1590,6 +1590,11 @@ fn served(provider: &Provider, tools: &[String]) -> Vec<&'static str> {
 
 /// The grant of an agent's process: its tools that are served, in its order, and its place.
 pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
+    // A caller of another machine has no process here: the tools of the tree that address a
+    // session, as it was given them.
+    if crate::across::is_stand_in(&agent.id) {
+        return Ok(crate::across::stand_in_grant(daemon, agent));
+    }
     let tools = served(providers::of(agent)?, &agent.tools);
     let project = projects::load_project(daemon, &agent.project).map_err(|f| f.message)?;
     let place = match &agent.workspace {
@@ -2368,6 +2373,48 @@ async fn played_in(
     key: Option<&str>,
     cancelled: CancellationToken,
 ) -> (String, bool) {
+    let played = played_whole(daemon, grant, tool, args, key, cancelled).await;
+    (played.text, played.error)
+}
+
+/// What a call came to, as its agent is answered: the text, whether it is an error, the word of
+/// its outcome (`ok`, `held`, `refused`, `failed`) and the request that holds it, if any.
+pub(crate) struct Played {
+    pub(crate) text: String,
+    pub(crate) error: bool,
+    pub(crate) word: &'static str,
+    pub(crate) request: Option<u64>,
+}
+
+/// A call of an agent of another machine, stood in for by `grant` (`across::session_call`),
+/// played as one of this machine's agents' calls is, gate, judge and tool alike: its answer as
+/// that agent is to be answered, `key` the call's id there.
+pub(crate) async fn played_for(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    key: &str,
+) -> Played {
+    Box::pin(played_whole(
+        daemon,
+        grant,
+        tool,
+        args,
+        Some(key),
+        CancellationToken::new(),
+    ))
+    .await
+}
+
+async fn played_whole(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    key: Option<&str>,
+    cancelled: CancellationToken,
+) -> Played {
     let started = Instant::now();
     let replaced = is_replaced(daemon, grant);
     let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
@@ -2399,18 +2446,28 @@ async fn played_in(
     // A session named by its title is the session of its id from here on, for the gate, the leave
     // and the request alike (`session_name`).
     // A session this agent started on another machine is named by its id, which is not here.
-    let (args, unnamed) = if grant.tools.contains(&tool)
+    // A session of another machine is found the same way, and its machine answers the call.
+    let (args, unnamed, away) = if grant.tools.contains(&tool)
         && !replaced
         && removed.is_none()
         && crate::across::aimed(daemon, &grant.agent, tool, &args).is_none()
     {
         match crate::session_name::resolve(daemon, grant, tool, args.clone()) {
-            Ok(named) => (named, None),
-            Err(refused) => (args, Some(refused)),
+            Ok(crate::session_name::Resolved::Here(named)) => (named, None, None),
+            // Named by its title, a session this agent started there: called as by its id.
+            Ok(crate::session_name::Resolved::Away(named, _))
+                if crate::across::aimed(daemon, &grant.agent, tool, &named).is_some() =>
+            {
+                (named, None, None)
+            }
+            Ok(crate::session_name::Resolved::Away(named, away)) => (named, None, Some(away)),
+            Err(refused) => (args, Some(refused), None),
         }
     } else {
-        (args, None)
+        (args, None, None)
     };
+    // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
+    let shaped = away.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2428,6 +2485,9 @@ async fn played_in(
         refused
     } else if let Some(why) = branch_refused {
         Outcome::Refused(why)
+    } else if let Some(away) = &away {
+        // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
+        crate::across::forward(daemon, grant, tool, &args, away).await
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -2581,7 +2641,10 @@ async fn played_in(
         (Outcome::Done(text), Some(said)) => Outcome::Done(format!("{said}\n{text}")),
         (outcome, _) => outcome,
     };
-    let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
+    let (outcome, cut) = match shaped {
+        true => (outcome, None),
+        false => cut_long(daemon, grant, tool, reads_a_result, outcome),
+    };
     if logging {
         log_call(
             daemon, grant, tool, key, &recorded, verdict, held, judged_log, &outcome, request,
@@ -2605,7 +2668,18 @@ async fn played_in(
         outcome,
         Outcome::Refused(_) | Outcome::Invalid(_) | Outcome::Failed(_)
     );
-    let (text, limit) = shown(outcome, &grant.place);
+    let word = outcome.word();
+    let (text, limit) = match (shaped, outcome) {
+        // Masked there of that machine's secrets, and here of this one's: a secret only this
+        // machine knows is never shown its agent either. Escaped and cut there.
+        (true, Outcome::Done(text) | Outcome::Failed(text)) => {
+            (masked(&text, &grant.place), RESULT_LIMIT)
+        }
+        (true, Outcome::Held(text) | Outcome::Refused(text) | Outcome::Invalid(text)) => {
+            (text, RESULT_LIMIT)
+        }
+        (false, outcome) => shown(outcome, &grant.place),
+    };
     // Notes left for the session that replaced this one are its own, not this late call's.
     let notes = if is_replaced(daemon, grant) {
         Vec::new()
@@ -2616,7 +2690,12 @@ async fn played_in(
             limit.saturating_sub(text.chars().count()),
         )
     };
-    (with_notes(text, &notes), error)
+    Played {
+        text: with_notes(text, &notes),
+        error,
+        word,
+        request,
+    }
 }
 
 /// Whether a newer session of the grant's agent took over (`docs/design.md` §5.5).
