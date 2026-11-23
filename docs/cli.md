@@ -890,8 +890,8 @@ Removed skill react from shop. The project's files were not touched.
 
 ## The vault
 
-The user's secrets, kept by the keyring, that agents use through Flottille's tools and never see
-(`docs/vault.md`). A secret is never printed, by these commands or any other.
+The user's secrets, kept by the keyring, that agents use through Flottille's tools without seeing
+them in Ask and Auto; in Full a command they run can read them (`docs/vault.md`). A secret is never printed, by these commands or any other.
 
 ### `flottille vault list [--project <project>]`
 

@@ -2,8 +2,9 @@
 
 Agents sometimes need a secret the user holds: a tracker's API token to log time, the login of a
 test account, a deploy key. Pasted in a conversation, it would be stored and shown. The vault keeps
-it instead, where the operating system keeps secrets, and lets agents **use it without ever seeing
-it**.
+it instead, where the operating system keeps secrets. In Ask and Auto, agents **use it through
+Flottille's tools without seeing it**. In Full, a command an agent runs is the user's own and can
+read it (see below).
 
 ## Where the secrets are
 

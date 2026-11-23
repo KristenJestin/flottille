@@ -176,8 +176,8 @@ enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
-    /// The vault: secrets kept by the keyring, that agents use through Flottille's tools and
-    /// never see
+    /// The vault: secrets kept by the keyring, that agents use through Flottille's tools; in Full
+    /// a command they run can read them
     Vault {
         #[command(subcommand)]
         action: VaultAction,

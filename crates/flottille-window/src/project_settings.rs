@@ -2746,8 +2746,9 @@ impl ProjectSettingsPage {
                                 "no-project-vault",
                                 Icon::Key,
                                 "No entry this project sees yet. Add a secret its agents need, \
-                                 such as a tracker's token: they use it through Flottille's tools \
-                                 and never see it.",
+                                 such as a tracker's token. In Ask and Auto they use it through \
+                                 Flottille's tools without seeing it. In Full, a command they run \
+                                 can read it.",
                             ),
                         )
                         .space(space::MD),

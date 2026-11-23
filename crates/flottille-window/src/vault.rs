@@ -25,8 +25,9 @@ use crate::modals::Modals;
 use crate::shell::Shell;
 
 /// What the section says the vault is for.
-pub const SENTENCE: &str = "Secrets agents use without seeing them. Your keyring keeps them; \
-                            agents see only their names and what they are for.";
+pub const SENTENCE: &str = "Secrets agents use through Flottille's tools, without seeing them \
+                            in Ask and Auto. In Full, a command they run can read them. Your \
+                            keyring keeps them.";
 
 /// How an entry is used, said once under the sentence (rule 14).
 pub const USAGE: &str = "An agent names an entry; Flottille puts the secret where it goes. A \
@@ -1204,7 +1205,8 @@ impl Render for VaultSection {
                                 "no-vault",
                                 Icon::Key,
                                 "No entry yet. Add a secret an agent needs, such as a tracker's \
-                                 token: agents use it through Flottille's tools and never see it.",
+                                 token. In Ask and Auto agents use it through Flottille's tools \
+                                 without seeing it. In Full, a command they run can read it.",
                             ),
                         )
                         .space(space::MD),

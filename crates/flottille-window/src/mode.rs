@@ -41,7 +41,7 @@ const MODES: [(&str, &str, &str, Tone); 3] = [
     (
         "full",
         "Full",
-        "Nothing is held back: commands run as yours, with your keys, sign-ins and keyring, the vault included.",
+        "Nothing is held back: commands run as yours, with your keys, sign-ins and keyring, the vault included. They can also act as this machine: reach the daemon, switch other sessions or machines.",
         Tone::Fail,
     ),
 ];
@@ -276,5 +276,6 @@ mod tests {
         assert!(line.starts_with("Nothing is held back"), "{line}");
         assert!(line.contains("commands run as yours"), "{line}");
         assert!(line.contains("keyring, the vault included"), "{line}");
+        assert!(line.contains("act as this machine"), "{line}");
     }
 }
