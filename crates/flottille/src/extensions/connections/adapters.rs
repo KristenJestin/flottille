@@ -312,7 +312,8 @@ impl Adapter {
              headed and gives its window the class flottille-browser (args); with X11 the \
              browser can read the keys typed in other windows and type into them (a terminal's \
              included), and on some Wayland compositors a client can capture the screen and the \
-             clipboard"
+             clipboard; its profile (cookies, sign-ins) is kept from one browser to the next in a \
+             folder of the connection's own, unless its command keeps it to some domains"
                 .to_owned(),
         );
         said
@@ -491,7 +492,16 @@ pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<Strin
 /// explicit one replaces agent-browser's discovery of the user's own). It is the file and not
 /// flags: agent-browser's MCP tool calls run in child processes that load only the `--config`
 /// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file.
-pub fn start_options(folder: &Path, headed: bool) -> Result<Vec<String>, String> {
+///
+/// It names the browser's profile too, a folder of the connection's own: each browser started
+/// in the other mode is a new one, and agent-browser's own profile of a browser is gone when it
+/// closes; with it the user signs in shown and the agent goes on headless, signed in. A command
+/// kept to some domains gets none: agent-browser refuses `--allowed-domains` beside a profile.
+pub fn start_options(
+    declaration: &Declaration,
+    folder: &Path,
+    headed: bool,
+) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
@@ -500,6 +510,9 @@ pub fn start_options(folder: &Path, headed: bool) -> Result<Vec<String>, String>
         "args": ["vault", "provide", socket_file(folder)],
         "capabilities": ["credential.read"],
     }]});
+    if !kept_to_domains(declaration) {
+        config["profile"] = json!(folder.join("profile"));
+    }
     if headed {
         config["headed"] = json!(true);
         // Chrome's `--class` is its app id on Wayland and its WM_CLASS on X11: the user's desktop
@@ -511,6 +524,20 @@ pub fn start_options(folder: &Path, headed: bool) -> Result<Vec<String>, String>
     written(&file, config.to_string().as_bytes())
         .map_err(|error| format!("{}: {error}", file.display()))?;
     Ok(vec!["--config".into(), file.display().to_string()])
+}
+
+/// Whether the user's command keeps the browser to some domains (`--allowed-domains`, or its
+/// variable in the connection's `env`).
+fn kept_to_domains(declaration: &Declaration) -> bool {
+    let Reach::Command(words) = &declaration.reach else {
+        return false;
+    };
+    words
+        .iter()
+        .any(|word| word == "--allowed-domains" || word.starts_with("--allowed-domains="))
+        || declaration
+            .env
+            .contains_key("AGENT_BROWSER_ALLOWED_DOMAINS")
 }
 
 /// The display of the browser of `declaration` when the agent's call shows it (`headed`): a
@@ -840,7 +867,7 @@ async fn run(
         // A login never shows a browser by itself: it goes on in the one that is shown, if any.
         None => super::client::browser_display(daemon, &declaration.name),
     };
-    let options = start_options(&folder, shown.is_some())?;
+    let options = start_options(declaration, &folder, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }

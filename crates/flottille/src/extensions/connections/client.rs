@@ -606,7 +606,7 @@ async fn start_with(
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(&folder, display.is_some())?
+                    super::adapters::start_options(declaration, &folder, display.is_some())?
                 }
                 None => Vec::new(),
             };
@@ -1102,7 +1102,7 @@ pub async fn call(
     grant: &Grant,
     name: &str,
     action: &str,
-    arguments: Map<String, Value>,
+    mut arguments: Map<String, Value>,
 ) -> Outcome {
     let server = server_of(daemon, name);
     let mut turn = server.turn.lock().await;
@@ -1125,7 +1125,7 @@ pub async fn call(
     }
     // The call that opens the browser says whether to show it; any other goes on in the mode that
     // runs. The other mode restarts the server and closes the browser, so that the next one starts
-    // in the mode asked: the browser's profile is the user's command's, left as it is.
+    // in the mode asked, on the same profile (`adapters::start_options`).
     let current = turn.as_ref().map_or_else(
         || browser_display(daemon, name).is_some(),
         |running| running.headed,
@@ -1181,6 +1181,11 @@ pub async fn call(
     let running = turn.as_ref().expect("started");
     // Asked to show the browser that could not be: the agent is told, not left to wait for a window.
     let not_shown = running.headless.clone().filter(|_| wanted == Some(true));
+    // agent-browser's own `headed` is above its configuration: the server is told the mode that
+    // runs, so a browser that could not be shown opens the page headless instead of failing.
+    if wanted.is_some() && arguments.contains_key("headed") {
+        arguments.insert("headed".into(), json!(running.display.is_some()));
+    }
     let params = CallToolRequestParams::new(action.to_owned()).with_arguments(arguments);
     // A cut that ended no call (an event stream that went on after it) is not this call's.
     running.cut.take();
