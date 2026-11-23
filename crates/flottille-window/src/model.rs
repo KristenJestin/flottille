@@ -565,7 +565,10 @@ fn last_known(
     if let Some(machine) = machine.filter(|machine| !machine.online()) {
         return (machine.state_words(), None);
     }
-    if let Some(listed) = listed {
+    // Idle there before it said anything here, in a project made for it: that machine prepares
+    // the project, which its list does not say.
+    let preparing = launched.heard.is_none() && launched.making.is_some();
+    if let Some(listed) = listed.filter(|listed| !(preparing && listed.state == "idle")) {
         return (listed.state.clone(), listed_mark(&listed.state));
     }
     // Held, it waits for the user of its machine, who allows it there; allowed, a held launch is
@@ -2863,6 +2866,12 @@ mod tests {
         let row = the_led_row(&led_on_server("held", None, None));
         assert_eq!(row.mark, Some(AgentState::NeedsYou));
         assert_eq!(row.mark_said, "Needs you on server");
+        // A project made for it there, which that machine prepares while it lists it idle.
+        let mut machines = led_on_server("started", None, Some("idle"));
+        machines.launches[0].making = Some("app".into());
+        let row = the_led_row(&machines);
+        assert_eq!(row.mark, Some(AgentState::Running));
+        assert_eq!(row.mark_said, "Preparing app on server");
         // Allowed there, its machine lists it as it runs now.
         let row = the_led_row(&led_on_server("held", None, Some("running")));
         assert_eq!(row.mark, Some(AgentState::Running));

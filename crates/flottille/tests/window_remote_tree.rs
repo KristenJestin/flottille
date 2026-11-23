@@ -266,12 +266,12 @@ fn a_session_on_another_machine_shows_under_its_pilot_with_the_machine(cx: &mut 
         label(cx, session_id(&row)).as_deref(),
         Some("Finish the export")
     );
-    // Its machine's name and its state as last known.
+    // Its machine's name and its state, as that machine lists it or as last known.
     let said = label(cx, session_machine_id(&row)).unwrap_or_default();
     assert!(said.starts_with("server · "), "{said}");
     let state = said.trim_start_matches("server · ");
     assert!(
-        ["running", "waiting", "reported"].contains(&state),
+        ["running", "idle", "waiting", "reported"].contains(&state),
         "{said}"
     );
 }
