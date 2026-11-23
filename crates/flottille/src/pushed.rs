@@ -12,6 +12,13 @@
 //! that include a file not protected since the start, a file protected at the start that is no
 //! longer the one at its path, another mount of the same files, a kernel that gives no namespace.
 //! Nothing here protects by reading the configuration: reading it only decides whether to lend.
+//!
+//! A run in Full is confined in no way (`docs/tools.md`, "In Full, a run is the user's own"): it
+//! writes `~/.ssh` and the git settings as the user does, and what it writes outlives it. A
+//! later push in Ask or Auto still reads them as here, each time: what `ssh`'s configuration
+//! runs is refused, the credential helpers are those found at the start, the hooks, the
+//! transports, the `ssh` command and the programs a transport names are the daemon's own, and a
+//! program of `~/.ssh` the user's `ssh` command names runs only as it was at the start.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::MetadataExt;
@@ -113,6 +120,8 @@ struct Found {
     /// Whether the daemon found it, and made `~/.ssh` (not `flottille doctor`, which probes
     /// what a daemon would find: one would make a missing `~/.ssh`).
     made: bool,
+    /// When: what a run in Full, which writes `~/.ssh` as the user does, changed is after it.
+    started: std::time::SystemTime,
 }
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
@@ -171,6 +180,7 @@ pub fn find(make: bool) {
             read_only,
             pinned,
             made: make,
+            started: std::time::SystemTime::now(),
         })
     });
 }
@@ -449,7 +459,7 @@ impl Read {
 }
 
 /// Whether the link at `path` leads to a file of `ssh_folder` with no other link on the way,
-/// which no command can change.
+/// which no confined command can change.
 fn inside(path: &Path, ssh_folder: &Path) -> bool {
     let Ok(target) = std::fs::read_link(path) else {
         return false;
@@ -1033,6 +1043,27 @@ fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
         .as_ref()
         .and_then(|path| path.canonicalize().ok())
         .is_some_and(|real| real.ancestors().all(root));
+    // `~/.ssh` is read-only to a confined run, not to a run in Full (`docs/tools.md`): a
+    // program there is run only as it was at the daemon's start, its status (`ctime`, which no
+    // one sets back) older, through a link or not.
+    if in_ssh
+        && !rooted
+        && let (Some(path), Some(found)) = (&path, found)
+    {
+        let older = |meta: std::io::Result<std::fs::Metadata>| {
+            meta.is_ok_and(|meta| {
+                let changed = std::time::UNIX_EPOCH
+                    + std::time::Duration::new(meta.ctime() as u64, meta.ctime_nsec() as u32);
+                changed <= found.started
+            })
+        };
+        if !older(std::fs::symlink_metadata(path)) || !older(std::fs::metadata(path)) {
+            return Err(format!(
+                "runs {program}, which was made or changed since the daemon's start (a run in \
+                 Full writes ~/.ssh): restart the daemon to have it run"
+            ));
+        }
+    }
     match in_ssh || rooted {
         true => Ok(format!("{program} {}{rest}", crate::git::SSH_OPTIONS).into()),
         false => Err(format!(
