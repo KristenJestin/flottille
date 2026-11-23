@@ -1609,3 +1609,138 @@ fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
 
     assert_eq!(titled(&server, "From the child")["gate_mode"], "full");
 }
+
+/// The states of the launches `pc` recorded on other machines, by launch name.
+fn launches_out(pc: &Machine) -> Vec<String> {
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let mut statement = store
+        .prepare("SELECT state FROM launches WHERE way = 'out' ORDER BY launch")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|state| state.unwrap())
+        .collect()
+}
+
+/// The rows `pc` shows under their pilots of the sessions its agents started on other machines.
+fn rows_under_pilots(pc: &Machine) -> Vec<Value> {
+    pc.user.call("remote.launches", json!({})).unwrap()["launches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The prompt `machine` was sent that holds `text`, once it was.
+fn prompt_with(machine: &Machine, text: &str) -> String {
+    prompted(machine, text);
+    machine
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains(text))
+        .unwrap()
+}
+
+#[test]
+fn a_held_launch_allowed_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Allowed there");
+    assert_eq!(launches_out(&pc), vec!["held"]);
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    assert!(told.contains("allowed by the user of server"), "{told}");
+    assert!(told.contains("runs now"), "{told}");
+    assert!(
+        told.contains("its questions, reports and end wake you"),
+        "{told}"
+    );
+    assert!(told.contains("session_send"), "{told}");
+    eventually("the launch recorded as started", || {
+        launches_out(&pc) == vec!["started"]
+    });
+    let rows = rows_under_pilots(&pc);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["state"], "started", "{rows:#?}");
+}
+
+#[test]
+fn a_held_launch_refused_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused there");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    assert!(told.contains("refused by the user of server"), "{told}");
+    assert!(told.contains("Refused there"), "{told}");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+}
+
+#[test]
+fn a_refused_launch_leaves_no_waiting_row_under_its_pilot() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "No row left");
+    let rows = rows_under_pilots(&pc);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["state"], "held", "{rows:#?}");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    eventually("no row left under the pilot", || {
+        rows_under_pilots(&pc).is_empty()
+    });
+}
+
+#[test]
+fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    let led = done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Led, held", "brief": "Do it."}),
+    ))
+    .to_owned();
+    assert!(!led.contains("told nothing more"), "{led}");
+    assert!(led.contains("Once the user allows it there"), "{led}");
+    assert!(
+        led.contains("its questions, reports and end wake you"),
+        "{led}"
+    );
+    assert!(led.contains("session_send"), "{led}");
+    assert!(led.contains("You are told when the user decides"), "{led}");
+
+    let child = done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Child, held", "brief": "Do it."}),
+    ))
+    .to_owned();
+    assert!(child.contains("request #"), "{child}");
+    assert!(!child.contains("told nothing more"), "{child}");
+    assert!(child.contains("Once the user allows it there"), "{child}");
+    assert!(child.contains("agent_send"), "{child}");
+    assert!(
+        child.contains("You are told when the user decides"),
+        "{child}"
+    );
+}
