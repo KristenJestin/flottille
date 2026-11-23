@@ -607,9 +607,10 @@ device key from the same keyring item, or the same file, as the command line.
 
 **Built (#1182), in the window: every page works on any machine.** The window addresses another
 machine one way only, the one its sessions use: bringing that machine in front, every connection of
-the window signed with the device key for it and carried by this machine's daemon. Settings opens
-with `Settings of` (the kit's select: this machine, then the other runners, each with its role and
-state, `runner · online`);
+the window signed with the device key for it and carried by this machine's daemon. Settings has the
+machine's picker on its title's line, at the header's right, the title its label (`Settings of`
+to a reader; #1244): the kit's select, this machine, then the other runners, each with its role and
+state, `runner · online`; with no other runner it narrows away and the title stays in place;
 choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
 and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
 that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
@@ -811,7 +812,7 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
-  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
+  chosen where a page is a machine's: Settings' header and Add project's `On` (#1182, #1244), and
   in a project's composer (the machine picker); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
