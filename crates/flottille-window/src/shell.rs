@@ -2131,10 +2131,6 @@ impl Shell {
     pub fn ask_appearance(&mut self, choice: Option<gpui_design_system::Appearance>) {
         self.appearance_asked += 1;
         let seq = self.appearance_asked;
-        eprintln!(
-            "TRACE ask_appearance {choice:?} seq={seq} front={:?}",
-            self.front
-        );
         self.actions.send(match choice {
             Some(appearance) => Command::AppearanceSet { appearance, seq },
             None => Command::AppearanceRead { seq },
@@ -3397,18 +3393,8 @@ impl Shell {
             }
             // Only the answer to the latest request counts: an older one would take the window
             // back to a choice the user has since changed.
-            Outcome::Appearance { seq, .. } if seq != self.appearance_asked => {
-                eprintln!(
-                    "TRACE appearance dropped seq={seq} asked={}",
-                    self.appearance_asked
-                );
-            }
+            Outcome::Appearance { seq, .. } if seq != self.appearance_asked => {}
             Outcome::Appearance { written, shown, .. } => {
-                eprintln!(
-                    "TRACE appearance answered written={written} ok={} aside={}",
-                    shown.is_ok(),
-                    self.aside
-                );
                 match &shown {
                     Ok(appearance) => {
                         gpui_design_system::appearance::appear(appearance.clone(), cx);
