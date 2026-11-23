@@ -336,7 +336,11 @@ impl Plan {
     pub fn giving(mut self, copies: Vec<(PathBuf, Vec<u8>)>) -> Option<Plan> {
         let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).ok();
         // Any folder that is there does to stage them: what it holds is hidden for that time only.
-        let Some(staging) = copies.first().and_then(|(target, _)| target.parent()) else {
+        let Some(staging) = copies
+            .first()
+            .and_then(|(target, _)| target.parent())
+            .map(Path::to_owned)
+        else {
             return Some(self);
         };
         let mut files = Vec::new();
@@ -349,7 +353,7 @@ impl Plan {
             });
         }
         self.copies = Copies {
-            staging: Some(c(staging)?),
+            staging: Some(c(&staging)?),
             files,
         };
         Some(self)
