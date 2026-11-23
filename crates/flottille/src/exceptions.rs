@@ -683,12 +683,12 @@ mod tests {
         let line = run("git push --force origin main");
         assert_eq!(rule_of(&place(None, ""), &[], "run", &line), None);
         assert_eq!(
-            rule_of(&place(Some("main"), &[], "main"), "run", &line),
+            rule_of(&place(Some("main"), "main"), &[], "run", &line),
             None
         );
         let line = run("git push --force origin next/2.0");
         assert_eq!(
-            rule_of(&place(Some("x"), &[], "next/2.0"), "run", &line),
+            rule_of(&place(Some("x"), "next/2.0"), &[], "run", &line),
             None
         );
     }
@@ -716,7 +716,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                rule_of(&own, tool, &args),
+                rule_of(&own, &[], tool, &args),
                 Some(Rule::ForgeState),
                 "{tool} {args}"
             );
@@ -735,7 +735,7 @@ mod tests {
             ),
             ("tickets", json!({"action": "create", "title": "x"})),
         ] {
-            assert_eq!(rule_of(&own, tool, &args), None, "{tool} {args}");
+            assert_eq!(rule_of(&own, &[], tool, &args), None, "{tool} {args}");
         }
         assert_eq!(
             rule_of(&own, &[], "forge", &json!({"action": "merge"})),
