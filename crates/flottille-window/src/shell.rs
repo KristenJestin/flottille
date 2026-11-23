@@ -1609,24 +1609,55 @@ impl Shell {
         cx.notify();
     }
 
-    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
-    /// from what the daemon last said.
+    /// A row folded or unfolded the led sessions under it: the level that holds it is drawn
+    /// again at once, from what the daemon last said, in the arrangement shown (`show`).
     pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+        let snapshot = &self.snapshot;
+        let Some(found) = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .find(|s| s.id == session)
+        else {
+            eprintln!("flottille: the fold of {session} has no session to draw it from");
             return;
         };
-        let live = self.snapshot.live_sessions_of(&project);
-        let rows: Vec<Entity<SessionRow>> = live
-            .iter()
-            .filter_map(|s| self.sessions.get(&s.id).cloned())
+        let project = found.project.clone();
+        // Grouped by machine, the level is the project's under the session's machine, and holds
+        // that machine's sessions only.
+        let machine = self.grouped.then(|| snapshot.machine_of(found).to_owned());
+        let live: Vec<&crate::model::Session> = snapshot
+            .live_sessions_of(&project)
+            .into_iter()
+            .filter(|s| {
+                machine
+                    .as_deref()
+                    .is_none_or(|m| snapshot.machine_of(s) == m)
+            })
             .collect();
-        if rows.len() != live.len() {
+        let node = match &machine {
+            Some(machine) => self
+                .machine_projects
+                .get(&(project.clone(), machine.clone())),
+            None => self.projects.get(&project),
+        };
+        let Some(node) = node.cloned() else {
+            eprintln!("flottille: the fold of {session} has no level of {project} to draw");
             return;
-        }
+        };
+        // A session with no row yet is left out, said, and the others are drawn.
+        let (live, rows): (Vec<_>, Vec<_>) = live
+            .into_iter()
+            .filter_map(|s| match self.sessions.get(&s.id) {
+                Some(row) => Some((s, row.clone())),
+                None => {
+                    eprintln!("flottille: no row for {} of {project} yet", s.id);
+                    None
+                }
+            })
+            .unzip();
         let rows = nested(&live, &rows, cx);
-        if let Some(node) = self.projects.get(&project).cloned() {
-            node.update(cx, |node, cx| node.set_rows(rows, cx));
-        }
+        node.update(cx, |node, cx| node.set_rows(rows, cx));
     }
 
     /// "Resume" in an ended session's row.

@@ -37,6 +37,8 @@ mod window_developer_reports;
 mod window_drafts;
 #[path = "../window_first_frame.rs"]
 mod window_first_frame;
+#[path = "../window_folds.rs"]
+mod window_folds;
 #[path = "../window_health_check.rs"]
 mod window_health_check;
 #[path = "../window_instance.rs"]
