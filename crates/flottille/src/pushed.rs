@@ -1163,19 +1163,50 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_user_s_ssh_command_runs_nothing_a_run_can_change() {
-        let temp = tempfile::tempdir().unwrap();
-        let found = Found {
-            account: temp.path().to_owned(),
-            home: Some(temp.path().to_owned()),
-            ssh: temp.path().join(".ssh"),
+    /// What a daemon starting now finds in the home `home`.
+    fn found_now(home: &Path) -> Found {
+        Found {
+            account: home.to_owned(),
+            home: Some(home.to_owned()),
+            ssh: home.join(".ssh"),
             git: Vec::new(),
             read_only: Vec::new(),
             pinned: Vec::new(),
             made: false,
-        };
+            started: std::time::SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn a_program_of_ssh_a_run_in_full_may_have_written_is_not_run() {
+        let temp = tempfile::tempdir().unwrap();
         let wrapper = temp.path().join(".ssh/wrap");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let found = found_now(temp.path());
+        assert!(checked("~/.ssh/wrap", Some(&found)).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Changed in place since the daemon's start, as a run in Full may (`~/.ssh` is read-only
+        // to a confined run alone), or made since.
+        std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
+        let made = temp.path().join(".ssh/made");
+        std::fs::write(&made, "").unwrap();
+
+        for refused in ["~/.ssh/wrap", "~/.ssh/made", "~/.ssh/missing"] {
+            let why = checked(refused, Some(&found)).unwrap_err();
+            assert!(why.contains("since the daemon's start"), "{refused}: {why}");
+        }
+    }
+
+    #[test]
+    fn the_user_s_ssh_command_runs_nothing_a_run_can_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let wrapper = temp.path().join(".ssh/wrap");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, "").unwrap();
+        let found = found_now(temp.path());
         assert!(checked("ssh -i ~/.ssh/work -o IdentitiesOnly=yes", Some(&found)).is_ok());
         // Its first options, which win over any later: no shared connection, no forwarding.
         assert_eq!(
