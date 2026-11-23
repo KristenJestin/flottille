@@ -172,7 +172,13 @@ user (`Bad owner or permissions on /etc/ssh/ssh_config.d/…`). So each root-own
 machine's `/etc/ssh/ssh_config` and the user's `~/.ssh/config` include (followed through their
 `Include`s) is copied, as it is when the run starts, into a file system the run's namespace
 makes, read-only, and put over the file at its own path: the same name and text, owned by the
-user in the run. The text is root's, which no run can write; nothing of it is logged or shown. Two
+user in the run. The text is root's, which no run can write; nothing of it is logged or shown. A
+file `ssh` would refuse anyway, one its group or others may write, is not copied, so that `ssh`
+still refuses it. What a run can write steers none of it: the machine's configuration is followed
+only through root's files, the user's only inside `~/.ssh` (as the lent push reads it), and each
+file is opened without following a link or waiting on a FIFO, then judged on what was opened, up
+to 1 MB. A copy that cannot be made fails no command: it starts without the copies, `ssh` refuses
+as before, and the daemon's log says it once. Two
 other ways were weighed and set aside. Mapping root into the namespace too needs a setuid helper
 (`newuidmap`), which an unprivileged daemon does not have. Running a run's fetches outside the
 sandbox, as the push the gate let through, would read the repository's settings, which the run
