@@ -571,6 +571,24 @@ fn a_session_in_full_is_told_where_its_pull_requests_and_tickets_are() {
 }
 
 #[test]
+fn a_session_in_full_is_told_its_commands_are_the_user_s_though_its_map_cannot_be_built() {
+    let user = full_user();
+    shop(&user);
+    let (id, _mcp) = started(&user, "shop");
+
+    // The project's file is gone: its map cannot be built any more.
+    std::fs::remove_file(user.project_file("shop")).unwrap();
+    set_mode(&user, &id, "full");
+
+    eventually("the delivery of the switch, without a map", || {
+        delivered(&user, &id, "mode").len() == 1
+    });
+    let told = delivered(&user, &id, "mode").remove(0);
+    assert!(told.contains("the user's own"), "{told}");
+    assert!(!told.contains("GitHub acme/shop"), "{told}");
+}
+
+#[test]
 fn the_map_of_a_project_of_several_repositories_names_each_one_s_folder() {
     let user = full_user();
     let folder = user.path("work/suite");
