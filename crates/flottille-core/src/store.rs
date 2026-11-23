@@ -1415,7 +1415,7 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let started: u32 = transaction.query_row(
             "SELECT COUNT(*) FROM workspace_steps WHERE workspace = ?1 AND state != 'pending' \
-             AND action NOT LIKE '%\"worktree\"%'",
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
             params![workspace],
             |row| row.get(0),
         )?;
@@ -1423,8 +1423,8 @@ impl Store {
             return Ok(false);
         }
         transaction.execute(
-            "DELETE FROM workspace_steps WHERE workspace = ?1 AND action NOT LIKE \
-             '%\"worktree\"%'",
+            "DELETE FROM workspace_steps WHERE workspace = ?1 \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
             params![workspace],
         )?;
         let next: u32 = transaction.query_row(
