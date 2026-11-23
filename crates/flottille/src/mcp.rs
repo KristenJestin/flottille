@@ -385,7 +385,7 @@ const SERVED: [Definition; 33] = [
                 "resolved": {"type": "boolean", "description": "resolve: true resolves the thread, false opens it again."},
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
-                "exception": {"type": "string", "description": "merge, close, reopen, edit labels, blocked for good: ask the user to lift that rule for this session; say the pull request, the check it skips, why. A merge then bypasses the protection."},
+                "exception": {"type": "string", "description": "merge, close, reopen, edit labels, blocked for good: ask the user to lift that rule for this session; say in one line why it is wrong here: Flottille shows the pull request and what blocks it. That pull request then merges past its protection."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}, "description": "subscribe: what wakes you. approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer."},
@@ -2422,7 +2422,7 @@ async fn played_whole(
     let replaced = is_replaced(daemon, grant);
     let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
     // An exception asked for rides on the call it is for: the tool never sees it.
-    let (args, asking) = crate::exceptions::split(tool, args);
+    let (args, asking) = crate::exceptions::split(args);
     // A line that only prints part of a file is the read it is, served and recorded as such, once
     // nothing refuses the call as the run it was sent as.
     let read = if replaced || removed.is_some() || !matches!(asking, Ok(None)) {
@@ -2492,13 +2492,15 @@ async fn played_whole(
         Outcome::Refused(why)
     } else if let Err(why) = &asking {
         Outcome::Refused(why.clone())
+    } else if away.is_some() && matches!(asking, Ok(Some(_))) {
+        Outcome::Refused(crate::exceptions::ELSEWHERE.into())
     } else if let Some(away) = &away {
         // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
         crate::across::forward(daemon, grant, tool, &args, away).await
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
-        let digest = match removes_a_workspace(tool, &args) {
+        let mut digest = match removes_a_workspace(tool, &args) {
             true => crate::actions::removal_digest(daemon, grant, &args).await,
             false => None,
         };
@@ -2508,9 +2510,14 @@ async fn played_whole(
             Err(refused) => refused,
             Ok(says) => {
                 let (decided, first) = judged_off(daemon, grant, tool, &args).await;
+                // An exception's request covers what Flottille read when it was asked.
                 let decided = match &asking {
                     Ok(Some(why)) => {
-                        crate::exceptions::asked(daemon, grant, tool, &args, decided, why)
+                        let (decided, scope) =
+                            crate::exceptions::asked(daemon, grant, tool, &args, decided, why)
+                                .await;
+                        digest = digest.or(scope);
+                        decided
                     }
                     _ => decided,
                 };

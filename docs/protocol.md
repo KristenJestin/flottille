@@ -2649,11 +2649,15 @@ request of a call asked with `exception` (`approval.approve`).
 
 #### `exception.list`
 
-`{"session"}`. `{"exceptions": [...]}`, the exceptions that agent holds, the oldest first
-(`not-found` when it names no agent). Each is `{"session", "rule", "said", "why", "request",
-"granted_at"}`: `rule` is `force-push`, `merge-blocked` or `forge-state`, `said` what it lets the
-session do, `why` the agent's reason as the user read it, masked, `request` the number of the
-request the user allowed it in, `granted_at` in milliseconds since the Unix epoch.
+`{"session", "tree"?}`. `{"exceptions": [...]}`, the exceptions that agent holds, the oldest first
+(`not-found` when it names no agent); with `tree: true`, those of its sub-agents that have not
+ended after its own, as the window lists them. Each is `{"session", "title", "rule", "said", "why",
+"request", "granted_at", "scope"}`: `session` the agent that holds it, `title` its title or
+`null`, `rule` is `force-push`, `merge-blocked` or `forge-state`, `said` what it lets the session
+do, `why` the agent's reason as the user read it, masked, `request` the number of the request the
+user allowed it in, `granted_at` in milliseconds since the Unix epoch, and `scope` what it covers,
+`{"repository"?, "branch"?, "pull"?}`: the repository and branch of a forced push, the pull
+request of a merge, `{}` for `forge-state`.
 
 #### `exception.withdraw`
 

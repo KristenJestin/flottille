@@ -1626,7 +1626,7 @@ Request #2 is denied; agent ce034b165403 is told nothing was done.
 The exceptions the session holds (`docs/design.md` §7.3): each rule of the gate you lifted for it
 when you allowed a request its agent asked with `exception`, what it lets the session do, the
 request, and the agent's reason. `--json` prints `exception.list`. The window shows them in the
-session's rail, under Exceptions.
+session's rail, under Exceptions, with those of its sub-agents, each with who holds it.
 
 ```
 $ flottille exception list ce034b165403

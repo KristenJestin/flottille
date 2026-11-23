@@ -13,6 +13,8 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use flottille_core::approval::{Exception, Scope};
+
 use crate::daemon::Daemon;
 use crate::gate::{self, Ask, Class, Verdict};
 use crate::mcp::Grant;
@@ -85,46 +87,106 @@ const PUSH_OPTIONS: [&str; 7] = [
 ];
 const FORCING: [&str; 3] = ["--force", "-f", "--force-with-lease"];
 
+/// What an exception's ask says first of the agent's own words, on the card below what Flottille
+/// read of the call.
+pub const REASON: &str = "the agent's reason:";
+
 /// The `exception` of a call taken out of its arguments, with the agent's reason: what the tool
-/// itself is given is the call without it. A merge asked for this way is waived with that reason.
-/// The reason is `Err` with the refusal when it is not one.
-pub fn split(tool: &str, mut args: Value) -> (Value, Result<Option<String>, String>) {
+/// itself is given is the call without it. The reason is `Err` with the refusal when it is not
+/// one: one line, no longer than the user is shown whole.
+pub fn split(mut args: Value) -> (Value, Result<Option<String>, String>) {
     let Some(asked) = args.as_object_mut().and_then(|map| map.remove("exception")) else {
         return (args, Ok(None));
     };
     if asked.is_null() {
         return (args, Ok(None));
     }
-    let Some(why) = asked.as_str().map(str::trim).filter(|why| !why.is_empty()) else {
-        return (
-            args,
-            Err(
-                "refused: exception is the reason the agent gives the user for an exception: \
-                 say exactly what the rule refuses and why it is wrong in this case"
-                    .into(),
-            ),
-        );
+    let refused = |what: &str| {
+        Err(format!(
+            "refused: exception is the reason the agent gives the user for an exception, {what}: \
+             say in one line what the rule refuses and why it is wrong in this case"
+        ))
     };
-    if tool == "forge" && args["action"] == "merge" && args.get("waive").is_none_or(Value::is_null)
-    {
-        args["waive"] = json!(why);
+    let Some(why) = asked.as_str().map(str::trim).filter(|why| !why.is_empty()) else {
+        return (args, refused("a text"));
+    };
+    if why.contains(['\n', '\r']) {
+        return (args, refused("on one line"));
+    }
+    if let Some(Verdict::Deny(long)) = gate::too_long("exception", &json!(why)) {
+        return (args, Err(long));
     }
     (args, Ok(Some(why.to_owned())))
 }
 
+/// What a call asked with `exception` is refused for when another machine answers it.
+pub const ELSEWHERE: &str = "refused: an exception is asked of the user of the machine the call \
+    runs on, and this call is answered by another machine: exceptions are each machine's own for \
+    now; call it without exception, and the other machine's gate holds it as any call";
+
+/// The branches of the place no exception lets an agent rewrite, beside `PROTECTED`: the bases
+/// of the project's repositories, and the branches the workspace resumed, which were the user's
+/// before it.
+pub fn guarded(daemon: &Daemon, place: &Place) -> Vec<String> {
+    let mut guarded: Vec<String> = crate::projects::load_project(daemon, &place.project)
+        .map(|project| {
+            project
+                .repositories
+                .iter()
+                .flat_map(|repository| repository.base.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let workspace = place.workspace.as_deref().and_then(|name| {
+        daemon
+            .read(|store| store.workspace(&place.project, name))
+            .ok()
+            .flatten()
+    });
+    for repository in workspace.iter().flat_map(|w| &w.repositories) {
+        guarded.push(repository.base.branch.clone());
+        if repository.resumed {
+            // Recorded before its name was kept: the workspace's branch is the one it resumed.
+            let resumed = repository.resumed_branch.clone();
+            guarded.push(resumed.unwrap_or_else(|| place.branch.clone()));
+        }
+    }
+    guarded
+}
+
 /// The rule an exception would lift for this call, by its shape alone: `None` for a call no
-/// exception can ever cover.
-pub fn rule_of(place: &Place, tool: &str, args: &Value) -> Option<Rule> {
+/// exception can ever cover. `guarded` are the place's own branches no exception rewrites
+/// (`guarded`).
+pub fn rule_of(place: &Place, guarded: &[String], tool: &str, args: &Value) -> Option<Rule> {
     match tool {
-        "run" => args["line"]
-            .as_str()
-            .filter(|_| keys_within(args, &["line", "repository", "timeout", "why"]))
-            .filter(|line| forces_own_branch(place, line))
-            .map(|_| Rule::ForcePush),
+        "run" => forced_branch(place, guarded, args).map(|_| Rule::ForcePush),
         "forge" if args["action"] == "merge" => Some(Rule::MergeBlocked),
         "forge" | "tickets" if changes_state(tool, args) => Some(Rule::ForgeState),
         _ => None,
     }
+}
+
+/// What a forced push of the agent's own branch covers: the repository it is pushed from and
+/// the branch; `None` for any other line.
+pub fn push_scope(place: &Place, guarded: &[String], args: &Value) -> Option<Scope> {
+    let branch = forced_branch(place, guarded, args)?;
+    let repository = place.base(args["repository"].as_str()).ok()?.0.to_owned();
+    Some(Scope {
+        repository,
+        branch,
+        pull: None,
+    })
+}
+
+/// The branch a `run` line forces a push of, when it is a forced push of the agent's own branch
+/// and nothing else.
+fn forced_branch(place: &Place, guarded: &[String], args: &Value) -> Option<String> {
+    let line = args["line"]
+        .as_str()
+        .filter(|_| keys_within(args, &["line", "repository", "timeout", "why"]))?;
+    forces_own_branch(place, line)
+        .filter(|branch| !guarded.iter().any(|guarded| guarded == branch))
+        .map(str::to_owned)
 }
 
 /// Whether the call sets no argument but `keys`.
@@ -162,31 +224,31 @@ fn changes_state(tool: &str, args: &Value) -> bool {
     }
 }
 
-/// Whether a line is a forced push of the agent's own branch to a named remote, and nothing
-/// else: `git push` with forcing options, a remote and one refspec whose destination is the
-/// workspace's branch, never a protected one, never a deletion.
-fn forces_own_branch(place: &Place, line: &str) -> bool {
+/// The branch a line forces a push of when it is a forced push of the agent's own branch to a
+/// named remote, and nothing else: `git push` with forcing options, a remote and one refspec
+/// whose destination is the workspace's branch, never a protected one, never a deletion.
+fn forces_own_branch<'a>(place: &'a Place, line: &str) -> Option<&'a str> {
     let own = place.branch.as_str();
     if place.workspace.is_none() || own.is_empty() || protected(own) {
-        return false;
+        return None;
     }
     let plain = |c: char| c.is_ascii_alphanumeric() || "-_./:+=@^~ ".contains(c);
     if !line.chars().all(plain) {
-        return false;
+        return None;
     }
     let words: Vec<&str> = line.split_whitespace().collect();
     let ["git", "push", rest @ ..] = words.as_slice() else {
-        return false;
+        return None;
     };
     let (options, named): (Vec<&str>, Vec<&str>) =
         rest.iter().partition(|word| word.starts_with('-'));
     let known =
         |option: &&str| PUSH_OPTIONS.contains(option) || option.starts_with("--force-with-lease=");
     if !options.iter().all(known) {
-        return false;
+        return None;
     }
     let [remote, target] = named.as_slice() else {
-        return false;
+        return None;
     };
     let remote_plain = remote
         .chars()
@@ -201,7 +263,7 @@ fn forces_own_branch(place: &Place, line: &str) -> bool {
         || options
             .iter()
             .any(|option| FORCING.contains(option) || option.starts_with("--force-with-lease="));
-    remote_plain && forced && !source.is_empty() && destination == own
+    (remote_plain && forced && !source.is_empty() && destination == own).then_some(own)
 }
 
 /// Whether no exception may ever let an agent rewrite `branch`.
@@ -217,8 +279,10 @@ fn lift(rule: Rule, ask: &Ask) -> Verdict {
     let mut judge: Vec<String> = judge.to_vec();
     match rule {
         Rule::ForcePush => {
+            // The line's own push alone: a service started first says its line's reasons after
+            // its name, and stays.
             let lifted = |reason: &String| {
-                reason.contains(gate::FORCES)
+                (reason.starts_with("git push ") && reason.contains(gate::FORCES))
                     || reason.starts_with(&format!("{} git push", gate::NEVER_HOLDS))
             };
             let before = base.len();
@@ -229,7 +293,9 @@ fn lift(rule: Rule, ask: &Ask) -> Verdict {
                 judge.push(gate::PUSH.into());
             }
         }
-        Rule::MergeBlocked => base.retain(|reason| !reason.starts_with(gate::WAIVED)),
+        // What blocks a merge is the forge's to say: the merge itself checks the pull request
+        // the exception is for (`forge::Excepted`).
+        Rule::MergeBlocked => {}
         Rule::ForgeState => judge.clear(),
     }
     let count = base.len();
@@ -247,17 +313,34 @@ fn lift(rule: Rule, ask: &Ask) -> Verdict {
     })
 }
 
-/// Whether the session holds an exception of `rule`.
-fn holds(daemon: &Daemon, agent: &str, rule: Rule) -> bool {
+/// The exception of `rule` the session holds, if it holds one.
+fn held(daemon: &Daemon, agent: &str, rule: Rule) -> Option<Exception> {
     daemon
-        .read(|store| store.has_exception(agent, rule.name()))
-        .unwrap_or(false)
+        .read(|store| store.exception(agent, rule.name()))
+        .ok()
+        .flatten()
 }
 
-/// Whether the session `agent` holds the exception that lets it merge past failing checks or a
-/// branch protection.
-pub fn bypasses(daemon: &Daemon, agent: &str) -> bool {
-    holds(daemon, agent, Rule::MergeBlocked)
+/// What the exception the session `agent` holds to merge past what blocks a pull request covers:
+/// the merge checks it is that pull request (`forge::Excepted`).
+pub fn merge_held(daemon: &Daemon, agent: &str) -> Option<Scope> {
+    held(daemon, agent, Rule::MergeBlocked).map(|held| held.scope)
+}
+
+/// Whether the session holds the exception of `rule` that covers this call: a forced push of the
+/// branch of the repository it was asked for, any change of state.
+fn covers(daemon: &Daemon, grant: &Grant, rule: Rule, args: &Value) -> bool {
+    let Some(held) = held(daemon, &grant.agent, rule) else {
+        return false;
+    };
+    match rule {
+        Rule::ForcePush => {
+            let guarded = guarded(daemon, &grant.place);
+            push_scope(&grant.place, &guarded, args).is_some_and(|scope| scope == held.scope)
+        }
+        Rule::MergeBlocked => false,
+        Rule::ForgeState => true,
+    }
 }
 
 /// The gate's verdict once the exceptions the session holds are lifted.
@@ -271,48 +354,103 @@ pub fn lifted(
     let Verdict::Ask(ask) = &verdict else {
         return verdict;
     };
-    match rule_of(&grant.place, tool, args) {
-        Some(rule) if holds(daemon, &grant.agent, rule) => lift(rule, ask),
+    // The place's guarded branches are read only for a session that holds an exception.
+    match rule_of(&grant.place, &[], tool, args) {
+        Some(rule) if covers(daemon, grant, rule, args) => lift(rule, ask),
         _ => verdict,
     }
 }
 
 /// The verdict on a call asked with `exception` (`why`), the session's exceptions already lifted
-/// (`verdict`): the ask, a request of the user's in every mode, when an exception can lift what
-/// holds the call; the call as it is when the session holds it already; else a refusal, with no
-/// ask.
-pub fn asked(
+/// (`verdict`), and what the exception would cover (the request's digest): the ask, a request of
+/// the user's in every mode, when an exception can lift what holds the call; the call as it is
+/// when the session holds it already; else a refusal, with no ask. The ask says the refused
+/// action as Flottille read it, a merge's pull request and what blocks it from the forge, then
+/// the agent's reason.
+pub async fn asked(
     daemon: &Daemon,
     grant: &Grant,
     tool: &str,
     args: &Value,
     verdict: Verdict,
     why: &str,
-) -> Verdict {
-    let rule = rule_of(&grant.place, tool, args);
-    let held = rule.is_some_and(|rule| holds(daemon, &grant.agent, rule));
-    match verdict {
-        Verdict::Deny(refused) => Verdict::Deny(format!(
-            "{refused} (no exception can be asked for it: {ASKABLE})"
-        )),
-        Verdict::Allow if held => Verdict::Allow,
-        Verdict::Allow => Verdict::Deny(
-            "refused: this call needs no exception: the gate lets it through as it is; call it \
-             again without exception"
-                .into(),
-        ),
-        Verdict::Ask(ask) if held => Verdict::Ask(ask),
-        Verdict::Ask(ask) => {
-            let Some(rule) = rule else {
-                return Verdict::Deny(format!(
-                    "refused: no exception can be asked for this call: {ASKABLE}; what holds it \
-                     stays: {}",
-                    ask.reasons.join("; ")
+) -> (Verdict, Option<String>) {
+    let refused = |why: String| (Verdict::Deny(why), None);
+    let guarded = guarded(daemon, &grant.place);
+    let rule = rule_of(&grant.place, &guarded, tool, args);
+    let ask = match verdict {
+        Verdict::Deny(refused_for) => {
+            return refused(format!(
+                "{refused_for} (no exception can be asked for it: {ASKABLE})"
+            ));
+        }
+        Verdict::Allow if rule != Some(Rule::MergeBlocked) => {
+            return match rule.is_some_and(|rule| covers(daemon, grant, rule, args)) {
+                true => (Verdict::Allow, None),
+                false => refused(
+                    "refused: this call needs no exception: the gate lets it through as it is; \
+                     call it again without exception"
+                        .into(),
+                ),
+            };
+        }
+        Verdict::Allow => None,
+        Verdict::Ask(ask) => Some(ask),
+    };
+    let Some(rule) = rule else {
+        let holding = ask.map(|ask| ask.reasons.join("; ")).unwrap_or_default();
+        return refused(format!(
+            "refused: no exception can be asked for this call: {ASKABLE}; what holds it stays: \
+             {holding}"
+        ));
+    };
+    let (exact, scope, reasons, lifted, kind) = match rule {
+        Rule::MergeBlocked => {
+            let read = match crate::forge::merge_read(daemon, &grant.place, args).await {
+                Ok(read) => read,
+                Err(why) => return refused(format!("{why} (no exception was asked)")),
+            };
+            let Some(blocks) = &read.blocks else {
+                return refused(format!(
+                    "refused: nothing blocks the pull request #{} of {} in {}: it needs no \
+                     exception; merge it without exception",
+                    read.number, read.branch, read.slug
                 ));
             };
+            let scope = Scope {
+                repository: read.repository.clone(),
+                branch: read.branch.clone(),
+                pull: Some(read.number),
+            };
+            if held(daemon, &grant.agent, rule).is_some_and(|held| held.scope == scope) {
+                let verdict = ask.map_or(Verdict::Allow, Verdict::Ask);
+                return (verdict, None);
+            }
+            let bypass = match read.bypass {
+                true => "its branch protection bypassed (gh pr merge --admin)",
+                false => "Flottille's refusal lifted; Bitbucket's own merge checks still answer",
+            };
+            let exact = format!(
+                "merge the pull request #{} of {} into {} in {} (repository {}) although {blocks}, \
+                 {bypass}",
+                read.number, read.branch, read.base, read.slug, read.repository
+            );
+            let (reasons, kind) = match ask {
+                Some(ask) => (ask.reasons, ask.kind),
+                None => (Vec::new(), flottille_core::approval::Kind::Call),
+            };
+            (exact, scope, reasons, Vec::new(), kind)
+        }
+        Rule::ForcePush | Rule::ForgeState => {
+            let Some(ask) = ask else {
+                unreachable!("an allowed call is answered above")
+            };
+            if covers(daemon, grant, rule, args) {
+                return (Verdict::Ask(ask), None);
+            }
             let lifted: Vec<String> = match lift(rule, &ask) {
                 Verdict::Ask(lifted) if lifted.reasons == ask.reasons => {
-                    return Verdict::Deny(format!(
+                    return refused(format!(
                         "refused: no exception is needed for this call: the rule an exception \
                          lifts ({}) does not hold it; what holds it: {}",
                         rule.name(),
@@ -322,23 +460,38 @@ pub fn asked(
                 Verdict::Ask(lifted) => lifted.reasons,
                 _ => Vec::new(),
             };
-            // What the call becomes once allowed is on the card too: its check again, once the
-            // exception is the session's, finds nothing the user did not read.
-            let mut reasons = vec![format!("{ASKS}: {} ({}): {why}", rule.name(), rule.said())];
-            reasons.extend(ask.reasons.iter().cloned());
-            for reason in lifted {
-                if !reasons.contains(&reason) {
-                    reasons.push(reason);
-                }
-            }
-            Verdict::Ask(Ask {
-                base: reasons.len(),
-                reasons,
-                class: Class::Base,
-                kind: ask.kind,
-            })
+            let (exact, scope) = match push_scope(&grant.place, &guarded, args) {
+                Some(scope) if rule == Rule::ForcePush => (
+                    format!(
+                        "force the push of {} from the repository {}, as the line says",
+                        scope.branch, scope.repository
+                    ),
+                    scope,
+                ),
+                _ => ("as the call says".to_owned(), Scope::default()),
+            };
+            (exact, scope, ask.reasons, lifted, ask.kind)
+        }
+    };
+    // What the call becomes once allowed is on the card too: its check again, once the
+    // exception is the session's, finds nothing the user did not read.
+    let mut card = vec![
+        format!("{ASKS}: {} ({}): {exact}", rule.name(), rule.said()),
+        format!("{REASON} {why}"),
+    ];
+    for reason in reasons.into_iter().chain(lifted) {
+        if !card.contains(&reason) {
+            card.push(reason);
         }
     }
+    let digest = serde_json::to_string(&scope).ok();
+    let ask = Ask {
+        base: card.len(),
+        reasons: card,
+        class: Class::Base,
+        kind,
+    };
+    (Verdict::Ask(ask), digest)
 }
 
 /// Whether a held call asks an exception: only the user answers it, in every mode.
@@ -348,23 +501,35 @@ pub fn asks(ask: &Ask) -> bool {
         .is_some_and(|reason| reason.starts_with(ASKS))
 }
 
-/// The exception an allowed request grants: its rule and the agent's reason, from its first
-/// reason.
+/// The exception an allowed request grants: its rule from its first reason, and the agent's
+/// reason, said after.
 pub fn granted_by(reasons: &[String]) -> Option<(Rule, String)> {
     let rest = reasons.first()?.strip_prefix(ASKS)?.strip_prefix(": ")?;
     let (name, rest) = rest.split_once(" (")?;
     let rule = Rule::parse(name)?;
-    let why = rest.strip_prefix(rule.said())?.strip_prefix("): ")?;
+    rest.strip_prefix(rule.said())?.strip_prefix("): ")?;
+    let why = reasons
+        .iter()
+        .find_map(|reason| reason.strip_prefix(REASON))?
+        .trim_start();
     Some((rule, why.to_owned()))
 }
 
-/// The user accepted the exception of request `number`: the session holds it from now on.
-pub fn grant(daemon: &Daemon, agent: &str, reasons: &[String], number: u64) {
+/// The user accepted the exception of request `number`: the session holds it from now on, for
+/// what the request covers (`digest`, its scope).
+pub fn grant(daemon: &Daemon, agent: &str, reasons: &[String], digest: Option<&str>, number: u64) {
     let Some((rule, why)) = granted_by(reasons) else {
         return;
     };
+    let scope: Scope = match digest.map(serde_json::from_str) {
+        Some(Ok(scope)) => scope,
+        _ => {
+            eprintln!("flottille daemon: request #{number}: the exception covers nothing it says");
+            return;
+        }
+    };
     if let Err(error) =
-        daemon.write(|store| store.grant_exception(agent, rule.name(), &why, number))
+        daemon.write(|store| store.grant_exception(agent, rule.name(), &why, number, &scope))
     {
         eprintln!("flottille daemon: request #{number}: the exception cannot be kept: {error}");
     }
@@ -374,6 +539,10 @@ pub fn grant(daemon: &Daemon, agent: &str, reasons: &[String], number: u64) {
 #[serde(deny_unknown_fields)]
 struct List {
     session: String,
+    /// Every exception of the session's tree, the session's own and its sub-agents', each with
+    /// its holder: what the window lists.
+    #[serde(default)]
+    tree: bool,
 }
 
 #[derive(Deserialize)]
@@ -383,10 +552,11 @@ struct Withdraw {
     rule: String,
 }
 
-fn listed(exception: &flottille_core::approval::Exception) -> Value {
+fn listed(exception: &Exception, title: Option<&str>) -> Value {
     let said = Rule::parse(&exception.rule).map(Rule::said);
-    json!({"session": exception.agent, "rule": exception.rule, "said": said,
-        "why": exception.why, "request": exception.request, "granted_at": exception.granted_at})
+    json!({"session": exception.agent, "title": title, "rule": exception.rule, "said": said,
+        "why": exception.why, "request": exception.request, "granted_at": exception.granted_at,
+        "scope": exception.scope})
 }
 
 /// `exception.list`, what the window shows where a session's rights are, and
@@ -395,20 +565,29 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     let params = if params.is_null() { json!({}) } else { params };
     match method {
         "exception.list" => {
-            let List { session } = serde_json::from_value(params)?;
-            if daemon.read(|store| store.agent(&session))?.is_none() {
+            let List { session, tree } = serde_json::from_value(params)?;
+            let Some(agent) = daemon.read(|store| store.agent(&session))? else {
                 return Err(Failure::new(
                     "not-found",
                     format!("there is no agent {session}"),
                 ));
+            };
+            let mut holders = vec![agent];
+            if tree {
+                holders.extend(crate::tree::descendants(daemon, &session));
             }
-            let held = daemon.read(|store| store.exceptions_of(&session))?;
-            Ok(json!({"exceptions": held.iter().map(listed).collect::<Vec<_>>()}))
+            let mut held = Vec::new();
+            for holder in &holders {
+                for exception in daemon.read(|store| store.exceptions_of(&holder.id))? {
+                    held.push(listed(&exception, holder.title.as_deref()));
+                }
+            }
+            Ok(json!({"exceptions": held}))
         }
         "exception.withdraw" => {
             let Withdraw { session, rule } = serde_json::from_value(params)?;
             match daemon.write(|store| store.withdraw_exception(&session, &rule))? {
-                Some(exception) => Ok(json!({"exception": listed(&exception)})),
+                Some(exception) => Ok(json!({"exception": listed(&exception, None)})),
                 None => Err(Failure::new(
                     "not-found",
                     format!("agent {session} holds no exception {rule}"),
@@ -456,7 +635,7 @@ mod tests {
             "git push --quiet --force origin main:app/login",
         ] {
             assert_eq!(
-                rule_of(&own, "run", &run(line)),
+                rule_of(&own, &[], "run", &run(line)),
                 Some(Rule::ForcePush),
                 "{line}"
             );
@@ -484,27 +663,34 @@ mod tests {
             "git push --force git@host:x/y.git app/login",
             "git push --force --receive-pack=x origin app/login",
         ] {
-            assert_eq!(rule_of(&own, "run", &run(line)), None, "{line}");
+            assert_eq!(rule_of(&own, &[], "run", &run(line)), None, "{line}");
         }
         // A line that waits for a ready server, or a task, is not one.
         assert_eq!(
             rule_of(
                 &own,
+                &[],
                 "run",
                 &json!({"line": "git push --force origin app/login", "notify": "ready"})
             ),
             None
         );
         assert_eq!(
-            rule_of(&own, "run", &json!({"task": "push", "why": "x"})),
+            rule_of(&own, &[], "run", &json!({"task": "push", "why": "x"})),
             None
         );
         // The project folder, or a workspace on a protected branch, has no own branch to force.
         let line = run("git push --force origin main");
-        assert_eq!(rule_of(&place(None, ""), "run", &line), None);
-        assert_eq!(rule_of(&place(Some("main"), "main"), "run", &line), None);
+        assert_eq!(rule_of(&place(None, ""), &[], "run", &line), None);
+        assert_eq!(
+            rule_of(&place(Some("main"), &[], "main"), "run", &line),
+            None
+        );
         let line = run("git push --force origin next/2.0");
-        assert_eq!(rule_of(&place(Some("x"), "next/2.0"), "run", &line), None);
+        assert_eq!(
+            rule_of(&place(Some("x"), &[], "next/2.0"), "run", &line),
+            None
+        );
     }
 
     #[test]
@@ -552,7 +738,7 @@ mod tests {
             assert_eq!(rule_of(&own, tool, &args), None, "{tool} {args}");
         }
         assert_eq!(
-            rule_of(&own, "forge", &json!({"action": "merge"})),
+            rule_of(&own, &[], "forge", &json!({"action": "merge"})),
             Some(Rule::MergeBlocked)
         );
     }
@@ -613,48 +799,83 @@ mod tests {
 
     #[test]
     fn the_reason_of_an_ask_is_one_line_of_a_bounded_length() {
-        let (_, why) = split("run", json!({"line": "x", "exception": "one\ntwo"}));
+        let (_, why) = split(json!({"line": "x", "exception": "one\ntwo"}));
         assert!(why.is_err(), "{why:?}");
         let long = "x".repeat(crate::judge::WHOLE_CHARS + 1);
-        let (_, why) = split("run", json!({"line": "x", "exception": long}));
+        let (_, why) = split(json!({"line": "x", "exception": long}));
         assert!(why.is_err(), "{why:?}");
-        let (_, why) = split("run", json!({"line": "x", "exception": "one line"}));
+        let (_, why) = split(json!({"line": "x", "exception": "one line"}));
         assert_eq!(why, Ok(Some("one line".into())));
     }
 
     #[test]
     fn the_exception_an_allowed_request_grants_is_read_from_its_first_reason() {
         let reason = format!(
-            "{ASKS}: {} ({}): a check refuses: an old commit",
+            "{ASKS}: {} ({}): force the push of app/login from the repository .",
             Rule::ForcePush.name(),
             Rule::ForcePush.said()
         );
+        let why = format!("{REASON} a check refuses: an old commit");
         assert_eq!(
-            granted_by(&[reason, "other".into()]),
+            granted_by(&[reason.clone(), why, "other".into()]),
             Some((Rule::ForcePush, "a check refuses: an old commit".into()))
         );
+        assert_eq!(granted_by(&[reason]), None);
         assert_eq!(granted_by(&["it pushes".into()]), None);
         assert_eq!(granted_by(&[]), None);
     }
 
     #[test]
+    fn a_base_or_resumed_branch_of_the_place_is_never_forced_by_an_exception() {
+        let own = place(Some("login"), "app/login");
+        let line = run("git push --force origin app/login");
+        assert_eq!(rule_of(&own, &[], "run", &line), Some(Rule::ForcePush));
+        let guarded = ["integration".to_owned(), "app/login".to_owned()];
+        assert_eq!(rule_of(&own, &guarded, "run", &line), None);
+    }
+
+    #[test]
+    fn a_forced_push_covers_its_repository_and_branch() {
+        let mut own = place(Some("login"), "app/login");
+        own.repositories = vec![
+            (".".into(), PathBuf::from("/work/app")),
+            ("api".into(), PathBuf::from("/work/app/api")),
+        ];
+        let scope = |repository: &str| Scope {
+            repository: repository.into(),
+            branch: "app/login".into(),
+            pull: None,
+        };
+        let line = "git push -f origin app/login";
+        assert_eq!(
+            push_scope(&own, &[], &json!({"line": line, "repository": "api"})),
+            Some(scope("api"))
+        );
+        assert_eq!(
+            push_scope(&own, &[], &json!({"line": line})).map(|s| s.branch),
+            Some("app/login".into())
+        );
+        // Switched to another branch, the place's own is that one: a push of it is no other's.
+        let switched = place(Some("login"), "app/x");
+        assert_eq!(
+            push_scope(&switched, &[], &json!({"line": "git push -f origin app/x"}))
+                .map(|s| s.branch),
+            Some("app/x".into())
+        );
+        assert_eq!(push_scope(&switched, &[], &json!({"line": line})), None);
+    }
+
+    #[test]
     fn the_exception_is_taken_out_of_the_call_and_a_merge_is_waived_with_it() {
-        let (args, why) = split("run", json!({"line": "x", "exception": " why "}));
+        let (args, why) = split(json!({"line": "x", "exception": " why "}));
         assert_eq!(args, json!({"line": "x"}));
         assert_eq!(why, Ok(Some("why".into())));
-        let (args, _) = split("forge", json!({"action": "merge", "exception": "why"}));
-        assert_eq!(args, json!({"action": "merge", "waive": "why"}));
-        let (args, why) = split("run", json!({"line": "x"}));
+        // A merge is never waived with the agent's words: the user reads what blocks it.
+        let (args, _) = split(json!({"action": "merge", "exception": "why"}));
+        assert_eq!(args, json!({"action": "merge"}));
+        let (args, why) = split(json!({"line": "x"}));
         assert_eq!((args, why), (json!({"line": "x"}), Ok(None)));
-        assert!(
-            split("run", json!({"line": "x", "exception": ""}))
-                .1
-                .is_err()
-        );
-        assert!(
-            split("run", json!({"line": "x", "exception": 3}))
-                .1
-                .is_err()
-        );
+        assert!(split(json!({"line": "x", "exception": ""})).1.is_err());
+        assert!(split(json!({"line": "x", "exception": 3})).1.is_err());
     }
 }

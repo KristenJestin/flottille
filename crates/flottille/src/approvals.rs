@@ -68,7 +68,7 @@ fn holder(daemon: &Daemon, agent: &str) -> String {
 /// Writes the request for a held call, or finds the one its call key already made, and answers
 /// the agent at once. `says` is what it changes, in words, for the user; `judgement` what the
 /// judge said of it, in Auto; `digest`, for a workspace's removal, the workspace's state read
-/// before its card.
+/// before its card, and for an exception's ask what it covers (`approval::Scope`).
 #[allow(clippy::too_many_arguments)]
 pub fn ask(
     daemon: &Arc<Daemon>,
@@ -445,7 +445,13 @@ async fn performed(
     }
     // An exception the user accepted is the session's from now on, whatever becomes of the call:
     // its check below finds the call without the rule it lifts.
-    crate::exceptions::grant(daemon, &request.agent, &request.reasons, number);
+    crate::exceptions::grant(
+        daemon,
+        &request.agent,
+        &request.reasons,
+        request.digest.as_deref(),
+        number,
+    );
     // The situation may have changed since the request was made.
     let (verdict, first) = mcp::judged_off(daemon, &grant, tool, &request.arguments).await;
     // A connection's write compares once more, where it writes, what it does with what the user

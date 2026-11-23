@@ -1798,9 +1798,11 @@ pub(super) async fn write(
                 ));
             };
             let number = pull.id.to_string();
-            // Bitbucket has no bypass of its own: an exception lifts Flottille's refusal, and
-            // the forge's merge checks still answer.
-            if asked.waive.is_none() && !asked.bypass {
+            // Bitbucket has no bypass of its own: an exception lifts Flottille's refusal for the
+            // pull request it is for, and the forge's merge checks still answer.
+            let covered = asked.excepted.covers(path, branch, pull.id);
+            let reading = asked.excepted.reads();
+            if asked.waive.is_none() || covered || reading {
                 let checks = match checks_of(forge, context, &number).await {
                     Ok(checks) => checks,
                     Err(why) => return Outcome::Failed(why),
@@ -1821,7 +1823,23 @@ pub(super) async fn write(
                     }
                     _ => None,
                 };
-                if let Some(blocks) = blocks(&checks, decision(&reviewers), starting.as_deref()) {
+                let blocked = blocks(&checks, decision(&reviewers), starting.as_deref());
+                if reading {
+                    return super::MergeRead {
+                        repository: path.to_owned(),
+                        slug: slug.to_string(),
+                        branch: branch.to_owned(),
+                        base: base.to_owned(),
+                        number: pull.id,
+                        blocks: blocked,
+                        bypass: false,
+                    }
+                    .said();
+                }
+                if let Some(blocks) = blocked
+                    && !covered
+                    && asked.waive.is_none()
+                {
                     return Outcome::Refused(format!(
                         "refused: the pull request #{number} of {branch} in {slug} is not \
                          merged: {blocks}; wait for its checks, or have it waived by the user \

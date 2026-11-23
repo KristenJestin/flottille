@@ -44,7 +44,8 @@ pub struct Request {
     pub place: Option<String>,
     /// A workspace's removal: the workspace's state when it was asked (`workspaces::digest`),
     /// read before its card. The answer to discard removes it only while it is still that;
-    /// `None` when it could not be read, or for any other call.
+    /// `None` when it could not be read. An exception's ask: what it covers, as read when it was
+    /// asked (`Scope`, in JSON). `None` for any other call.
     pub digest: Option<String>,
 }
 
@@ -212,12 +213,26 @@ pub struct Exception {
     /// The request the user allowed it in.
     pub request: u64,
     pub granted_at: u64,
+    /// What the user allowed, exactly: a later call outside it is held as before.
+    pub scope: Scope,
+}
+
+/// What an exception covers, read when it was asked: the repository (its path in the project)
+/// and the branch it is for, and for a merge the pull request; empty for a rule that names none.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Scope {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repository: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<u64>,
 }
 
 impl Exception {
     pub fn to_json(&self) -> Value {
         json!({"agent": self.agent, "rule": self.rule, "why": self.why,
-            "request": self.request, "granted_at": self.granted_at})
+            "request": self.request, "granted_at": self.granted_at, "scope": self.scope})
     }
 }
 

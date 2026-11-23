@@ -1008,16 +1008,23 @@ with `exception`, its reason, saying exactly what the rule refuses and why it is
 
 - The ask is a request of the user's in every mode, Full included, never the judge's, answered at
   once as any held call ("request #n is waiting"): no tool call waits for a human. Its card says
-  the call whole (the line, the pull request), the rule it lifts, what that lets the session do
-  (the protection bypassed, for a merge), the agent's reason, and what else the gate says of the
-  call. A child's ask goes to its parent first, as its other requests do.
+  the refused action exactly as Flottille read it, never in the agent's words alone: the call
+  whole, the rule it lifts and what that lets the session do, the branch and the repository of a
+  forced push, and for a merge the pull request (its number, branch, base and repository) and what
+  blocks it, read on the forge when the card is made, with the protection bypassed. The agent's
+  reason comes below, one line, then what else the gate says of the call. A child's ask goes to
+  its parent first, as its other requests do. An ask on a call another machine answers is refused:
+  exceptions are each machine's own for now.
 - Allowed, the call is done and the rule no longer stops **that session** until it ends (even to
   be resumed) or the user withdraws it, in the window (the session's rail, Exceptions) or with
   `flottille exception withdraw`. Other sessions and the session's own sub-agents still ask for
   themselves. Denied or left unanswered, nothing changes. The exception and the answer stay in the
   session's history (`exception.granted`, `exception.withdrawn`).
-- An exception lifts only its rule's reasons: what else the gate says of a call stays, and the
-  session's mode decides it as before.
+- An exception is what the user allowed, exactly that, nothing wider. It covers the branch and
+  the repository it was asked for, and for a merge that pull request: after a `git switch`, a
+  forced push of another branch, or the merge of another pull request, is held and refused as
+  before. It lifts only its rule's reasons: what else the gate says of a call stays, and the
+  session's mode decides it as before; one rule's exception never lifts another.
 
 What can be asked for are the refusals that protect the project's own process, where the user
 could do the same by hand on the forge:
@@ -1026,11 +1033,13 @@ could do the same by hand on the forge:
   `--force-with-lease`, a `+` refspec), base and held by the project's never list; then judged as
   any push is. Only a plain line of `git push`, its forcing options, a named remote and one
   refspec whose destination is the workspace's branch, never `main`, `master`, `dev`, `develop`,
-  `trunk`, `stable/*`, `next/*` or `release/*`, never a deletion;
+  `trunk`, `stable/*`, `next/*` or `release/*`, nor a base of the project's repositories, nor a
+  branch the workspace resumed (it was the user's before), never a deletion;
 - `merge-blocked`: a merge of the workspace's pull request whose required checks fail or whose
-  branch protection blocks it (`forge merge`, the exception its waive): merged past Flottille's
-  refusal, with GitHub's protection bypassed (`gh pr merge --admin`, the rights of the user's own
-  `gh`); Bitbucket has no bypass, and its merge checks still answer;
+  branch protection blocks it (`forge merge`): that pull request merged past Flottille's refusal,
+  with GitHub's protection bypassed (`gh pr merge --admin`, the rights of the user's own `gh`)
+  only while something blocks it; Bitbucket has no bypass, and its merge checks still answer. A
+  merge nothing blocks needs none, and the ask is refused;
 - `forge-state`: closing, reopening or relabelling an issue or a pull request (`forge` and
   `tickets` `close`, `reopen`, `edit` of labels alone), then harmless.
 

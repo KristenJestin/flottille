@@ -804,8 +804,8 @@ judges its lines as it judges `gh`'s, by what they do, and lists its reads in th
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval, or the session holds the exception
-  `merge-blocked`, which merges it with the branch protection bypassed, `gh pr merge --admin`:
-  `docs/design.md` §7.3), with `message`, by squash only, the
+  `merge-blocked` for that pull request, which merges it with the branch protection bypassed,
+  `gh pr merge --admin`: `docs/design.md` §7.3), with `message`, by squash only, the
   squashed commit's message (its subject on the first line, then its body: `gh pr merge --squash
   --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{
-    Decision, Delivery, Exception, Forward, Judgement, Kind, Leave, Request, RequestState,
+    Decision, Delivery, Exception, Forward, Judgement, Kind, Leave, Request, RequestState, Scope,
 };
 use crate::finding::{self, Finding};
 use crate::item::{Check, Cursor, Filter, Item, Post};
@@ -1034,6 +1034,10 @@ const MIGRATIONS: &[&str] = &[
         why        TEXT NOT NULL,
         request    INTEGER NOT NULL,
         granted_at INTEGER NOT NULL,
+        -- What it covers (`approval::Scope`): '' and NULL where the rule names none.
+        repository TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        pull       INTEGER,
         PRIMARY KEY (agent, rule)
     ) STRICT;
 ",
@@ -2960,14 +2964,16 @@ impl Store {
             .is_some())
     }
 
-    /// The user lifts `rule` for the session `agent`, with the request it was asked in, and its
-    /// `exception.granted` event; `None` when it holds it already or has ended.
+    /// The user lifts `rule` for the session `agent`, for what `scope` covers, with the request
+    /// it was asked in, and its `exception.granted` event; `None` when it holds it already or has
+    /// ended.
     pub fn grant_exception(
         &mut self,
         agent: &str,
         rule: &str,
         why: &str,
         request: u64,
+        scope: &Scope,
     ) -> Result<(Option<Exception>, Option<Event>)> {
         let transaction = self.connection.transaction()?;
         let exception = Exception {
@@ -2976,14 +2982,25 @@ impl Store {
             why: why.to_owned(),
             request,
             granted_at: now_ms(),
+            scope: scope.clone(),
         };
         // Checked in the same write as `change_agent`'s DELETE, so a session ended between the
         // approval and here never keeps an exception a resume would find.
         let added = transaction.execute(
-            "INSERT OR IGNORE INTO session_exceptions (agent, rule, why, request, granted_at) \
-             SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM agents \
+            "INSERT OR IGNORE INTO session_exceptions \
+             (agent, rule, why, request, granted_at, repository, branch, pull) \
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE EXISTS (SELECT 1 FROM agents \
              WHERE id = ?1 AND state NOT IN ('ended', 'failed'))",
-            params![agent, rule, why, request, exception.granted_at],
+            params![
+                agent,
+                rule,
+                why,
+                request,
+                exception.granted_at,
+                scope.repository,
+                scope.branch,
+                scope.pull
+            ],
         )?;
         if added == 0 {
             return Ok((None, None));
@@ -2998,34 +3015,21 @@ impl Store {
         Ok((Some(exception), Some(event)))
     }
 
-    /// Whether the session `agent` holds an exception of `rule`.
-    pub fn has_exception(&self, agent: &str, rule: &str) -> Result<bool> {
+    /// The exception of `rule` the session `agent` holds, if it holds one.
+    pub fn exception(&self, agent: &str, rule: &str) -> Result<Option<Exception>> {
         Ok(self
-            .connection
-            .query_row(
-                "SELECT 1 FROM session_exceptions WHERE agent = ?1 AND rule = ?2",
-                params![agent, rule],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
+            .exceptions_of(agent)?
+            .into_iter()
+            .find(|exception| exception.rule == rule))
     }
 
     /// The exceptions the session `agent` holds, oldest first.
     pub fn exceptions_of(&self, agent: &str) -> Result<Vec<Exception>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT rule, why, request, granted_at FROM session_exceptions \
-             WHERE agent = ?1 ORDER BY granted_at, rowid",
+            "SELECT rule, why, request, granted_at, repository, branch, pull \
+             FROM session_exceptions WHERE agent = ?1 ORDER BY granted_at, rowid",
         )?;
-        let rows = statement.query_map(params![agent], |row| {
-            Ok(Exception {
-                agent: agent.to_owned(),
-                rule: row.get(0)?,
-                why: row.get(1)?,
-                request: row.get(2)?,
-                granted_at: row.get(3)?,
-            })
-        })?;
+        let rows = statement.query_map(params![agent], |row| exception_row(agent, row))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -3040,17 +3044,9 @@ impl Store {
         let exception = transaction
             .query_row(
                 "DELETE FROM session_exceptions WHERE agent = ?1 AND rule = ?2 \
-                 RETURNING why, request, granted_at",
+                 RETURNING rule, why, request, granted_at, repository, branch, pull",
                 params![agent, rule],
-                |row| {
-                    Ok(Exception {
-                        agent: agent.to_owned(),
-                        rule: rule.to_owned(),
-                        why: row.get(0)?,
-                        request: row.get(1)?,
-                        granted_at: row.get(2)?,
-                    })
-                },
+                |row| exception_row(agent, row),
             )
             .optional()?;
         let Some(exception) = exception else {
@@ -5305,6 +5301,22 @@ fn append_agent_event(
     Ok(event)
 }
 
+/// An exception of `agent`'s from `rule, why, request, granted_at, repository, branch, pull`.
+fn exception_row(agent: &str, row: &rusqlite::Row) -> rusqlite::Result<Exception> {
+    Ok(Exception {
+        agent: agent.to_owned(),
+        rule: row.get(0)?,
+        why: row.get(1)?,
+        request: row.get(2)?,
+        granted_at: row.get(3)?,
+        scope: Scope {
+            repository: row.get(4)?,
+            branch: row.get(5)?,
+            pull: row.get(6)?,
+        },
+    })
+}
+
 fn notification_row(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
     let kind: String = row.get(2)?;
     Ok(Notification {
@@ -6625,22 +6637,33 @@ mod tests {
                 .unwrap();
         }
 
+        let scope = Scope {
+            repository: ".".into(),
+            branch: "app/login".into(),
+            pull: None,
+        };
         let (granted, event) = store
-            .grant_exception(&agent.id, "force-push", "a check refuses it", 4)
+            .grant_exception(&agent.id, "force-push", "a check refuses it", 4, &scope)
             .unwrap();
         assert_eq!(granted.map(|e| e.request), Some(4));
         assert_eq!(event.unwrap().name, "exception.granted");
-        assert!(store.has_exception(&agent.id, "force-push").unwrap());
-        assert!(!store.has_exception(&other.id, "force-push").unwrap());
-        assert!(!store.has_exception(&agent.id, "merge-blocked").unwrap());
+        assert!(store.exception(&agent.id, "force-push").unwrap().is_some());
+        assert!(!store.exception(&other.id, "force-push").unwrap().is_some());
+        assert!(
+            !store
+                .exception(&agent.id, "merge-blocked")
+                .unwrap()
+                .is_some()
+        );
         // Given twice, it is the first.
         let again = store
-            .grant_exception(&agent.id, "force-push", "again", 5)
+            .grant_exception(&agent.id, "force-push", "again", 5, &Scope::default())
             .unwrap();
         assert_eq!(again, (None, None));
         let listed = store.exceptions_of(&agent.id).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].why, "a check refuses it");
+        assert_eq!(listed[0].scope, scope);
 
         let (withdrawn, event) = store.withdraw_exception(&agent.id, "force-push").unwrap();
         assert_eq!(withdrawn.map(|e| e.rule).as_deref(), Some("force-push"));
@@ -6652,17 +6675,23 @@ mod tests {
 
         // The end of the session takes it, even to be resumed; an ended one gets none.
         store
-            .grant_exception(&agent.id, "force-push", "a check refuses it", 6)
+            .grant_exception(
+                &agent.id,
+                "force-push",
+                "a check refuses it",
+                6,
+                &Scope::default(),
+            )
             .unwrap();
         let ended = AgentChange {
             state: Some(AgentState::Ended),
             ..AgentChange::default()
         };
         store.change_agent(&agent.id, ended, None).unwrap();
-        assert!(!store.has_exception(&agent.id, "force-push").unwrap());
+        assert!(!store.exception(&agent.id, "force-push").unwrap().is_some());
         assert_eq!(
             store
-                .grant_exception(&agent.id, "force-push", "x", 7)
+                .grant_exception(&agent.id, "force-push", "x", 7, &Scope::default())
                 .unwrap(),
             (None, None)
         );
