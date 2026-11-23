@@ -1294,6 +1294,11 @@ impl Shell {
         if machine == self.front {
             return;
         }
+        // The tab of the Settings left is the one the next machine's shows.
+        if self.selected == Some(Selection::Settings) {
+            let tab = self.settings.read(cx).tab();
+            self.selected_on = Some((self.front.clone(), tab));
+        }
         let pages = match self.sides.remove(&machine) {
             Some(pages) => pages,
             None => self.pages_for(machine.as_deref(), window, cx),
