@@ -4983,7 +4983,11 @@ fn every_command_of_agent_browser_runs_in_the_browsers_network() {
     };
     let mut seen = Vec::new();
     for event in ["start", "open", "login", "close"] {
-        let lines = logged(&user, "browser", event);
+        // The server started before its adapter applies (to list its tools) is no browser's.
+        let lines: Vec<Value> = logged(&user, "browser", event)
+            .into_iter()
+            .filter(|line| event != "start" || !line["config"].is_null())
+            .collect();
         assert!(!lines.is_empty(), "no {event}");
         for line in lines {
             let netns = line["netns"].as_u64().unwrap_or_else(|| panic!("{line}"));
