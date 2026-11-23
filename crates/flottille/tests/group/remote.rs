@@ -21,6 +21,8 @@ mod connections;
 mod mcp;
 #[path = "../remote_asks.rs"]
 mod remote_asks;
+#[path = "../remote_child.rs"]
+mod remote_child;
 #[path = "../remote_code.rs"]
 mod remote_code;
 #[path = "../remote_deliveries.rs"]
@@ -59,6 +61,8 @@ mod remote_uploads;
 mod ssh_agent;
 #[path = "../ssh_files.rs"]
 mod ssh_files;
+#[path = "../tree_parity.rs"]
+mod tree_parity;
 #[path = "../vault.rs"]
 mod vault;
 #[path = "../vault_ask.rs"]

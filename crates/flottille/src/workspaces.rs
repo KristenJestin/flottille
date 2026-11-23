@@ -811,6 +811,12 @@ pub async fn create_from(
             folder.display()
         )));
     }
+    // A root the daemon cannot make, or write in, fails here with its reason, before any fetch or
+    // record: the session that asked says it, and nothing half made is left to resume.
+    let root = project.workspaces_root.clone();
+    blocking(move || crate::workspaces_folder::usable(&root))
+        .await
+        .map_err(Failure::refused)?;
 
     let mut repositories = Vec::new();
     for path in &taken {

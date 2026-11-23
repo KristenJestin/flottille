@@ -109,6 +109,8 @@ pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
         Ok(session) => {
             session.project != caller.project
                 && session.launched_by.as_deref() != Some(caller.id.as_str())
+                // Nor one a caller of another machine started here.
+                && grant.reads.as_deref() != Some(session.id.as_str())
                 && !daemon
                     .read(|store| store.has_leave(&caller.id, &session.id))
                     .unwrap_or(false)

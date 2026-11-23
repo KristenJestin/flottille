@@ -1144,3 +1144,42 @@ fn a_running_root_of_another_machine_with_a_question_shows_needs_you(cx: &mut Te
         .clone();
     assert_eq!(agent["state"], "working", "its turn still runs");
 }
+
+#[gpui_kit::test]
+fn a_child_launched_from_another_machine_is_not_a_root_in_the_window(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer
+        .text
+        .find("(agent ")
+        .unwrap_or_else(|| panic!("no agent in {}", answer.text));
+    let child = answer.text[at + 7..at + 19].to_owned();
+    eventually("the child runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": child}))
+            .is_ok()
+    });
+    let (shell, cx) = window(&server, cx);
+
+    open_page(&shell, &child, cx);
+
+    // Its parent writes to it: a bar naming that agent stands where the composer would, with
+    // nothing to go back to.
+    until(&shell, cx, "the bar in place of the composer", |cx| {
+        present(cx, "read-only".into())
+    });
+    let said = label(cx, "read-only".into()).unwrap_or_default();
+    assert!(
+        said.contains(&format!("a child of agent {pilot} of pc")),
+        "{said}"
+    );
+    assert!(!present(cx, "composer-field".into()), "no composer");
+    assert!(!present(cx, "back-to-root".into()));
+}

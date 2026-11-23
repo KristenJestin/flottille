@@ -13121,20 +13121,24 @@ fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut Test
     );
     cx.update(|window, cx| window.click("workspaces-choice-atlas-own", cx));
     settle(cx);
-    type_folder(&own, "/srv/trees/<project>", cx);
+    // An absolute folder the daemon can make: under this test's own tree.
+    let trees = user.path("trees");
+    let folder = format!("{}/<project>", trees.display());
+    let made = format!("{}/atlas", trees.display());
+    type_folder(&own, &folder, cx);
     cx.update(|window, cx| window.click("workspaces-save-atlas", cx));
     until(&shell, cx, "the project's own folder is kept", |cx| {
-        own.read_with(cx, |s, _| s.folder() == Some("/srv/trees/atlas"))
+        own.read_with(cx, |s, _| s.folder() == Some(made.as_str()))
     });
     settle(cx);
     let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
     assert!(
-        text.contains("workspaces_root = \"/srv/trees/<project>\""),
+        text.contains(&format!("workspaces_root = \"{folder}\"")),
         "{text}"
     );
     assert_eq!(
         text_of("workspaces-folder-atlas", cx),
-        Some("Its workspaces are made in /srv/trees/atlas".to_owned())
+        Some(format!("Its workspaces are made in {made}"))
     );
 
     cx.update(|window, cx| window.click("workspaces-choice-atlas-data", cx));
