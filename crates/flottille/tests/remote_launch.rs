@@ -1906,8 +1906,9 @@ fn a_child_launch_across_machines_is_not_held_for_the_chain() {
 #[test]
 fn a_child_on_another_machine_launches_a_session_only_with_the_user() {
     // A child pc's root launched on the server counts there as a session another agent started
-    // (`launches::launched_from`): its led launch comes to the user. #1274 makes it a real child,
-    // whose led and handed launches are refused outright.
+    // (`launches::launched_from`): its led launch is held for its parent then the user,
+    // never the judge's. #1274 makes it a real child, whose led and handed launches are refused
+    // outright.
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, _child, child) = launched_on_server(&pc, &server, "child");
@@ -1918,18 +1919,24 @@ fn a_child_on_another_machine_launches_a_session_only_with_the_user() {
         json!({"kind": "led", "title": "Third", "brief": "And the tests."}),
     );
 
+    // Held, as any action of a child its gate does not allow: its parent, on pc, decides first.
     assert!(
-        !answer.text.contains("Started a session"),
+        answer.text.starts_with("Waiting for approval")
+            && answer.text.contains("your parent decides"),
         "{}",
         answer.text
     );
-    eventually(&format!("a request held, answered {}", answer.text), || {
-        !server.requests().is_empty()
-    });
-    held_for_the_chain(&server.requests()[0]);
     assert_eq!(
         server.user.judge_received().len(),
         judged,
         "the judge was asked"
+    );
+    a_while();
+    assert!(
+        !server
+            .agents()
+            .iter()
+            .any(|agent| agent["title"] == "Third"),
+        "a session started before the user allowed it"
     );
 }
