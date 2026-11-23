@@ -6917,6 +6917,11 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     // shown on a Weston of the test's own (never the user's screen), then headless again, the
     // sign-in made shown kept. Fakes do not see what the sandbox does to a real browser.
     let user = User::with_fake_agent().with_env("WAYLAND_DISPLAY", "wayland-flottille-test");
+    // The test's runtime folder is under /tmp, which Landlock then keeps the server from writing
+    // in (a user's is under /run): Chrome is given a temporary folder of the test's own.
+    let temporary = user.path("tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let program = match real_agent_browser(&user) {
         Ok(program) => program,
@@ -6949,7 +6954,8 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
             "agent_browser_close": "passes"}}),
     )
     .unwrap();
-    let open = |url: String, headed: Option<bool>| {
+    let open = |path: &str, headed: Option<bool>| {
+        let url = format!("{site}{path}");
         let mut arguments = json!({"url": url});
         if let Some(headed) = headed {
             arguments["headed"] = json!(headed);
@@ -6960,7 +6966,15 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
         );
         let text = done(answer);
         assert!(!text.contains("not shown"), "{text}");
-        let last = seen.lock().unwrap().last().cloned().unwrap();
+        // The page's own request, not the icon the browser asks for after it.
+        let last = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|request| request["path"] == path)
+            .cloned()
+            .unwrap();
         last
     };
     let headless = |request: &Value| {
@@ -6970,12 +6984,12 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
             .contains("HeadlessChrome")
     };
 
-    let first = open(format!("{site}/"), None);
+    let first = open("/", None);
     assert!(headless(&first), "{first}");
     assert_eq!(first["cookie"], Value::Null);
 
     // The user signs in on the shown browser: Chrome on the test's own Wayland display.
-    let shown = open(format!("{site}/login"), Some(true));
+    let shown = open("/login", Some(true));
     assert!(!headless(&shown), "{shown}");
     assert!(
         user.path("runtime/flottille/display/browser").exists(),
@@ -6983,7 +6997,7 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     );
 
     // The agent goes on headless, signed in.
-    let after = open(format!("{site}/"), None);
+    let after = open("/", None);
     assert!(headless(&after), "{after}");
     assert_eq!(after["cookie"], json!("signed=in"), "{after}");
     eventually("the display folder is removed", || {
