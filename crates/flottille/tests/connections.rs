@@ -5139,6 +5139,177 @@ fn a_plugin_that_fails_tells_the_agent_why() {
     assert!(form(&user).is_none(), "the form was filled");
 }
 
+/// The files of the plugin's last login beside its socket (`vault.token`, `vault.why`), found by
+/// the socket the configuration names.
+fn plugin_file(user: &User, file: &str) -> PathBuf {
+    let login = logged(user, "browser", "login");
+    let socket = login.last().unwrap()["config"]["plugins"][0]["args"][2]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Path::new(&socket).with_file_name(file)
+}
+
+#[test]
+fn a_run_cannot_get_the_credential() {
+    // A run of the agent's own waits for a login of Flottille's, reads the token beside the
+    // plugin's socket and speaks to that socket with the entry and its site's URL: it gets
+    // nothing, and the login still signs in.
+    let user = user();
+    let until = user.path("probe-done");
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"hold": until.to_str().unwrap()}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let result = user.path("probe-result.json");
+    let config = user.path("state/flottille/connections/browser/agent-browser.json");
+    std::fs::write(
+        user.path("work/app/probe.py"),
+        format!(
+            "import json, os, socket, time\n\
+             started, config, result, until = {started:?}, {config:?}, {result:?}, {until:?}\n\
+             deadline = time.time() + 30\n\
+             while not os.path.exists(started) and time.time() < deadline:\n    time.sleep(0.02)\n\
+             out = {{'started': os.path.exists(started)}}\n\
+             token = ''\n\
+             try:\n\
+             \x20   sock = json.load(open(config))['plugins'][0]['args'][-1]\n\
+             \x20   out['socket'] = sock\n\
+             \x20   try:\n\
+             \x20       token = open(os.path.join(os.path.dirname(sock), 'vault.token')).read()\n\
+             \x20       out['token'] = token\n\
+             \x20   except Exception as error:\n\
+             \x20       out['token_error'] = str(error)\n\
+             \x20   s = socket.socket(socket.AF_UNIX)\n\
+             \x20   s.settimeout(5)\n\
+             \x20   s.connect(sock)\n\
+             \x20   s.sendall((json.dumps({{'token': token, 'item': 'shop-test', \\\n\
+             \x20       'url': 'https://shop.example.com/login'}}) + '\\n').encode())\n\
+             \x20   out['answer'] = s.makefile().readline()\n\
+             except Exception as error:\n\
+             \x20   out['error'] = str(error)\n\
+             open(result, 'w').write(json.dumps(out))\n\
+             open(until, 'w').write('')\n",
+            started = format!("{}.started", until.display()),
+            config = config.display().to_string(),
+            result = result.display().to_string(),
+            until = until.display().to_string(),
+        ),
+    )
+    .unwrap();
+    // Left running past its call: it waits for the login.
+    mcp.call("run", json!({"line": "python3 probe.py", "timeout": 1}));
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("shop-test"), "{said}");
+    let filled = form(&user).expect("the login did not sign in");
+    assert_eq!(filled["password"], PASSWORD);
+    let held = logged(&user, "browser", "held");
+    assert_eq!(held.last().unwrap()["token_seen"], true, "{held:?}");
+    let probe: Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the run never ended"))
+            .unwrap();
+    assert_eq!(probe["started"], true, "{probe}");
+    assert!(probe["socket"].is_string(), "{probe}");
+    assert!(
+        probe.get("token").is_none(),
+        "the run read the token: {probe}"
+    );
+    assert!(!probe.to_string().contains(PASSWORD), "{probe}");
+    assert!(!probe.to_string().contains("tester@example.com"), "{probe}");
+}
+
+/// A login of the entry `shop-test` with the fake's `login` behaviour `login`: its answer, and
+/// the paths of the run's token and reason files.
+fn logged_in_with(user: &User, login: Value) -> (Answer, PathBuf, PathBuf) {
+    browser(user, &agent_browser("0.43.0"), login);
+    let (_, mcp) = signed_up(user);
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    (
+        answer,
+        plugin_file(user, "vault.token"),
+        plugin_file(user, "vault.why"),
+    )
+}
+
+#[test]
+fn the_token_and_the_reason_are_gone_once_the_login_ends() {
+    // Signed in: the token was there while the plugin was asked.
+    let signed_in = user();
+    let until = signed_in.path("go");
+    std::fs::write(&until, "").unwrap();
+    let (answer, token, why) = logged_in_with(&signed_in, json!({"hold": until.to_str().unwrap()}));
+    done(answer);
+    let held = logged(&signed_in, "browser", "held");
+    assert_eq!(held.last().unwrap()["token_seen"], true, "{held:?}");
+    assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
+    // Failed: the plugin wrote why.
+    let failed = user();
+    let (answer, token, why) = logged_in_with(&failed, json!({"token": "wrong"}));
+    let said = refused(answer);
+    assert!(said.contains("Flottille refused"), "{said}");
+    assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
+}
+
+#[test]
+fn the_token_is_gone_once_the_login_runs_out_of_time() {
+    let user = user().with_env("FLOTTILLE_CONNECTION_LOGIN_MS", "1500");
+    let never = user.path("never");
+    let (answer, token, why) = logged_in_with(&user, json!({"hold": never.to_str().unwrap()}));
+    let said = refused(answer);
+    assert!(said.contains("did not sign in within"), "{said}");
+    let held = logged(&user, "browser", "held");
+    assert_eq!(held.last().unwrap()["token_seen"], true, "{held:?}");
+    assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
+}
+
+#[test]
+fn the_plugins_reason_is_never_read_through_a_link() {
+    // Its reason replaced with a link to a file that holds another secret: never read.
+    let linked = user();
+    let elsewhere = linked.path("elsewhere.txt");
+    std::fs::write(&elsewhere, "another-secret-of-the-user\n").unwrap();
+    let (answer, _, _) = logged_in_with(
+        &linked,
+        json!({"token": "drop", "why_link": elsewhere.to_str().unwrap()}),
+    );
+    let said = refused(answer);
+    assert!(!said.contains("another-secret-of-the-user"), "{said}");
+    // A link planted where it writes its reason: replaced, never written through.
+    let planted = user();
+    let target = planted.path("target.txt");
+    std::fs::write(&target, "kept\n").unwrap();
+    let (answer, _, _) = logged_in_with(
+        &planted,
+        json!({"token": "drop", "why_planted": target.to_str().unwrap()}),
+    );
+    let said = refused(answer);
+    assert!(
+        said.contains("Flottille's credential plugin said"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept\n");
+}
+
+#[test]
+fn the_plugins_reason_is_read_up_to_a_kibibyte() {
+    let user = user();
+    let (answer, _, _) = logged_in_with(&user, json!({"token": "drop", "why_big": true}));
+    let said = refused(answer);
+    assert!(
+        said.contains("Flottille's credential plugin said"),
+        "{said}"
+    );
+    assert!(!said.contains(&"x".repeat(1025)), "{} bytes", said.len());
+}
+
 /// The real agent-browser 0.43.x to drive, when this machine has it: `FLOTTILLE_TEST_AGENT_BROWSER`
 /// names it, else `agent-browser` on the `PATH`; a launcher beside its native binary (npm's
 /// `agent-browser.js`) is replaced by that binary, which needs no Node in the run's sandbox.

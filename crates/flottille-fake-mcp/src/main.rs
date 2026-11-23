@@ -84,6 +84,10 @@
 //! `replay` (the plugin is asked once more, with the same token) and `echo` (the password is
 //! written on its output, as a careless command line would) and `fail` (the password is written
 //! on its error output, and it fails; the form is filled first, as a page that refused it keeps it).
+//! `hold` names a file: before the plugin is asked, the log says `held` (`token_seen`: whether
+//! the run's `vault.token` is there), `<file>.started` is written, and it waits for the file (30 s
+//! at most). `why_planted` makes `vault.why` a link to that path before the plugin is asked;
+//! after it answered, `why_link` replaces it with a link to that path, `why_big` with 1 MiB.
 //! With `open` among its arguments (and no `mcp`), it plays `agent-browser open <url>`: its log line
 //! `open` says its arguments and folder, and it empties the form, as a page loaded afresh does;
 //! `open_fail` in `login` makes it fail instead. It keeps the address of the page it lands on
@@ -1065,7 +1069,36 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         std::process::exit(1);
     };
     browser(args, log, "login");
+    // Beside the socket the plugin is given last: Flottille's files of the run.
+    let beside = |file: &str| {
+        plugin["args"]
+            .as_array()
+            .and_then(|args| args.last())
+            .and_then(Value::as_str)
+            .map(|socket| std::path::Path::new(socket).with_file_name(file))
+    };
+    if let Some(until) = behaviour["hold"].as_str() {
+        let token_seen = beside("vault.token").is_some_and(|file| file.is_file());
+        write_log(log, json!({"event": "held", "token_seen": token_seen}));
+        std::fs::write(format!("{until}.started"), "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !std::path::Path::new(until).exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    if let (Some(target), Some(why)) = (behaviour["why_planted"].as_str(), beside("vault.why")) {
+        let _ = std::os::unix::fs::symlink(target, why);
+    }
     let answer = ask(&plugin);
+    if let Some(why) = beside("vault.why") {
+        if let Some(target) = behaviour["why_link"].as_str() {
+            let _ = std::fs::remove_file(&why);
+            let _ = std::os::unix::fs::symlink(target, &why);
+        }
+        if behaviour["why_big"] == true {
+            std::fs::write(&why, "x".repeat(1 << 20)).unwrap();
+        }
+    }
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
         "cwd": std::env::current_dir().ok(), "display": display_environment(),
