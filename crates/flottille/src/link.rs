@@ -1675,6 +1675,15 @@ impl Remote {
         });
     }
 
+    /// The keys of the other machines the member list trusts.
+    pub(crate) fn trusted_keys(&self) -> Vec<PublicKey> {
+        self.peers()
+            .machines
+            .into_iter()
+            .map(|peer| peer.key)
+            .collect()
+    }
+
     /// The live root sessions each other machine of the user's last listed, without those whose
     /// close waits to be sent: each with its machine's key, as hex, and name. It reads the store.
     pub(crate) fn sessions_elsewhere(

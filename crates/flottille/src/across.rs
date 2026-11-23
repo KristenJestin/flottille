@@ -58,6 +58,9 @@ const LONGEST: usize = 64_000;
 
 /// How many messages wait for one machine at most: one more is refused.
 const MOST_KEPT: usize = 100;
+/// The callers of one other machine stood in for here at most (`stand_in`): each is a row of the
+/// store, with its leaves, kept until it is idle for `KEPT_FOR`.
+const MOST_STAND_INS: usize = 64;
 
 /// How long a message the other machine could not take now waits before it is sent again, when
 /// no new link or new message sends it sooner.
@@ -767,6 +770,20 @@ fn session_title(daemon: &Daemon, machine: &str, agent: &str) -> Option<String> 
 /// Drops what waited for its machine for 30 days, each with an entry in the inbox.
 pub(crate) fn drop_old(daemon: &Daemon) {
     let before = now_ms().saturating_sub(KEPT_FOR.as_millis() as u64);
+    // The callers of other machines stood in for here: those of a machine that left the members,
+    // and those idle as long as a message is kept, with what they were let do.
+    if let Ok(remote) = crate::link::remote_of(daemon) {
+        let machines: Vec<String> = remote
+            .trusted_keys()
+            .iter()
+            .map(|key| hex(key.as_bytes()))
+            .collect();
+        let _ = daemon.write(|store| {
+            store
+                .forget_stand_ins(&machines, before)
+                .map(|_| ((), None))
+        });
+    }
     let old = daemon
         .write(|store| store.drop_outgoing_before(before).map(|old| (old, None)))
         .unwrap_or_default();
@@ -1589,8 +1606,19 @@ fn stand_in(
         titled_by: None,
     };
     daemon
-        .write(|store| store.keep_stand_in(&agent).map(|agent| (agent, None)))
-        .map_err(|error| Refused::Now(error.to_string()))
+        .write(|store| {
+            store
+                .keep_stand_in(&agent, MOST_STAND_INS)
+                .map(|agent| (agent, None))
+        })
+        .map_err(|error| Refused::Now(error.to_string()))?
+        .ok_or_else(|| {
+            format!(
+                "{name} has {MOST_STAND_INS} agents calling this machine's sessions already: a \
+                 new one calls again once one of them has been idle for 30 days"
+            )
+            .into()
+        })
 }
 
 /// A `call` of the machine of `from` aimed at a session of this machine its agent did not start:

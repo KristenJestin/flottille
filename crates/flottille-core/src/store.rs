@@ -2836,9 +2836,20 @@ impl Store {
     /// Keeps the agent of another machine that calls a session of this one, stood in for by
     /// `agent` (its id `<caller>@<machine's key>`, never one of this machine's): made the first
     /// time, its title, project, mode and machine's name brought up to date after. No event: it
-    /// is shown nowhere but on the requests and in the leaves it makes.
-    pub fn keep_stand_in(&mut self, agent: &Agent) -> Result<Agent> {
+    /// is shown nowhere but on the requests and in the leaves it makes. `None` when it is new and
+    /// `most` of that machine's are kept already.
+    pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
         if self.agent(&agent.id)?.is_none() {
+            let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
+            let kept: i64 = self.connection.query_row(
+                "SELECT count(*) FROM agents WHERE instr(id, '@') > 0 \
+                 AND substr(id, instr(id, '@') + 1) = ?1",
+                params![machine],
+                |row| row.get(0),
+            )?;
+            if kept as usize >= most {
+                return Ok(None);
+            }
             self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
         } else {
             self.connection.execute(
@@ -2854,7 +2865,48 @@ impl Store {
                 ],
             )?;
         }
-        Ok(self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()))
+        Ok(Some(
+            self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()),
+        ))
+    }
+
+    /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
+    /// machine whose key is none of `machines` (it left the members), or idle since before
+    /// `idle_before`, with their leaves and requests; and the answers awaited from such a
+    /// machine, or since before `idle_before` (never sent). How many callers went.
+    pub fn forget_stand_ins(&mut self, machines: &[String], idle_before: u64) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let stand_ins: Vec<(String, u64)> = {
+            let mut statement = transaction
+                .prepare("SELECT id, updated_at FROM agents WHERE instr(id, '@') > 0")?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut forgotten = 0;
+        for (id, at) in stand_ins {
+            let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+            if at < idle_before || !machines.iter().any(|kept| kept == machine) {
+                forgotten +=
+                    transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+            }
+        }
+        let awaited: Vec<(String, i64, u64)> = {
+            let mut statement =
+                transaction.prepare("SELECT machine, request, at FROM awaited_answers")?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (machine, request, at) in awaited {
+            if at < idle_before || !machines.contains(&machine) {
+                transaction.execute(
+                    "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2",
+                    params![machine, request],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(forgotten)
     }
 
     /// Records that `agent` of this machine waits for the answer of request `request` of the
