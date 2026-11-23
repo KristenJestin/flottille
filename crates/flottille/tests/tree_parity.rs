@@ -49,8 +49,15 @@ const ALLOWED: &[(&str, &str, &str)] = &[
          place (docs/tools.md, agent_launch)",
     ),
     (
+        "ask: session_send",
+        "Sent to ",
+        "a led session across has no pilot there to answer with session_send, which #1272 gives \
+         it: until then its answer comes as the wake of its turn, not as a [flottille:session] \
+         message, and the answer says so; a refusal still fails the row",
+    ),
+    (
         "held: answer",
-        "It will run in workspace ",
+        "It will run as ",
         "a launch held on another machine runs there once allowed, on a copy of its caller's \
          place, and its commits come back on a ref of their own (docs/tools.md, agent_launch)",
     ),

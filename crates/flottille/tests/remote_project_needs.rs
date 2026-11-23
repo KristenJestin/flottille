@@ -154,7 +154,10 @@ fn a_setup_needing_a_secret_holds_the_launch_and_asks_to_share_it() {
 
     let answer = led_there(&pc, "Ledger", "auto");
 
-    assert!(answer.contains("waiting for the user"), "{answer}");
+    assert!(
+        answer.contains("Waiting for the user's approval"),
+        "{answer}"
+    );
     let request = the_request(&server);
     let card = request.to_string();
     assert!(
@@ -466,7 +469,10 @@ fn laid_and_read_masked(text: &str, at: usize, secrets: &[&str]) {
 
     // Full: the launch would start at once, but a file is laid from the vault, which the user
     // allows, the entry named.
-    assert!(answer.contains("waiting for the user"), "{answer}");
+    assert!(
+        answer.contains("Waiting for the user's approval"),
+        "{answer}"
+    );
     let request = the_request(&server);
     let card = request.to_string();
     assert!(
@@ -551,7 +557,10 @@ fn in_full_an_entry_of_the_server_s_own_named_as_the_file_is_never_laid() {
     ))
     .to_owned();
 
-    assert!(answer.contains("waiting for the user"), "{answer}");
+    assert!(
+        answer.contains("Waiting for the user's approval"),
+        "{answer}"
+    );
     let request = the_request(&server);
     let card = request.to_string();
     assert!(

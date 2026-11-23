@@ -656,7 +656,7 @@ fn the_receiving_machine_s_gate_judges_the_launch_in_ask_and_auto() {
     let number = request["number"].as_u64().unwrap();
     assert!(
         text.contains(&format!(
-            "request #{number} on server is waiting for the user"
+            "Waiting for the user's approval, request #{number} on server."
         )),
         "{text}"
     );
@@ -1220,7 +1220,7 @@ fn a_launch_the_judge_denies_is_held_for_the_user_and_never_started() {
     );
 
     let text = done(&answer);
-    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(text.contains("Waiting for the user's approval"), "{text}");
     assert!(
         !server.user.judge_received().is_empty(),
         "no judge was asked"
@@ -1251,7 +1251,7 @@ fn a_launch_whose_judge_fails_is_held_for_the_user_and_never_started() {
     );
 
     let text = done(&answer);
-    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(text.contains("Waiting for the user's approval"), "{text}");
     assert!(
         !server.user.judge_received().is_empty(),
         "no judge was asked"
@@ -1667,13 +1667,15 @@ fn a_held_launch_allowed_there_tells_its_caller() {
         .unwrap();
 
     let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    // A prompt is its JSON: its quotes and line ends escaped.
     assert!(
         told.contains(&format!(
             "Request #{number} on server (agent_launch) was approved by the user, and Flottille \
-             has now done it. Its result:\n\nStarted a session led by you, \"Allowed there\""
+             has now done it. Its result:"
         )),
         "{told}"
     );
+    assert!(told.contains("Started a session led by you"), "{told}");
     assert!(
         told.contains("[flottille:session-turn-ended] wakes you when it asks, reports or ends"),
         "{told}"
@@ -1747,10 +1749,7 @@ fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
         held.contains("The answer will be handed to you when the user gives it."),
         "{held}"
     );
-    assert!(
-        held.contains("It will run on server in workspace"),
-        "{held}"
-    );
+    assert!(held.contains("on server in workspace"), "{held}");
     let number = server.requests()[0]["number"].as_u64().unwrap();
 
     server
@@ -1760,7 +1759,8 @@ fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
 
     // Once allowed, its answer says what follows, as a child launched here.
     let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
-    assert!(told.contains("Launched \"Child, held\""), "{told}");
+    assert!(told.contains("Child, held"), "{told}");
+    assert!(told.contains("Its result:"), "{told}");
     assert!(
         told.contains("Its report, questions and failure come to you"),
         "{told}"
