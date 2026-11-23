@@ -181,6 +181,11 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   and `effort`, each optional) is the user's choice, made in the window's settings page ("New
   sessions") or with `flottille provider new-session <provider> [--model <model>] [--effort
   <effort>]` (`--clear` goes back; the method `provider.set_new_session`, `docs/protocol.md`).
+  Beside it, **the mode a session the user starts is in** (`new_session_mode` in `providers.toml`,
+  `ask`, `auto` or `full`, Auto when the file says none): the window's Mode, or `flottille provider
+  new-session --mode <mode>` (the method `provider.set_new_session_mode`). It is per machine, and
+  it is the user's door's: a session an agent starts and a child keep their own rules
+  (`docs/design.md` §7.1).
   Without it, a new session follows what the provider proposes, as it always did. The order is
   the project's file (its `provider` and `model`), then this setting, then what the provider
   proposes (and, in the window, the last pick). The setting's model and effort apply to its own
@@ -954,8 +959,7 @@ naming its root. The tree is one project's: a child works in its parent's place,
 belongs in another workspace is a session (`agent_launch` with `kind` `led` or `handed`,
 `docs/tools.md` "Sessions an agent starts"), in an existing workspace or a new one, made and
 prepared before it starts; the agent that started it and the session write to each other with
-`session_send`. A led session asks its pilot its questions and wakes it when it asks, reports or
-ends; a handed one is the user's.
+`session_send`. A led session asks its pilot its questions and wakes it at each end of its turns; a handed one is the user's.
 
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
   12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor
@@ -1010,7 +1014,7 @@ message included, sent again to a new session), a brief (`brief`: a parent's to 
 extension's first message to its session), the first message of a session an agent started for the user (`launched`, under a first
 line naming that agent: it is the agent's words, never the user's), a message another session
 wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
-the agent leads, when it asked or reported (`session-turn-ended`, `docs/tools.md`, "Following a
+the agent leads, at each end of a turn (`session-turn-ended`, `docs/tools.md`, "Following a
 session"), what a led session asked the user while its pilot's machine was off, once that machine
 is back (`session-meanwhile`, `docs/remote.md`), a led session's pilot that ended (`handed`), a
 parent's message (`parent`), what happens to a child (`child-report`,

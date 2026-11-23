@@ -722,7 +722,7 @@ const SERVED: [Definition; 33] = [
         description: "kind (required): child, a part of your own task, in your place, that you \
             direct and that reports to you (no workspace; refused above the children cap); led, an \
             autonomous job of its own that you pilot, a real session the user sees under you and \
-            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
+            may talk to, which asks you its questions and wakes you at each end of its turns; \
             handed, a session you start for the user and let go, of which you hear nothing more \
             unless it writes to you. led and handed: a root only, judged, in workspace (main is \
             the project folder) or new_workspace; you and it write with session_send. Answered at \

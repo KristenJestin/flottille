@@ -60,6 +60,11 @@ pub struct ModeSwitch {
     pending: Option<String>,
     judge_chosen: bool,
     refused: Option<String>,
+    /// For the composer that starts a session: the mode the machine gives a new session
+    /// (`provider.set_new_session_mode`), Auto until it is read, and whether the user chose
+    /// another for this session, which the default then no longer moves.
+    default: String,
+    chosen_here: bool,
 }
 
 impl ModeSwitch {
@@ -73,11 +78,13 @@ impl ModeSwitch {
             // Until the providers are read, no sentence about a judge that may well be chosen.
             judge_chosen: true,
             refused: None,
+            default: AUTO.to_owned(),
+            chosen_here: false,
         }
     }
 
-    /// The control of the composer that starts a session: on Auto, and the mode chosen is the one
-    /// the session starts in.
+    /// The control of the composer that starts a session: on the machine's default mode (Auto
+    /// until it is read), and the mode chosen is the one the session starts in.
     pub fn local(shell: WeakEntity<Shell>) -> Self {
         Self {
             prefix: "start-mode",
@@ -86,14 +93,33 @@ impl ModeSwitch {
         }
     }
 
-    /// Back on Auto: a choice never waits for a later session.
+    /// Back on the default: a choice never waits for a later session.
     pub fn reset(&mut self, cx: &mut Context<Self>) {
-        self.set_mode(Some(AUTO.to_owned()), cx);
+        self.chosen_here = false;
+        self.set_mode(Some(self.default.clone()), cx);
+    }
+
+    /// The mode the machine gives a new session, as the daemon last said it: shown as long as the
+    /// user chose none for this session.
+    pub fn set_default(&mut self, default: &str, cx: &mut Context<Self>) {
+        if self.default == default {
+            return;
+        }
+        self.default = default.to_owned();
+        if !self.chosen_here && self.session.is_empty() {
+            self.set_mode(Some(self.default.clone()), cx);
+        }
     }
 
     /// The mode shown: the one asked for while the daemon has not said it.
     pub fn mode(&self) -> Option<&str> {
         self.pending.as_deref().or(self.mode.as_deref())
+    }
+
+    /// The mode the user chose for the session this control starts: none until they choose, so
+    /// that a start leaves the mode to the machine's default, whatever this control last read.
+    pub fn chosen(&self) -> Option<&str> {
+        self.chosen_here.then(|| self.mode()).flatten()
     }
 
     /// What the daemon said when it refused the last change, shown beside the control.
@@ -143,6 +169,7 @@ impl ModeSwitch {
     pub fn choose(&mut self, wanted: &str, cx: &mut Context<Self>) {
         // Nothing runs yet: the choice is the mode the session starts in, and goes nowhere.
         if self.session.is_empty() {
+            self.chosen_here = true;
             return self.set_mode(Some(wanted.to_owned()), cx);
         }
         if self.pending.is_some() || self.mode.as_deref().is_none_or(|mode| mode == wanted) {

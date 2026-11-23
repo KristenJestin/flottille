@@ -43,7 +43,7 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("provider list", Window(&["provider.list"])),
     (
         "provider new-session",
-        Window(&["provider.set_new_session"]),
+        Window(&["provider.set_new_session", "provider.set_new_session_mode"]),
     ),
     ("provider enable", Window(&["provider.enable"])),
     ("provider disable", Window(&["provider.disable"])),

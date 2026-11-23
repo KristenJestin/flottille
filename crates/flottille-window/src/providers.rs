@@ -92,6 +92,9 @@ pub struct Providers {
     /// What the user chose a new session starts on: its provider, and its model and effort (the
     /// provider's to propose when none); `None` while nothing is chosen.
     pub new_session: Option<NewSession>,
+    /// The mode a session the user starts is in, `ask`, `auto` or `full`, as the machine keeps it;
+    /// `None` until the daemon said.
+    pub new_session_mode: Option<String>,
 }
 
 /// The provider, the model and the effort a new session starts on, as the user chose them.
@@ -333,6 +336,7 @@ impl Providers {
                         text(&answer["new_session"]["effort"]),
                     )
                 }),
+                new_session_mode: text(&answer["new_session_mode"]),
             },
             Err(error) => Providers {
                 list: Vec::new(),
@@ -341,6 +345,7 @@ impl Providers {
                 judge: None,
                 judge_picked: false,
                 new_session: None,
+                new_session_mode: None,
             },
         }
     }
