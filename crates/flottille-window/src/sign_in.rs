@@ -47,6 +47,16 @@ pub const NO_CODE_SENTENCE: &str = "Finish in your browser with the code the pro
 pub const PASTED_HINT: &str = "If your browser shows a code, paste it here: it goes to the program \
                                once and is kept nowhere.";
 
+/// The row of `program` in what `signin.list` answered: an older daemon answers the whole list
+/// whatever the program asked.
+fn row_of(answer: &Value, program: &str) -> Option<SignInRow> {
+    answer["programs"]
+        .as_array()?
+        .iter()
+        .map(SignInRow::of)
+        .find(|row| row.program == program)
+}
+
 /// A program as `signin.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignInRow {
@@ -63,6 +73,15 @@ pub struct SignInRow {
     /// The line to type in a terminal when it cannot sign in from here.
     pub line: Option<String>,
     pub running: bool,
+    /// Its check runs: the row says so, and offers nothing, until the daemon says the result.
+    pub checking: bool,
+    /// Why its check could not be made (#1315): the command line's first error line, masked, or
+    /// `no answer in N s`. A program that could not be checked is not a program that is not signed
+    /// in: it is never offered a sign-in.
+    pub problem: Option<String>,
+    /// The window's own request for the check failed, so no command line ever said anything:
+    /// `problem` says why the window could not ask, not what a program answered.
+    pub unreached: bool,
 }
 
 impl SignInRow {
@@ -80,31 +99,74 @@ impl SignInRow {
             can_sign_in: value["can_sign_in"] == true,
             line: text("line"),
             running: value["running"] == true,
+            checking: value["checking"] == true,
+            problem: text("problem"),
+            unreached: false,
         }
     }
 
-    /// Its state, once: not installed, signing in, signed in (as whom), not signed in.
+    /// Its state, once: signing in, checking, not installed, signed in (as whom), not signed in,
+    /// or could not be checked.
     pub fn said(&self) -> String {
+        if self.running && self.found {
+            return "Signing in…".into();
+        }
+        // Never a guessed state while its check runs: not the last result as if it were fresh.
+        if self.checking {
+            return "Checking…".into();
+        }
         if !self.found {
             return "Not installed".into();
         }
-        if self.running {
-            return "Signing in…".into();
+        match (self.signed_in, &self.account, &self.problem) {
+            (Some(true), Some(account), _) => format!("Signed in as {account}"),
+            (Some(true), None, _) => "Signed in".into(),
+            (Some(false), ..) => "Not signed in".into(),
+            (None, _, Some(problem)) if problem.starts_with("no answer in") => {
+                format!("Could not check: {problem}")
+            }
+            (None, _, Some(_)) if self.unreached => {
+                "Could not check: Flottille is not answering".into()
+            }
+            (None, _, Some(_)) => format!("Could not check: {} failed", self.program),
+            (None, _, None) => format!("{} did not say whether it is signed in", self.program),
         }
-        match (self.signed_in, &self.account) {
-            (Some(true), Some(account)) => format!("Signed in as {account}"),
-            (Some(true), None) => "Signed in".into(),
-            (Some(false), _) => "Not signed in".into(),
-            (None, _) => format!("{} did not say whether it is signed in", self.program),
-        }
+    }
+
+    /// Whether the line to type in a terminal is shown: only for a program known not to be signed
+    /// in, never while it checks nor when its check could not be made.
+    fn shows_line(&self) -> bool {
+        self.found && self.signed_in != Some(true) && !self.checking && self.problem.is_none()
+    }
+
+    /// The window's own request for this row's check failed: the daemon never said anything.
+    fn failed(&mut self, why: String) {
+        self.checking = false;
+        self.signed_in = None;
+        self.problem = Some(why);
+        self.unreached = true;
+    }
+
+    /// What the command line said of the failure, under the row: none for a check that got no
+    /// answer, which the state says whole.
+    fn reason(&self) -> Option<&str> {
+        self.problem
+            .as_deref()
+            .filter(|problem| !problem.starts_with("no answer in"))
+            .filter(|_| !self.checking && self.signed_in.is_none())
     }
 
     fn offers_sign_in(&self) -> bool {
-        self.found && self.can_sign_in && self.signed_in != Some(true) && !self.running
+        self.found
+            && self.can_sign_in
+            && self.signed_in != Some(true)
+            && self.problem.is_none()
+            && !self.running
+            && !self.checking
     }
 
     fn offers_sign_out(&self) -> bool {
-        self.found && self.signed_in == Some(true) && !self.running
+        self.found && self.signed_in == Some(true) && !self.running && !self.checking
     }
 }
 
@@ -144,6 +206,9 @@ pub struct SignInSection {
     asked: String,
     /// The programs a request is out for: their buttons wait for the daemon.
     pending: HashSet<String>,
+    /// The programs whose check is asked and not answered: a list read again meanwhile does not
+    /// ask it twice.
+    checks: HashSet<String>,
 }
 
 impl SignInSection {
@@ -160,6 +225,7 @@ impl SignInSection {
             confirming: None,
             asked: String::new(),
             pending: HashSet::new(),
+            checks: HashSet::new(),
         }
     }
 
@@ -187,12 +253,29 @@ impl SignInSection {
             .map(|field| field.read(cx).focus_handle(cx))
     }
 
-    /// Asks the daemon for the list.
+    /// Asks the daemon for the rows: each says it is being checked, and its check is asked as the
+    /// rows arrive (`listed`).
     pub fn read(&self, cx: &mut Context<Self>) {
         perform_later(&self.shell, Command::SignIns, cx);
     }
 
-    /// The daemon's list.
+    /// Checks one program again: its row says so at once and its buttons wait.
+    pub fn check(&mut self, program: &str, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .listed
+            .iter_mut()
+            .flatten()
+            .find(|row| row.program == program)
+        {
+            row.checking = true;
+        }
+        self.checks.insert(program.to_owned());
+        perform_later(&self.shell, Command::SignInCheck(program.to_owned()), cx);
+        cx.notify();
+    }
+
+    /// The daemon's rows, in the daemon's fixed order; the check of each that has not been made is
+    /// asked, one by one, each answered by its own result (`checked`).
     pub fn listed(&mut self, listed: Result<Value, String>, cx: &mut Context<Self>) {
         match listed {
             Ok(listed) => {
@@ -203,11 +286,44 @@ impl SignInSection {
                     .flatten()
                     .map(SignInRow::of)
                     .collect();
+                for row in rows.iter().filter(|row| row.checking) {
+                    if self.checks.insert(row.program.clone()) {
+                        perform_later(&self.shell, Command::SignInCheck(row.program.clone()), cx);
+                    }
+                }
                 if self.listed.as_ref() != Some(&rows) {
                     self.listed = Some(rows);
                 }
             }
             Err(why) => self.problem = Some(why.into()),
+        }
+        cx.notify();
+    }
+
+    /// One program's result replaces its row where it stands: the others keep their places. A check
+    /// the daemon could not answer is that row's reason, not a sign-in to offer.
+    pub fn checked(
+        &mut self,
+        program: &str,
+        answer: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.checks.remove(program);
+        let Some(row) = self
+            .listed
+            .iter_mut()
+            .flatten()
+            .find(|row| row.program == program)
+        else {
+            return;
+        };
+        match answer {
+            Ok(answer) => {
+                if let Some(checked) = row_of(&answer, program) {
+                    *row = checked;
+                }
+            }
+            Err(why) => row.failed(why),
         }
         cx.notify();
     }
@@ -280,7 +396,7 @@ impl SignInSection {
                 );
             }
         }
-        self.read(cx);
+        self.check(program, cx);
         cx.notify();
     }
 
@@ -293,7 +409,7 @@ impl SignInSection {
         why: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.read(cx);
+        self.check(program, cx);
         if !matches!(state, "signed_in" | "failed" | "cancelled") {
             return;
         }
@@ -379,7 +495,7 @@ impl SignInSection {
             }
             _ => {}
         }
-        self.read(cx);
+        self.check(program, cx);
         cx.notify();
     }
 
@@ -407,6 +523,7 @@ impl SignInSection {
         };
         let said = row.said();
         let ink = match row.signed_in {
+            _ if row.checking => p.mute,
             Some(true) if row.found => p.ok,
             _ if !row.found => p.faint,
             _ => p.mute,
@@ -466,16 +583,44 @@ impl SignInSection {
                     ElementId::Name(format!("sign-in-check-{program}").into()),
                     "Check again",
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.read(cx)
-                })),
+                .disabled(row.checking)
+                .on_click({
+                    let program = program.to_owned();
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if this.row(&program).is_some_and(|row| !row.checking) {
+                            this.check(&program, cx)
+                        }
+                    })
+                }),
             ));
+        // A skeleton under the state while its check runs (rule 11: a part that waits for a slow
+        // read): it pulses, and fades out when the result comes; the state keeps saying Checking….
+        let checking = awaiting(
+            format!("sign-in-checking-{program}"),
+            row.checking,
+            div().pt(space::SM).child(
+                Skeleton::new(format!("sign-in-checking-{program}-skeleton"))
+                    .w(px(64.))
+                    .h(px(6.)),
+            ),
+            div(),
+        );
+        // What the command line said when its check could not be made, under the state.
+        let reason = presence_of(
+            format!("sign-in-reason-{program}-block"),
+            row.reason().map(|why| SharedString::from(why.to_owned())),
+            {
+                let id = format!("sign-in-reason-{program}");
+                move |why| crate::programs::command_row(id, why, p)
+            },
+        )
+        .space(space::SM);
         let typed = presence_of(
             format!("sign-in-line-{program}-block"),
             row.line
                 .clone()
-                .filter(|_| line && row.found && row.signed_in != Some(true))
+                .filter(|_| line && row.shows_line())
                 .map(SharedString::from),
             {
                 let id = format!("sign-in-line-{program}");
@@ -494,6 +639,8 @@ impl SignInSection {
                     .child(div().flex_1().min_w_0().child(state))
                     .child(buttons),
             )
+            .child(checking)
+            .child(reason)
             .child(typed)
             .into_any_element()
     }
@@ -724,7 +871,61 @@ fn opens(address: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::opens;
+    use super::{SignInRow, opens, row_of};
+    use serde_json::json;
+
+    #[test]
+    fn a_check_is_found_by_its_program_whatever_the_order_of_the_answer() {
+        // An older daemon answers every program, not the one asked.
+        let answer = json!({"programs": [
+            {"program": "gh", "found": true, "signed_in": true},
+            {"program": "glab", "found": true, "signed_in": false},
+        ]});
+
+        let row = row_of(&answer, "glab").expect("glab's row");
+
+        assert_eq!(row.program, "glab");
+        assert_eq!(row.signed_in, Some(false));
+        assert!(row_of(&answer, "bkt").is_none());
+    }
+
+    #[test]
+    fn the_line_to_type_is_shown_only_to_a_program_known_not_to_be_signed_in() {
+        let with = |extra: serde_json::Value| {
+            let mut value = json!({"program": "bkt", "found": true, "line": "bkt auth login"});
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            SignInRow::of(&value)
+        };
+
+        assert!(
+            with(json!({"signed_in": false})).shows_line(),
+            "not signed in"
+        );
+        assert!(!with(json!({"signed_in": true})).shows_line(), "signed in");
+        assert!(
+            !with(json!({"checking": true})).shows_line(),
+            "while it checks"
+        );
+        assert!(
+            !with(json!({"problem": "Error: 503 Service Unavailable"})).shows_line(),
+            "could not check"
+        );
+        assert!(!with(json!({"found": false})).shows_line(), "not installed");
+    }
+
+    #[test]
+    fn a_request_the_window_could_not_make_does_not_blame_the_program() {
+        let mut row = SignInRow::of(&json!({"program": "gh", "found": true, "checking": true}));
+
+        row.failed("the daemon did not answer".to_owned());
+
+        let said = row.said();
+        assert!(!said.contains("gh failed"), "{said}");
+        assert!(said.starts_with("Could not check"), "{said}");
+        assert_eq!(row.reason(), Some("the daemon did not answer"));
+    }
 
     /// #1185 round 2: the dialog opens an address of the web only, whatever a daemon answered.
     #[test]

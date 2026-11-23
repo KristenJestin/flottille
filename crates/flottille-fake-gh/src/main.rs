@@ -21,7 +21,11 @@
 //!  "fail": {"acme/api": "HTTP 502: Bad Gateway"}}
 //! ```
 //!
-//! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
+//! `signed_in: false` makes `gh auth status` end with 1, saying it is not logged in; `status_fail`
+//! (`"error connecting to api.github.com"`) makes it end with 1 in the shape gh prints for any
+//! failure of its API call (`X Failed to log in…`, `- The token in keyring is invalid.`, `- Error:`
+//! then that text), as a check that could not reach the service does (#1315); the fake `glab` prints
+//! it as `x gitlab.com: API call failed: <text>`. `pulls` gives, by repository and branch,
 //! the object `gh pr view --json` answers (`gh pr list --json` answers the fields it asks that the
 //! object has); a branch with none has no pull request. `fail` makes every `pr` call on that
 //! repository end with 1, saying its text. `issues` gives, by repository and number, the object
@@ -213,6 +217,17 @@ fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
     let code = match words.as_slice() {
         ["auth", "status", ..] => {
             wait(script);
+            // `status_fail` is the cause of a failed check; gh prints every failure of its API call
+            // but a timeout in the shape of a bad token (cli/cli, `auth/status/status.go`), the
+            // cause last, whether it is a refused connection, a 502 or a 401.
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!(
+                    "github.com\n  X Failed to log in to github.com account {} (keyring)\n  - \
+                     Active account: true\n  - The token in keyring is invalid.\n  - Error: {why}",
+                    login_name(script)
+                );
+                return Some(1);
+            }
             if !sign_in::signed_in(dir, script) {
                 eprintln!(
                     "You are not logged into any GitHub hosts. To log in, run: gh auth login"
@@ -274,6 +289,11 @@ fn glab(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["auth", "status", ..] => {
+            // As glab prints a check whose API call failed: a lowercase `x`, the host, the cause.
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!("gitlab.com\n  x gitlab.com: API call failed: {why}");
+                return 1;
+            }
             if sign_in::signed_in(dir, script) {
                 eprintln!("gitlab.com\n  ✓ Logged in to gitlab.com as someone");
                 0
