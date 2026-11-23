@@ -1560,7 +1560,10 @@ fn a_launch_with_an_unfit_title_caller_or_branch_is_refused() {
 
 #[test]
 fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
+    // The server's clock is thirteen hours ahead from its start: moved forward while it runs, it
+    // would be taken for a sleep, which loses its session to the hub and its links with it.
     let ahead = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
     let user = server_user(allowing()).with_env(
         "FLOTTILLE_TEST_WALL_AHEAD_FILE",
         ahead.path().to_str().unwrap(),
@@ -1574,19 +1577,17 @@ fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
     assert!(switched.status.success(), "{}", pc.log());
     done(&launched(
         &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Stale", "brief": "Two."}),
+    ));
+    assert_eq!(titled(&server, "Stale")["gate_mode"], "auto");
+
+    // The server's clock set back to the hour: the same switch counts there.
+    std::fs::write(ahead.path(), "0").unwrap();
+    done(&launched(
+        &mcp,
         json!({"kind": "led", "machine": "server", "title": "Fresh", "brief": "One."}),
     ));
     assert_eq!(titled(&server, "Fresh")["gate_mode"], "full");
-
-    // Thirteen hours later on the server's clock: the switch no longer counts there.
-    std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
-    pc.wait_for_offer("server", 12);
-    done(&launched(
-        &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Stale", "brief": "Two."}),
-    ));
-
-    assert_eq!(titled(&server, "Stale")["gate_mode"], "auto");
 }
 
 #[test]
