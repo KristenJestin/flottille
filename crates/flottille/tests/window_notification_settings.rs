@@ -203,7 +203,9 @@ fn the_quiet_hours_unfold_under_their_switch_and_the_days_and_times_are_chosen(
         settings_of(&user)["quiet"]["on"] == true
     });
     // The range is not there at its full height at once: it unfolds.
-    cx.update(|window, cx| window.simulate_next_frame(cx));
+    until(&shell, cx, "the range starts to unfold", |cx| {
+        has("notify-quiet-range-block", cx)
+    });
     let start = rect("notify-quiet-range-block", cx).size.height;
     cx.executor().advance_clock(PANEL / 3);
     cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -369,6 +371,11 @@ fn the_bell_turns_do_not_disturb_on_for_an_hour_and_off(cx: &mut TestAppContext)
     click("bell-dnd-switch", cx);
     until(&shell, cx, "the daemon lets it go", |_| {
         settings_of(&user)["do_not_disturb"]["on"] == false
+    });
+    until(&shell, cx, "the bell says it is off", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.bell_list().read(cx).do_not_disturb() == Some(false)
+        })
     });
     settle(cx);
     assert!(
