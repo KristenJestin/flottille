@@ -2729,14 +2729,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // What the window keeps (drafts, folds), its appearance and its build are asked of this
-        // machine's daemon whichever page asks: no word of that machine.
+        // What the window keeps (its folds), its appearance and its build are asked of this
+        // machine's daemon whichever page asks: no word of that machine. A session's draft is
+        // kept on its own machine, and its answer is that machine's.
         let here = matches!(
             &update,
             Update::Done(
-                Outcome::Draft { .. }
-                    | Outcome::DraftWritten { .. }
-                    | Outcome::WindowKept { .. }
+                Outcome::WindowKept { .. }
                     | Outcome::Appearance { .. }
                     | Outcome::Update { .. }
                     | Outcome::Tunnel(_)
