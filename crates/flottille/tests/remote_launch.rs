@@ -1608,3 +1608,127 @@ fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
 
     assert_eq!(titled(&server, "From the child")["gate_mode"], "full");
 }
+
+/// The request of `machine` held for its user, once there.
+fn held_there(machine: &Machine, name: &str) -> Value {
+    eventually(&format!("a request held for the user of {name}"), || {
+        !machine.requests().is_empty()
+    });
+    machine.requests()[0].clone()
+}
+
+/// Held as base, for the chain rule: never the judge's, in every mode but Full.
+fn held_for_the_chain(request: &Value) {
+    assert_eq!(request["class"], "base", "{request:#}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{request:#}"
+    );
+}
+
+#[test]
+fn a_session_an_agent_started_launches_on_another_machine_only_with_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    // A session the root started on pc, allowed by the user, then put in Auto.
+    let (_root, mcp) = pc.root("ask");
+    let opened = pc.user.received_requests("session/new").len();
+    launched(
+        &mcp,
+        json!({"kind": "handed", "title": "Second", "brief": "Go on with the docs."}),
+    );
+    let number = held_there(&pc, "pc")["number"].as_u64().unwrap();
+    pc.user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let (url, authorization) = server_of(&pc.user, opened);
+    let second = titled(&pc, "Second")["id"].as_str().unwrap().to_owned();
+    pc.user
+        .call("agent.mode", json!({"agent": second, "mode": "auto"}))
+        .unwrap();
+    let second = Mcp::initialize(&url, &authorization);
+
+    let answer = launched(
+        &second,
+        json!({"kind": "led", "machine": "server", "title": "Third",
+            "brief": "And the tests, there."}),
+    );
+
+    let text = done(&answer);
+    let request = held_there(&server, "server");
+    assert!(
+        text.contains(&format!(
+            "request #{} on server is waiting for the user",
+            request["number"]
+        )),
+        "{text}"
+    );
+    held_for_the_chain(&request);
+    assert!(
+        server.user.judge_received().is_empty(),
+        "the judge was asked"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("And the tests, there.")),
+        "a session started before the user allowed it"
+    );
+}
+
+#[test]
+fn a_led_session_from_another_machine_starts_a_session_only_with_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+    let opened = server.user.received_requests("session/new").len();
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Export",
+            "brief": "Finish the export."}),
+    ));
+    let led = titled(&server, "Export");
+    assert_eq!(led["gate_mode"], "auto", "{led:#}");
+    prompted(&server, "Finish the export.");
+    let (url, authorization) = server_of(&server.user, opened);
+    let led = Mcp::initialize(&url, &authorization);
+    let judged = server.user.judge_received().len();
+
+    let answer = launched(
+        &led,
+        json!({"kind": "handed", "title": "Third", "brief": "And the tests."}),
+    );
+
+    assert!(
+        !answer.text.contains("Started a session"),
+        "{}",
+        answer.text
+    );
+    held_for_the_chain(&held_there(&server, "server"));
+    assert_eq!(
+        server.user.judge_received().len(),
+        judged,
+        "the judge was asked"
+    );
+    assert!(
+        !server
+            .agents()
+            .iter()
+            .any(|agent| agent["title"] == "Third"),
+        "a session started before the user allowed it"
+    );
+}
+
+#[test]
+fn a_launch_of_a_caller_no_agent_started_reads_as_before() {
+    // Left out when false: a machine of before, which refuses any field it does not know, still
+    // takes such a launch.
+    let sent = serde_json::to_value(launch_ask("l1", "caller")).unwrap();
+    assert!(sent.get("launched").is_none(), "{sent:#}");
+    let before: LaunchAsk = serde_json::from_value(sent).unwrap();
+    assert_eq!(before, launch_ask("l1", "caller"));
+}
