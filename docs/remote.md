@@ -1642,7 +1642,8 @@ on a real phone, by hand, and reported.
   (#1263): a session that resolves to a third machine (or to its own) is refused with a sentence
   of its own, and no call goes out on its behalf.
 - **A member list that cannot be read keeps the stand-ins** (#1263): while the peers' file was never
-  read whole (a broken file at the start), the sweep forgets none, with their leaves and the
+  read whole (a broken file at the start), no machine left the members by it: the sweep forgets
+  none of them for that, and still forgets those idle for 30 days, with their leaves and the
   answers they await; a list read whole that has nobody in it forgets them all.
 - **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
   under the user's runtime folder, never made, rather than refused: a read of a session of another

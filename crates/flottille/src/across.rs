@@ -828,14 +828,15 @@ pub(crate) fn drop_old(daemon: &Daemon) {
     let before = now_ms().saturating_sub(KEPT_FOR.as_millis() as u64);
     // The callers of other machines stood in for here: those of a machine that left the members,
     // and those idle as long as a message is kept, with what they were let do.
-    // A member list that cannot be read is no list of nobody: nothing leaves the members by it.
-    if let Ok(remote) = crate::link::remote_of(daemon)
-        && let Some(keys) = remote.trusted_keys()
-    {
-        let machines: Vec<String> = keys.iter().map(|key| hex(key.as_bytes())).collect();
+    // A member list that cannot be read is no list of nobody: nothing leaves the members by it,
+    // and the idle go all the same.
+    if let Ok(remote) = crate::link::remote_of(daemon) {
+        let machines: Option<Vec<String>> = remote
+            .trusted_keys()
+            .map(|keys| keys.iter().map(|key| hex(key.as_bytes())).collect());
         let _ = daemon.write(|store| {
             store
-                .forget_stand_ins(&machines, before)
+                .forget_stand_ins(machines.as_deref(), before)
                 .map(|_| ((), None))
         });
     }
