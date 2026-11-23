@@ -1683,6 +1683,53 @@ fn a_device_row_shows_its_icon_in_its_colour(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui_kit::test]
+fn a_controller_is_in_the_machines_tab_with_its_role_and_the_hub_command(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let (pc, laptop, phone) = (Machine::new(), Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&hub, &laptop, "laptop", "controller");
+    pair(&hub, &phone, "phone", "viewer");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-laptop") && present(cx, "member-phone")
+    });
+    settle(&shell, cx);
+    // Its role is said, and that it runs nothing, with the command of the hub's host, copyable.
+    assert_eq!(
+        label(cx, "member-role-laptop-command").as_deref(),
+        Some("flottille-hub role laptop runner")
+    );
+    assert_eq!(
+        label(cx, "member-role-phone-command").as_deref(),
+        Some("flottille-hub role phone runner")
+    );
+    assert!(label(cx, "member-role-laptop-said").is_some_and(|said| said.contains("runs nothing")));
+    // A runner has nothing to explain: it is in the Settings picker.
+    assert!(!present(cx, "member-role-pc-command"));
+    // The window offers no button that changes a role: only the copy.
+    click(&shell, cx, "member-role-laptop-command-copy");
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+        Some("flottille-hub role laptop runner".to_owned())
+    );
+    // Neither is offered where a machine is chosen: they run nothing.
+    let offered: Vec<_> = shell.read_with(cx, |s, cx| {
+        let read = s.machines().read(cx).machines().expect("read");
+        flottille_window::machines::choices(read)
+            .into_iter()
+            .filter_map(|choice| choice.name)
+            .collect()
+    });
+    assert!(
+        !offered
+            .iter()
+            .any(|name| name == "laptop" || name == "phone"),
+        "{offered:?}"
+    );
+}
+
 #[test]
 fn a_member_with_no_look_gets_the_defaults_of_its_key() {
     // A member added before pair mode has no icon nor colour (`remote.members`: null).

@@ -520,12 +520,17 @@ pub(crate) fn proposed(daemon: &crate::daemon::Daemon) -> Value {
         (false, true) => flottille_link::Icon::Desktop,
         (false, false) => flottille_link::Icon::Server,
     };
-    let role = if crate::link::offered(daemon).agents.is_empty() {
-        Role::Controller
-    } else {
-        Role::Runner
-    };
+    let role = role_proposed(icon, !crate::link::offered(daemon).agents.is_empty());
     json!({"name": host_name(), "icon": icon, "role": role})
+}
+
+/// The role proposed for a machine of this icon, with agents signed in or not.
+fn role_proposed(_icon: flottille_link::Icon, agents: bool) -> Role {
+    if agents {
+        Role::Runner
+    } else {
+        Role::Controller
+    }
 }
 
 /// The host's name, as a device's name is proposed; `None` when it has none.
@@ -838,6 +843,27 @@ async fn stopped(stopping: &mut tokio::sync::watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_without_a_screen_is_proposed_as_a_runner_without_agents() {
+        // Agents are signed in later: a server is where they run, signed in or not.
+        assert_eq!(
+            role_proposed(flottille_link::Icon::Server, false),
+            Role::Runner
+        );
+        assert_eq!(
+            role_proposed(flottille_link::Icon::Server, true),
+            Role::Runner
+        );
+    }
+
+    #[test]
+    fn a_desktop_without_agents_is_proposed_as_a_controller() {
+        for icon in [flottille_link::Icon::Desktop, flottille_link::Icon::Laptop] {
+            assert_eq!(role_proposed(icon, false), Role::Controller);
+            assert_eq!(role_proposed(icon, true), Role::Runner);
+        }
+    }
 
     #[test]
     fn a_machine_that_wakes_from_a_suspend_waits_for_the_next_list() {

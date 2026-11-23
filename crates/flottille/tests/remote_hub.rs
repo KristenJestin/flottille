@@ -703,6 +703,47 @@ fn the_name_icon_and_role_proposed_are_this_machines_own() {
 }
 
 #[test]
+fn pair_says_the_role_it_takes() {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let proposed = pc.remote()["proposed"]["role"].as_str().unwrap().to_owned();
+    // Before it asks the hub: the role proposed, and how to choose another.
+    let output = pc
+        .user
+        .run_with_input(&["remote", "pair"], &format!("{}\n", hub.code()));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains(&format!("pairing as a {proposed}")) && said.contains("--role"),
+        "{said}"
+    );
+}
+
+#[test]
+fn pair_says_the_role_it_was_given() {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let output = pc.user.run_with_input(
+        &["remote", "pair", "--role", "viewer"],
+        &format!("{}\n", hub.code()),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("pairing as a viewer") && !said.contains("--role"),
+        "{said}"
+    );
+}
+
+#[test]
 fn name_icon_and_colour_change_from_any_device_and_the_role_on_the_hub_only() {
     let hub = TestHub::new();
     let (pc, server) = (Machine::new(), Machine::new());
