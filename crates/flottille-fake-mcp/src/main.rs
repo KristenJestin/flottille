@@ -435,7 +435,9 @@ fn write_log(log: &Option<String>, mut line: Value) {
     };
     // The network namespace each command ran in: the tests check that every command of
     // agent-browser's runs in the browser's own.
-    line["netns"] = json!(network_namespace());
+    if let Some(fields) = line.as_object_mut() {
+        fields.insert("netns".into(), json!(network_namespace()));
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
