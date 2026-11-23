@@ -786,7 +786,7 @@ impl Sidebar {
             .iter()
             .flat_map(|group| group.rows.iter())
             .chain(&self.arranged.loose)
-            .map(|node| name(node))
+            .map(name)
             .collect();
         let going: HashSet<String> = order
             .iter()
