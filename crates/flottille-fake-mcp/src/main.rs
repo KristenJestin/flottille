@@ -114,7 +114,8 @@
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
 //! epoch), written once the call is answered; `received` (the tool) is written as a call arrives,
 //! before it sleeps or answers, so a test can wait for a call in progress. Every line carries
-//! `netns`, the inode of the network namespace the process ran in.
+//! `netns`, the inode of the network namespace the process ran in, and `folders`, the variables
+//! that say where Chrome writes outside its profile.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -400,6 +401,24 @@ fn network_namespace() -> Option<u64> {
         .map(|ns| ns.ino())
 }
 
+/// The variables that say where Chrome writes outside its profile (its crash database, its
+/// caches, its default configuration folder), as this process got them: the tests check that each
+/// command of agent-browser's is given folders of the vault's.
+fn chrome_folders() -> Value {
+    let mut folders = serde_json::Map::new();
+    for name in [
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "CHROME_CONFIG_HOME",
+        "BREAKPAD_DUMP_LOCATION",
+    ] {
+        folders.insert(name.into(), json!(std::env::var(name).ok()));
+    }
+    Value::Object(folders)
+}
+
 /// What Chrome leaves in the temporary folder (`$TMPDIR`, else `/tmp`) while it runs for the
 /// browser of the socket folder `folder`: agent-browser's profile folder, which holds its cookies,
 /// and Chrome's own `.org.chromium.Chromium.*` file. Named after the socket folder, so that
@@ -437,6 +456,7 @@ fn write_log(log: &Option<String>, mut line: Value) {
     // agent-browser's runs in the browser's own.
     if let Some(fields) = line.as_object_mut() {
         fields.insert("netns".into(), json!(network_namespace()));
+        fields.insert("folders".into(), chrome_folders());
     }
     let mut file = std::fs::OpenOptions::new()
         .create(true)

@@ -385,12 +385,17 @@ mod tests {
     }
 
     #[test]
-    fn without_landlock_nor_yama_the_browser_is_within_a_runs_reach() {
-        let refused = out_of_reach(1, 0).unwrap_err();
-        assert!(refused.contains("Landlock"), "{refused}");
-        assert!(out_of_reach(0, 0).is_err());
+    fn without_landlocks_second_abi_the_browser_is_within_a_runs_reach() {
+        // Yama keeps a run from attaching to the browser, not from opening `/proc/<pid>/root`
+        // of the user's processes, which leads to the vault folder and the browser's socket:
+        // Landlock alone closes both, whatever Yama says.
+        for (landlock, yama) in [(0, 0), (1, 0), (0, 1), (1, 3)] {
+            let refused = out_of_reach(landlock, yama).unwrap_err();
+            for words in ["Landlock", "/proc/<pid>/root", "5.19"] {
+                assert!(refused.contains(words), "{landlock} {yama}: {refused}");
+            }
+        }
         assert!(out_of_reach(2, 0).is_ok());
-        assert!(out_of_reach(0, 1).is_ok());
-        assert!(out_of_reach(1, 3).is_ok());
+        assert!(out_of_reach(6, 1).is_ok());
     }
 }

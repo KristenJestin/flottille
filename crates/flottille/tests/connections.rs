@@ -4882,6 +4882,12 @@ fn without_isolation_the_login_refuses_to_fill() {
         json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
     ));
     assert!(opened.contains("opened"), "{opened}");
+    // Doctor says the gap with its remedy, once.
+    let doctor = user.run(&["doctor", "--json"]);
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(report["sandbox"]["browser_network"], false, "{report}");
+    let warnings = report["warnings"].to_string();
+    assert_eq!(warnings.matches("install passt").count(), 1, "{report}");
 }
 
 /// What Chrome leaves in the temporary folder while it runs, by the start of its name:
@@ -5003,6 +5009,67 @@ fn every_command_of_agent_browser_runs_in_the_browsers_network() {
         seen.iter().all(|(_, netns)| *netns == seen[0].1),
         "not one network: {seen:?}"
     );
+}
+
+#[test]
+fn every_command_of_agent_browser_keeps_chromes_folders_in_the_vault() {
+    // Chrome writes outside its profile: its crash database (page memory, a password typed), its
+    // caches, under its default configuration folder whatever profile it is given. The server,
+    // the login's `open` and `auth login`, and `close` are each given folders of the vault's, and
+    // none of the user's variables that would move them elsewhere.
+    let user = user();
+    let elsewhere = user.path("elsewhere");
+    let user = user
+        .with_env("XDG_CACHE_HOME", elsewhere.join("cache").to_str().unwrap())
+        .with_env(
+            "CHROME_CONFIG_HOME",
+            elsewhere.join("chrome").to_str().unwrap(),
+        )
+        .with_env(
+            "BREAKPAD_DUMP_LOCATION",
+            elsewhere.join("crashes").to_str().unwrap(),
+        );
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    user.call("connection.remove", json!({"name": "browser"}))
+        .unwrap();
+    eventually("the browser is closed", || {
+        !logged(&user, "browser", "close").is_empty()
+    });
+    let vault = vault_folder(&user);
+    for event in ["start", "open", "login", "close"] {
+        // The server started before its adapter applies (to list its tools) is no browser's.
+        let lines: Vec<Value> = logged(&user, "browser", event)
+            .into_iter()
+            .filter(|line| event != "start" || !line["config"].is_null())
+            .collect();
+        assert!(!lines.is_empty(), "no {event}");
+        for line in lines {
+            let folders = &line["folders"];
+            for name in [
+                "TMPDIR",
+                "XDG_CONFIG_HOME",
+                "XDG_CACHE_HOME",
+                "XDG_DATA_HOME",
+            ] {
+                let folder = folders[name]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{event}: no {name}: {line}"));
+                assert!(
+                    Path::new(folder).starts_with(&vault) && Path::new(folder) != vault,
+                    "{event}: {name} is outside the vault folder: {line}"
+                );
+            }
+            for name in ["CHROME_CONFIG_HOME", "BREAKPAD_DUMP_LOCATION"] {
+                assert!(folders[name].is_null(), "{event}: {name} given: {line}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -6118,6 +6185,7 @@ fn the_login_fills_and_no_run_reads_it() {
         vault: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
+    let before = written_by_others(&user);
     real_connection(&user, &program);
     project(&user, "app");
     user.call(
@@ -6155,8 +6223,8 @@ fn the_login_fills_and_no_run_reads_it() {
 #[test]
 fn a_run_finds_none_of_the_real_browsers_profile() {
     // The real agent-browser, headless, a page open: its Chrome's profile (cookies, Local
-    // Storage, History) is in no folder a run in Ask or in Auto can list, neither the daemon's
-    // temporary folder nor /tmp where it may list it.
+    // Storage, History) is not in the daemon's temporary folder, which a run in Ask or in Auto
+    // lists. (`/tmp` itself is refused to a run here: the test's runtime folder is under it.)
     let Some((user, program)) = real_user() else {
         return;
     };
@@ -6171,11 +6239,9 @@ fn a_run_finds_none_of_the_real_browsers_profile() {
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
     opened(&mcp, &url);
-    let folders = [user.path("tmp"), PathBuf::from("/tmp")];
+    let folders = [user.path("tmp")];
     for mode in ["ask", "auto"] {
         let listing = listed_by_run(&user, &mcp, &id, mode, &folders);
-        // The daemon's temporary folder is listed; /tmp may itself be refused to the run (the
-        // test's runtime folder is under it: `landlock.rs`), its entries then out of its sight.
         assert!(
             listing["listed"]
                 .as_object()
@@ -6239,6 +6305,43 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
         sent.contains(&("password", PASSWORD)),
         "the password sent is not the entry's"
     );
+    // Chrome's crash database and caches are in the vault folder, not in the user's
+    // configuration and cache folders, which runs read and write.
+    let after = written_by_others(&user);
+    let new: Vec<&String> = after.iter().filter(|path| !before.contains(path)).collect();
+    assert!(new.is_empty(), "written outside the vault folder: {new:?}");
+}
+
+/// What is in the test user's configuration, cache and data folders (`$XDG_CONFIG_HOME`,
+/// `$XDG_DATA_HOME`, and `~/.config`, `~/.cache`, `~/.local/share`), two levels deep, but
+/// Flottille's own: where Chrome writes its crash database and its caches unless it is told
+/// otherwise.
+fn written_by_others(user: &User) -> Vec<String> {
+    let home = user.path("home");
+    let roots = [
+        user.path("config"),
+        user.path("data"),
+        home.join(".config"),
+        home.join(".cache"),
+        home.join(".local/share"),
+    ];
+    let mut found = Vec::new();
+    for root in roots {
+        let Ok(first) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in first.flatten() {
+            if entry.file_name() == "flottille" {
+                continue;
+            }
+            found.push(entry.path().display().to_string());
+            if let Ok(second) = std::fs::read_dir(entry.path()) {
+                found.extend(second.flatten().map(|e| e.path().display().to_string()));
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 #[test]
@@ -7174,6 +7277,96 @@ fn login_is_refused_while_an_option_could_send_the_session_elsewhere() {
 }
 
 #[test]
+fn login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set() {
+    // The options agent-browser's own `--allowed-domains` rejects as unsafe: another profile, a
+    // saved or restored session, a browser reached over CDP or found running, launch arguments of
+    // the command's (a `--proxy-server` among them). From the server's command, the connection's
+    // environment, or the environment the daemon itself started with.
+    let command =
+        |options: &[&str]| -> Vec<String> { options.iter().map(|o| o.to_string()).collect() };
+    let mut cases: Vec<(Vec<String>, Option<&str>, bool, &str)> = vec![
+        (command(&["--profile", "Default"]), None, false, "--profile"),
+        (
+            command(&["--profile=/tmp/a-profile"]),
+            None,
+            false,
+            "--profile",
+        ),
+        (
+            command(&["--args", "--proxy-server=http://127.0.0.1:9"]),
+            None,
+            false,
+            "--args",
+        ),
+        (command(&["--cdp", "9222"]), None, false, "--cdp"),
+        (command(&["--auto-connect"]), None, false, "--auto-connect"),
+        (
+            command(&["--state", "/tmp/a-state.json"]),
+            None,
+            false,
+            "--state",
+        ),
+        (command(&["--restore"]), None, false, "--restore"),
+        (
+            command(&["--session-name", "saved"]),
+            None,
+            false,
+            "--session-name",
+        ),
+    ];
+    for variable in [
+        "AGENT_BROWSER_PROFILE",
+        "AGENT_BROWSER_ARGS",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_RESTORE",
+        "AGENT_BROWSER_SESSION_NAME",
+    ] {
+        cases.push((Vec::new(), Some(variable), false, variable));
+        cases.push((Vec::new(), Some(variable), true, variable));
+    }
+    for (options, variable, of_the_daemon, named) in cases {
+        let mut user = user();
+        let mut more = json!({});
+        match variable {
+            Some(variable) if of_the_daemon => user = user.with_env(variable, SETTING),
+            Some(variable) => {
+                user.call(
+                    "vault.set",
+                    json!({"name": "browser-setting", "secret": SETTING}),
+                )
+                .unwrap();
+                more = json!({"env": {variable: {"vault": "browser-setting"}}});
+            }
+            None => {}
+        }
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        browser_declared(&user, &agent_browser("0.43.0"), json!({}), &options, more);
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        // The option or the variable by its name, and never its value.
+        assert!(said.contains(named), "{named}: {said}");
+        assert!(said.contains("unsafe"), "{named}: {said}");
+        if of_the_daemon {
+            assert!(said.contains("daemon"), "{named}: {said}");
+        }
+        assert!(!said.contains(SETTING), "{named}: {said}");
+        assert!(logged(&user, "browser", "login").is_empty(), "{named}");
+        assert!(form(&user).is_none(), "{named}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(named), "{named}: {review}");
+        assert!(!review.to_string().contains(SETTING), "{named}: {review}");
+    }
+}
+
+#[test]
 fn a_harmless_variable_of_agent_browsers_is_accepted() {
     let user = user();
     user.call(
@@ -7964,6 +8157,58 @@ fn a_headless_browser_left_by_a_daemon_that_stopped_is_closed_at_start() {
     user.status();
     assert_eq!(browser_running(&user), None);
     assert_eq!(logged(&user, "browser", "close").len(), 1);
+}
+
+#[test]
+fn a_profile_a_crashed_browser_left_is_removed_when_its_browser_is_closed() {
+    // A Chrome that crashed leaves its profile (cookies, Local Storage…) in the vault's temporary
+    // folder, which agent-browser's own close never removes: closing the connection's browser
+    // empties the folder.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let temporary = vault_folder(&user).join("tmp");
+    let crashed = temporary.join("agent-browser-chrome-crashed");
+    std::fs::create_dir_all(crashed.join("Default")).unwrap();
+    std::fs::write(crashed.join("Default/Cookies"), "left").unwrap();
+    std::fs::write(temporary.join(".org.chromium.Chromium.crashed"), "left").unwrap();
+    // The daemon that died left the browser; the next closes it.
+    killed(&user);
+    user.status();
+    assert_eq!(browser_running(&user), None);
+    eventually("the profile is removed", || !crashed.exists());
+    assert_eq!(common::names_in(&temporary), Vec::<String>::new());
+}
+
+#[test]
+fn a_profile_left_with_no_browser_is_removed_at_start() {
+    // No browser left to close (it crashed with the daemon): the start empties the vault's
+    // temporary folder all the same, and keeps the folder.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let temporary = vault_folder(&user).join("tmp");
+    killed(&user);
+    let sockets = socket_folder(&user).expect("no socket folder");
+    for entry in std::fs::read_dir(&sockets).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let crashed = temporary.join("agent-browser-chrome-crashed");
+    std::fs::create_dir_all(crashed.join("Default")).unwrap();
+    std::fs::write(crashed.join("Default/Cookies"), "left").unwrap();
+    user.status();
+    eventually("the profile is removed", || !crashed.exists());
+    assert!(temporary.is_dir(), "the temporary folder is gone");
+    assert_eq!(common::names_in(&temporary), Vec::<String>::new());
+    assert!(logged(&user, "browser", "close").is_empty());
 }
 
 #[test]
