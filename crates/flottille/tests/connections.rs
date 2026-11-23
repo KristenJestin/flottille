@@ -5119,6 +5119,216 @@ fn a_plugin_request_without_its_runs_token_is_refused() {
 }
 
 #[test]
+fn a_plugin_that_fails_tells_the_agent_why() {
+    // The plugin is asked while no token of a login of Flottille's is there: it fails before it
+    // reaches the daemon, and agent-browser says only that it "exited unsuccessfully".
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({"token": "drop"}));
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(answer.contains("exited unsuccessfully"), "{answer}");
+    // Flottille's plugin's own reason, which agent-browser does not relay.
+    assert!(
+        answer.contains("Flottille's credential plugin said: refused: no login of Flottille's"),
+        "{answer}"
+    );
+    assert!(!answer.contains(PASSWORD), "{answer}");
+    assert!(form(&user).is_none(), "the form was filled");
+}
+
+/// The real agent-browser 0.43.x to drive, when this machine has it: `FLOTTILLE_TEST_AGENT_BROWSER`
+/// names it, else `agent-browser` on the `PATH`; a launcher beside its native binary (npm's
+/// `agent-browser.js`) is replaced by that binary, which needs no Node in the run's sandbox.
+/// `Err` says why the test cannot drive one.
+fn real_agent_browser(home: &Path) -> Result<PathBuf, String> {
+    let named = std::env::var_os("FLOTTILLE_TEST_AGENT_BROWSER")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|folder| folder.join("agent-browser"))
+                    .find(|candidate| candidate.is_file())
+            })
+        })
+        .ok_or("no agent-browser: neither FLOTTILLE_TEST_AGENT_BROWSER nor one on the PATH")?;
+    let resolved =
+        std::fs::canonicalize(&named).map_err(|e| format!("{}: {e}", named.display()))?;
+    let native = resolved.with_file_name("agent-browser-linux-x64");
+    let program = if native.is_file() { native } else { resolved };
+    let version = std::process::Command::new(&program)
+        .arg("--version")
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+    let said = String::from_utf8_lossy(&version.stdout).trim().to_owned();
+    if !said.starts_with("agent-browser 0.43.") {
+        return Err(format!(
+            "{} is not agent-browser 0.43.x under a test's HOME: {said:?}{}",
+            program.display(),
+            String::from_utf8_lossy(&version.stderr).trim()
+        ));
+    }
+    Ok(program)
+}
+
+/// A login page on this machine, with an invented account: its form sends `username` and
+/// `password` to `/signed-in`, whose query is sent on the channel. It serves until the test ends.
+fn login_page() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = first.split_whitespace().nth(1).unwrap_or("/").to_owned();
+            let body = if let Some(query) = path.strip_prefix("/signed-in?") {
+                let _ = sent.send(query.to_owned());
+                "<!doctype html><title>Signed in</title><p>Welcome.</p>".to_owned()
+            } else {
+                "<!doctype html><title>Sign in</title><form action=\"/signed-in\" method=\"get\">\
+                 <label>Email <input type=\"email\" name=\"username\" id=\"username\" \
+                 autocomplete=\"username\"></label><label>Password <input type=\"password\" \
+                 name=\"password\" id=\"password\" autocomplete=\"current-password\"></label>\
+                 <button type=\"submit\">Sign in</button></form>"
+                    .to_owned()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (format!("http://127.0.0.1:{port}/login"), received)
+}
+
+/// Closes the browser agent-browser's daemon runs for the connection `browser` once the test
+/// ends, however it ends: no Chrome of the test outlives it.
+struct Closed {
+    program: PathBuf,
+    home: PathBuf,
+    state: PathBuf,
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        for folder in walk(&self.state) {
+            if folder.file_name().is_some_and(|name| name == "browser")
+                && folder.parent().and_then(|p| p.file_name()) == Some("connections".as_ref())
+            {
+                let _ = std::process::Command::new(&self.program)
+                    .arg("close")
+                    .env_clear()
+                    .env("HOME", &self.home)
+                    .env("AGENT_BROWSER_SOCKET_DIR", &folder)
+                    .output();
+            }
+        }
+    }
+}
+
+fn walk(folder: &Path) -> Vec<PathBuf> {
+    let mut found = vec![folder.to_owned()];
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            found.extend(walk(&entry.path()));
+        }
+    }
+    found
+}
+
+#[test]
+fn the_real_agent_browser_signs_in_with_a_vault_entry() {
+    // The whole path with the real tool: the connection runs the real `agent-browser mcp`, its
+    // adapter applies, login runs agent-browser's command line in the run's sandbox, agent-browser's
+    // daemon starts Flottille's plugin, which asks the daemon for the entry; the page is a local
+    // one, headless, and the account an invented one in the in-memory keyring.
+    let user = user();
+    let program = match real_agent_browser(&user.path("home")) {
+        Ok(program) => program,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        state: user.path("state"),
+    };
+    let (url, signed_in) = login_page();
+    turn_on(&user);
+    let added = user
+        .call(
+            "connection.add",
+            json!({"name": "browser", "about": "A browser for the tests.",
+                "command": [program, "mcp"]}),
+        )
+        .unwrap();
+    if added["given"] != true {
+        user.call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        user.call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {}}),
+        )
+        .unwrap();
+    }
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": PASSWORD, "username": "tester@example.com",
+            "url": url, "for": "connection:browser",
+            "description": "The test account of the shop."}),
+    )
+    .unwrap();
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    assert!(
+        !answer.text.contains(PASSWORD),
+        "the secret reached the agent"
+    );
+    assert!(!answer.error, "{}", answer.text);
+    // The page's form was filled and sent with the entry's account.
+    let query = signed_in
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the form was never sent");
+    let sent: Vec<(&str, &str)> = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
+    assert!(
+        sent.contains(&("username", "tester%40example.com")),
+        "the username was not sent"
+    );
+    // Never printed: compared only.
+    assert!(
+        sent.contains(&("password", PASSWORD)),
+        "the password sent is not the entry's"
+    );
+}
+
+#[test]
 fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));

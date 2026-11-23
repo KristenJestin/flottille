@@ -75,8 +75,12 @@
 //! (`agent-browser auth login <name> --credential-provider <plugin> --item <ref> [--url <url>]`,
 //! with `--config <file>`): it runs the plugin that file declares with `credential.read`, asks it
 //! for the credential over `agent-browser.plugin.v1`, and writes what it got to the file `form`
-//! of the script's `login`, as a page's login form would be filled. `login` takes `token`
-//! (`"drop"`: the plugin is run without `FLOTTILLE_VAULT_TOKEN`; `"wrong"`: with another one),
+//! of the script's `login`, as a page's login form would be filled. As agent-browser 0.43.0 does,
+//! the plugin is run by the browser's daemon and not by the command line: never with the command
+//! line's environment (its `FLOTTILLE_VAULT_TOKEN` included), and its failure said only as
+//! `Plugin '<name>' exited unsuccessfully` (or `returned success=false`), never its own words.
+//! `login` takes `token` (`"drop"`: the run's token file beside the plugin's socket, `vault.token`,
+//! is removed before the plugin is asked; `"wrong"`: another token is written there),
 //! `replay` (the plugin is asked once more, with the same token) and `echo` (the password is
 //! written on its output, as a careless command line would) and `fail` (the password is written
 //! on its error output, and it fails; the form is filled first, as a page that refused it keeps it).
@@ -1008,25 +1012,31 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     let request = json!({"protocol": "agent-browser.plugin.v1", "type": "credential.resolve",
         "capability": "credential.read", "request": {"profileName": name,
             "itemRef": option("--item"), "url": url}});
-    let token = std::env::var("FLOTTILLE_VAULT_TOKEN").ok();
     let ask = |plugin: &Value| -> Value {
         let mut command = std::process::Command::new(plugin["command"].as_str().unwrap_or("?"));
-        for arg in plugin["args"].as_array().into_iter().flatten() {
-            command.arg(arg.as_str().unwrap_or_default());
+        let args: Vec<&str> = plugin["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|arg| arg.as_str().unwrap_or_default())
+            .collect();
+        command.args(&args);
+        // The token file of Flottille's run, beside the socket the plugin is given last.
+        let token_file = args
+            .last()
+            .map(|socket| std::path::Path::new(socket).with_file_name("vault.token"));
+        match (behaviour["token"].as_str(), &token_file) {
+            (Some("drop"), Some(file)) => {
+                let _ = std::fs::remove_file(file);
+            }
+            (Some("wrong"), Some(file)) => {
+                let _ = std::fs::write(file, "not-the-token-of-this-run");
+            }
+            _ => {}
         }
-        match behaviour["token"].as_str() {
-            Some("drop") => {
-                command.env_remove("FLOTTILLE_VAULT_TOKEN");
-            }
-            Some("wrong") => {
-                command.env("FLOTTILLE_VAULT_TOKEN", "not-the-token-of-this-run");
-            }
-            _ => {
-                if let Some(token) = &token {
-                    command.env("FLOTTILLE_VAULT_TOKEN", token);
-                }
-            }
-        }
+        // The browser's daemon runs it, with the environment it was started with: never the
+        // command line's.
+        command.env_remove("FLOTTILLE_VAULT_TOKEN");
         let child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1039,8 +1049,10 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         writeln!(stdin, "{request}").ok();
         drop(stdin);
         let output = child.wait_with_output().unwrap();
-        serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|_| json!({"success": false, "error": "no JSON on its output"}))
+        let mut answer: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| json!({"success": false, "error": "no JSON on its output"}));
+        answer["exited"] = json!(output.status.success());
+        answer
     };
     let Some(plugin) = plugin else {
         write_log(
@@ -1064,7 +1076,12 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     }
     write_log(log, line);
     if !success {
-        eprintln!("✗ the credential provider failed");
+        // agent-browser 0.43.0's own words: the plugin's are not relayed.
+        if answer["exited"] == false {
+            eprintln!("✗ Plugin '{provider}' exited unsuccessfully");
+        } else {
+            eprintln!("✗ Plugin '{provider}' returned success=false");
+        }
         std::process::exit(1);
     }
     let credential = &answer["credential"];
