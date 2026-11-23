@@ -745,3 +745,37 @@ fn a_run_still_cannot_read_an_ssh_setting_it_can_write() {
         "Host forge.invalid\n  User git\n"
     );
 }
+
+#[test]
+fn the_daemon_s_fetch_of_an_ssh_origin_reaches_the_network() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // The daemon's own fetch of a workspace's base runs confined as a run does, with the real git
+    // and ssh: an origin on a host that does not resolve fails on the host, past the machine's
+    // root-owned configuration that stopped it before (#1302).
+    let user = User::with_fake_agent();
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.git(
+        &folder,
+        &["remote", "add", "origin", "ssh://nohost.invalid/x"],
+    );
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+
+    let created = user
+        .call("workspace.create", json!({"project": "app", "name": "w"}))
+        .unwrap();
+
+    let said = created.to_string();
+    assert!(!said.contains("Bad owner or permissions"), "{said}");
+    assert!(
+        said.contains("could not be fetched") && said.contains("nohost.invalid"),
+        "{said}"
+    );
+}
