@@ -1884,7 +1884,8 @@ on a real phone, by hand, and reported.
   records its pilot as the caller stood in for there (`launched_by` and `led_by`
   `<caller>@<machine's key>`, `led`), kept while it leads a session there or did before it was
   detached; a handed session records the caller the same way, not `led`. Such a stand-in counts
-  in the cap of 64 of its machine no more once every session that names it has ended. Its first
+  in the cap of 64 of its machine no more once every session that names it has ended, and one
+  that did not count takes a place again, with its next launch, only where the cap has room. Its first
   message says where a question goes as a local one's, and, on a line of the same paragraph (which the window
   does not show) `While pc is not linked to this machine, ask reaches the user's inbox instead.`;
   the launch's answer says what a local one's says, with the place and its return, and a held launch says what follows once the user allows it
@@ -1893,7 +1894,8 @@ on a real phone, by hand, and reported.
   or the user's Cancel tell that machine, kept until it takes it, and its questions go to the user
   there; the following pauses after fifty `session_send` of the pilot with no message of the user
   to the pilot, and resumes when the user writes to the pilot or resumes it. The user detaches it
-  there as on one machine: its pilot is told (`detached`), its following ends and the launch is
+  there as on one machine: its pilot is told (`detached`; the pilot of a handed session, which
+  follows nothing, is told nothing), its following ends and the launch is
   the user's on both machines (no longer a row under its pilot, reached with a leave as any
   session of another machine). A real end of the pilot ends it there (`its pilot ended`), the stop
   kept until that machine takes it; `agent.ending` and the window's End confirmation list it,
@@ -1927,7 +1929,9 @@ on a real phone, by hand, and reported.
 - At most 100 messages wait for one machine: one more `agent_send` or `session_send` is refused at
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
   an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
-  the receiver would.
+  the receiver would; a review's result to a pilot of another machine is cut instead, the cut
+  said with the `session_read` that reads the rest there. The kinds a machine takes are the
+  session's own and a review's (`review`), no other extension's name.
 - A led session's plain end of a turn (it neither asked nor reported) is kept once per session
   for the machine that took none: the next replaces the one still waiting, so that the turns of a
   session that runs while its pilot's machine is off never fill the 100 and push out a report or
