@@ -184,7 +184,7 @@ pub enum LaunchKind {
 const KINDS: &str = "child: a part of your own task, in your place, that you direct and that \
     reports to you; led: an autonomous job of its own (its own workspace or main) that you pilot, \
     a real session the user sees under you and may talk to, which asks you its questions and wakes \
-    you when it asks, reports or ends; handed: a session you start for the user and let go, \
+    you at each end of its turns; handed: a session you start for the user and let go, \
     which is theirs and of which you hear nothing more unless it writes to you";
 
 /// What a launch without `kind` is told.
@@ -583,7 +583,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "Started a session led by you, {}, on {runs}, in {place}. It is a real session, not your child: \
              the user sees it under you and may talk to it, and the agent_* tools do not reach \
              it. It asks you its questions: a delivery [flottille:session-turn-ended] wakes you \
-             when it asks, reports or ends, with its last message. Answer with session_send, \
+             at each end of its turns, with its last message. Answer with session_send, \
              relay to the user with ask, or do nothing; forge unsubscribe with its session stops \
              the wakes.{leave}",
             named(&child)
@@ -2799,7 +2799,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
         return;
     }
     if agent.parent.is_none() && !crate::across::remote_child(daemon, &agent) {
-        crate::subscriptions::turn_ended(daemon, &agent);
+        crate::subscriptions::turn_ended(daemon, &agent, stop_reason);
         remind_integrated(daemon, &agent);
         return;
     }

@@ -412,8 +412,8 @@ fn answer_to_caller(
         "led" => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
              of {machine}, not your child: the user sees it there and may talk to it. It asks you \
-             its questions: a delivery [flottille:session-turn-ended] wakes you when it asks, \
-             reports or ends, with its last message. Answer with session_send, relay to the user \
+             its questions: a delivery [flottille:session-turn-ended] wakes you at each end of \
+             its turns, with its last message. Answer with session_send, relay to the user \
              with ask, or do nothing; session_read reads it. {back}"
         ),
         _ => format!(
