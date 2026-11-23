@@ -414,7 +414,7 @@ fn says_the_map(text: &str) {
         "Jira on example.atlassian.net",
         "ABC",
         "`acli`",
-        "Jira stays read-only",
+        "never write to Jira with `acli`",
         "work/shop",
     ] {
         assert!(text.contains(said), "{said:?} is not said: {text}");
