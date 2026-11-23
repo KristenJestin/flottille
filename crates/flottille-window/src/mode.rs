@@ -41,7 +41,7 @@ const MODES: [(&str, &str, &str, Tone); 3] = [
     (
         "full",
         "Full",
-        "Nothing is asked: commands run as yours, with your keys and sign-ins.",
+        "Nothing is held back: commands run as yours, with your keys, sign-ins and keyring, the vault included.",
         Tone::Fail,
     ),
 ];
