@@ -219,6 +219,10 @@ about five minutes, not twenty.
   merges go on (no freeze of `dev`). What it does gate is the publish of that push (`dev`'s beta,
   a line's release candidate): `publish` waits for its `verify`.
 
+**A pull request writes no cache**: it reads those dev's pushes write (`save-if` on every
+`Swatinem/rust-cache`, and Gradle's downloads saved by a push only), which its own would evict from
+the repository's 10 GB while serving it alone.
+
 Every job that compiles links with **mold** (`rui314/setup-mold@v1`, which makes it the default
 `ld`: no flag changes, so the caches stay valid).
 

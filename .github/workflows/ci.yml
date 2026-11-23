@@ -263,6 +263,9 @@ jobs:
           prefix-key: v2-rust
           # Clippy's own artefacts, apart from the tests' (`test`).
           shared-key: check
+          # A pull request reads dev's caches and writes none: its own would be read by it alone,
+          # and evict dev's from the repository's 10 GB.
+          save-if: ${{ github.event_name != 'pull_request' }}
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
       # time and opens no window here: its tests use GPUI's own test platform.
       - name: Have the window's system libraries
@@ -302,6 +305,7 @@ jobs:
           # The name of the job that wrote the cache before the suite was split: the
           # dependencies already cached are kept.
           shared-key: verify
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Have the window's system libraries
         run: |
           sudo apt-get update
@@ -534,6 +538,7 @@ jobs:
         with:
           prefix-key: v2-rust
           shared-key: android
+          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk@4.1.2
@@ -823,6 +828,7 @@ jobs:
       - if: steps.version.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build
         if: steps.version.outputs.skip != 'true'
         env:
@@ -916,6 +922,7 @@ jobs:
         with:
           prefix-key: v1-rust
           shared-key: hub-${{ matrix.target }}
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build the hub
         run: cargo build --release --locked -p flottille-hub --target ${{ matrix.target }}
       - name: the_static_binary_runs_with_no_shared_library

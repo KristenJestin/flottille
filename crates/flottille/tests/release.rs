@@ -6378,6 +6378,53 @@ fn android_sign_runs_on_a_push_and_on_a_release_build_of_main_only() {
     }
 }
 
+#[test]
+fn a_pull_request_writes_no_cache() {
+    // A pull request's cache is read by that pull request alone, and the repository holds 10 GB:
+    // the hub's and the build's of each pull request (1.3 GB) evicted dev's, which every run
+    // reads (10.7 GB held on 23 November 2026). A pull request reads dev's and writes none.
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let lines: Vec<&str> = workflow.lines().collect();
+    let mut caches = 0;
+    for (at, line) in lines.iter().enumerate() {
+        if !line.contains("uses: Swatinem/rust-cache@v2") && !line.contains("uses: actions/cache") {
+            continue;
+        }
+        caches += 1;
+        let step: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|l| !l.trim_start().starts_with("- "))
+            .copied()
+            .collect();
+        let step = step.join("\n");
+        if line.contains("actions/cache/restore") {
+            continue;
+        }
+        assert!(
+            !line.contains("uses: actions/cache@"),
+            "a cache that restores and saves in one step saves on a pull request: {line}"
+        );
+        if line.contains("actions/cache/save") {
+            let condition = condition_of(&format!("{line}\n{step}"));
+            let context = |event: &'static str| [("github.event_name", event)];
+            assert!(holds(&condition, &context("push")), "{condition}");
+            assert!(!holds(&condition, &context("pull_request")), "{condition}");
+            continue;
+        }
+        let save = step
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("save-if:"))
+            .unwrap_or_else(|| panic!("a rust-cache with no save-if, line {}: {step}", at + 1))
+            .trim();
+        assert!(
+            save == "false" || save == "${{ github.event_name != 'pull_request' }}",
+            "line {}: {save}",
+            at + 1
+        );
+    }
+    assert!(caches >= 6, "{caches} caches");
+}
+
 /// Every file under `dir`, folders walked.
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
