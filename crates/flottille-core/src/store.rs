@@ -1419,6 +1419,48 @@ impl Store {
             .flatten())
     }
 
+    /// Replaces the setup steps of the workspace `workspace` that have not started, its worktrees
+    /// kept, by `steps` (none of them a worktree), numbered after the steps that stay, in one
+    /// transaction: a workspace made of another machine's code takes the setup its launch laid,
+    /// once allowed. Nothing is changed when a setup step has started.
+    pub fn replace_pending_steps(&mut self, workspace: i64, steps: &[Step]) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        let started: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM workspace_steps WHERE workspace = ?1 AND state != 'pending' \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        if started > 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "DELETE FROM workspace_steps WHERE workspace = ?1 \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
+            params![workspace],
+        )?;
+        let next: u32 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM workspace_steps WHERE workspace = ?1",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        for (at, step) in steps.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO workspace_steps (workspace, position, repository, action, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    workspace,
+                    next + at as u32,
+                    step.repository,
+                    serde_json::to_string(&step.action)?,
+                    StepState::Pending.as_str(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     /// Puts these steps back to pending, forgetting their failure, with one event, in one
     /// transaction.
     pub fn reset_steps(
@@ -5971,6 +6013,65 @@ mod tests {
             .set_ticket(id, None, ("workspace.ticket", json!({"ticket": null})))
             .unwrap();
         assert_eq!(store.workspace_by_id(id).unwrap().ticket, None);
+    }
+
+    #[test]
+    fn a_step_naming_worktree_in_its_text_is_replaced_once_not_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let step = |position, action| Step {
+            position,
+            repository: None,
+            action,
+            state: StepState::Pending,
+            failure: None,
+            started_at: None,
+            ended_at: None,
+            duration_ms: None,
+        };
+        let mut workspace = a_workspace();
+        // Steps whose JSON holds "worktree" without being one.
+        workspace.steps.push(step(
+            2,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        ));
+        workspace.steps.push(step(
+            3,
+            Action::Run {
+                line: "git worktree prune".into(),
+                task: Some("worktree".into()),
+                time_limit: 60,
+            },
+        ));
+        let (id, _) = store
+            .create_workspace(&workspace, ("workspace.created", json!({})))
+            .unwrap();
+        let laid = [step(
+            0,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        )];
+
+        assert!(store.replace_pending_steps(id, &laid).unwrap());
+
+        let actions: Vec<Action> = store
+            .workspace_by_id(id)
+            .unwrap()
+            .steps
+            .into_iter()
+            .map(|step| step.action)
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::Worktree,
+                Action::Copy {
+                    globs: vec!["worktree".into()]
+                }
+            ]
+        );
     }
 
     #[test]

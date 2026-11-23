@@ -961,7 +961,9 @@ local child's work; nothing moves your branch.*
   those are made one at a time, a link at any of them refused: nothing lands outside the project
   through a link planted after the launch was allowed. A link is refused wherever it leads,
   inside the project too (`sub is a link: nothing is made through it`): following it is what a
-  link planted since the check would use. The commits a machine lists (`Has`) are those of a
+  link planted since the check would use. A file laid from the vault is written by walking those
+  folders again, each opened from the one before without following a link, so one swapped for a
+  link after they were made is refused too. The commits a machine lists (`Has`) are those of a
   repository inside the project folder only. In a project Flottille made, a repository
   whose folder leads out of the project is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
@@ -974,10 +976,44 @@ local child's work; nothing moves your branch.*
   its file and its folder, once its workspace is gone, unless another launch of the same machine
   may still start in it. Two launches of a new project at once make it once: the second takes the
   project the first made.
-- Not yet (#1188's follow-up): the folder for projects from other machines as a setting of that
-  machine; a setup that needs ignored files or vault entries the receiving machine lacks holding
-  the first launch until the user shares them; the making shown on the launch's row; the refusals
-  in the window's words with their action.
+- **The folder for projects from other machines** is a setting of the receiving machine
+  (#1214): Settings, General, "Projects from other machines" (`travelled_folder.set`), on that
+  machine or from another's window through "Settings of"; `$XDG_DATA_HOME/flottille/projects`
+  until the user types another. It is checked as a project's folder is: absolute, reached through
+  no link, neither a project's folder nor inside one, outside Flottille's configuration and state;
+  and it is no disk's root (`/`, a mount point), not the home itself nor Flottille's data folder
+  itself, and holds none of Flottille's configuration, state or data folders.
+  Only the projects made afterwards go there; those made before stay where they are.
+- **A setup that copies files the receiving machine lacks** (#1214): the caller's machine names,
+  with the launch, the files its project's `copy` steps match in its folder, their paths only,
+  never what they hold. Each that the project there lacks is made from a vault entry,
+  `<project>-<path>` (`app-.env`), which the user shares from the caller's machine through the
+  vault's sharing, keyring to keyring: never a file between machines. The entry is bound to that
+  file (`file:<project>/<path>`), and only an entry bound to it and shared from the launch's
+  machine is ever laid: one of the machine's own, or another machine's, of the same name is not
+  (it counts as missing). **A launch that lays a file is held for the user whatever the mode**,
+  Full included, the judge not asked, and asks once, on every device, as any held launch does: its
+  words name each file and entry there already (`app lays .env from the vault entry app-.env shared
+  by pc`); one still missing starts them with `app needs .env on server: share it?`, its reasons
+  name each entry, and its card's `needs` gives them (`{"from", "files": [{"path", "entry"}]}`). On the caller's machine, `vault.from_file` makes the
+  entry from the file, read only then, masked before it is kept; `vault.share` sends it. Allowed,
+  the receiving machine makes each file from its vault entry in the project's folder, never over
+  a file, readable by the user alone, before the setup runs, whose `copy` step then copies it as
+  any; one still missing refuses the launch, naming it. Refused, the launch ends and the agent that
+  asked it is told what was missing (`child-failed`). A file is laid through no link: each folder
+  to it is made one at a time, a link refused, the file never over one.
+- **A launch refused on the caller's machine names the window's action**, never a command line
+  (#1214): `claude is not signed in on server. Sign in to Claude on server in Settings › Agents`,
+  `server is offline since 22:14: …. Settings › Machines says when server is back`, a machine that
+  is no runner (Settings › Machines says each machine's role), a runner with no slot free (it
+  takes one once one of its children there ends). The receiving machine's own refusals of these
+  kinds are said the same way.
+- **The making shows on the launch's row** (#1214): the receiving machine answers the launch with
+  the project it runs in, whether it made it, and whose settings it keeps (`remote.launches`'
+  `there`); the row of a launch whose project was made says `server · preparing ledgerly` until
+  that machine's first delivery, and the caller's answer says when the project there keeps its
+  own settings or another machine's (`It runs in the project app there, which the user registered
+  on server: it keeps its own settings, not yours`).
 - **The place**: a new workspace on that machine, on the caller's branch for each repository of the
   caller's place, with the caller's uncommitted changes laid on it as uncommitted changes. A `child`
   on another machine works in that copy of its parent's place: a child still works in its parent's
@@ -1614,6 +1650,33 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **What a travelling setup needs is its copied files** (#1214): today a project's settings name no
+  vault entry (its services and setup steps hold none), so the entries a launch asks for are those
+  made from the files its `copy` steps match on the caller's machine, one entry a file, named
+  `<project>-<path>` by the caller's name of the project, every project's (a project's name may
+  differ on the other machine). A file is made from its entry only when the project there lacks it,
+  in the project's folder, mode `0600`.
+- **The ask is the held launch's request** (#1214): Allow on a device shares nothing by itself yet;
+  the user makes the entry on the caller's machine (`vault.from_file`) and shares it (Settings,
+  Vault, **Share with…**) before Allow, and an Allow while it is still missing refuses the launch,
+  saying so. The window's card doing both on Allow is a follow-up.
+- **The row says `preparing <project>` until the first delivery** (#1214): the receiving machine
+  says nothing while the setup runs, so the row cannot tell the setup's end from the first turn's;
+  its next delivery says what it does.
+- **A secret of several lines is masked line by line too** (#1214), each line and each value after
+  its first `=` or `:` (quotes and a final comma left out) and an address's password, of 6
+  characters or more, comments left: a file's entry would otherwise be masked only whole, and an
+  agent reads one line of a `.env`. A secret transformed is not recognised (`docs/vault.md`).
+- **Two files whose entry would have one name are told apart by the entry's binding** (#1214):
+  `a/b` and `a-b` both name `app-a-b`; the entry is bound to the file it was made of, so the other
+  is refused its entry, naming the first, rather than the name carrying a hash of the path (names
+  stay readable on the card). A launch that copies both lays the first and lacks the second,
+  saying so; a hash in the name is the change if that case is met.
+- **A file is laid only after the user allows it, in every mode** (#1214): even in Full and with
+  the entry shared already, a secret written into a project's folder is the user's to allow.
+- **The folder for projects from other machines is not moved** (#1214): changing it applies to the
+  projects made afterwards; those made before stay, and a launch that did not start removes its
+  project from where it was made.
 - **A call to a session of a machine that is off is refused at once** (#1250), every tool alike,
   never kept: what the session's machine would answer (held, refused, the leave) cannot be known
   before it is back. Messages to a session the caller started stay kept, as before.

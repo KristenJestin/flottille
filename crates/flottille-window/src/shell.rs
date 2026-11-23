@@ -434,6 +434,7 @@ impl Shell {
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
+        let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(this.clone()));
         let modals = cx.new(|_| Modals::new());
         let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
@@ -468,6 +469,7 @@ impl Shell {
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
+                travelled.clone(),
                 vault.clone(),
                 connections.clone(),
                 machines.clone(),
@@ -2840,6 +2842,12 @@ impl Shell {
                     });
                 }
             }
+            Outcome::TravelledFolder { written, shown } => {
+                let section = self.settings.read(cx).travelled_folder().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(shown, written, window, cx)
+                });
+            }
             Outcome::Skills { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
                     let section = page.read(cx).skills().clone();
@@ -3325,6 +3333,7 @@ impl Shell {
         self.actions.send(Command::SessionsRead);
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
+        self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
         self.actions.send(Command::SignIns);
         self.ask_appearance(None);
