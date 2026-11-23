@@ -1832,8 +1832,26 @@ on a real phone, by hand, and reported.
   notice that its process died and it goes on (`child-replaced`), and a led session's
   `session-turn-ended` (when a turn reported or asked, and when it ends or fails
   unless its pilot ended it), and since #818 a child's held request (`child-asks`) and what a led
-  session asked the user while its pilot's machine was off (`session-meanwhile`). Not yet:
-  `led-integrated`, whose check reads the forge and the base on the session's machine.
+  session asked the user while its pilot's machine was off (`session-meanwhile`), and since #1272
+  `led-integrated` (checked on the session's machine, against its forge and its base) and
+  `detached`.
+- **A session led from another machine is a led session** (#1272). The machine that runs it
+  records its pilot as the caller stood in for there (`launched_by` and `led_by`
+  `<caller>@<machine's key>`, `led`), kept while it leads a session there or did before it was
+  detached. Its first message says where a question goes (`this session is led by agent … of pc:
+  … which reaches it while pc is linked to this machine and the user's inbox while it is not`);
+  the launch's answer says what wakes the pilot, and a held launch says what follows once the user
+  allows it there. Its pilot follows it on its own machine, a subscription of the source `session`
+  naming the machine (`forge show`, `subscription.list`, the window's rail): `forge unsubscribe`
+  or the user's Cancel tell that machine, kept until it takes it, and its questions go to the user
+  there; the following pauses after fifty `session_send` of the pilot with no message of the user
+  to the pilot, and resumes when the user writes to the pilot or resumes it. The user detaches it
+  there as on one machine: its pilot is told (`detached`), its following ends and the launch is
+  the user's on both machines (no longer a row under its pilot, reached with a leave as any
+  session of another machine). A real end of the pilot ends it there (`its pilot ended`), the stop
+  kept until that machine takes it. The light list does not name a pilot of another machine (its
+  `pilot` is a session of the same list): drawing it under its pilot on every window is the
+  window's part.
 - Where a question goes when the parent is off (#818): a parent of another machine that forwards
   a request of its child gives it to the user of the child's machine, never to its own parent on
   its machine (the request lives where the call was held). A request goes to the user when the

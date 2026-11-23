@@ -40,7 +40,7 @@ const CALLED: [&str; 6] = [
 ];
 
 /// The kinds of delivery a session on another machine sends the agent that started it.
-const KINDS: [&str; 10] = [
+const KINDS: [&str; 12] = [
     "child-report",
     "child-question",
     "child-asks",
@@ -51,7 +51,17 @@ const KINDS: [&str; 10] = [
     "child-replaced",
     "child-ended",
     "session-turn-ended",
+    DETACHED,
+    crate::tree::LED_INTEGRATED,
 ];
+
+/// The kind of the delivery that tells a pilot of another machine the user detached the session
+/// it led here.
+pub(crate) const DETACHED: &str = "detached";
+
+/// The tool a pilot's machine calls to say whether its pilot still follows the session it leads
+/// here (`on`, `paused` or `ended`): no agent's tool, its daemon's.
+const FOLLOWING: &str = "following";
 
 /// The longest body of a delivery or text of a call another machine sends, in characters.
 const LONGEST: usize = 64_000;
@@ -205,6 +215,17 @@ pub(crate) fn remote_child(daemon: &Daemon, agent: &Agent) -> bool {
 /// Whether `agent` is a session an agent of another machine leads.
 pub(crate) fn remote_led(daemon: &Daemon, agent: &Agent) -> bool {
     agent.parent.is_none() && launch_here(daemon, &agent.id).is_some_and(|l| l.kind == "led")
+}
+
+/// Whether the pilot of another machine of `agent`, a session it leads here, still follows it: not
+/// when its machine said it unsubscribed or its following paused.
+pub(crate) fn followed(daemon: &Daemon, agent: &Agent) -> bool {
+    launch_here(daemon, &agent.id).is_some_and(|launch| {
+        launch.kind == "led"
+            && launch.asked["following"]
+                .as_str()
+                .is_none_or(|on| on == "on")
+    })
 }
 
 /// The agent of another machine that started `agent` here as a `kind` (`child` or `led`):
@@ -986,6 +1007,29 @@ fn delivered(
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     }
+    // The following of a led session there ends with it, or once it is the user's alone.
+    let detached = deliver.kind == DETACHED && launch.kind == "led";
+    if (deliver.ended || detached)
+        && let Some(session) = &launch.agent
+    {
+        for following in crate::subscriptions::following(daemon, &launch.caller, Some(session)) {
+            let why = if detached {
+                "detached"
+            } else {
+                "session-ended"
+            };
+            crate::subscriptions::end(daemon, &following, why);
+        }
+    }
+    if detached {
+        daemon
+            .write(|store| {
+                store
+                    .hand_launch("out", &machine, &launch.launch)
+                    .map(|()| ((), None))
+            })
+            .map_err(|error| Refused::Now(error.to_string()))?;
+    }
     Ok(json!({}))
 }
 
@@ -1060,7 +1104,7 @@ fn called(
         )
         .into());
     }
-    if !CALLED.contains(&call.tool.as_str()) {
+    if !CALLED.contains(&call.tool.as_str()) && call.tool != FOLLOWING {
         return Err(format!("{:?} is not a tool another machine calls", call.tool).into());
     }
     let agent = daemon
@@ -1069,6 +1113,10 @@ fn called(
         .ok_or_else(|| format!("there is no agent {}", call.agent))?;
     let args: Value = serde_json::from_str(&call.arguments)
         .map_err(|_| "the call's arguments are not JSON".to_owned())?;
+    if call.tool == FOLLOWING {
+        return following_said(daemon, &launch, &agent, &caller, &name, &args)
+            .map(|text| json!({"text": text}));
+    }
     let child = launch.kind == "child";
     let text = match call.tool.as_str() {
         "agent_send" | "session_send" => {
@@ -1135,9 +1183,12 @@ fn called(
             if agent.state.is_final() {
                 format!("{} has {} already.", named(&agent), agent.state.as_str())
             } else {
-                let reason = match child {
-                    true => format!("stopped by its parent, agent {caller} of {name}"),
-                    false => format!("ended by the session that led it, agent {caller} of {name}"),
+                let reason = match (child, args["why"].as_str()) {
+                    (true, _) => format!("stopped by its parent, agent {caller} of {name}"),
+                    (false, Some(PILOT_ENDED)) => crate::tree::ITS_PILOT_ENDED.to_owned(),
+                    (false, _) => {
+                        format!("ended by the session that led it, agent {caller} of {name}")
+                    }
                 };
                 crate::tree::stop_tree(daemon, &agent.id, &reason);
                 match child {
@@ -1155,6 +1206,172 @@ fn called(
         _ => unreachable!("the tools are checked above"),
     };
     Ok(json!({"text": text}))
+}
+
+/// What the pilot of another machine of the led session `agent` said of its following of it: kept
+/// on the launch, so that its questions go to the user while it does not follow it, and those
+/// still open to it go there now; unsubscribed, the session is told, as one led here is.
+fn following_said(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    agent: &Agent,
+    caller: &str,
+    name: &str,
+    args: &Value,
+) -> Result<String, Refused> {
+    let state = args["state"].as_str().unwrap_or_default();
+    if !["on", "paused", "ended"].contains(&state) {
+        return Err(format!("a following is on, paused or ended, not {state:?}").into());
+    }
+    if launch.kind != "led" {
+        return Err(format!("{} is not a session agent {caller} leads", named(agent)).into());
+    }
+    daemon
+        .write(|store| {
+            store
+                .follow_launch(&launch.machine, &launch.launch, state)
+                .map(|()| ((), None))
+        })
+        .map_err(|error| Refused::Now(error.to_string()))?;
+    if state == "on" || agent.state.is_final() {
+        return Ok(format!("{} is followed again.", named(agent)));
+    }
+    let moved = crate::tree::questions_to_user(daemon, agent, &launch.caller, None);
+    if state == "ended" {
+        deliveries::deliver(
+            daemon,
+            &agent.id,
+            "unfollowed",
+            Some(format!("unfollowed-{}-{}", agent.id, launch.launch)),
+            &format!(
+                "agent {caller} of {name}, which leads this session, no longer follows it: what \
+                 you need answered now goes through ask to the user.{}",
+                crate::tree::moved_said(moved)
+            ),
+            approval::BETWEEN_TURNS,
+        );
+    }
+    Ok(format!("{} is no longer followed.", named(agent)))
+}
+
+/// The user detached `session`, titled `title`, from its pilot of another machine: that pilot is
+/// told there, kept until its machine takes it, and the launch is the user's here, as a session
+/// handed over is. How the pilot is named to the session; `None` when no agent of another machine
+/// leads it.
+pub(crate) fn detached(daemon: &Arc<Daemon>, session: &Agent, title: &str) -> Option<String> {
+    let launch = launch_here(daemon, &session.id).filter(|launch| launch.kind == "led")?;
+    let name = machine_name(daemon, &launch);
+    let here = own_name(daemon).unwrap_or_else(|| "its machine".to_owned());
+    tell_with(
+        daemon,
+        &launch,
+        DETACHED,
+        &format!(
+            "the user detached the session \"{title}\" (agent {}) on {here} from you. It is \
+             theirs alone: you are no longer woken by it, and writing to it now asks the user's \
+             leave.",
+            session.id
+        ),
+        approval::BETWEEN_TURNS,
+        false,
+        false,
+    );
+    let _ = daemon.write(|store| {
+        store
+            .hand_launch("in", &launch.machine, &launch.launch)
+            .map(|()| ((), None))
+    });
+    Some(format!("agent {} of {name}", launch.caller))
+}
+
+/// What a pilot's machine says of the stop it sends for the session it led, its pilot ended.
+const PILOT_ENDED: &str = "pilot-ended";
+
+/// The pilot `caller` of this machine no longer follows the session `session` it leads on
+/// another machine (it unsubscribed, or its following `paused`, or resumed `on`): that machine is
+/// told, kept until it takes it. False when it leads no such session.
+pub(crate) fn following(daemon: &Arc<Daemon>, caller: &str, session: &str, state: &str) -> bool {
+    let Some(launch) = led_elsewhere(daemon, caller, session) else {
+        return false;
+    };
+    let args = json!({"state": state});
+    keep_call(daemon, &launch, FOLLOWING, &args).is_ok()
+}
+
+/// The live launch `caller` made of the session `session` it leads on another machine.
+fn led_elsewhere(daemon: &Daemon, caller: &str, session: &str) -> Option<Launch> {
+    daemon
+        .read(|store| store.launches("out", None, LaunchFilter::Agent(session)))
+        .ok()?
+        .into_iter()
+        .find(|launch| {
+            launch.caller == caller
+                && launch.kind == "led"
+                && !matches!(launch.state.as_str(), "refused" | "ended")
+        })
+}
+
+/// A call of `tool` with `args` for the session of `launch`, kept until its machine takes it.
+fn keep_call(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    tool: &str,
+    args: &Value,
+) -> Result<(), String> {
+    let id = format!(
+        "call-{}",
+        flottille_core::agent::new_id().unwrap_or_default()
+    );
+    let message = MachineMessage::Call(Box::new(Call {
+        id: id.clone(),
+        launch: launch.launch.clone(),
+        caller: launch.caller.clone(),
+        agent: launch.agent.clone().unwrap_or_default(),
+        tool: tool.to_owned(),
+        arguments: args.to_string(),
+        ..Call::default()
+    }));
+    let name = machine_name(daemon, launch);
+    keep(
+        daemon,
+        &launch.machine,
+        &launch.launch,
+        &name,
+        id,
+        &message,
+        false,
+    )
+}
+
+/// The pilot `pilot` of this machine ended for good: each session it leads on another machine
+/// ends with it there, as one it leads here does, the stop kept until that machine takes it
+/// (`docs/tools.md`, "Sessions an agent starts").
+pub(crate) fn end_led(daemon: &Arc<Daemon>, pilot: &str) {
+    let launches = daemon
+        .read(|store| store.launches("out", None, LaunchFilter::All))
+        .unwrap_or_default();
+    for launch in launches.iter().filter(|launch| {
+        launch.caller == pilot
+            && launch.kind == "led"
+            && launch.agent.is_some()
+            && !matches!(launch.state.as_str(), "refused" | "ended")
+    }) {
+        let args = json!({"agent_id": launch.agent, "why": PILOT_ENDED});
+        match keep_call(daemon, launch, "agent_stop", &args) {
+            Ok(()) => {
+                let _ = daemon.write(|store| {
+                    store
+                        .end_launch(&launch.machine, &launch.launch)
+                        .map(|()| ((), None))
+                });
+            }
+            Err(why) => eprintln!(
+                "flottille daemon: the session {} its pilot led on {} is not ended with it: {why}",
+                launch.agent.as_deref().unwrap_or_default(),
+                machine_name(daemon, launch)
+            ),
+        }
+    }
 }
 
 /// The live launch, from the machine `machine`, of `caller`'s child whose tree asked the request
@@ -1447,6 +1664,10 @@ pub(crate) async fn call(
                      one {length}: put the rest in a file of its place"
                 ));
             }
+            // Its following counts what it writes, as one of a session here does.
+            if !child && crate::subscriptions::paused(daemon, &caller.id, &agent) {
+                return refused(crate::subscriptions::PAUSED.to_owned());
+            }
             let id = flottille_core::agent::new_id().unwrap_or_default();
             let kept = keep(
                 daemon,
@@ -1461,6 +1682,9 @@ pub(crate) async fn call(
                 return refused(format!(
                     "refused: {why}: send it again once {name} took them"
                 ));
+            }
+            if !child {
+                crate::subscriptions::exchanged(daemon, &caller.id, &agent, false);
             }
             Some(Outcome::Done(match link {
                 Ok(_) => format!(
@@ -1661,12 +1885,53 @@ fn stand_in(
     name: &str,
     mode: flottille_core::agent::GateMode,
 ) -> Result<Agent, Refused> {
+    let agent = stand_in_agent(
+        daemon,
+        format!("{}@{machine}", call.caller),
+        &call.project,
+        &call.title,
+        name,
+        mode,
+    );
+    keep_stand_in(daemon, &agent, name)
+}
+
+/// The pilot of the led session `launch` starts here, an agent of another machine: stood in for
+/// here (`<caller>@<machine's key>`), so that the session records who leads it as one led on this
+/// machine does. Kept as it is when it called here before: its title is the one its calls said.
+pub(crate) fn pilot_stand_in(
+    daemon: &Daemon,
+    launch: &Launch,
+    project: &str,
+    mode: flottille_core::agent::GateMode,
+) -> Result<String, String> {
+    let id = format!("{}@{}", launch.caller, launch.machine);
+    if let Ok(Some(kept)) = daemon.read(|store| store.agent(&id)) {
+        return Ok(kept.id);
+    }
+    let name = launch.asked["from"].as_str().unwrap_or("another machine");
+    let agent = stand_in_agent(daemon, id, project, "", name, mode);
+    match keep_stand_in(daemon, &agent, name) {
+        Ok(agent) => Ok(agent.id),
+        Err(Refused::Never(why) | Refused::Now(why)) => Err(why),
+    }
+}
+
+/// A caller of the machine named `name` stood in for here as `id`.
+fn stand_in_agent(
+    daemon: &Daemon,
+    id: String,
+    project: &str,
+    title: &str,
+    name: &str,
+    mode: flottille_core::agent::GateMode,
+) -> Agent {
     let now = now_ms();
-    let agent = Agent {
-        id: format!("{}@{machine}", call.caller),
+    Agent {
+        id,
         provider: "claude".into(),
         role: "lead".into(),
-        project: call.project.clone(),
+        project: project.to_owned(),
         workspace: None,
         folder: no_place(daemon),
         state: flottille_core::agent::AgentState::Idle,
@@ -1689,7 +1954,7 @@ fn stand_in(
         parent: None,
         depth: 0,
         epoch: 0,
-        title: Some(call.title.trim().to_owned()).filter(|title| !title.is_empty()),
+        title: Some(title.trim().to_owned()).filter(|title| !title.is_empty()),
         brief: Some(name.to_owned()),
         reported_at: None,
         quiet_turns: 0,
@@ -1701,11 +1966,15 @@ fn stand_in(
         led: false,
         detached_from: None,
         titled_by: None,
-    };
+    }
+}
+
+/// Keeps `agent`, a caller of the machine named `name` stood in for here.
+fn keep_stand_in(daemon: &Daemon, agent: &Agent, name: &str) -> Result<Agent, Refused> {
     daemon
         .write(|store| {
             store
-                .keep_stand_in(&agent, MOST_STAND_INS)
+                .keep_stand_in(agent, MOST_STAND_INS)
                 .map(|agent| (agent, None))
         })
         .map_err(|error| Refused::Now(error.to_string()))?

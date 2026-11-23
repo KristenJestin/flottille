@@ -1131,6 +1131,8 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
                     .launched_by
                     .as_deref()
                     .filter(|_| agent.led)
+                    // A pilot of another machine is no session of this one's list.
+                    .filter(|pilot| !crate::across::is_stand_in(pilot))
                     .filter(|pilot| parents.contains_key(pilot))
                     .map(root_of),
             }

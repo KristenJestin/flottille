@@ -2934,9 +2934,13 @@ impl Store {
         let mut forgotten = 0;
         for (id, at) in stand_ins {
             let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+            // One that leads a session here, or led it before it was detached, is kept with it.
             if at < idle_before || left(machine) {
-                forgotten +=
-                    transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+                forgotten += transaction.execute(
+                    "DELETE FROM agents WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM agents \
+                     WHERE launched_by = ?1 OR detached_from = ?1)",
+                    params![id],
+                )?;
             }
         }
         let awaited: Vec<(String, i64, u64)> = {
@@ -3542,6 +3546,29 @@ impl Store {
             Ok((launch, heard))
         })
         .collect()
+    }
+
+    /// The led session of the launch `launch` (`way`, with the machine of key `machine`) was
+    /// detached by the user: it is theirs, as a session handed over is, and its caller reaches it
+    /// no more as the session it started.
+    pub fn hand_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET kind = 'handed' WHERE way = ?1 AND machine = ?2 AND launch = ?3 \
+             AND kind = 'led'",
+            params![way, machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the pilot of another machine of the led session of the launch `launch` still
+    /// follows it here: `on`, `paused` or `ended`, as that pilot's machine said it.
+    pub fn follow_launch(&mut self, machine: &str, launch: &str, following: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET asked = json_set(asked, '$.following', ?3) WHERE way = 'in' \
+             AND machine = ?1 AND launch = ?2",
+            params![machine, launch, following],
+        )?;
+        Ok(())
     }
 
     /// Ends the launch `out` `launch` to `machine`: the session it started there ended, and counts

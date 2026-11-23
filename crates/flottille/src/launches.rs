@@ -317,6 +317,12 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
+    // Its pilot follows it from here, as a session it leads here: held, from now on too, since its
+    // first wake may come before anything else is heard of it.
+    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent) {
+        crate::subscriptions::lead_elsewhere(daemon, &caller.id, session, &asked.title, machine)
+            .map_err(refused)?;
+    }
     Ok(Outcome::Done(answer(&asked, machine, &launch, &placed)))
 }
 
@@ -378,10 +384,21 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
     };
     let back = format!("{back}{kept}");
     if let Some(number) = placed["request"].as_u64() {
+        let follows = match asked.kind {
+            LaunchKind::Led => {
+                "it runs as a session led by you: its questions, reports and end wake you as a \
+                 local led session's do, and session_send reaches it"
+            }
+            LaunchKind::Child => {
+                "it runs as your child: its report, questions and failure come to you as a local \
+                 child's do, and agent_send reaches it"
+            }
+            LaunchKind::Handed => "it runs as the user's session, handed over",
+        };
         return format!(
             "Not started yet: request #{number} on {machine} is waiting for the user, who allows \
-             or refuses it there. {named} will run on {machine} {place}, once allowed. {back} You \
-             are told nothing more here: go on with your own work."
+             or refuses it there. {named} will run on {machine} {place}, once allowed. {back} Once \
+             the user allows it there, {follows}. Go on with your own work meanwhile."
         );
     }
     match asked.kind {
@@ -393,7 +410,11 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
         ),
         LaunchKind::Led => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
-             of {machine}, not your child: the user sees it there and may talk to it. {back}"
+             of {machine}, not your child: the user sees it under you and may talk to it there. \
+             It asks you its questions: a delivery [flottille:session-turn-ended] wakes you when \
+             it asks, reports or ends, with its last message, kept while this machine is off. \
+             Answer with session_send, relay to the user with ask, or do nothing; forge \
+             unsubscribe with its session stops the wakes. {back}"
         ),
         LaunchKind::Handed => format!(
             "Started a session for the user, {named}, on {machine}, {place}, handed over. It is \
@@ -1060,6 +1081,17 @@ async fn with_agent(
     let role = crate::roles::role(role).ok_or_else(|| format!("there is no role {role}"))?;
     let mode =
         GateMode::parse(launch.asked["mode"].as_str().unwrap_or_default()).unwrap_or_default();
+    // A led session records its pilot as one led here does: the caller, stood in for here.
+    let led = launch.kind == "led";
+    let pilot = match led {
+        true => Some(crate::across::pilot_stand_in(
+            daemon,
+            &launch,
+            &asked.project,
+            mode,
+        )?),
+        false => None,
+    };
     let agent = agents::create(
         daemon,
         &project,
@@ -1075,8 +1107,8 @@ async fn with_agent(
             model: asked.model.clone(),
             effort: asked.effort.clone(),
             gate_mode: Some(mode),
-            launched_by: None,
-            led: false,
+            launched_by: pilot,
+            led,
             launched: None,
         },
     )
