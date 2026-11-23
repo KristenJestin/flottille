@@ -1034,7 +1034,8 @@ local child's work; nothing moves your branch.*
 - **The making shows on the launch's row** (#1214): the receiving machine answers the launch with
   the project it runs in, whether it made it, and whose settings it keeps (`remote.launches`'
   `there`); the row of a launch whose project was made says `server · preparing ledgerly` until
-  that machine's first delivery, and the caller's answer says when the project there keeps its
+  that machine's first delivery (its list saying `running` or `idle` does not end it; one saying
+  it needs the user does), and the caller's answer says when the project there keeps its
   own settings or another machine's (`It runs in the project app there, which the user registered
   on server: it keeps its own settings, not yours`).
 - **The place**: a new workspace on that machine, on the caller's branch for each repository of the

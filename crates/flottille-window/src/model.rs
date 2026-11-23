@@ -568,12 +568,18 @@ fn last_known(
     if let Some(machine) = machine.filter(|machine| !machine.online()) {
         return (machine.state_words(), None);
     }
-    // Idle there before it said anything here, in a project made for it: that machine prepares
-    // the project, which its list does not say.
+    // Nothing said here yet, in a project made for it: the row cannot tell that machine's setup
+    // from its first turn, which its list says `running` (or `idle` before the turn starts), so
+    // only a list that says it asks the user is believed before the first delivery.
     let preparing = launched.heard.is_none() && launched.making.is_some();
     // Held, it waits for the user there: a machine of before lists it idle, which says less.
     let held = launched.state == "held";
-    if let Some(listed) = listed.filter(|listed| !((preparing || held) && listed.state == "idle")) {
+    let says_less = |state: &str| match (held, preparing) {
+        (true, _) => state == "idle",
+        (_, true) => matches!(state, "idle" | "running"),
+        _ => false,
+    };
+    if let Some(listed) = listed.filter(|listed| !says_less(&listed.state)) {
         return (listed.state.clone(), listed_mark(&listed.state));
     }
     // A held launch is `held` until the user's answer there comes back: allowed, it is `started`.
