@@ -456,6 +456,15 @@ impl Machines {
         self.machines.iter().find(|machine| machine.name == name)
     }
 
+    /// The session `launched` as its machine's light list says it now, when it lists it.
+    pub fn listed(&self, launched: &Launched) -> Option<&Listed> {
+        self.lists
+            .machines
+            .iter()
+            .find(|(name, _)| *name == launched.machine)
+            .and_then(|(_, listed)| listed.iter().find(|session| session.id == launched.agent))
+    }
+
     /// When the member `name` was last seen, as its machine's state says it.
     pub fn seen(&self, member: &Member) -> Option<&Machine> {
         let machine = member.machine.as_deref()?;

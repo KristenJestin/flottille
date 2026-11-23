@@ -316,6 +316,9 @@ fn what_is_new_is_found_again_in_settings(cx: &mut TestAppContext) {
         label(cx, "version-whats-new-open")
     );
 
+    // Unfolded: a click on a button still folding in lands on nothing.
+    settle(cx);
+
     click(cx, "version-whats-new-open");
 
     until(&shell, cx, "the page opens", |cx| {

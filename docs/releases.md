@@ -207,13 +207,21 @@ about five minutes, not twenty.
   running them again picks up a line written after the push). When it selects no binary, it runs the unit tests of the crates whose
   `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
   to build for that). `.github/scripts/pr-tests.sh` decides, from the files and the description,
-  nothing else. A pull request that touches no test and no such source runs `check` alone. A push
+  nothing else. A pull request that touches no test and no such source runs `check` alone.
+  Beside them, **the guards** (`guards`) run on every pull request the Rust suite runs for,
+  whatever it changes: the tests that hold a rule over the whole repository, which no pull
+  request's files select (the unit tests of the `flottille` binary, every command's section of
+  `docs/cli.md` among them, `window_parity`, and the window's `window_rules`). A push
   to a feature branch (`feat/**`, `fix/**`) runs **nothing**: its pull request's run is its run.
 - **A push** to `dev` (each merge), `main`, `stable/*`, `next/*` or a tag runs **the whole suite**
   (below). It **blocks nothing**: a pull request's `verify` never waits for it, and a failure there
   names the test and the merge that brought it, to be fixed by a pull request of its own while
   merges go on (no freeze of `dev`). What it does gate is the publish of that push (`dev`'s beta,
   a line's release candidate): `publish` waits for its `verify`.
+
+**A pull request writes no cache**: it reads those dev's pushes write (`save-if` on every
+`Swatinem/rust-cache`, and Gradle's downloads saved by a push only), which its own would evict from
+the repository's 10 GB while serving it alone.
 
 Every job that compiles links with **mold** (`rui314/setup-mold@v1`, which makes it the default
 `ld`: no flag changes, so the caches stay valid).
@@ -235,10 +243,12 @@ The jobs of the whole suite's run:
   (`org.robolectric:android-all-instrumented`, in `apps/android/app/build.gradle.kts`), fetched
   by `:app:fetchRobolectricJars`, a step of `ci.sh` of its own (tried three times) that runs before
   any test, and every test task reads it from there with `robolectric.offline=true`: a test that
-  needs a jar it was not given fails, it never goes to the network.
+  needs a jar it was not given fails, it never goes to the network. Gradle's downloads
+  (`~/.gradle/caches/modules-2`) are kept from one run to the next: Maven Central answers a jar
+  fetched on every run with 429, Too Many Requests.
 - **`verify`**, the required check, always concludes. On a push it fails unless `check`,
-  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check` and
-  `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
+  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check`,
+  `guards` and `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
   pass). Skipped is also a pass when `changes` said the Rust suite is not needed, and when `hub`
   ran, it must have passed.
 
