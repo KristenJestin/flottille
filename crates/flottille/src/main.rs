@@ -356,10 +356,10 @@ enum ProviderAction {
     Enable { name: String },
     /// Start no more agents on it: those running now go on, and fail at their next start
     Disable { name: String },
-    /// Choose the provider, model and effort a new session starts on
+    /// Choose the provider, model and effort, and the mode, a new session starts in
     NewSession {
         /// The provider; with no model or effort, they are the ones it proposes
-        #[arg(required_unless_present = "clear")]
+        #[arg(required_unless_present_any = ["clear", "mode"])]
         provider: Option<String>,
         #[arg(long, requires = "provider")]
         model: Option<String>,
@@ -368,6 +368,9 @@ enum ProviderAction {
         /// Go back to what the provider proposes
         #[arg(long, conflicts_with = "provider")]
         clear: bool,
+        /// The mode a session you start is in: ask, auto or full
+        #[arg(long, value_parser = ["ask", "auto", "full"])]
+        mode: Option<String>,
     },
 }
 
@@ -551,13 +554,25 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     provider,
                     model,
                     effort,
-                    clear: _,
+                    clear,
+                    mode,
                 } => {
-                    let answer = Client::connect_or_start(&paths)?.request(
-                        "provider.set_new_session",
-                        serde_json::json!({"provider": provider, "model": model, "effort": effort}),
-                    )?;
-                    print!("{}", providers::new_session_text(&answer["new_session"]));
+                    let mut client = Client::connect_or_start(&paths)?;
+                    // The mode alone leaves what a new session starts on as it is.
+                    if provider.is_some() || clear {
+                        let answer = client.request(
+                            "provider.set_new_session",
+                            serde_json::json!({"provider": provider, "model": model, "effort": effort}),
+                        )?;
+                        print!("{}", providers::new_session_text(&answer["new_session"]));
+                    }
+                    if let Some(mode) = mode {
+                        let answer = client.request(
+                            "provider.set_new_session_mode",
+                            serde_json::json!({"mode": mode}),
+                        )?;
+                        print!("{}", providers::new_session_mode_text(&answer));
+                    }
                     return Ok(ExitCode::SUCCESS);
                 }
                 ProviderAction::List { json } => {

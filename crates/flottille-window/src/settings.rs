@@ -186,6 +186,17 @@ pub const COMPACTION_HINT: &str = "When an agent's context fills up, its convers
 pub const NEW_SESSIONS_SENTENCE: &str = "What a session starts on when its project says nothing \
      and you pick nothing: left alone, the provider's own recommendation.";
 
+/// What the mode's row says under its label: which sessions it is for.
+pub const NEW_SESSION_MODE_HINT: &str =
+    "Sessions agents start, and children, keep their own rules.";
+
+/// What the page says once when Full is chosen for new sessions: what Full lends.
+pub const FULL_LENDS: &str = "In Full, a session's commands run as yours, as in your terminal: \
+     nothing is held back, the vault included.";
+
+/// The modes of a new session, in the order of the choice: the daemon's word and the word said.
+const NEW_SESSION_MODES: [(&str, &str); 3] = [("ask", "Ask"), ("auto", "Auto"), ("full", "Full")];
+
 /// What the page says of the summary's cost, under the model that writes it.
 pub const COMPACTOR_COST: &str = "Each summary is a turn of this model, on your own quota.";
 
@@ -331,6 +342,8 @@ pub struct SettingsPage {
     judge_refused: Option<String>,
     /// What new sessions start on, chosen, until the daemon lists it.
     new_session_pending: bool,
+    /// The mode of new sessions chosen, until the daemon lists it: what it was asked to become.
+    new_session_mode_pending: Option<String>,
     /// The developer mode, once the daemon said it.
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
@@ -469,6 +482,7 @@ impl SettingsPage {
             judge_turning: None,
             judge_refused: None,
             new_session_pending: false,
+            new_session_mode_pending: None,
             developer: None,
             developer_pending: None,
             findings: None,
@@ -1230,6 +1244,30 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// The mode new sessions start in as the page shows it: the one asked for while the daemon
+    /// has not listed it, else what the machine keeps (Auto until it said).
+    fn new_session_mode_shown(&self) -> &str {
+        self.new_session_mode_pending
+            .as_deref()
+            .or(self.providers.new_session_mode.as_deref())
+            .unwrap_or("auto")
+    }
+
+    /// Asks the daemon for the mode a new session starts in.
+    pub fn choose_new_session_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if self.new_session_mode_pending.is_some() || self.new_session_mode_shown() == mode {
+            return;
+        }
+        self.new_session_mode_pending = Some(mode.to_owned());
+        let mode = mode.to_owned();
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::SetNewSessionMode { mode })
+            })
+            .ok();
+        cx.notify();
+    }
+
     /// The daemon's answer to what new sessions start on: a toast says it.
     pub fn new_session_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.new_session_pending = false;
@@ -1240,6 +1278,28 @@ impl SettingsPage {
             ),
             None => toast(
                 Toast::success("New sessions saved").detail("They apply to the next session."),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// The daemon's answer to the mode new sessions start in: a toast of its own says it.
+    pub fn new_session_mode_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        // Taken, the mode stays on the choice while the providers are read again: it never slides
+        // back to the old one and forward once more.
+        let asked = self.new_session_mode_pending.take();
+        if let (None, Some(mode)) = (&refused, asked) {
+            self.providers.new_session_mode = Some(mode);
+        }
+        match refused {
+            Some(why) => toast(
+                Toast::failure("The mode of new sessions was not changed").detail(why),
+                cx,
+            ),
+            None => toast(
+                Toast::success("New session mode saved")
+                    .detail("It applies to the next session you start."),
                 cx,
             ),
         }
@@ -2151,6 +2211,67 @@ impl SettingsPage {
                     .into_any_element()
             },
         );
+        // The mode: one visible label, the state said once by the choice; the note under it is
+        // there only while Full is chosen, and unfolds and folds away with its gap.
+        let shown_mode = self.new_session_mode_shown().to_owned();
+        let mode = Segmented::new(
+            "new-sessions-mode",
+            "Mode",
+            NEW_SESSION_MODES,
+            NEW_SESSION_MODES
+                .iter()
+                .position(|(key, _)| *key == shown_mode)
+                .unwrap_or(1),
+        )
+        .alarm(2)
+        .disabled(!self.providers.known)
+        .on_choose({
+            let this = cx.entity().downgrade();
+            move |index, _, cx| {
+                let (mode, _) = NEW_SESSION_MODES[index];
+                this.update(cx, |this, cx| this.choose_new_session_mode(mode, cx))
+                    .ok();
+            }
+        });
+        let mode_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(space::LG)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(div().text_size(px(13.)).child("Mode"))
+                    .child(
+                        div()
+                            .id("new-sessions-mode-hint")
+                            .aria_label(NEW_SESSION_MODE_HINT)
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child(NEW_SESSION_MODE_HINT)
+                            .test_support(),
+                    ),
+            )
+            .child(mode);
+        let full_note = presence_of(
+            "new-sessions-full-note-line",
+            (shown_mode == "full").then(|| SharedString::from(FULL_LENDS)),
+            move |said| {
+                div()
+                    .id("new-sessions-full-note")
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.wait)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            },
+        )
+        .space(space::MD);
         let card = div()
             .id("new-sessions")
             .p(space::LG)
@@ -2162,6 +2283,15 @@ impl SettingsPage {
             .border_color(p.line)
             .child(choice)
             .child(notice)
+            .child(
+                div()
+                    .mt(space::MD)
+                    .pt(space::MD)
+                    .border_t_1()
+                    .border_color(p.line)
+                    .child(mode_row),
+            )
+            .child(full_note)
             .test_support();
         // Its models are the providers': the card crossfades in from a skeleton once they are known.
         Section::new("new-sessions", "New sessions")
