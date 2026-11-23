@@ -688,9 +688,11 @@ fn a_run_still_cannot_read_an_ssh_setting_it_can_write() {
     }
     // A root-owned file ssh includes is the run's own in its namespace, as its owner: never one
     // it may change, by a write or its mode, nor from a namespace of its own made inside, where it
-    // holds every capability, by a remount or an unmount of the copy. The daemon is told the
-    // machine's configuration is a file of the test's that includes the machine's own, so that
-    // one root-owned file is always given.
+    // holds every capability, by a remount or an unmount of the copy (Landlock refuses a
+    // sandboxed process every mount, and the copy's file system is read-only besides). The
+    // propagation of `/` is left as it is, which Landlock would refuse to change before any of
+    // these was tried. The daemon is told the machine's configuration is a file of the test's
+    // that includes the machine's own, so that one root-owned file is always given.
     let root_owned = PathBuf::from("/etc/ssh/ssh_config");
     if !std::fs::metadata(&root_owned).is_ok_and(|m| m.is_file()) {
         eprintln!("skipped: no /etc/ssh/ssh_config on this machine");
@@ -734,7 +736,8 @@ fn a_run_still_cannot_read_an_ssh_setting_it_can_write() {
              attempt('write', write(target))\n\
              attempt('mode', lambda: os.chmod(target, 0o666))\n\
              out['owner'] = os.stat(target).st_uid == os.getuid()\n\
-             nested = subprocess.run(['unshare', '-Urm', 'python3', 'nested.py', target],\n\
+             nested = subprocess.run(['unshare', '-Urm', '--propagation', 'unchanged',\n\
+             \x20   'python3', 'nested.py', target],\n\
              \x20   capture_output=True, text=True)\n\
              out['nested'] = json.loads(nested.stdout) if nested.returncode == 0 \\\n\
              \x20   else nested.stderr[-500:]\n\
