@@ -14,7 +14,8 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::tree::{
-    group_count_id, group_header_id, new_group_id, project_id, project_slot_id, projects_menu_id,
+    by_machine_id, group_count_id, group_header_id, new_group_id, project_id, project_slot_id,
+    projects_menu_id, session_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
@@ -517,6 +518,16 @@ fn the_arrangement_arriving_after_the_rows_slides_them_into_their_groups(cx: &mu
     for name in ["alpha", "bravo", "charlie", "delta"] {
         project(&user, name);
     }
+    // The daemon holds nothing yet: the window opens, and its rows are drawn and at rest.
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the rows", |cx| {
+        present(cx, project_id("delta"))
+    });
+    settle(&shell, cx);
+    assert!(held(&shell, "Work", cx).is_empty());
+
+    // The arrangement comes later: another window made it, and this one reads it on its next
+    // change (a change that changes nothing here, of a group it has never heard of).
     user.call(
         "window.set",
         json!({"key": "arrangement", "value": {
@@ -525,45 +536,51 @@ fn the_arrangement_arriving_after_the_rows_slides_them_into_their_groups(cx: &mu
                 "projects": ["charlie", "bravo"]}]}}),
     )
     .unwrap();
-    let (shell, cx) = window(&user, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.group_opened("g1", true, window, cx)
+    });
 
-    // Every frame from the first row to the settled list: where each row is.
+    // Every frame from then to the settled list: where each row is.
     let rows = ["alpha", "bravo", "charlie", "delta"];
-    let mut seen: Vec<Vec<Option<f32>>> = Vec::new();
+    let mut seen: Vec<Vec<f32>> = Vec::new();
     let began = Instant::now();
+    let mut arrived = None;
     loop {
         step(&shell, FRAME, cx);
         seen.push(
             rows.iter()
-                .map(|name| {
-                    present(cx, project_slot_id(name))
-                        .then(|| f32::from(bounds(cx, project_slot_id(name)).origin.y))
-                })
+                .map(|name| f32::from(bounds(cx, project_slot_id(name)).origin.y))
                 .collect(),
         );
-        let drawn = seen.last().unwrap().iter().all(Option::is_some);
-        if (drawn && seen.len() > 120) || began.elapsed() > Duration::from_secs(25) {
+        if arrived.is_none() && !held(&shell, "Work", cx).is_empty() {
+            arrived = Some(seen.len());
+        }
+        if arrived.is_some_and(|at| seen.len() > at + 60)
+            || began.elapsed() > Duration::from_secs(25)
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(arrived.is_some(), "the arrangement never arrived");
     assert_eq!(held(&shell, "Work", cx), names(&["charlie", "bravo"]));
+    let mut moved = 0;
     for (at, name) in rows.iter().enumerate() {
-        let path: Vec<f32> = seen.iter().filter_map(|frame| frame[at]).collect();
-        // The row came in, rising a little: where it was drawn first is where it moves from.
-        let from = path[path.len().min(3) - 1];
-        let to = *path.last().unwrap();
+        let path: Vec<f32> = seen.iter().map(|frame| frame[at]).collect();
+        let (from, to) = (path[0], *path.last().unwrap());
         let worst = path
             .windows(2)
             .map(|pair| (pair[1] - pair[0]).abs())
             .fold(0., f32::max);
         if (to - from).abs() >= 10. {
+            moved += 1;
             assert!(
                 worst <= (to - from).abs() * 0.6,
                 "{name} jumps ({from} to {to}, {worst} in one frame): {path:?}"
             );
         }
     }
+    assert!(moved > 0, "the rows moved into their groups: {seen:?}");
 }
 
 #[gpui_kit::test]
@@ -632,6 +649,130 @@ fn a_project_absent_while_the_user_drags_returns_to_its_place_and_group(cx: &mut
     settle(&shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["bravo"]), "its group");
     assert_eq!(loose(&shell, cx), names(&["charlie", "alpha"]));
+}
+
+#[gpui_kit::test]
+fn a_window_that_never_heard_of_a_group_does_not_erase_it(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "alpha");
+    project(&user, "bravo");
+    let (one, cx_one) = window(&user, first);
+    until(&one, cx_one, "the rows of the window", |cx| {
+        present(cx, project_id("bravo"))
+    });
+    // Open before the group is made: it reads the arrangement once, as it opens.
+    let (two, cx_two) = window(&user, second);
+    until(&two, cx_two, "the rows of the other window", |cx| {
+        present(cx, project_id("bravo"))
+    });
+    settle(&two, cx_two);
+
+    new_group("Work", &one, cx_one);
+    eventually("the daemon keeps the group", || {
+        kept(&user)["groups"][0]["name"] == "Work"
+    });
+
+    // The other window drags a project: what it writes is the daemon's arrangement with this
+    // change, not its own copy.
+    drag(project_id("alpha"), project_id("bravo"), 6., &two, cx_two);
+    eventually("the daemon keeps the order", || {
+        strings(&kept(&user)["order"]) == ["bravo", "alpha"]
+    });
+    assert_eq!(
+        kept(&user)["groups"][0]["name"],
+        "Work",
+        "the group made elsewhere is kept"
+    );
+    until(&two, cx_two, "the group in the window that moved", |cx| {
+        two.read_with(cx, |s, _| {
+            s.listing().groups.iter().any(|group| group.name == "Work")
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn the_projects_menu_offers_group_by_machine_disabled_while_there_is_one_machine(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha"], cx);
+    assert!(!shell.read_with(cx, |s, cx| s.offers_grouping(cx)));
+    cx.update(|window, cx| window.click(projects_menu_id(), cx));
+    settle(&shell, cx);
+    assert!(
+        present(cx, by_machine_id()),
+        "the switch is in the menu from the start"
+    );
+    assert_eq!(
+        label(cx, "projects-by-machine-detail").as_deref(),
+        Some("One machine"),
+        "and says why it is off"
+    );
+    cx.update(|window, cx| window.click(by_machine_id(), cx));
+    settle(&shell, cx);
+    assert!(
+        !shell.read_with(cx, |s, _| s.is_by_machine()),
+        "it does nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_dropped_below_a_row_still_folding_away_lands_where_it_was_let_go(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo", "charlie", "delta"], cx);
+    // alpha is held a little below charlie.
+    let (_, end) = lift(project_id("alpha"), project_id("charlie"), 6., &shell, cx);
+    // bravo goes while it is held: its row folds away, still drawn between alpha and charlie.
+    user.call("project.remove", json!({"name": "bravo"}))
+        .unwrap();
+    until(&shell, cx, "bravo to leave the list", |cx| {
+        !shell.read_with(cx, |s, _| s.listing().loose.contains(&"bravo".to_owned()))
+    });
+    assert!(
+        present(cx, project_slot_id("bravo")),
+        "the row is still folding away"
+    );
+    release(end, &shell, cx);
+    assert_eq!(loose(&shell, cx), names(&["charlie", "alpha", "delta"]));
+}
+
+#[gpui_kit::test]
+fn a_press_on_a_session_row_never_drags_the_project(cx: &mut TestAppContext) {
+    let user = user();
+    for name in ["alpha", "bravo", "charlie"] {
+        project(&user, name);
+    }
+    let session = user
+        .call(
+            "agent.start",
+            json!({"project": "alpha", "message": "Say hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session's row", |cx| {
+        present(cx, session_id(&session)) && present(cx, project_id("charlie"))
+    });
+    settle(&shell, cx);
+
+    // A press on the session row, moved past a project below: the project is not moved with it.
+    let start = bounds(cx, session_id(&session)).center();
+    let end = point(
+        start.x,
+        bounds(cx, project_id("charlie")).center().y + px(6.),
+    );
+    press(start, &shell, cx);
+    pull(start, end, &shell, cx);
+    release(end, &shell, cx);
+    settle(&shell, cx);
+    assert_eq!(loose(&shell, cx), names(&["alpha", "bravo", "charlie"]));
 }
 
 /// The dialog of New group… refused `name`, with what it says, and made no group.
