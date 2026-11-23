@@ -104,15 +104,11 @@ fn window_through<'a>(
     open_through(connect, cx)
 }
 
-/// Another window on the user's daemon.
-fn open<'a>(user: &User, cx: &'a mut TestAppContext) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    open_through(Arc::new(user.connector()), cx)
-}
-
-fn open_through<'a>(
+/// Another window, on the daemon `connect` reaches.
+fn open_through(
     connect: Connect,
-    cx: &'a mut TestAppContext,
-) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    cx: &mut TestAppContext,
+) -> (Entity<Shell>, &mut VisualTestContext) {
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));
     (shell, cx)
