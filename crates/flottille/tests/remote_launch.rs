@@ -1667,10 +1667,15 @@ fn a_held_launch_allowed_there_tells_its_caller() {
         .unwrap();
 
     let told = prompt_with(&pc, &format!("Request #{number} on server"));
-    assert!(told.contains("allowed by the user of server"), "{told}");
-    assert!(told.contains("runs now"), "{told}");
     assert!(
-        told.contains("its questions, reports and end wake you"),
+        told.contains(&format!(
+            "Request #{number} on server (agent_launch) was approved by the user, and Flottille \
+             has now done it. Its result:\n\nStarted a session led by you, \"Allowed there\""
+        )),
+        "{told}"
+    );
+    assert!(
+        told.contains("[flottille:session-turn-ended] wakes you when it asks, reports or ends"),
         "{told}"
     );
     assert!(told.contains("session_send"), "{told}");
@@ -1695,8 +1700,12 @@ fn a_held_launch_refused_there_tells_its_caller() {
         .unwrap();
 
     let told = prompt_with(&pc, &format!("Request #{number} on server"));
-    assert!(told.contains("refused by the user of server"), "{told}");
-    assert!(told.contains("Refused there"), "{told}");
+    assert!(
+        told.contains(&format!(
+            "Request #{number} on server (agent_launch) was refused by the user. Nothing was done."
+        )),
+        "{told}"
+    );
     eventually("the launch recorded as refused", || {
         launches_out(&pc) == vec!["refused"]
     });
@@ -1724,37 +1733,39 @@ fn a_refused_launch_leaves_no_waiting_row_under_its_pilot() {
 
 #[test]
 fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
-    let (_hub, pc, _server) = pc_and_server(server_user(None), Some(""));
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
 
-    let led = done(&launched(
-        &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Led, held", "brief": "Do it."}),
-    ))
-    .to_owned();
-    assert!(!led.contains("told nothing more"), "{led}");
-    assert!(led.contains("Once the user allows it there"), "{led}");
-    assert!(
-        led.contains("its questions, reports and end wake you"),
-        "{led}"
-    );
-    assert!(led.contains("session_send"), "{led}");
-    assert!(led.contains("You are told when the user decides"), "{led}");
-
-    let child = done(&launched(
+    let held = done(&launched(
         &mcp,
         json!({"kind": "child", "machine": "server", "title": "Child, held", "brief": "Do it."}),
     ))
     .to_owned();
-    assert!(child.contains("request #"), "{child}");
-    assert!(!child.contains("told nothing more"), "{child}");
-    assert!(child.contains("Once the user allows it there"), "{child}");
-    assert!(child.contains("agent_send"), "{child}");
+    assert!(!held.contains("told nothing more"), "{held}");
     assert!(
-        child.contains("You are told when the user decides"),
-        "{child}"
+        held.contains("The answer will be handed to you when the user gives it."),
+        "{held}"
     );
+    assert!(
+        held.contains("It will run on server in workspace"),
+        "{held}"
+    );
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    // Once allowed, its answer says what follows, as a child launched here.
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(told.contains("Launched \"Child, held\""), "{told}");
+    assert!(
+        told.contains("Its report, questions and failure come to you"),
+        "{told}"
+    );
+    assert!(told.contains("agent_send"), "{told}");
 }
 
 #[test]
@@ -1773,4 +1784,60 @@ fn a_led_session_started_on_another_machine_says_what_follows() {
     assert!(text.contains("[flottille:session-turn-ended]"), "{text}");
     assert!(text.contains("when it asks, reports or ends"), "{text}");
     assert!(text.contains("session_send"), "{text}");
+}
+
+#[test]
+fn a_held_launch_whose_session_ends_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Ended while held");
+    let session = titled(&server, "Ended while held");
+
+    server
+        .user
+        .call("agent.stop", json!({"agent": session["id"]}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("its session there ended before the user of server decided"),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    assert!(rows_under_pilots(&pc).is_empty());
+}
+
+#[test]
+fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register("[[setup]]\nrun = \"false\"\n");
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Failing setup",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(&pc, "[flottille:child-failed]");
+    let all = pc.prompts().join("\n");
+    let allowed = all
+        .find(&format!(
+            "Request #{number} on server (agent_launch) was approved"
+        ))
+        .expect(&all);
+    let failed = all.find("[flottille:child-failed]").unwrap();
+    assert!(
+        allowed < failed,
+        "the failure came before the answer:\n{all}"
+    );
 }

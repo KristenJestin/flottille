@@ -235,6 +235,38 @@ fn refusing_the_share_refuses_the_launch_saying_what_was_missing() {
 }
 
 #[test]
+fn allowed_before_the_share_tells_the_caller_nothing_was_done() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    needing_env(&pc);
+    signed_in_there(&pc);
+    led_there(&pc, "Ledger", "auto");
+    let request = the_request(&server);
+    let number = request["number"].as_u64().unwrap();
+
+    // Allowed while .env is still not shared: its setup cannot lay it.
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    eventually("pc's root told", || {
+        pc.prompts().iter().any(|prompt| {
+            prompt.contains(&format!(
+                "Request #{number} on server (agent_launch) was approved by the user, but \
+                 nothing was done"
+            ))
+        })
+    });
+    let told = pc
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("nothing was done"))
+        .unwrap();
+    assert!(told.contains(".env"), "{told}");
+    assert!(!told.contains("runs now"), "{told}");
+}
+
+#[test]
 fn a_file_made_a_vault_entry_is_in_no_event_log_or_answer() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
     needing_env(&pc);

@@ -48,6 +48,18 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "a child on another machine works in a workspace of its own there, a copy of its parent's \
          place (docs/tools.md, agent_launch)",
     ),
+    (
+        "held: answer",
+        "It will run in workspace ",
+        "a launch held on another machine runs there once allowed, on a copy of its caller's \
+         place, and its commits come back on a ref of their own (docs/tools.md, agent_launch)",
+    ),
+    (
+        "held: root's deliveries",
+        "Started a session ",
+        "the answer of a session started on another machine is led_started_answer's row, which \
+         #1272 turns on; this row compares how the user's answer reaches the caller",
+    ),
 ];
 
 /// Where the launched agent runs.
@@ -481,19 +493,16 @@ fn held_then(method: &'static str) -> impl Fn(Topology) -> Seen {
 }
 
 #[test]
-#[ignore = "#1273: a held launch across never tells its caller the user's answer"]
 fn led_held_then_allowed() {
     parity(held_then("approval.approve"));
 }
 
 #[test]
-#[ignore = "#1273: a held launch across never tells its caller the user's answer"]
 fn led_held_then_refused() {
     parity(held_then("approval.deny"));
 }
 
 #[test]
-#[ignore = "#1272: in Auto, the pilot's session_send to its led session across is refused: names no session"]
 fn led_asks_its_pilot() {
     parity(|topology| {
         let play = Play::new(topology, "auto", first_turn(json!([ask(QUESTION)])));
