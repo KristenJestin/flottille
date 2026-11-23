@@ -1533,9 +1533,9 @@ fn interrupting_the_server_s_session_gets_its_answer(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_draft_of_the_server_s_session_is_read_back(cx: &mut TestAppContext) {
-    let (_hub, pc, server, _here, there) = two_machines();
-    server
-        .user
+    let (_hub, pc, _server, _here, there) = two_machines();
+    // The window keeps its drafts on this machine, another machine's sessions' too.
+    pc.user
         .call(
             "draft.set",
             json!({"kind": "session", "target": there, "text": "Half a thought"}),
@@ -1617,7 +1617,14 @@ fn back_to_a_machine_gone_offline_leaves_the_history_where_it_was(cx: &mut TestA
     });
     open_there(&shell, cx, &there);
     settle(&shell, cx);
-    click(cx, session_id(&here));
+    let again = here.clone();
+    shell.update_in(cx, |s, window, cx| {
+        s.open(
+            flottille_window::shell::Selection::Session(again),
+            window,
+            cx,
+        )
+    });
     until(&shell, cx, "this machine's session is drawn again", |cx| {
         shows_reply(&shell, cx, &here)
     });
@@ -1673,6 +1680,7 @@ fn a_read_asked_by_the_server_s_answer_after_its_page_was_left_goes_to_the_serve
         let page = s.main().read(cx).settings_page().cloned().unwrap();
         page.read(cx).vault().clone()
     });
+    vault.update(cx, |vault, cx| vault.read(cx));
     until(&shell, cx, "the server's vault is listed", |cx| {
         vault.read_with(cx, |vault, _| {
             vault
