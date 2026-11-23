@@ -439,11 +439,26 @@ pub(crate) fn tell(
         true => Err(format!(
             "a delivery to another machine is {LONGEST} characters at most, this one {length}"
         )),
-        false => keep(daemon, &launch, &name, id, &message, back),
+        false => keep(
+            daemon,
+            &launch.machine,
+            &launch.launch,
+            &name,
+            id,
+            &message,
+            back,
+        ),
     };
     if let Err(why) = kept {
         eprintln!("flottille daemon: a {kind} for {name} is dropped: {why}");
-        let outgoing = outgoing(&launch, &name, String::new(), &message, back);
+        let outgoing = outgoing(
+            &launch.machine,
+            &launch.launch,
+            &name,
+            String::new(),
+            &message,
+            back,
+        );
         let _ = daemon.emit(
             "remote.delivery_dropped",
             dropped(daemon, &outgoing, None, Some(&why)),
@@ -453,7 +468,8 @@ pub(crate) fn tell(
 }
 
 fn outgoing(
-    launch: &Launch,
+    machine: &str,
+    launch: &str,
     name: &str,
     id: String,
     message: &MachineMessage,
@@ -462,28 +478,29 @@ fn outgoing(
     Outgoing {
         seq: 0,
         id,
-        machine: launch.machine.clone(),
+        machine: machine.to_owned(),
         name: name.to_owned(),
-        launch: launch.launch.clone(),
+        launch: launch.to_owned(),
         message: serde_json::to_value(message).unwrap_or_default(),
         back,
         at: now_ms(),
     }
 }
 
-/// Keeps `message` for the machine of `launch`, and sends it when it can; refused when as many
-/// wait for that machine as may.
+/// Keeps `message` of `launch` (or of the request it answers) for the machine of key `machine`,
+/// and sends it when it can; refused when as many wait for that machine as may.
 fn keep(
     daemon: &Arc<Daemon>,
-    launch: &Launch,
+    machine: &str,
+    launch: &str,
     name: &str,
     id: String,
     message: &MachineMessage,
     back: bool,
 ) -> Result<(), String> {
-    let outgoing = outgoing(launch, name, id, message, back);
+    let outgoing = outgoing(machine, launch, name, id, message, back);
     let waiting = daemon
-        .read(|store| store.outgoing(Some(&launch.machine)))
+        .read(|store| store.outgoing(Some(machine)))
         .map_err(|error| format!("it cannot be kept: {error}"))?
         .len();
     if waiting >= MOST_KEPT {
@@ -492,7 +509,7 @@ fn keep(
     daemon
         .write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None)))
         .map_err(|error| format!("it cannot be kept: {error}"))?;
-    send_kept(daemon, &launch.machine);
+    send_kept(daemon, machine);
     Ok(())
 }
 
@@ -821,6 +838,9 @@ fn delivered(
             .to_owned()
             .into());
     }
+    if deliver.launch.starts_with("request-") {
+        return delivered_answer(daemon, &machine, &name, &deliver);
+    }
     let launch = daemon
         .read(|store| store.launches("out", Some(&machine), LaunchFilter::Named(&deliver.launch)))
         .map_err(|error| Refused::Now(error.to_string()))?
@@ -879,7 +899,14 @@ pub(crate) async fn serve_call(
     received: Received,
     call: Box<Call>,
 ) {
-    let answer = serving(&remote).and_then(|daemon| called(&daemon, &remote, &from, *call));
+    let answer = match serving(&remote) {
+        Err(refused) => Err(refused),
+        // A session its agent did not start: served as a call of this machine's agents is.
+        Ok(daemon) if call.launch.is_empty() && call.tool != "approval_answer" => {
+            session_call(&daemon, &remote, &from, *call).await
+        }
+        Ok(daemon) => called(&daemon, &remote, &from, *call),
+    };
     received.answer(answer_of(answer, "a call"));
 }
 
@@ -1281,6 +1308,7 @@ pub(crate) async fn call(
             agent: if answer { String::new() } else { agent.clone() },
             tool: tool.to_owned(),
             arguments: args.to_string(),
+            ..Call::default()
         }))
     };
     let link = crate::link::remote_of(daemon)
@@ -1321,7 +1349,8 @@ pub(crate) async fn call(
             let id = flottille_core::agent::new_id().unwrap_or_default();
             let kept = keep(
                 daemon,
-                &launch,
+                &launch.machine,
+                &launch.launch,
                 &name,
                 format!("call-{id}"),
                 &message(format!("call-{id}")),
@@ -1389,6 +1418,445 @@ pub(crate) async fn call(
             }
         }
     }
+}
+
+// A session of another machine, the same as one of this machine (`docs/remote.md`, "A tree
+// across machines"): found in the list that machine last gave, called through its daemon, judged
+// there by the same gate as a call of one of its own agents.
+
+/// A live root session another machine of the user's lists: that machine's key, as hex, its
+/// name, and the session as it listed it.
+#[derive(Clone, Debug)]
+pub(crate) struct Away {
+    pub(crate) machine: String,
+    pub(crate) name: String,
+    pub(crate) session: flottille_link::LightSession,
+}
+
+/// The sessions other machines list, those of `project` only when one is given.
+pub(crate) fn sessions_elsewhere(daemon: &Daemon, project: Option<&str>) -> Vec<Away> {
+    let Ok(remote) = crate::link::remote_of(daemon) else {
+        return Vec::new();
+    };
+    remote
+        .sessions_elsewhere(daemon)
+        .into_iter()
+        .filter(|(_, _, session)| project.is_none_or(|project| session.project == project))
+        .map(|(machine, name, session)| Away {
+            machine,
+            name,
+            session,
+        })
+        .collect()
+}
+
+/// What keeps the machine of `away` from being reached now, in the words of its state
+/// (`offline since 22:14`, `needs an update`); `None` while it is linked.
+pub(crate) fn unreachable(daemon: &Daemon, away: &Away) -> Option<String> {
+    let why = crate::link::remote_of(daemon)
+        .ok()?
+        .link_to(&away.name)
+        .err()?;
+    let why = why
+        .strip_prefix(&format!("{} is ", away.name))
+        .unwrap_or(&why);
+    Some(why.split(": ").next().unwrap_or(why).to_owned())
+}
+
+/// The tools of the tree an agent uses about itself, which a caller of another machine is not
+/// given here: every other tool of the tree addresses a session, and is.
+const OWN: [&str; 5] = ["agent_launch", "report", "ask", "ask_user", "ask_parent"];
+
+/// The tools of the tree that address a session, as a caller of another machine is given them.
+pub(crate) fn stand_in_tools() -> Vec<&'static str> {
+    crate::tree::TOOLS
+        .iter()
+        .copied()
+        .filter(|tool| !OWN.contains(tool))
+        .collect()
+}
+
+/// The tools that only read: all a `viewer` device's agents may call on another machine
+/// (`docs/remote.md`, "Roles").
+const READS: [&str; 2] = ["session_read", "agent_status"];
+
+/// Whether `id` is a caller of another machine stood in for here (`<caller>@<machine's key>`):
+/// no id of this machine's holds an `@`.
+pub(crate) fn is_stand_in(id: &str) -> bool {
+    id.contains('@')
+}
+
+/// How a caller of another machine stood in for here is named to the user and to a session:
+/// `agent <id> of <machine>`, its machine's name kept as its `brief`.
+pub(crate) fn stand_in_name(agent: &Agent) -> Option<String> {
+    let (id, _) = agent.id.split_once('@')?;
+    let machine = agent.brief.as_deref().unwrap_or("another machine");
+    Some(
+        match agent.title.as_deref().filter(|title| !title.is_empty()) {
+            Some(title) => format!("\"{title}\" (agent {id} of {machine})"),
+            None => format!("agent {id} of {machine}"),
+        },
+    )
+}
+
+/// The grant of a caller of another machine stood in for here: the tools of the tree that
+/// address a session, in its project here when this machine has one of that name, in an empty
+/// place otherwise (it reaches no file).
+pub(crate) fn stand_in_grant(daemon: &Daemon, agent: &Agent) -> crate::mcp::Grant {
+    let project = crate::projects::load_project(daemon, &agent.project).unwrap_or_else(|_| {
+        flottille_core::project::Project::new(
+            &agent.project,
+            agent.folder.clone(),
+            Vec::new(),
+            &daemon.paths.data,
+        )
+    });
+    crate::mcp::Grant {
+        agent: agent.id.clone(),
+        epoch: agent.epoch,
+        tools: stand_in_tools(),
+        place: crate::place::Place::main(&project, project.folder.clone()),
+        launched: false,
+    }
+}
+
+/// An agent's id another machine gives: 1 to 64 letters, digits, dashes or underscores.
+fn agent_word(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A text another machine gives that goes on a card: one line, `most` characters at most.
+fn one_line(text: &str, most: usize) -> bool {
+    text.chars().count() <= most && !text.contains(|c: char| c.is_control())
+}
+
+/// The agent of the machine `machine` (named `name`) that `call` comes from, stood in for here:
+/// kept, its title, project and mode as the call says them now.
+fn stand_in(
+    daemon: &Daemon,
+    call: &Call,
+    machine: &str,
+    name: &str,
+    mode: flottille_core::agent::GateMode,
+) -> Result<Agent, Refused> {
+    let now = now_ms();
+    let agent = Agent {
+        id: format!("{}@{machine}", call.caller),
+        provider: "claude".into(),
+        role: "lead".into(),
+        project: call.project.clone(),
+        workspace: None,
+        folder: daemon.paths.data.clone(),
+        state: flottille_core::agent::AgentState::Idle,
+        state_reason: None,
+        created_at: now,
+        updated_at: now,
+        active_at: None,
+        exchanged_at: None,
+        ended_at: None,
+        chosen: Default::default(),
+        taken: Default::default(),
+        pending: Default::default(),
+        native_id: None,
+        agent_version: None,
+        instructions: String::new(),
+        tools: stand_in_tools()
+            .iter()
+            .map(|tool| (*tool).to_owned())
+            .collect(),
+        parent: None,
+        depth: 0,
+        epoch: 0,
+        title: Some(call.title.trim().to_owned()).filter(|title| !title.is_empty()),
+        brief: Some(name.to_owned()),
+        reported_at: None,
+        quiet_turns: 0,
+        waiting_on_answer: false,
+        reopens: false,
+        images: None,
+        gate_mode: mode,
+        launched_by: None,
+        led: false,
+        detached_from: None,
+        titled_by: None,
+    };
+    daemon
+        .write(|store| store.keep_stand_in(&agent).map(|agent| (agent, None)))
+        .map_err(|error| Refused::Now(error.to_string()))
+}
+
+/// A `call` of the machine of `from` aimed at a session of this machine its agent did not start:
+/// served as the same call of an agent of this machine would be, by the same gate, the same
+/// judge and the same tool, the caller stood in for by an agent of its own (`stand_in`), in its
+/// tree's mode (Full only with the user's signed switch). A `viewer` device's agents only read.
+async fn session_call(
+    daemon: &Arc<Daemon>,
+    remote: &Arc<Remote>,
+    from: &PublicKey,
+    call: Call,
+) -> Result<Value, Refused> {
+    let name = remote
+        .name_of(from)
+        .ok_or_else(|| "it is no machine of the user's".to_owned())?;
+    let machine = hex(from.as_bytes());
+    if !an_id(&call.id)
+        || !agent_word(&call.caller)
+        || !agent_word(&call.agent)
+        || !(call.tree.is_empty() || agent_word(&call.tree))
+    {
+        return Err(
+            "a call, its caller and its session are named by short words"
+                .to_owned()
+                .into(),
+        );
+    }
+    if !one_line(&call.title, flottille_link::TITLE_LIMIT) {
+        return Err(format!(
+            "a title is one line of {} characters at most",
+            flottille_link::TITLE_LIMIT
+        )
+        .into());
+    }
+    if call.project.trim().is_empty() || !one_line(&call.project, 64) {
+        return Err("a project is named by one line of 64 characters at most"
+            .to_owned()
+            .into());
+    }
+    let tool = stand_in_tools()
+        .into_iter()
+        .find(|tool| *tool == call.tool)
+        .ok_or_else(|| format!("{:?} is not a tool another machine calls", call.tool))?;
+    let args: Value = serde_json::from_str(&call.arguments)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| "the call's arguments are not a JSON object".to_owned())?;
+    let members = {
+        let remote = remote.clone();
+        tokio::task::spawn_blocking(move || remote.members())
+            .await
+            .map_err(|_| Refused::Now("the member list could not be read".to_owned()))?
+            .map_err(Refused::Now)?
+            .0
+    };
+    let member = members
+        .by_machine(from)
+        .ok_or_else(|| "it is no member's machine".to_owned())?;
+    if member.role == flottille_link::Role::Viewer && !READS.contains(&tool) {
+        return Ok(json!({"outcome": "refused", "text": format!(
+            "refused: {name} may only view: a controller or a runner may call {tool} on a \
+             session of another machine"
+        )}));
+    }
+    let tree = match call.tree.is_empty() {
+        true => &call.caller,
+        false => &call.tree,
+    };
+    let mode = crate::launches::mode_taken(
+        &call.mode,
+        call.switch.as_deref(),
+        &member.name,
+        tree,
+        &members,
+    );
+    let agent = stand_in(daemon, &call, &machine, &name, mode)?;
+    let grant = Arc::new(stand_in_grant(daemon, &agent));
+    let played = crate::mcp::played_for(daemon, &grant, tool, args, &call.id).await;
+    eprintln!(
+        "flottille daemon: {tool} of agent {} of {name} on {}: {}",
+        call.caller, call.agent, played.word
+    );
+    Ok(json!({"text": played.text, "outcome": played.word, "request": played.request}))
+}
+
+/// A tool of the tree aimed at `away`, a session of another machine: sent to that machine,
+/// which judges it and answers it as it would one of its own agents' calls; refused at once
+/// while that machine cannot be reached, saying why. A call held there for its user is answered
+/// as held, and its answer awaited from that machine.
+pub(crate) async fn forward(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+    away: &Away,
+) -> Outcome {
+    let caller = match daemon.read(|store| store.agent(&grant.agent)) {
+        Ok(Some(caller)) => caller,
+        Ok(None) => return Outcome::Failed(format!("there is no agent {}", grant.agent)),
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    let name = &away.name;
+    let session = match away.session.title.trim() {
+        "" => format!("the session agent {}", away.session.id),
+        title => format!("the session \"{title}\" (agent {})", away.session.id),
+    };
+    let link = crate::link::remote_of(daemon)
+        .map_err(|failure| failure.message)
+        .and_then(|remote| remote.link_to(name).map(|(link, _)| link));
+    let link = match link {
+        Ok(link) => link,
+        Err(why) => {
+            return Outcome::Refused(format!(
+                "refused: {why}: {session} runs there, and cannot be reached now; call again \
+                 once {name} is back"
+            ));
+        }
+    };
+    let (tree, mode, switch) = crate::launches::mode_sent(daemon, &caller);
+    let title: String = caller
+        .title
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(flottille_link::TITLE_LIMIT)
+        .collect();
+    let call = Call {
+        id: format!(
+            "call-{}",
+            flottille_core::agent::new_id().unwrap_or_default()
+        ),
+        launch: String::new(),
+        caller: caller.id.clone(),
+        agent: away.session.id.clone(),
+        tool: tool.to_owned(),
+        arguments: args.to_string(),
+        project: caller.project.clone(),
+        title,
+        tree,
+        mode: mode.to_owned(),
+        switch,
+    };
+    match link
+        .send(&Message::Machine(MachineMessage::Call(Box::new(call))))
+        .await
+    {
+        Ok(answer) if answer["later"].is_string() => Outcome::Refused(format!(
+            "refused: {name} cannot answer now ({}): {session} cannot be reached now; call \
+             again in a moment",
+            answer["later"].as_str().unwrap_or_default()
+        )),
+        Ok(answer) => {
+            let text = answer["text"].as_str().unwrap_or_default().to_owned();
+            if let Some(number) = answer["request"].as_u64() {
+                let _ = daemon.write(|store| {
+                    store
+                        .await_answer(&away.machine, number, &caller.id)
+                        .map(|()| ((), None))
+                });
+            }
+            match answer["outcome"].as_str() {
+                Some("ok") => Outcome::Done(text),
+                Some("held") => Outcome::Held(text),
+                Some("failed") => Outcome::Failed(text),
+                _ => Outcome::Refused(text),
+            }
+        }
+        Err(LinkError::Declined { reason, .. }) => {
+            Outcome::Refused(format!("refused by {name}: {reason}"))
+        }
+        Err(error) => Outcome::Refused(format!(
+            "refused: {error}: {session} cannot be reached now; call again in a moment"
+        )),
+    }
+}
+
+/// The answer of request `request`, held for the user of this machine, of a caller of another
+/// machine stood in for here: kept for that machine, and delivered there to the agent that
+/// called, as an `approval` delivery is on one machine. True when the request was such a caller's.
+pub(crate) fn answer_back(daemon: &Arc<Daemon>, request: &Request, body: &str) -> bool {
+    let Some((caller, machine)) = request.agent.split_once('@') else {
+        return false;
+    };
+    let name = daemon
+        .read(|store| store.agent(&request.agent))
+        .ok()
+        .flatten()
+        .and_then(|agent| agent.brief)
+        .unwrap_or_else(|| "another machine".to_owned());
+    let launch = format!("request-{}", request.number);
+    let id = format!("approval-{}", request.number);
+    let message = MachineMessage::Deliver(Box::new(Deliver {
+        id: id.clone(),
+        launch: launch.clone(),
+        agent: caller.to_owned(),
+        kind: "approval".to_owned(),
+        body: body.chars().take(LONGEST).collect(),
+        urgency: approval::URGENT.to_owned(),
+        ended: false,
+    }));
+    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false) {
+        eprintln!(
+            "flottille daemon: the answer of request #{} for {name} is dropped: {why}",
+            request.number
+        );
+    }
+    true
+}
+
+/// The answer of a request of another machine a caller of this one waited for (`forward`),
+/// `launch` naming it as `request-<n>`: stored for that agent as its `approval` delivery, once;
+/// refused when that agent waits for no such answer of that machine.
+fn delivered_answer(
+    daemon: &Arc<Daemon>,
+    machine: &str,
+    name: &str,
+    deliver: &Deliver,
+) -> Result<Value, Refused> {
+    let number = deliver
+        .launch
+        .strip_prefix("request-")
+        .and_then(|number| number.parse::<u64>().ok())
+        .ok_or_else(|| "a delivery names its launch or its request".to_owned())?;
+    if deliver.kind != "approval" {
+        return Err(format!(
+            "no delivery of kind {:?} answers a request of another machine",
+            deliver.kind
+        )
+        .into());
+    }
+    let length = deliver.body.chars().count();
+    if length > LONGEST {
+        return Err(
+            format!("a delivery is {LONGEST} characters at most, this one {length}").into(),
+        );
+    }
+    let id = format!("{}-{}", deliver.launch, deliver.id);
+    // Sent again, an answer already taken is answered and stored once.
+    if daemon
+        .read(|store| store.delivery(&id))
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return Ok(json!({}));
+    }
+    let awaited = daemon
+        .write(|store| {
+            store
+                .take_awaited(machine, number, &deliver.agent)
+                .map(|taken| (taken, None))
+        })
+        .map_err(|error| Refused::Now(error.to_string()))?;
+    if !awaited {
+        return Err(format!(
+            "agent {} of this machine waits for no answer of request #{number} of {name}",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+        .into());
+    }
+    deliveries::deliver(
+        daemon,
+        &deliver.agent,
+        "approval",
+        Some(id),
+        &deliver.body,
+        approval::URGENT,
+    )
+    .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
+    Ok(json!({}))
 }
 
 #[cfg(test)]

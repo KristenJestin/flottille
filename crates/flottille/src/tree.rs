@@ -98,6 +98,9 @@ fn failed(error: impl std::fmt::Display) -> Outcome {
 
 /// How an agent is named to another: its title and its id.
 pub fn named(agent: &Agent) -> String {
+    if let Some(named) = crate::across::stand_in_name(agent) {
+        return named;
+    }
     match &agent.title {
         Some(title) => format!("\"{title}\" (agent {})", agent.id),
         None => format!("agent {}", agent.id),

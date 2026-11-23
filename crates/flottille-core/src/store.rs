@@ -1011,6 +1011,18 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX finding_occurrences_by_finding ON finding_occurrences (finding, id);
 ",
+    "
+    -- The answers an agent of this machine waits for from another machine: a call of a session
+    -- there held for that machine's user (`docs/remote.md`, \"A tree across machines\"). Its
+    -- answer is taken from that machine only while it is waited for.
+    CREATE TABLE awaited_answers (
+        machine TEXT NOT NULL,
+        request INTEGER NOT NULL,
+        agent   TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        at      INTEGER NOT NULL,
+        PRIMARY KEY (machine, request)
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -1617,10 +1629,11 @@ impl Store {
         Ok(agent)
     }
 
-    /// Every agent, the oldest first.
+    /// Every agent, the oldest first. A caller of another machine stood in for here
+    /// ([`Store::keep_stand_in`]) is none of this machine's: only its id finds it.
     pub fn agents(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
-            "SELECT {AGENT_COLUMNS} FROM agents ORDER BY created_at, id"
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE id NOT LIKE '%@%' ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -1631,7 +1644,7 @@ impl Store {
     pub fn live_agents(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state NOT IN ('ended', 'failed') \
-             ORDER BY created_at, id"
+             AND id NOT LIKE '%@%' ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -2818,6 +2831,50 @@ impl Store {
         let event = append_event(&transaction, "leave.granted", leave.to_json())?;
         transaction.commit()?;
         Ok((Some(leave), Some(event)))
+    }
+
+    /// Keeps the agent of another machine that calls a session of this one, stood in for by
+    /// `agent` (its id `<caller>@<machine's key>`, never one of this machine's): made the first
+    /// time, its title, project, mode and machine's name brought up to date after. No event: it
+    /// is shown nowhere but on the requests and in the leaves it makes.
+    pub fn keep_stand_in(&mut self, agent: &Agent) -> Result<Agent> {
+        if self.agent(&agent.id)?.is_none() {
+            self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
+        } else {
+            self.connection.execute(
+                "UPDATE agents SET title = ?2, project = ?3, gate_mode = ?4, brief = ?5, \
+                 updated_at = ?6 WHERE id = ?1",
+                params![
+                    agent.id,
+                    agent.title,
+                    agent.project,
+                    agent.gate_mode.as_str(),
+                    agent.brief,
+                    now_ms()
+                ],
+            )?;
+        }
+        Ok(self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()))
+    }
+
+    /// Records that `agent` of this machine waits for the answer of request `request` of the
+    /// machine of key `machine`: that answer alone is taken from it.
+    pub fn await_answer(&mut self, machine: &str, request: u64, agent: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO awaited_answers (machine, request, agent, at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![machine, request as i64, agent, now_ms() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `agent` waited for the answer of request `request` of the machine of key
+    /// `machine`, which it waits for no more.
+    pub fn take_awaited(&mut self, machine: &str, request: u64, agent: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2 AND agent = ?3",
+            params![machine, request as i64, agent],
+        )? > 0)
     }
 
     /// Whether the user let `writer` write to `session`.

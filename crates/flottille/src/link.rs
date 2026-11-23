@@ -1516,6 +1516,31 @@ impl Remote {
         });
     }
 
+    /// The live root sessions each other machine of the user's last listed, without those whose
+    /// close waits to be sent: each with its machine's key, as hex, and name. It reads the store.
+    pub(crate) fn sessions_elsewhere(
+        &self,
+        daemon: &Daemon,
+    ) -> Vec<(String, String, flottille_link::LightSession)> {
+        let closing = crate::across::closing(daemon);
+        let kept = daemon
+            .read(|store| store.machine_sessions())
+            .unwrap_or_default();
+        let peers = self.peers().machines;
+        kept.into_iter()
+            .filter(|(machine, _, _, _)| peers.iter().any(|peer| hex_of(&peer.key) == *machine))
+            .flat_map(|(machine, name, list, _)| {
+                let list: flottille_link::SessionList =
+                    serde_json::from_value(list).unwrap_or_default();
+                list.sessions
+                    .into_iter()
+                    .filter(|session| !closing.contains(&(machine.clone(), session.id.clone())))
+                    .map(|session| (machine.clone(), name.clone(), session))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// `remote.sessions`: this machine's live root sessions, and each other machine's as it last
     /// listed them, without those whose close waits to be sent. It reads the store: called on a
     /// blocking thread.

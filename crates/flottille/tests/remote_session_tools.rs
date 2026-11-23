@@ -295,9 +295,18 @@ fn a_viewer_device_reads_and_cannot_write() {
     assert!(server.requests().is_empty(), "{:#?}", server.requests());
 }
 
-/// What an answer says once the ids, the titles, the numbers and the times in it are the same
+/// What an answer says once the ids, the titles, the numbers, the times and the cursor in it are the same
 /// for every session: what is left is what the tool says.
 fn shape(text: &str, id: &str, title: &str) -> String {
+    // A cursor names an event of its machine's store, whose numbers are that machine's own.
+    let text = match text.find("\"cursor\": \"") {
+        Some(at) => {
+            let start = at + "\"cursor\": \"".len();
+            let end = start + text[start..].find('"').unwrap_or(0);
+            format!("{}<cursor>{}", &text[..start], &text[end..])
+        }
+        None => text.to_owned(),
+    };
     text.replace(id, "<id>")
         .replace(title, "<title>")
         .chars()
