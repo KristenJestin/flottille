@@ -683,16 +683,20 @@ The gaps, where the platform does not allow more:
   cannot list it nor read the login's token or agent-browser's configuration, and agent-browser's
   daemon's socket is in a folder of a random name it cannot guess, but it can connect to the
   login's socket, whose name it can guess and which refuses a request without the token;
-- **a browser of a connection is reachable by any run of the same user while it runs**:
-  agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens
-  on `127.0.0.1`, on a port of its choice, with no token. Runs share the machine's network and
-  Landlock rules no network here, so a run finds the port (`/proc/net/tcp`, a scan of the local
-  ports, the `DevToolsActivePort` file Chrome writes in its profile when that is in a shared
-  `/tmp`) and drives the browser with no gate: it reads the pages that are open, a password
-  Flottille's login filled in a form before it is sent, the cookies and storage of every site
-  signed in to. Flottille never hands the address to an agent (the adapter keeps `get_cdp_url`
-  off, with no setting to turn it on), but that does not keep a run from finding it. The fix
-  planned: agent-browser and its Chrome in a network namespace of their own, which no run shares;
+- **a browser of a connection is in the runs' network where it cannot have its own** ("The
+  browser's network", below): agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`,
+  so Chrome's DevTools listens on the loopback, on a port of its choice, with no token, and
+  agent-browser's daemon listens on another. In its own network namespace neither is on the runs'
+  loopback. Where pasta is missing or the kernel refuses user namespaces (a distribution that
+  restricts them to programs its AppArmor profiles allow, Ubuntu from 23.10, included), the
+  browser still runs, in the runs' network: a run that finds the port (`/proc/net/tcp`, a scan)
+  drives it with no gate, reads its pages, the cookies and storage of every site signed in to.
+  The login refuses to fill a password then, and says to install passt; the daemon's log and
+  `flottille doctor` say the gap (`sandbox.browser_network` false in `--json`). Flottille never
+  hands the address to an agent (the adapter keeps `get_cdp_url` off). Where the user's runs
+  have no private mount namespace (above), a run is in the same user namespace as the daemon and
+  can enter the browser's (`setns`): the browser's network keeps it out only where runs have
+  theirs;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then
@@ -792,6 +796,41 @@ hold for what is made there (above). And the missing `XAUTHORITY` does not keep 
   for the runtime folder under it too, since Landlock grants by hierarchy and denies nothing. The
   user cannot write in these folders anyway; a runtime folder set in one the user writes to (an
   `XDG_RUNTIME_DIR` in `/tmp`) takes that folder's new entries from what the daemon runs.
+
+## The browser's network
+
+agent-browser's daemon and its Chrome, for a connection the agent-browser adapter applies to
+(`docs/extensions.md`, "agent-browser"), run in a **network namespace of their own**, so that
+their loopback is not the runs': Chrome's DevTools, which has no token and drives the browser
+(the pages open, a password filled before it is sent, every cookie), and agent-browser's own
+port listen there, where no run connects. passt's `pasta` gives the namespace its way out:
+
+- the browser reaches the internet as the user does, through pasta, unprivileged;
+- the host's loopback ports are forwarded into the namespace (`-T auto -U auto`): a developer's
+  server on `localhost:<port>`, or one a run started, opens in the browser, and so does the
+  host's resolver on its loopback address;
+- nothing is forwarded in (`-t none -u none`): no port of the namespace is on the host's
+  loopback, DevTools' included.
+
+The namespace is held by a process of its own, `flottille browser-network`, started by the daemon
+in a user and a network namespace it makes (the user mapped to themself), and pasta set up on it
+by its pid. It outlives a server, as the browser does: the connection's vault folder records it
+(`network`, the holder's pid and its namespaces), and the next server, a login and `close` find it
+there and start each command of agent-browser's in it, before the rest of its sandbox (its private
+mount namespace is made inside). The vault folder's socket keeps working by its path: a socket by
+its path is no network's. It ends when the browser is closed (`close`, the daemon's stop, the
+connection's removal); pasta ends with it. A browser that answers on the socket folder from
+outside the namespace (started by a server that ran without one) is closed before a login or a
+server uses the namespace, and a login checks, once its page is loaded, that every browser that
+answers runs in it.
+
+Without pasta on the `PATH`, or where the kernel refuses user namespaces, the server still runs,
+its browser in the runs' network, and the **login refuses to fill**: "install passt (pasta) to let
+the agent's browser sign in". Every other action of the connection works. `flottille doctor` says
+whether the browser's isolation is available (`sandbox.browser_network`), with the gap as a
+warning. passt is packaged by the main distributions, as `passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces through AppArmor, which
+refuses Flottille's own namespaces, the browser's included, until the user lifts the restriction
+or allows Flottille.
 
 ## The tests' keyring
 

@@ -1569,12 +1569,16 @@ way in:
   `$XDG_RUNTIME_DIR`, named after its session, `default`, which anyone can tell), so they reach
   the same browser, the removal of a display folder never takes a live socket, and a run does not
   reach that socket, which drives the browser with no gate (an init script, a route, the filled
-  password field read). **The browser is not out of every run's reach, though**: agent-browser
-  0.43 starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens on
-  `127.0.0.1`, on a port of its choice, with no token; runs share the machine's network and
-  Landlock rules no port here, so a run that finds the port (in `/proc/net/tcp`, by a scan) drives
-  the browser as well, reads its pages, a password filled in a form, its cookies (`docs/vault.md`,
-  "The gaps"). The adapter keeps `get_cdp_url`, which says the address, off. One browser per
+  password field read). **The server, its login, its reload and `close` run agent-browser in the
+  browser's network namespace** (`docs/vault.md`, "The browser's network"): agent-browser 0.43
+  starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens on the loopback, on
+  a port of its choice, with no token, and agent-browser's daemon on another port; in a network of
+  their own neither is on the runs' loopback, while the browser still reaches the internet and the
+  host's local servers (`localhost:<port>`) through passt's `pasta`. **Without pasta, or where the
+  kernel refuses user namespaces, the browser runs in the runs' network, where a run that finds
+  the port drives it, and the login refuses to fill**, saying to install passt; the rest of the
+  connection works, and `flottille doctor` says the gap. The adapter keeps `get_cdp_url`, which
+  says the address, off. One browser per
   connection, in the mode the switch says: a login uses the server's display folder (the running
   server's own, else made under the connection's name for the time of the login), and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
