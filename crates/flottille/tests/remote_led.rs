@@ -422,6 +422,36 @@ fn detaching_a_led_session_from_another_machine_tells_its_pilot() {
 }
 
 #[test]
+fn detaching_a_handed_session_from_another_machine_stores_nothing_for_its_stand_in() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "handed", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    ))
+    .to_owned();
+    let session = id_in(&text);
+    prompted(&server, "Finish the export.");
+
+    server
+        .user
+        .call("agent.detach", json!({"agent": session}))
+        .unwrap();
+
+    // Its session is told it is the user's alone; the stand-in of its starter, which nobody reads
+    // on this machine, is told nothing.
+    prompt_with(&server, "detached this session");
+    let stand_in = format!("{root}@{}", hex_of(&pc));
+    let stored = Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .delivery(&format!("detached-{stand_in}-from-{session}"))
+        .unwrap();
+    assert!(stored.is_none(), "{stored:?}");
+}
+
+#[test]
 fn the_pilot_unsubscribes_from_its_led_session_on_another_machine() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     script(
