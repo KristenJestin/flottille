@@ -450,7 +450,13 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
         present(cx, group_header_id(&id))
     });
     settle(&again, cx);
-    assert_eq!(held(&again, "Work", cx), names(&["alpha"]));
+    assert_eq!(
+        held(&again, "Work", cx),
+        names(&["alpha"]),
+        "the daemon holds {}, the window lists {:?}",
+        kept(&user),
+        again.read_with(cx, |s, _| s.listing())
+    );
     assert_eq!(loose(&again, cx), names(&["charlie", "bravo"]));
     assert!(
         !present(cx, project_id("alpha")),

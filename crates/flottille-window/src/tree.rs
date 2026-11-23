@@ -349,6 +349,8 @@ pub struct Sidebar {
     /// The places of the rows as last drawn (a project's name and its group), so that a row that
     /// is going stays where it was while it folds away.
     drawn: Vec<(String, Option<String>)>,
+    /// The rows the list opened with: they rise into place, the rows that come after unfold.
+    opening: Option<HashSet<String>>,
     /// The machines' sections, which replace the projects' list while they are shown by machine.
     sections: Vec<Entity<MachineNode>>,
     section_list: Listing<Entity<MachineNode>>,
@@ -387,6 +389,7 @@ impl Sidebar {
             list: Listing::default(),
             arranged: Arranged::default(),
             drawn: Vec::new(),
+            opening: None,
             sections: Vec::new(),
             section_list: Listing::default(),
             by_machine: false,
@@ -696,6 +699,11 @@ impl Sidebar {
                 row.placement,
                 row.value.clone(),
             );
+            // The rows the window opens with rise into place; one that comes later unfolds.
+            let item = match self.opening.as_ref().is_none_or(|rows| rows.contains(&key)) {
+                true => item.rising(),
+                false => item,
+            };
             canonical.push(key.clone());
             items.insert(key, item.into_any_element());
         }
@@ -731,6 +739,9 @@ impl Sidebar {
             }
         }
         self.drawn = order.clone();
+        if self.opening.is_none() && !order.is_empty() {
+            self.opening = Some(order.iter().map(|(key, _)| key.clone()).collect());
+        }
 
         let mut list = Reorderable::new(projects_list_id());
         for group in &self.arranged.groups {
