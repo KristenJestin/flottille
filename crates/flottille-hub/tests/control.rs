@@ -2410,3 +2410,291 @@ async fn a_pinned_list_changed_on_the_way_is_no_verdict() {
     );
     served.stop().await;
 }
+
+/// A hub that holds `key` and says `hello`: it welcomes every device whose protocol it speaks and
+/// keeps its session, and refuses the others as a hub does.
+async fn hub_saying(key: HubKey, hello: Hello) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let key = std::sync::Arc::new(key);
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (key, hello) = (key.clone(), hello.clone());
+            tokio::spawn(async move {
+                let Ok(arriving) = arrive(Box::new(stream), &key, &hello).await else {
+                    return;
+                };
+                let Ok(mut session) = arriving.welcome().await else {
+                    return;
+                };
+                while session.ask().await.is_ok() {}
+            });
+        }
+    });
+    address
+}
+
+/// The hub's hello, in its handshake or in its refusal before it, changed by `change` on its way
+/// to the device.
+fn hello_changed(
+    change: impl Fn(&mut serde_json::Map<String, serde_json::Value>) + Send + Sync + 'static,
+) -> std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> {
+    std::sync::Arc::new(move |line: &str| {
+        let Ok(serde_json::Value::Object(mut said)) = serde_json::from_str(line) else {
+            return line.to_owned();
+        };
+        let Some(serde_json::Value::Object(hello)) = said.get_mut("hello") else {
+            return line.to_owned();
+        };
+        change(hello);
+        format!("{}\n", serde_json::Value::Object(said))
+    })
+}
+
+/// A device pinned to the hub of `key` at `address`, with no list.
+fn pinned_to(address: SocketAddr, key: &HubKey) -> Device {
+    Device {
+        url: url(address),
+        hub: key.public(),
+        root: device_key(7).public(),
+        list: MemberList::default(),
+    }
+}
+
+/// What a device says of a hub's hello it could not check: no verdict on the version, the hub
+/// taken as not reached.
+fn assert_hello_not_taken(said: Result<Session, ControlError>, case: &str) {
+    let Err(error) = said else {
+        panic!("{case}: a session was opened on a hello the hub did not sign");
+    };
+    assert!(
+        matches!(error, ControlError::Unreachable { .. }),
+        "{case}: {error}"
+    );
+    let words = error.to_string();
+    assert!(words.contains("could not be reached"), "{case}: {words}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protocols_injected_on_the_way_never_say_needs_an_update() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let hub = hub_saying(hub_signer(&place.hub_folder()), hello()).await;
+    let machine = place.machine("pc");
+    let refused_unsigned = serde_json::json!({
+        "refused": "no protocol in common",
+        "hello": {"flottille": "9.9.9", "protocols": [999]},
+    })
+    .to_string();
+    type Rewrite = std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>;
+    let cases: [(&str, Rewrite); 2] = [
+        (
+            "protocols made [999] in the hub's hello",
+            hello_changed(|hello| {
+                hello.insert("protocols".to_owned(), serde_json::json!([999]));
+            }),
+        ),
+        (
+            "the hub's hello replaced by a refusal that says [999]",
+            std::sync::Arc::new(move |line: &str| {
+                if line.starts_with(r#"{"hub""#) {
+                    format!("{refused_unsigned}\n")
+                } else {
+                    line.to_owned()
+                }
+            }),
+        ),
+    ];
+    for (case, rewrite) in cases {
+        let (middle, _) = in_the_middle(hub, rewrite).await;
+        let said = pinned_to(middle, &key)
+            .connect(&machine, &hello(), &Tls::System)
+            .await;
+        assert_hello_not_taken(said, case);
+    }
+
+    // Untouched, the hub opens the session.
+    pinned_to(hub, &key)
+        .connect(&machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_for_the_version_changed_on_the_way_is_no_verdict() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    // A hub of an older protocol, which refuses the device and says its hello with its refusal.
+    let hub = hub_saying(hub_signer(&place.hub_folder()), old_hello()).await;
+    let machine = place.machine("pc");
+    let (middle, _) = in_the_middle(
+        hub,
+        hello_changed(|hello| {
+            hello.insert("protocols".to_owned(), serde_json::json!([0]));
+        }),
+    )
+    .await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &hello(), &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "the refusal's protocols made [0]");
+
+    // Untouched, it is the hub's word on the version, signed: update the hub.
+    let Err(ControlError::NeedsUpdate(refusal)) = pinned_to(hub, &key)
+        .connect(&machine, &hello(), &Tls::System)
+        .await
+    else {
+        panic!("the hub refuses an older protocol");
+    };
+    assert!(
+        refusal.to_string().contains("update the hub on its host"),
+        "{refusal}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protocols_stripped_on_the_way_never_lower_the_protocol() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let both = Hello {
+        flottille: "0.4.0".to_owned(),
+        protocols: vec![1, 2],
+    };
+    let hub = hub_saying(hub_signer(&place.hub_folder()), both.clone()).await;
+    let machine = place.machine("pc");
+    let (middle, _) = in_the_middle(
+        hub,
+        hello_changed(|hello| {
+            hello.insert("protocols".to_owned(), serde_json::json!([1]));
+        }),
+    )
+    .await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &both, &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "the hub's protocols made [1]");
+
+    // Untouched, both speak 2.
+    let session = pinned_to(hub, &key)
+        .connect(&machine, &both, &Tls::System)
+        .await
+        .unwrap();
+    assert_eq!(session.protocol(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hub_that_does_not_sign_its_hello_is_reached_on_the_device_s_newest_protocol_only() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let machine = place.machine("pc");
+    // A hub of before 2026-11-22 signs nothing of its hello: here, its signature taken out.
+    let unsigned = || {
+        hello_changed(|hello| {
+            hello.remove("signed");
+        })
+    };
+
+    // It speaks the device's newest protocol: the session opens on it, nothing being lower.
+    let hub = hub_saying(hub_signer(&place.hub_folder()), hello()).await;
+    let (middle, _) = in_the_middle(hub, unsigned()).await;
+    let session = pinned_to(middle, &key)
+        .connect(&machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    assert_eq!(session.protocol(), 2);
+
+    // It speaks only a lower one the device also speaks: not taken from what nothing signed.
+    let both = Hello {
+        flottille: "0.4.0".to_owned(),
+        protocols: vec![1, 2],
+    };
+    let older = hub_saying(hub_signer(&place.hub_folder()), old_hello()).await;
+    let (middle, _) = in_the_middle(older, unsigned()).await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &both, &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "an unsigned hello of protocol 1");
+
+    // It speaks none the device does: its refusal, unsigned, says no verdict, and what to check.
+    let (middle, _) = in_the_middle(older, unsigned()).await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &hello(), &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "an unsigned refusal of protocol 1");
+}
+
+/// The device's hello, `{"key": …, "hello": …}`, its protocols made `protocols` on its way to the
+/// hub.
+fn device_hello_made(
+    protocols: serde_json::Value,
+) -> std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> {
+    std::sync::Arc::new(move |line: &str| {
+        if !line.starts_with(r#"{"key":"#) {
+            return line.to_owned();
+        }
+        let mut said: serde_json::Value = serde_json::from_str(line).unwrap();
+        said["hello"]["protocols"] = protocols.clone();
+        format!("{said}\n")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_hello_changed_on_the_way_never_lowers_the_hub_s_protocol() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let both = Hello {
+        flottille: "0.4.0".to_owned(),
+        protocols: vec![1, 2],
+    };
+    let hub = hub_saying(hub_signer(&place.hub_folder()), both.clone()).await;
+    let machine = place.machine("pc");
+    // The device's hello made [1] on its way: the hub would speak 1, the device 2. The hub signs
+    // its hello over the device's hello as it received it, which the device does not check.
+    let (middle, _) = relay(hub, device_hello_made(serde_json::json!([1]))).await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &both, &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "the device's protocols made [1]");
+
+    // A hub of protocol 1 the device's [1, 2] made [2] on its way refuses it, its refusal signed
+    // over the [2] it received: the device, which sent [1, 2], takes it for no verdict.
+    let older = hub_saying(hub_signer(&place.hub_folder()), old_hello()).await;
+    let (middle, _) = relay(older, device_hello_made(serde_json::json!([2]))).await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &both, &Tls::System)
+        .await;
+    assert_hello_not_taken(
+        said,
+        "the device's protocols made [2], the hub's refusal for it",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_signed_by_another_key_than_the_pinned_one_is_no_verdict() {
+    // The hub the device pinned, and another hub, or a man in the middle with a key of its own:
+    // it signs a refusal over the real keys and nonces of the handshake, and says its own key.
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let other = Place::new();
+    let middle = hub_saying(hub_signer(&other.hub_folder()), old_hello()).await;
+    assert_ne!(
+        key.public(),
+        hub_signer(&other.hub_folder()).public(),
+        "two hubs, two keys"
+    );
+    let said = pinned_to(middle, &key)
+        .connect(&place.machine("pc"), &hello(), &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "a refusal signed by another key");
+
+    // Pinned to that key, the same refusal is the hub's word: update it.
+    let Err(ControlError::NeedsUpdate(_)) = pinned_to(middle, &hub_signer(&other.hub_folder()))
+        .connect(&place.machine("pc"), &hello(), &Tls::System)
+        .await
+    else {
+        panic!("a refusal signed by the pinned key is a verdict");
+    };
+}
