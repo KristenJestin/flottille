@@ -302,6 +302,9 @@ struct FromFile {
     path: String,
     /// Left out, the name a launch that needs the file asks for (`travelled::entry_for`).
     name: Option<String>,
+    /// Whether it takes the file again into the entry made of it before.
+    #[serde(default)]
+    replace: bool,
 }
 
 /// What a client that does not sign is answered for `vault.share`.
@@ -357,8 +360,9 @@ pub async fn call(
                 project,
                 path,
                 name,
+                replace,
             } = serde_json::from_value(params)?;
-            from_file(&daemon, &project, &path, name).await
+            from_file(&daemon, &project, &path, name, replace).await
         }
         "vault.asks" => {
             let open = daemon.read(asks)?.open;
@@ -554,12 +558,15 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
 /// lacks the file, so that it is shared with that machine through the vault, never as a file. The
 /// daemon reads the file only now: inside the project's folder, reached through no link, a text
 /// of `LARGEST_COPIED` bytes at most; its text is masked, line by line too, before it is kept,
-/// and nothing that is said of it holds a word of it.
+/// and nothing that is said of it holds a word of it. The entry is bound to the file
+/// (`uses::file_use`), the only entry a launch lays it from; an entry of that name is replaced
+/// only when it is that file's and `replace` says so, never another entry.
 async fn from_file(
     daemon: &std::sync::Arc<Daemon>,
     project: &str,
     path: &str,
     name: Option<String>,
+    replace: bool,
 ) -> Result<Value, Failure> {
     let found = crate::projects::load_project(daemon, project)?;
     if !crate::travelled::fit_path(path) {
@@ -591,9 +598,35 @@ async fn from_file(
     let text = zeroize::Zeroizing::new(String::from_utf8(text).map_err(|_| cannot("is not text"))?);
     mask_lines(&text);
     let name = name.unwrap_or_else(|| crate::travelled::entry_for(project, path));
+    let bound = uses::file_use(project, path);
+    let existing = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == name);
+    match existing.map(|entry| entry.bound) {
+        None => {}
+        Some(Some(own)) if own == bound => {
+            if !replace {
+                return Err(Failure::refused(format!(
+                    "the vault entry {name} holds {path} of {project} already: replace it to \
+                     take the file again"
+                )));
+            }
+        }
+        Some(own) => {
+            let what = own.as_deref().and_then(use_said).map_or_else(
+                || "holds another secret".to_owned(),
+                |said| format!("is for {said}"),
+            );
+            return Err(Failure::refused(format!(
+                "the vault entry {name} {what}: {path} of {project} is not made that entry; \
+                 remove it first, or give another name"
+            )));
+        }
+    }
     let made = set(
         daemon,
-        json!({"name": name, "secret": *text,
+        json!({"name": name, "secret": *text, "for": bound,
             "description": format!("The file {path} of the project {project}, which its setup copies")}),
     )
     .await
@@ -605,21 +638,36 @@ async fn from_file(
     Ok(made)
 }
 
+/// Whether `entry` is the one a launch from the machine `from` lays its file from: named `name`,
+/// made of that very file (bound to `bound`, `uses::file_use`) and shared from `from`. Any other
+/// entry of this machine's, whatever its name, is never written into a file.
+pub(crate) fn lays_file(entry: &Entry, name: &str, bound: &str, from: &str) -> bool {
+    entry.name == name
+        && entry.bound.as_deref() == Some(bound)
+        && entry.shared_from.as_deref() == Some(from)
+}
+
 /// The secret of the entry `name`, for the file a launch's setup copies (`travelled::lay`): only
-/// an entry bound to no use, since one bound to another serves no other; none when this machine
-/// lacks it or its keyring cannot give it now.
-pub(crate) async fn of_file(daemon: &Daemon, name: &str) -> Option<zeroize::Zeroizing<String>> {
+/// the entry `lays_file` takes; none when this machine lacks it or its keyring cannot give it now.
+pub(crate) async fn of_file(
+    daemon: &Daemon,
+    name: &str,
+    bound: &str,
+    from: &str,
+) -> Option<zeroize::Zeroizing<String>> {
     let entries = daemon.read(|store| store.vault_entries()).ok()?;
     entries
         .iter()
-        .find(|entry| entry.name == name && entry.bound.is_none())?;
+        .find(|entry| lays_file(entry, name, bound, from))?;
     let secret = daemon.vault.read(name).await.ok().flatten()?;
     Some(zeroize::Zeroizing::new(secret))
 }
 
-/// Masks each line of a secret of several lines, and each line's value after its `=`, from now
-/// on: a file's (`vault.from_file`), of which an agent may come across one line alone. A comment
-/// and a part too short to be told from an ordinary word are left.
+/// Masks each line of a secret of several lines, and each line's value, from now on: a file's
+/// (`vault.from_file`), of which an agent may come across one line alone. A value is what follows
+/// a line's first `=` or `:` (`KEY=v`, `key: v`, `"key": "v",`), its quotes and final comma left
+/// out, and the password of an address's `user:password@`. A comment and a part too short to be
+/// told from an ordinary word are left.
 pub(crate) fn mask_lines(secret: &str) {
     if !secret.contains('\n') {
         return;
@@ -628,15 +676,27 @@ pub(crate) fn mask_lines(secret: &str) {
         if line.starts_with('#') {
             continue;
         }
-        let value = line
-            .split_once('=')
-            .map_or(line, |(_, value)| value.trim().trim_matches(['"', '\'']));
-        for part in [line, value] {
+        let value = line.find(['=', ':']).map_or(line, |at| {
+            line[at + 1..]
+                .trim()
+                .trim_end_matches(',')
+                .trim_end()
+                .trim_matches(['"', '\''])
+        });
+        for part in [line, value].into_iter().chain(password_in(line)) {
             if part.chars().count() >= VAULT_SHORTEST {
                 secrets::add_vault_value(part);
             }
         }
     }
+}
+
+/// The password of the first address of `line` that has one (`scheme://user:password@host`).
+fn password_in(line: &str) -> Option<&str> {
+    let after = &line[line.find("://")? + 3..];
+    let authority = &after[..after.find(['/', '"', '\'', ' ']).unwrap_or(after.len())];
+    let userinfo = &authority[..authority.rfind('@')?];
+    Some(&userinfo[userinfo.find(':')? + 1..])
 }
 
 /// The entry `name` sent to the user's machine `machine` (`docs/remote.md`, "Vault entries"): only
@@ -950,7 +1010,8 @@ fn bound_checked(
 ) -> Result<Option<String>, Failure> {
     let Some(said) = use_said(bound) else {
         return Err(Failure::refused(format!(
-            "an entry is bound to worklog:<project> or connection:<name>: {bound} is neither"
+            "an entry is bound to worklog:<project>, connection:<name> or file:<project>/<path>: \
+             {bound} is none of them"
         )));
     };
     if !crate::extensions::bound_possible(bound) {

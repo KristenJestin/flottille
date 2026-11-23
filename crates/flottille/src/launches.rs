@@ -625,9 +625,10 @@ async fn judged(
     // launch the user's to decide, never the judge's.
     let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
     // The files its setup copies that the project here lacks: made from the vault entries the
-    // user shares from the caller's machine, which the user is asked for, whatever the mode.
+    // user shares from the caller's machine. A secret written into a file is the user's to allow,
+    // whatever the mode, those shared already named, those not yet asked for.
     let needs = crate::travelled::needs(&asked, &project.folder);
-    let missing = crate::travelled::missing(daemon, &needs);
+    let missing = crate::travelled::missing(daemon, &needs, sender);
     let name_of = |key: &str| {
         members
             .members()
@@ -646,6 +647,8 @@ async fn judged(
             1..1,
             crate::travelled::words(found, &asked, (sender, &machine), name_of, &classed),
         );
+        let lays = crate::travelled::lays(&asked.project, sender, &needs, &missing);
+        says.splice(0..0, lays);
         if !missing.is_empty() {
             says.insert(
                 0,
@@ -658,7 +661,7 @@ async fn judged(
     let judgement = match mode {
         GateMode::Full => None,
         GateMode::Ask => None,
-        GateMode::Auto if classed.base || !missing.is_empty() => None,
+        GateMode::Auto if classed.base || !needs.is_empty() => None,
         GateMode::Auto => match crate::judge::chosen(daemon).await {
             Some(judge) => {
                 let place = Place::main(&project, project.folder.clone());
@@ -671,12 +674,23 @@ async fn judged(
             None => None,
         },
     };
-    let accepted = missing.is_empty()
+    let accepted = needs.is_empty()
         && (mode == GateMode::Full
             || judgement
                 .as_ref()
                 .is_some_and(|judged| judged.verdict == "allow"));
     let mut reasons = classed.reasons.clone();
+    let laid: Vec<String> = needs
+        .iter()
+        .filter(|need| !missing.contains(need))
+        .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
+        .collect();
+    if !laid.is_empty() {
+        reasons.push(format!(
+            "it writes into this machine's project secrets of the vault that {sender} shared: {}",
+            crate::travelled::listed(&laid)
+        ));
+    }
     if !missing.is_empty() {
         let lacking: Vec<String> = missing
             .iter()
@@ -1096,12 +1110,8 @@ async fn with_agent(
         launch.request = Some(request.number);
         placed["request"] = request.number.into();
     } else {
+        // Never one that lays a file: that one is held for the user.
         launch.state = "started".into();
-        // Allowed at once, what it needs is in the vault here already: made before its setup,
-        // whose copy finds nothing of what could not be made, as it would of any missing file.
-        if let Err(why) = crate::travelled::lay(daemon, &launch.project, &needs_of(&launch)).await {
-            eprintln!("flottille daemon: launch {}: {why}", launch.launch);
-        }
     }
     // The workspace is recorded as it is in this very write: one removed since `placed` read it
     // is none, never an id a later workspace may take.
@@ -1195,7 +1205,8 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     if allowed && !needs.is_empty() {
         let (daemon, request) = (daemon.clone(), request.clone());
         tokio::spawn(async move {
-            let laid = crate::travelled::lay(&daemon, &launch.project, &needs).await;
+            let from = launch.asked["from"].as_str().unwrap_or_default().to_owned();
+            let laid = crate::travelled::lay(&daemon, &launch.project, &needs, &from).await;
             finish(&daemon, launch, &request, agent, laid.map_err(Some));
         });
         return;

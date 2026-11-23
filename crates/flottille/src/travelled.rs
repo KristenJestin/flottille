@@ -194,7 +194,9 @@ pub(crate) fn fit_path(path: &str) -> bool {
 }
 
 /// The vault entry the file `path` of the project `project` is offered as: `<project>-<path>`,
-/// each `/` a `-` and each character an entry's name cannot hold a `_`, 64 at most.
+/// each `/` a `-` and each character an entry's name cannot hold a `_`, 64 at most. Two files may
+/// have one name (`a/b` and `a-b`): the entry is bound to the one it was made of
+/// (`flottille_core::vault::file_use`), which alone it is laid as, and the other is refused it.
 pub fn entry_for(project: &str, path: &str) -> String {
     format!("{project}-{path}")
         .chars()
@@ -208,11 +210,15 @@ pub fn entry_for(project: &str, path: &str) -> String {
 }
 
 /// A file the setup of a launch's project copies, which this machine's project lacks: made, once
-/// the launch is allowed, from the vault entry `entry`, shared from the caller's machine.
+/// the launch is allowed, from the vault entry `entry`, made of that file (bound to `bound`) and
+/// shared from the caller's machine.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Need {
     pub path: String,
     pub entry: String,
+    /// The use the entry is bound to: none matches in a launch recorded before it was kept.
+    #[serde(default)]
+    pub bound: String,
 }
 
 /// What the launch `asked` needs here that the project in `folder` lacks: each file its setup
@@ -225,18 +231,24 @@ pub(crate) fn needs(asked: &LaunchAsk, folder: &Path) -> Vec<Need> {
         .map(|path| Need {
             path: path.clone(),
             entry: entry_for(&asked.project, path),
+            bound: flottille_core::vault::file_use(&asked.project, path),
         })
         .collect()
 }
 
-/// Those of `needs` whose vault entry this machine lacks: what the user is asked to share.
-pub(crate) fn missing(daemon: &Daemon, needs: &[Need]) -> Vec<Need> {
+/// Those of `needs` whose vault entry, made of that file and shared from `from`, this machine
+/// lacks: what the user is asked to share. An entry of another kind with that name is none.
+pub(crate) fn missing(daemon: &Daemon, needs: &[Need], from: &str) -> Vec<Need> {
     let held = daemon
         .read(|store| store.vault_entries())
         .unwrap_or_default();
     needs
         .iter()
-        .filter(|need| !held.iter().any(|entry| entry.name == need.entry))
+        .filter(|need| {
+            !held
+                .iter()
+                .any(|entry| crate::vault::lays_file(entry, &need.entry, &need.bound, from))
+        })
         .cloned()
         .collect()
 }
@@ -261,10 +273,31 @@ pub(crate) fn asked_to_share(project: &str, here: &str, missing: &[Need]) -> Str
     )
 }
 
+/// What the user is told, on every device, of each of `needs` this machine has: `app lays .env
+/// from the vault entry app-.env shared by pc`.
+pub(crate) fn lays(project: &str, from: &str, needs: &[Need], missing: &[Need]) -> Vec<String> {
+    needs
+        .iter()
+        .filter(|need| !missing.contains(need))
+        .map(|need| {
+            format!(
+                "{project} lays {} from the vault entry {} shared by {from}",
+                need.path, need.entry
+            )
+        })
+        .collect()
+}
+
 /// Makes each file of `needs` the project `project` lacks from this machine's vault entry of it,
-/// never over anything there, readable by the user alone: the setup's `copy` steps then copy it
-/// as any file of the project's. What is still missing is refused, naming it.
-pub(crate) async fn lay(daemon: &Daemon, project: &str, needs: &[Need]) -> Result<(), String> {
+/// made of that file and shared from `from` (never any other entry), never over anything there,
+/// readable by the user alone: the setup's `copy` steps then copy it as any file of the
+/// project's. What is still missing is refused, naming it.
+pub(crate) async fn lay(
+    daemon: &Daemon,
+    project: &str,
+    needs: &[Need],
+    from: &str,
+) -> Result<(), String> {
     if needs.is_empty() {
         return Ok(());
     }
@@ -273,16 +306,16 @@ pub(crate) async fn lay(daemon: &Daemon, project: &str, needs: &[Need]) -> Resul
         .map_err(|error| format!("{}: {error}", project.folder.display()))?;
     let mut lacking = Vec::new();
     for need in needs {
-        let target = root.join(&need.path);
-        if !fit_path(&need.path) || std::fs::symlink_metadata(&target).is_ok() {
+        if !fit_path(&need.path) || std::fs::symlink_metadata(root.join(&need.path)).is_ok() {
             continue;
         }
-        let Some(secret) = crate::vault::of_file(daemon, &need.entry).await else {
+        let Some(secret) = crate::vault::of_file(daemon, &need.entry, &need.bound, from).await
+        else {
             lacking.push(need.path.clone());
             continue;
         };
         crate::vault::mask_lines(&secret);
-        let written = write_new(&root, &target, &secret);
+        let written = write_new(&root, &need.path, &secret);
         if let Err(why) = written {
             return Err(format!("{} cannot be made: {why}", need.path));
         }
@@ -297,22 +330,19 @@ pub(crate) async fn lay(daemon: &Daemon, project: &str, needs: &[Need]) -> Resul
     }
 }
 
-/// Writes `text` as the new file `target`, inside `root` (reached through no link), readable by
-/// the user alone.
-fn write_new(root: &Path, target: &Path, text: &str) -> Result<(), String> {
+/// Writes `text` as the new file `path` of `root`, readable by the user alone: its folders made one
+/// at a time, none of them a link (`travel::folders_inside`), and the file itself never one nor
+/// over one.
+fn write_new(root: &Path, path: &str, text: &str) -> Result<(), String> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    let parent = target.parent().unwrap_or(root);
-    std::fs::create_dir_all(parent).map_err(|error| error.kind().to_string())?;
-    let real = std::fs::canonicalize(parent).map_err(|error| error.kind().to_string())?;
-    if !real.starts_with(root) {
-        return Err("its folder leads out of the project".to_owned());
-    }
+    crate::travel::folders_inside(root, path)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(real.join(target.file_name().unwrap_or_default()))
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join(path))
         .map_err(|error| error.kind().to_string())?;
     file.write_all(text.as_bytes())
         .map_err(|error| error.kind().to_string())
