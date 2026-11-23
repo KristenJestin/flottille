@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 
 use gpui_design_system::{
-    Button, Confirm, Field, ListCard, ListRow, Listing, Modal, Progress, Section, Skeleton, Toast,
-    awaiting, changing, hoverable, palette, presence, presence_of, space, toast,
+    Button, Confirm, Field, ListCard, ListRow, Listing, Modal, Section, Skeleton, Toast, awaiting,
+    changing, hoverable, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -50,7 +50,11 @@ pub const PASTED_HINT: &str = "If your browser shows a code, paste it here: it g
 /// The row of `program` in what `signin.list` answered: an older daemon answers the whole list
 /// whatever the program asked.
 fn row_of(answer: &Value, program: &str) -> Option<SignInRow> {
-    answer["programs"].as_array()?.first().map(SignInRow::of)
+    answer["programs"]
+        .as_array()?
+        .iter()
+        .map(SignInRow::of)
+        .find(|row| row.program == program)
 }
 
 /// A program as `signin.list` gives it.
@@ -75,6 +79,9 @@ pub struct SignInRow {
     /// `no answer in N s`. A program that could not be checked is not a program that is not signed
     /// in: it is never offered a sign-in.
     pub problem: Option<String>,
+    /// The window's own request for the check failed, so no command line ever said anything:
+    /// `problem` says why the window could not ask, not what a program answered.
+    pub unreached: bool,
 }
 
 impl SignInRow {
@@ -94,6 +101,7 @@ impl SignInRow {
             running: value["running"] == true,
             checking: value["checking"] == true,
             problem: text("problem"),
+            unreached: false,
         }
     }
 
@@ -117,6 +125,9 @@ impl SignInRow {
             (None, _, Some(problem)) if problem.starts_with("no answer in") => {
                 format!("Could not check: {problem}")
             }
+            (None, _, Some(_)) if self.unreached => {
+                "Could not check: Flottille could not ask the daemon".into()
+            }
             (None, _, Some(_)) => format!("Could not check: {} failed", self.program),
             (None, _, None) => format!("{} did not say whether it is signed in", self.program),
         }
@@ -127,6 +138,7 @@ impl SignInRow {
         self.checking = false;
         self.signed_in = None;
         self.problem = Some(why);
+        self.unreached = true;
     }
 
     /// What the command line said of the failure, under the row: none for a check that got no
@@ -576,14 +588,18 @@ impl SignInSection {
                     })
                 }),
             ));
-        // The kit's activity indicator under the state while its check runs: it unfolds and folds
-        // away with the check.
-        let checking = presence(
-            format!("sign-in-checking-{program}-block"),
+        // A skeleton under the state while its check runs (rule 11: a part that waits for a slow
+        // read): it pulses, and fades out when the result comes; the state keeps saying Checking….
+        let checking = awaiting(
+            format!("sign-in-checking-{program}"),
             row.checking,
-            Progress::indeterminate(format!("sign-in-checking-{program}")).w(px(64.)),
-        )
-        .space(space::SM);
+            div().pt(space::SM).child(
+                Skeleton::new(format!("sign-in-checking-{program}-skeleton"))
+                    .w(px(64.))
+                    .h(px(6.)),
+            ),
+            div(),
+        );
         // What the command line said when its check could not be made, under the state.
         let reason = presence_of(
             format!("sign-in-reason-{program}-block"),
@@ -598,7 +614,12 @@ impl SignInSection {
             format!("sign-in-line-{program}-block"),
             row.line
                 .clone()
-                .filter(|_| line && row.found && row.signed_in != Some(true))
+                .filter(|_| {
+                    line && row.found
+                        && row.signed_in != Some(true)
+                        && !row.checking
+                        && row.problem.is_none()
+                })
                 .map(SharedString::from),
             {
                 let id = format!("sign-in-line-{program}");
