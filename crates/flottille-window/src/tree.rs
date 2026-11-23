@@ -90,6 +90,37 @@ pub fn machine_state_id(machine: &str) -> ElementId {
     ElementId::Name(format!("machine-state-{machine}").into())
 }
 
+/// The element id of the projects' list: its rows and groups are parts of it.
+pub fn projects_list_id() -> ElementId {
+    ElementId::Name("projects-list".into())
+}
+
+/// The element id of a project's place in the list (the row, and its fold, as the list moves
+/// it).
+pub fn project_slot_id(name: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-row-{name}").into())
+}
+
+/// The element id of a group of the user's.
+pub fn group_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}").into())
+}
+
+/// The element id of a group's heading, which folds it and is dragged.
+pub fn group_header_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}-header").into())
+}
+
+/// The element id of the number of projects a group holds.
+pub fn group_count_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}-count").into())
+}
+
+/// The element id of New group… in the Projects header's menu.
+pub fn new_group_id() -> ElementId {
+    ElementId::Name("projects-new-group".into())
+}
+
 /// The element id of the Projects header's "⋯" menu.
 pub fn projects_menu_id() -> ElementId {
     ElementId::Name("projects-menu".into())

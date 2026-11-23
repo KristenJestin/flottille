@@ -30,12 +30,14 @@ use lyon_tessellation::{LineCap, LineJoin};
 
 use crate::actions::{Actions, Command, Details, Outcome, Pick, Reading, RunFrom};
 use crate::add_project::AddProject;
+use crate::arrange::{Arrangement, Listed};
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::end_led::LedEnd;
 use crate::extensions::Registry;
 use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
+use crate::group_name::GroupName;
 use crate::history::{History, Way};
 use crate::kept::{DraftKey, Folds, Written, machine_key};
 use crate::link::{self, Connect, Seen, Update};
@@ -303,6 +305,10 @@ pub struct Shell {
     add_project: Entity<AddProject>,
     /// The dialog that renames a session.
     rename: Entity<RenameSession>,
+    /// The dialog that makes a group of projects.
+    group_form: Entity<GroupName>,
+    /// The user's order and groups of projects.
+    arrangement: Arrangement,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
     /// What the window knows of the parts of Flottille it draws in its places (Specs).
@@ -590,6 +596,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| RenameSession::new(this, window, cx))
         };
+        let group_form = {
+            let this = this.clone();
+            cx.new(|cx| GroupName::new(this, window, cx))
+        };
         let focus = cx.focus_handle();
         modals.update(cx, |modals, _| modals.fallback(focus.clone()));
         let switcher = {
@@ -688,6 +698,8 @@ impl Shell {
             project_settings: None,
             add_project,
             rename,
+            group_form,
+            arrangement: Arrangement::default(),
             switcher,
             extensions,
             spec_page: None,
@@ -1191,6 +1203,34 @@ impl Shell {
         self.rename
             .update(cx, |form, cx| form.open(session, &title, window, cx));
     }
+
+    /// The dialog that makes a group of projects.
+    pub fn group_form(&self) -> &Entity<GroupName> {
+        &self.group_form
+    }
+
+    /// Whether a group has this name already.
+    pub fn group_named(&self, name: &str) -> bool {
+        self.arrangement.names(name)
+    }
+
+    /// The projects' list as the user arranged it, for the projects the window holds.
+    pub fn listing(&self) -> Listed {
+        self.arrangement.listed(
+            &self
+                .snapshot
+                .projects
+                .iter()
+                .map(|project| project.name.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// A group made, from the dialog.
+    pub fn add_group(&mut self, _name: &str, _cx: &mut Context<Self>) {}
+
+    /// A group removed: its projects go back to the list.
+    pub fn remove_group(&mut self, _id: &str, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     /// The quick switcher.
     pub fn switcher(&self) -> &Entity<Switcher> {
@@ -4764,6 +4804,7 @@ impl Render for Shell {
             })
             .child(self.add_project.clone())
             .child(self.rename.clone())
+            .child(self.group_form.clone())
             .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()
