@@ -1574,8 +1574,18 @@ way in:
   same browser and the removal of a display folder never takes a live socket. One browser per
   connection, in the mode of the last `agent_browser_open` (any other action goes on in the mode
   that runs, and a call that asks the other mode **restarts the server and closes the browser**,
-  its profile, the user's command's, left where it is: the user signs in shown, the agent goes on
-  headless): a login never shows a browser by itself, it goes on in the display folder of the
+  its profile kept: the user signs in shown, the agent goes on headless). **Flottille keeps the
+  profile itself**: the configuration file it writes names `profile`, a folder of the
+  connection's own (`$XDG_STATE_HOME/flottille/connections/<connection>/profile`), so the cookies
+  and sign-ins of one browser are the next one's whatever the user's command says (without it,
+  agent-browser starts each browser on a profile of its own that is gone when it closes); a
+  `--profile` in the command, which agent-browser puts above its configuration, is the user's
+  choice of another kept profile. A command with `--allowed-domains` gets none, since
+  agent-browser refuses a profile beside it (a page restored before its containment is in
+  place); for the same reason agent-browser refuses a call's own `allowedDomains` while the
+  profile is set, so a limit to domains is the user's, in the command. The `headed` of the call reaches the server as the mode that runs: `false`
+  when the browser could not be shown, so agent-browser opens the page headless instead of
+  failing for want of a display. A login never shows a browser by itself, it goes on in the display folder of the
   shown browser when one runs (the running server's, else the one a stopped server left) and is
   headless otherwise, and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
