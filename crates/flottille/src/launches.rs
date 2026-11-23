@@ -1097,10 +1097,11 @@ async fn with_agent(
         placed["request"] = request.number.into();
     } else {
         launch.state = "started".into();
-        // Allowed at once, what it needs is in the vault here already: made before its setup.
-        crate::travelled::lay(daemon, &launch.project, &needs_of(&launch))
-            .await
-            .map_err(|why| format!("refused: {why}"))?;
+        // Allowed at once, what it needs is in the vault here already: made before its setup,
+        // whose copy finds nothing of what could not be made, as it would of any missing file.
+        if let Err(why) = crate::travelled::lay(daemon, &launch.project, &needs_of(&launch)).await {
+            eprintln!("flottille daemon: launch {}: {why}", launch.launch);
+        }
     }
     // The workspace is recorded as it is in this very write: one removed since `placed` read it
     // is none, never an id a later workspace may take.
