@@ -778,8 +778,7 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
             "From the laptop.",
         )],
     );
-    let refused = answers[0].clone().unwrap_err();
-    assert!(refused.contains("waits for no answer"), "{refused}");
+    assert!(answers[0].clone().unwrap()["later"].is_string());
 
     approve(&server, number);
     prompted(&pc, "was approved by the user");
@@ -797,8 +796,7 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
     );
     assert!(answers[0].is_ok(), "{:?}", answers[0]);
     for answer in &answers[1..] {
-        let refused = answer.clone().unwrap_err();
-        assert!(refused.contains("waits for no answer"), "{refused}");
+        assert!(answer.clone().unwrap()["later"].is_string(), "{answer:?}");
     }
     a_while();
     for body in ["From the laptop.", "Replayed", "Never asked."] {
@@ -843,4 +841,129 @@ fn a_session_id_two_machines_list_is_refused_naming_both() {
     assert!(text.contains("server") && text.contains("laptop"), "{text}");
     assert_eq!(server.user.judge_received().len(), judged);
     assert_eq!(stand_ins(&server), 0);
+}
+
+#[test]
+fn a_stand_in_is_not_a_session_this_machine_s_agents_can_reach() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let (root, mcp) = caller(&pc, &server, "full");
+    // The call stands pc's root in on the server.
+    done(&mcp.call("session_read", json!({"session": night})));
+    assert_eq!(stand_ins(&server), 1);
+    let stand_in = format!("{root}@{}", hex_of(&pc));
+    let (_local, local) = server.root("full");
+    let opened = server.user.received_requests("session/new").len();
+
+    let read = local.call("session_read", json!({"session": stand_in}));
+    assert!(
+        refused(&read).contains("there is no session"),
+        "{}",
+        read.text
+    );
+    let sent = local.call(
+        "session_send",
+        json!({"session": stand_in, "text": "Are you there?"}),
+    );
+    assert!(refused(&sent).contains("names no session"), "{}", sent.text);
+    let stopped = local.call("agent_stop", json!({"agent_id": stand_in}));
+    assert!(
+        refused(&stopped).contains("names no agent"),
+        "{}",
+        stopped.text
+    );
+
+    // Nothing was asked of the user, and nothing was started for it.
+    a_while();
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert_eq!(server.user.received_requests("session/new").len(), opened);
+    assert_eq!(server.agent(&stand_in)["state"], "idle");
+}
+
+#[test]
+fn an_unreadable_member_list_keeps_the_stand_ins() {
+    let (_hub, pc, server, _night) = night_lead("runner");
+    let day = user_session(&pc, DAY);
+    listed_as(&server, &day, DAY);
+    let (_local, mcp) = server.root("full");
+    done(&mcp.call("session_read", json!({"session": day})));
+    assert_eq!(stand_ins(&pc), 1);
+
+    // pc starts again with a member list it cannot read: it knows no machine, which is not to
+    // say that the server left the members.
+    let stopped = pc.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", pc.log());
+    std::fs::write(
+        pc.user.path("state/flottille/remote/peers.json"),
+        r#"{"machines": [{"name": "ser"#,
+    )
+    .unwrap();
+    pc.user.status();
+
+    // The sweep runs every five seconds.
+    std::thread::sleep(std::time::Duration::from_secs(12));
+    assert!(
+        pc.log().contains("peers.json is not read"),
+        "the file was not read: {}",
+        pc.log()
+    );
+    assert_eq!(stand_ins(&pc), 1, "{}", pc.log());
+}
+
+#[test]
+fn a_stand_in_never_relays_a_call_to_a_third_machine() {
+    let (hub, pc, server, _night) = night_lead("runner");
+    let laptop = Machine::of(server_user(None));
+    pair(&hub, &laptop, "laptop", "runner");
+    laptop.register("");
+    let folder = laptop.folder();
+    laptop.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    laptop.git(&folder, &["add", "."]);
+    laptop.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    server.wait_for("laptop");
+    let far = user_session(&laptop, "Laptop lead");
+    listed_as(&server, &far, "Laptop lead");
+    // pc's daemon is stopped: the test plays it, as it would send the call.
+    let key = pc.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![forged_call("c0", &far, "c0", "auto", None)],
+    );
+
+    let answer = answers[0].clone().unwrap();
+    let text = answer["text"].as_str().unwrap_or_default();
+    assert_eq!(answer["outcome"], "refused", "{answer:#}");
+    assert!(
+        text.contains("reaches only the sessions of this machine"),
+        "{text}"
+    );
+    a_while();
+    // Nothing was sent on to the laptop, which would have stood nobody in for it.
+    assert_eq!(stand_ins(&laptop), 0);
+    assert!(
+        !laptop.log().contains("from another machine was refused"),
+        "{}",
+        laptop.log()
+    );
+}
+
+#[test]
+fn an_answer_before_its_wait_is_recorded_is_sent_again() {
+    let (_hub, pc, server, _night) = night_lead("runner");
+    let (asker, _asking) = caller(&pc, &server, "ask");
+    let key = server.stand_in();
+
+    // The answer of a request pc's agent does not wait for yet: not never, later.
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![answer_of("approval-7", 7, &asker, "Allowed.")],
+    );
+
+    let answer = answers[0].clone().unwrap();
+    assert!(answer["later"].is_string(), "{answer:#}");
+    a_while();
+    assert_eq!(prompts_with(&pc, "Allowed."), 0);
 }

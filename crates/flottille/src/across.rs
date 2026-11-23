@@ -1917,6 +1917,27 @@ mod tests {
     }
 
     #[test]
+    fn a_stand_in_s_project_path_stays_in_its_folder() {
+        // The caller's project name is the remote machine's word: whatever it holds, nothing built
+        // from it leaves the stand-in's own folder.
+        let nowhere = std::path::Path::new("/run/user/1000/flottille/stand-in-no-place");
+        for name in ["../../../etc", "a/../../b", "/etc/cron.d", "..", "app"] {
+            let project = project_nowhere(nowhere, name);
+            assert_eq!(project.folder, nowhere, "{name}");
+            assert!(project.workspaces_root.starts_with(nowhere), "{name}");
+            assert!(
+                !project
+                    .workspaces_root
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir),
+                "{name}: {}",
+                project.workspaces_root.display()
+            );
+            assert_eq!(project.name, name);
+        }
+    }
+
+    #[test]
     fn a_close_dropped_names_the_session_and_that_it_was_a_close() {
         let named = json!({"machine": "pc", "kind": "close", "agent": "a1", "title": "Ship it",
             "refused": "the close is older than thirty days"});
