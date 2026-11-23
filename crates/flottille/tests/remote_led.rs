@@ -8,7 +8,7 @@
 use crate::remote_deliveries::{answered, launch_in, release, script};
 use crate::remote_launch::{
     Machine, TestHub, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
-    prompted, sent_with, server_user,
+    prompted, refused, sent_with, server_user,
 };
 
 use crate::common::mcp::Mcp;
@@ -249,7 +249,7 @@ fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
     );
 
     let led = done(&led);
-    assert!(led.contains("is waiting for the user"), "{led}");
+    assert!(led.contains("Waiting for the user's approval"), "{led}");
     assert!(
         led.contains(
             "Once the user allows it there, it runs as a session led by you: each end of its \
@@ -282,8 +282,13 @@ fn the_pilot_reaches_its_led_session_on_another_machine_without_a_leave() {
     prompted(&server, "CSV first, JSON next.");
     let read = mcp.call("session_read", json!({"session": session}));
     assert!(done(&read).contains(&session), "{}", read.text);
+    // As here, a session it leads is no child: agent_status reads its children only.
     let status = mcp.call("agent_status", json!({"agent_id": session}));
-    assert!(done(&status).contains(&session), "{}", status.text);
+    assert!(
+        refused(&status).contains("not one of your children"),
+        "{}",
+        status.text
+    );
     // No leave was asked of the user there, as for a session it leads here.
     assert!(server.requests().is_empty(), "{:#?}", server.requests());
 
@@ -465,19 +470,20 @@ fn following_there(server: &Machine, session: &str) -> Value {
         .clone()
 }
 
-/// `laptop`, a third machine of the user's, linked to `server`: the key it links with.
-fn laptop_of(hub: &TestHub, server: &Machine) -> std::path::PathBuf {
+/// `laptop`, a third machine of the user's, linked to `server`, and the key it links with.
+fn laptop_of(hub: &TestHub, server: &Machine) -> (Machine, std::path::PathBuf) {
     let laptop = Machine::of(server_user(None));
     pair(hub, &laptop, "laptop", "runner");
     server.wait_for("laptop");
-    laptop.stand_in()
+    let key = laptop.stand_in();
+    (laptop, key)
 }
 
 #[test]
 fn a_following_from_a_third_machine_is_refused() {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, root, text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
-    let key = laptop_of(&hub, &server);
+    let (_laptop, key) = laptop_of(&hub, &server);
 
     let answers = sent_with(
         &key,
@@ -558,7 +564,7 @@ fn a_following_of_a_state_that_is_none_is_refused() {
 fn a_pilot_ended_stop_from_a_machine_that_did_not_start_the_session_is_refused() {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, root, text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
-    let key = laptop_of(&hub, &server);
+    let (_laptop, key) = laptop_of(&hub, &server);
 
     let answers = sent_with(
         &key,
