@@ -1027,8 +1027,11 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
     )?;
     let now = now_ms();
-    let depth = match (&new.parent, new.remote_parent_depth) {
-        (Some((_, depth)), _) | (None, Some(depth)) => depth + 1,
+    let depth = match (
+        new.parent.as_ref().map(|(_, depth)| *depth),
+        new.remote_parent_depth,
+    ) {
+        (Some(depth), _) | (None, Some(depth)) => depth + 1,
         (None, None) => 0,
     };
     let at_depth_limit = depth >= DEPTH_LIMIT;
