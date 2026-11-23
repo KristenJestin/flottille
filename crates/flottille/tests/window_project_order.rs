@@ -897,11 +897,14 @@ fn the_window_draws_no_frame_at_rest_with_groups_and_a_finished_drag(cx: &mut Te
     );
 }
 
-/// The connections the window's keeper opens, through a relay a test can hold: while it holds,
-/// what the keeper asks does not reach the daemon and no answer comes back; then it drops the
-/// connections, so that what was asked is answered "retry" and the next ask opens another one.
+/// The connections the window's keeper opens, through a relay a test can hold: from the next time
+/// the keeper reads the arrangement, what it asks does not reach the daemon and no answer comes
+/// back; then it drops the connections, so that what was asked is answered "retry" and the next ask opens another one.
 #[derive(Clone, Default)]
 struct Relay {
+    /// The next read of the arrangement is the one to hold (other asks of the keeper, a fold
+    /// written, go through).
+    armed: Arc<AtomicBool>,
     held: Arc<AtomicBool>,
     open: Arc<Mutex<Vec<(UnixStream, UnixStream)>>>,
 }
@@ -922,18 +925,20 @@ impl Relay {
                 .unwrap()
                 .push((toward.try_clone()?, outside.try_clone()?));
             // The asks, once the relay lets them go.
-            let (mut from, mut to, held) = (
-                outside.try_clone()?,
-                toward.try_clone()?,
-                relay.held.clone(),
-            );
+            let (mut from, mut to) = (outside.try_clone()?, toward.try_clone()?);
+            let (armed, held) = (relay.armed.clone(), relay.held.clone());
             std::thread::spawn(move || {
                 let mut buffer = [0u8; 8192];
                 while let Ok(read) = from.read(&mut buffer) {
+                    let asked = &buffer[..read];
+                    let reads = asked.windows(10).any(|part| part == b"window.get");
+                    if read > 0 && reads && armed.swap(false, Ordering::SeqCst) {
+                        held.store(true, Ordering::SeqCst);
+                    }
                     while read > 0 && held.load(Ordering::SeqCst) {
                         std::thread::sleep(Duration::from_millis(5));
                     }
-                    if read == 0 || to.write_all(&buffer[..read]).is_err() {
+                    if read == 0 || to.write_all(asked).is_err() {
                         break;
                     }
                 }
@@ -954,9 +959,15 @@ impl Relay {
         })
     }
 
-    /// From now on what the keeper asks stays in the relay.
+    /// The next time the keeper reads the arrangement, that ask and what follows stay in the
+    /// relay.
     fn hold(&self) {
-        self.held.store(true, Ordering::SeqCst);
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an ask is stuck in the relay.
+    fn holding(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
     }
 
     /// The connections are lost: what was held never reaches the daemon.
@@ -965,6 +976,7 @@ impl Relay {
             let _ = toward.shutdown(Shutdown::Both);
             let _ = outside.shutdown(Shutdown::Both);
         }
+        self.armed.store(false, Ordering::SeqCst);
         self.held.store(false, Ordering::SeqCst);
     }
 }
@@ -989,6 +1001,10 @@ fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut Test
     let id = group_id(&shell, "Work", cx);
     drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["alpha"]));
+    assert!(
+        relay.holding(),
+        "the creation of the group is stuck in the relay"
+    );
     assert!(
         kept(&user)["groups"].as_array().is_none_or(Vec::is_empty),
         "nothing reached the daemon while the connection is held: {}",
