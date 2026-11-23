@@ -472,7 +472,50 @@ pub(crate) fn tell(
     let Some(launch) = launch_here(daemon, agent) else {
         return false;
     };
-    tell_with(daemon, &launch, kind, body, urgency, back, ended);
+    tell_with(daemon, &launch, None, kind, body, urgency, back, ended);
+    true
+}
+
+/// Tells the agent of another machine that leads `agent` that a turn of it ended with nothing to
+/// ask or report: kept as a delivery of `kind`, but one per launch, the latest replacing the one
+/// still waiting for that machine, so that the turns of a session that runs while its pilot's
+/// machine is off never fill the messages that may wait and push out a report. False when
+/// `agent` was started by no agent of another machine.
+pub(crate) fn tell_plain_turn_end(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    kind: &str,
+    body: &str,
+) -> bool {
+    let Some(launch) = launch_here(daemon, agent) else {
+        return false;
+    };
+    if launch.kind == "handed" {
+        return true;
+    }
+    // Each one has an id of its own, which the receiver stores once; the prefix finds the one
+    // still waiting.
+    let prefix = format!("{kind}-plain-{}-", launch.launch);
+    let waiting = daemon
+        .read(|store| store.outgoing(Some(&launch.machine)))
+        .unwrap_or_default();
+    for old in waiting.iter().filter(|old| old.id.starts_with(&prefix)) {
+        let _ = daemon.write(|store| store.forget_outgoing(&old.id).map(|()| ((), None)));
+    }
+    let id = format!(
+        "{prefix}{}",
+        flottille_core::agent::new_id().unwrap_or_default()
+    );
+    kept_for_caller(
+        daemon,
+        &launch,
+        Some(id),
+        kind,
+        body,
+        approval::BETWEEN_TURNS,
+        false,
+        false,
+    );
     true
 }
 
@@ -483,6 +526,7 @@ pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, st
     kept_for_caller(
         daemon,
         launch,
+        None,
         "approval",
         body,
         approval::URGENT,
@@ -491,9 +535,11 @@ pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, st
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tell_with(
     daemon: &Arc<Daemon>,
     launch: &Launch,
+    id: Option<String>,
     kind: &str,
     body: &str,
     urgency: &str,
@@ -504,22 +550,27 @@ fn tell_with(
     if launch.kind == "handed" {
         return;
     }
-    kept_for_caller(daemon, launch, kind, body, urgency, back, ended);
+    kept_for_caller(daemon, launch, id, kind, body, urgency, back, ended);
 }
 
+/// With `id`, the delivery is kept under it.
+#[allow(clippy::too_many_arguments)]
 fn kept_for_caller(
     daemon: &Arc<Daemon>,
     launch: &Launch,
+    id: Option<String>,
     kind: &str,
     body: &str,
     urgency: &str,
     back: bool,
     ended: bool,
 ) {
-    let id = format!(
-        "{kind}-{}",
-        flottille_core::agent::new_id().unwrap_or_default()
-    );
+    let id = id.unwrap_or_else(|| {
+        format!(
+            "{kind}-{}",
+            flottille_core::agent::new_id().unwrap_or_default()
+        )
+    });
     let message = MachineMessage::Deliver(Box::new(Deliver {
         id: id.clone(),
         launch: launch.launch.clone(),

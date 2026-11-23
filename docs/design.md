@@ -231,8 +231,7 @@ Flottille's own tools:
   `led` and `handed`, for a root only, start a session in a workspace (existing or new) or its own
   place, judged, in the tree's mode, its first message the agent's and never the user's, base when
   that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
-  session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
-  ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
+  session is piloted by the caller, asks it its questions and wakes it at each end of its turns; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
   with the id. With `project`, a `led` or `handed` session is started in another registered
   project, held for the user every time, in every mode (§7.2): a full lead of that project, in its
   places, with its tools, settings and vault entries; a child never is.

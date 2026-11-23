@@ -1905,6 +1905,10 @@ on a real phone, by hand, and reported.
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
   an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
   the receiver would.
+- A led session's plain end of a turn (it neither asked nor reported) is kept once per session
+  for the machine that took none: the next replaces the one still waiting, so that the turns of a
+  session that runs while its pilot's machine is off never fill the 100 and push out a report or
+  another session's news. What asked, reported or ended is each kept.
 - A message the other machine cannot take now (`later`) is sent again 30 seconds later, or sooner
   on the next link or message kept.
 - Pair mode (#1146) lasts 5 minutes unless `--minutes` says 1 to 15, works once, and one is open

@@ -954,8 +954,7 @@ naming its root. The tree is one project's: a child works in its parent's place,
 belongs in another workspace is a session (`agent_launch` with `kind` `led` or `handed`,
 `docs/tools.md` "Sessions an agent starts"), in an existing workspace or a new one, made and
 prepared before it starts; the agent that started it and the session write to each other with
-`session_send`. A led session asks its pilot its questions and wakes it when it asks, reports or
-ends; a handed one is the user's.
+`session_send`. A led session asks its pilot its questions and wakes it at each end of its turns; a handed one is the user's.
 
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
   12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor

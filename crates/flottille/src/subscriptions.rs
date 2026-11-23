@@ -170,7 +170,8 @@ pub fn all(daemon: &Daemon) -> Vec<Subscription> {
 }
 
 /// The agent leads the session it started: it is woken at each end of a turn of it, and when it
-/// ends, until it unsubscribes, the session or the agent ends, or the following pauses for the user's absence (`docs/tools.md`, "Following a session").
+/// ends, until it unsubscribes, the session or the agent ends, or the following pauses for the
+/// user's absence (`docs/tools.md`, "Following a session").
 pub fn lead(daemon: &Daemon, starter: &str, session: &Agent) -> Result<(), String> {
     let now = now_ms();
     subscribe(
@@ -180,7 +181,9 @@ pub fn lead(daemon: &Daemon, starter: &str, session: &Agent) -> Result<(), Strin
             agent: starter.to_owned(),
             source: SESSION.into(),
             target: json!({"session": session.id, "title": session.title}),
-            events: vec!["turn_ended".into(), "ended".into()],
+            // What the following lists, as it did before a plain end of a turn woke too: nothing
+            // reads it to decide, and the rows already stored say the same.
+            events: vec!["asked".into(), "reported".into(), "ended".into()],
             from: "anyone".into(),
             seen: json!({"exchanges": 0, "paused": false}),
             created_at: now,
@@ -291,11 +294,15 @@ fn reset(daemon: &Daemon, subscription: &Subscription) {
     }
 }
 
-/// A turn of the session ended: the agents that lead it are woken, once each, with why (it asked,
-/// it reported, or neither) and the last message of that turn, cut and said. A paused following
-/// wakes nobody, nor one whose session wrote to its pilot in the turn: that message woke it
-/// already.
-pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
+/// A turn of the session ended with `stop_reason`: the agents that lead it are woken, once each,
+/// with why (it asked, it reported, it failed, or none) and the last message of that turn, cut
+/// and said. A paused following wakes nobody, nor one whose session wrote to its pilot in the
+/// turn: that message woke it already. A turn cancelled to take a queued delivery wakes nobody:
+/// the turn that takes it does.
+pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
+    if stop_reason == "cancelled" && queued_for(daemon, &session.id) {
+        return;
+    }
     let last_of = |name: &str| {
         daemon
             .read(|store| store.last_agent_events(&session.id, name, 1))
@@ -307,6 +314,8 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
     let (prompted, prompted_at) = last_of("agent.prompted");
     let asked = seq_of("agent.asked") > prompted;
     let reported = !asked && seq_of("agent.reported") > prompted;
+    let plain = !asked && !reported;
+    let user_spoke = followed_the_user(daemon, &session.id);
     let woken: Vec<Subscription> = followers(daemon, &session.id)
         .into_iter()
         .filter(|s| s.seen["paused"] != true)
@@ -326,12 +335,7 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
         open.iter()
             .any(|q| q["seq"].as_u64().unwrap_or(0) > prompted)
     });
-    let what = match (asked, reported, remote && !pilot_asked) {
-        (true, _, false) => "ended a turn: it asked you a question with ask.",
-        (true, _, true) => "ended a turn: it asked the user a question with ask.",
-        (false, true, _) => "ended a turn: it reported.",
-        (false, false, _) => "ended a turn.",
-    };
+    let what = what_of(stop_reason, asked, reported, remote && !pilot_asked);
     let last = crate::tree::last_messages_after(daemon, &session.id, prompted)
         .pop()
         .unwrap_or_else(|| NO_MESSAGE.to_owned());
@@ -361,8 +365,10 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
             if left == 1 { "" } else { "s" }
         ));
     }
-    let last = asked
+    let last = user_spoke
+        .then(|| USER_SPOKE.to_owned())
         .into_iter()
+        .chain(asked)
         .chain([format!("Its last message:\n\n{}", cut_said(&last))])
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -370,17 +376,62 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
         wake_follower(daemon, follower, session, what, Some(&last));
     }
     if remote {
-        // Its commits go back with a report, and the delivery names where they came.
-        crate::across::tell(
-            daemon,
-            &session.id,
-            TURN_ENDED,
-            &wake_body(daemon, session, what, Some(&last)),
-            approval::BETWEEN_TURNS,
-            reported,
-            false,
-        );
+        let body = wake_body(daemon, session, what, Some(&last));
+        // A plain end is kept once for a machine that is off: it never fills what may wait there.
+        match plain {
+            true => crate::across::tell_plain_turn_end(daemon, &session.id, TURN_ENDED, &body),
+            // Its commits go back with a report, and the delivery names where they came.
+            false => crate::across::tell(
+                daemon,
+                &session.id,
+                TURN_ENDED,
+                &body,
+                approval::BETWEEN_TURNS,
+                reported,
+                false,
+            ),
+        };
     }
+}
+
+/// Why a turn ended, as a wake says it; `to_user` when its question went to the user.
+fn what_of(stop_reason: &str, asked: bool, reported: bool, to_user: bool) -> &'static str {
+    match (asked, reported, to_user) {
+        _ if stop_reason == "failed" => "ended a turn: the turn failed.",
+        (true, _, false) => "ended a turn: it asked you a question with ask.",
+        (true, _, true) => "ended a turn: it asked the user a question with ask.",
+        (false, true, _) => "ended a turn: it reported.",
+        (false, false, _) => "ended a turn.",
+    }
+}
+
+/// What a wake says of a turn that followed the user's own message to the session.
+const USER_SPOKE: &str = "The turn followed the user's own message to this session: they talk to \
+    it, so do not step in with session_send.";
+
+/// Whether the session has a delivery queued: a turn cancelled now was cancelled to take it.
+fn queued_for(daemon: &Daemon, session: &str) -> bool {
+    daemon
+        .read(|store| store.deliveries(session, "queued"))
+        .is_ok_and(|queued| !queued.is_empty())
+}
+
+/// Whether the turn the session just ended was started with a message of the user's.
+fn followed_the_user(daemon: &Daemon, session: &str) -> bool {
+    let prompted = daemon
+        .read(|store| store.last_agent_events(session, "agent.prompted", 1))
+        .unwrap_or_default();
+    let ids = prompted
+        .first()
+        .and_then(|event| event.data["deliveries"].as_array().cloned())
+        .unwrap_or_default();
+    ids.iter().filter_map(Value::as_str).any(|id| {
+        daemon
+            .read(|store| store.delivery(id))
+            .ok()
+            .flatten()
+            .is_some_and(|delivery| delivery.kind == "user")
+    })
 }
 
 /// What the questions a wake carries hold at most, in all: those past it are counted.
@@ -977,5 +1028,33 @@ mod tests {
         let mut review = comment("alice", false, false);
         review.kind = "review";
         assert!(!matches(&anyone, &review));
+    }
+}
+
+#[cfg(test)]
+mod turn_wakes {
+    use super::what_of;
+
+    #[test]
+    fn a_failed_turn_says_it_failed_not_that_it_said_nothing() {
+        assert_eq!(
+            what_of("failed", false, false, false),
+            "ended a turn: the turn failed."
+        );
+        assert_eq!(
+            what_of("failed", true, false, false),
+            "ended a turn: the turn failed."
+        );
+    }
+
+    #[test]
+    fn a_turn_says_why_it_ended() {
+        assert_eq!(what_of("end_turn", false, false, false), "ended a turn.");
+        assert_eq!(
+            what_of("end_turn", false, true, false),
+            "ended a turn: it reported."
+        );
+        assert!(what_of("end_turn", true, false, true).contains("asked the user"));
+        assert!(what_of("end_turn", true, false, false).contains("asked you"));
     }
 }
