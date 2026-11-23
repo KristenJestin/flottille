@@ -21,6 +21,8 @@ mod connections;
 mod mcp;
 #[path = "../remote_asks.rs"]
 mod remote_asks;
+#[path = "../remote_child.rs"]
+mod remote_child;
 #[path = "../remote_code.rs"]
 mod remote_code;
 #[path = "../remote_deliveries.rs"]
