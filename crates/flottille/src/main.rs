@@ -93,6 +93,7 @@ mod sign_in;
 mod skill_command;
 mod skills;
 mod ssh_agent;
+mod ssh_owned;
 mod subscriptions;
 mod sweep;
 mod tasks;

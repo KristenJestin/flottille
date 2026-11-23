@@ -318,7 +318,13 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
-    Ok(Outcome::Done(answer(&asked, machine, &launch, &placed)))
+    Ok(Outcome::Done(answer_to_caller(
+        kind_word(asked.kind),
+        &asked.title,
+        machine,
+        &launch,
+        &placed,
+    )))
 }
 
 /// `why` a launch on `machine` is refused, with the window's action that would let it through,
@@ -348,10 +354,17 @@ fn actioned(why: &str, machine: &str, provider: &str) -> String {
     format!("{why}. {action}")
 }
 
-/// What the caller is told of its launch on `machine`.
-fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String {
+/// What the caller is told of its launch on `machine`, of `kind` titled `title`: held, and once
+/// started, the result of the user's answer when it was held.
+fn answer_to_caller(
+    kind: &str,
+    title: &str,
+    machine: &str,
+    launch: &str,
+    placed: &Value,
+) -> String {
     let id = placed["session"].as_str().unwrap_or_default();
-    let named = format!("\"{}\" (agent {id})", asked.title);
+    let named = format!("\"{title}\" (agent {id})");
     let there = placed["branch"].as_str().unwrap_or_default();
     let workspace = placed["workspace"].as_str().unwrap_or_default();
     let place = format!(
@@ -378,25 +391,32 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
         None => String::new(),
     };
     let back = format!("{back}{kept}");
+    // Said as a call held here, then where it will run: the user's answer comes as a held call's.
     if let Some(number) = placed["request"].as_u64() {
+        let waiting = crate::approvals::waiting(number).replacen(
+            &format!("#{number}."),
+            &format!("#{number} on {machine}."),
+            1,
+        );
         return format!(
-            "Not started yet: request #{number} on {machine} is waiting for the user, who allows \
-             or refuses it there. {named} will run on {machine} {place}, once allowed. {back} You \
-             are told nothing more here: go on with your own work."
+            "{waiting}\nIt will run as {named} on {machine} {place}, once allowed. {back}"
         );
     }
-    match asked.kind {
-        LaunchKind::Child => format!(
+    match kind {
+        "child" => format!(
             "Launched {named} on {machine}, {place}. {back} Its report, questions and failure \
              come to you as a local child's; agent_send, agent_status and agent_stop reach it \
              while {machine} is on, and a message sent while it is off is kept and delivered \
              when it is back."
         ),
-        LaunchKind::Led => format!(
+        "led" => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
-             of {machine}, not your child: the user sees it there and may talk to it. {back}"
+             of {machine}, not your child: the user sees it there and may talk to it. It asks you \
+             its questions: a delivery [flottille:session-turn-ended] wakes you at each end of \
+             its turns, with its last message. Answer with session_send, relay to the user \
+             with ask, or do nothing; session_read reads it. {back}"
         ),
-        LaunchKind::Handed => format!(
+        _ => format!(
             "Started a session for the user, {named}, on {machine}, {place}, handed over. It is \
              the user's. {back}"
         ),
@@ -1177,12 +1197,8 @@ async fn with_agent(
     // the caller's row and answer say of it.
     placed["project"] = launch.project.clone().into();
     placed["made"] = (launch.asked["made"] == true).into();
-    if asked.settings.is_some() && !crate::travelled::takes(&project, &launch.machine) {
-        placed["kept"] = match project.from_machine {
-            None => "user",
-            Some(_) => "machine",
-        }
-        .into();
+    if let Some(kept) = kept_of(&project, &launch) {
+        placed["kept"] = kept.into();
     }
     Ok(placed)
 }
@@ -1332,10 +1348,19 @@ fn finish(
                 )
             }
         };
-        // What it lacked is said to the agent that launched it, which would wait for nothing.
-        if !missing.is_empty() {
-            refused_for_missing(daemon, &launch, &missing, why.as_deref());
-        }
+        // The agent that launched it is told, and what it lacked, as a held call's result comes:
+        // it would wait for nothing.
+        let here = this_machine(daemon);
+        let asked = asked_of(request.number, &here);
+        let body = match (&why, missing.is_empty()) {
+            (_, false) => refused_for_missing(&asked, &here, &missing, why.as_deref()),
+            (Some(why), true) => format!(
+                "{asked} was approved by the user, but nothing was done: it could not start \
+                 there: {why}."
+            ),
+            (None, true) => format!("{asked} was refused by the user. Nothing was done."),
+        };
+        crate::across::tell_decided(daemon, &launch, &body, false);
         crate::tree::stop_tree(daemon, &agent, &reason);
         // Its setup never runs: the workspace made of its code goes once its agent ended, and
         // the project made for it then.
@@ -1355,44 +1380,92 @@ fn finish(
             launch.launch
         );
     }
+    // Told before its setup goes on, so that a setup that fails at once is never heard of first.
+    let here = this_machine(daemon);
+    let asked = asked_of(request.number, &here);
+    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
+    let placed = placed_of(daemon, &launch, &agent);
+    let result = answer_to_caller(&launch.kind, title, &here, &launch.launch, &placed);
+    crate::across::tell_decided(
+        daemon,
+        &launch,
+        &format!(
+            "{asked} was approved by the user, and Flottille has now done it. Its \
+             result:\n\n{result}"
+        ),
+        true,
+    );
     go_on(daemon, &launch, &agent);
 }
 
-/// Tells the agent of the other machine that asked `launch` that it is refused for lacking
-/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
-fn refused_for_missing(
-    daemon: &Arc<Daemon>,
-    launch: &Launch,
-    missing: &[crate::travelled::Need],
-    why: Option<&str>,
-) {
-    let here = crate::link::remote_of(daemon)
+/// What the agent `agent` of the held `launch`, allowed now, was placed in: as `placed` says it
+/// to the caller's answer.
+fn placed_of(daemon: &Daemon, launch: &Launch, agent: &str) -> Value {
+    let branch = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok())
+        .map(|workspace| workspace.branch)
+        .unwrap_or_default();
+    let mut placed = json!({"session": agent, "workspace": launch.workspace, "branch": branch});
+    if let Ok(project) = projects::load_project(daemon, &launch.project)
+        && let Some(kept) = kept_of(&project, launch)
+    {
+        placed["project"] = launch.project.clone().into();
+        placed["kept"] = kept.into();
+    }
+    placed
+}
+
+/// Whose settings the project of `launch` here keeps instead of the caller's, when it keeps its
+/// own: `user` when the user registered it, `machine` when it was made for another machine.
+fn kept_of(project: &flottille_core::project::Project, launch: &Launch) -> Option<&'static str> {
+    let settings = !launch.asked["asked"]["settings"].is_null();
+    if !settings || crate::travelled::takes(project, &launch.machine) {
+        return None;
+    }
+    Some(match project.from_machine {
+        None => "user",
+        Some(_) => "machine",
+    })
+}
+
+/// This machine's name among the user's, as the agents of the others know it.
+fn this_machine(daemon: &Daemon) -> String {
+    crate::link::remote_of(daemon)
         .ok()
         .and_then(|remote| remote.listed().ok().map(|(_, name)| name))
-        .unwrap_or_else(|| "the other machine".to_owned());
+        .unwrap_or_else(|| "the other machine".to_owned())
+}
+
+/// The request `number` of a held launch, as its caller is told of the user's answer, as a held
+/// call's answer names its request: `Request #4 on server (agent_launch)`.
+fn asked_of(number: u64, here: &str) -> String {
+    format!("Request #{number} on {here} (agent_launch)")
+}
+
+/// What the agent of the other machine that asked `asked` is told when it is refused for lacking
+/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
+fn refused_for_missing(
+    asked: &str,
+    here: &str,
+    missing: &[crate::travelled::Need],
+    why: Option<&str>,
+) -> String {
     let lacking: Vec<String> = missing
         .iter()
         .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
         .collect();
-    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
     let what = match why {
-        None => "the user refused it",
-        Some(_) => "it was allowed before what it needs there was shared",
+        None => "was refused by the user. Nothing was done".to_owned(),
+        Some(_) => "was approved by the user, but nothing was done: it was allowed before what it \
+             needs there was shared"
+            .to_owned(),
     };
-    let body = format!(
-        "Your launch \"{title}\" on {here} is refused: {what}. Its setup copies what {here} \
-         lacks: {}, which the user shares from this machine through the vault. Nothing of it \
-         runs there; launch it again once they are shared.",
+    format!(
+        "{asked} {what}. Its setup copies what {here} lacks: {}, which the user shares from this \
+         machine through the vault. Launch it again once they are shared.",
         crate::travelled::listed(&lacking)
-    );
-    crate::across::tell_of(
-        daemon,
-        launch,
-        "child-failed",
-        &body,
-        approval::URGENT,
-        true,
-    );
+    )
 }
 
 /// The agent `agent` ended, its requests cancelled: a launch it was held for the user's answer
@@ -1416,6 +1489,18 @@ pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
         remove_workspace(daemon, workspace, Some(agent.to_owned()));
     }
     if matches!(settled, Ok(Some(_))) {
+        // Its caller would wait for the user's answer for ever.
+        let here = this_machine(daemon);
+        let asked = asked_of(launch.request.unwrap_or_default(), &here);
+        crate::across::tell_decided(
+            daemon,
+            &launch,
+            &format!(
+                "{asked} was refused: its session there ended before the user of {here} \
+                 decided. Nothing was done."
+            ),
+            false,
+        );
         crate::travelled::unmake(daemon, &launch);
     }
 }

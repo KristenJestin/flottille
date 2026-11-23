@@ -722,7 +722,7 @@ const SERVED: [Definition; 33] = [
         description: "kind (required): child, a part of your own task, in your place, that you \
             direct and that reports to you (no workspace; refused above the children cap); led, an \
             autonomous job of its own that you pilot, a real session the user sees under you and \
-            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
+            may talk to, which asks you its questions and wakes you at each end of its turns; \
             handed, a session you start for the user and let go, of which you hear nothing more \
             unless it writes to you. led and handed: a root only, judged, in workspace (main is \
             the project folder) or new_workspace; you and it write with session_send. Answered at \
@@ -2607,9 +2607,13 @@ async fn played_whole(
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 // The judge takes seconds: a leave the user withdrew meanwhile,
-                                // or a session ended, stops the message it was judging.
-                                let lost = (tool == "session_send")
-                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                // or a session ended, stops the message it was judging. A
+                                // session on another machine is no session here: the check
+                                // before the judge skipped it too.
+                                let lost = (tool == "session_send"
+                                    && crate::across::aimed(daemon, &grant.agent, tool, &args)
+                                        .is_none())
+                                .then(|| crate::tree::needs_leave(daemon, grant, &args));
                                 // A read of another project's session is under the same leave.
                                 let read_lost = tool == "session_read"
                                     && crate::session_read::needs_leave(daemon, grant, &args);

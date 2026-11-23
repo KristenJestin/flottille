@@ -7,7 +7,11 @@
 
 use crate::common;
 
-use std::sync::Arc;
+use std::io::{Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -85,17 +89,28 @@ fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    window_through(user, Arc::new(user.connector()), cx)
+}
+
+/// A window whose connections to the daemon are `connect`'s.
+fn window_through<'a>(
+    user: &User,
+    connect: Connect,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let env = Environment {
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
     cx.update(|cx| flottille_window::init_with(env, cx));
-    open(user, cx)
+    open_through(connect, cx)
 }
 
-/// Another window on the user's daemon.
-fn open<'a>(user: &User, cx: &'a mut TestAppContext) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    let connect: Connect = Arc::new(user.connector());
+/// Another window, on the daemon `connect` reaches.
+fn open_through(
+    connect: Connect,
+    cx: &mut TestAppContext,
+) -> (Entity<Shell>, &mut VisualTestContext) {
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));
     (shell, cx)
@@ -879,5 +894,138 @@ fn the_window_draws_no_frame_at_rest_with_groups_and_a_finished_drag(cx: &mut Te
         frames_at_rest(&shell, cx),
         (0, 0),
         "groups and a drag that ended: (drawn, asked)"
+    );
+}
+
+/// The connections the window's keeper opens, through a relay a test can hold: from the next time
+/// the keeper reads the arrangement, what it asks does not reach the daemon and no answer comes
+/// back; then it drops the connections, so that what was asked is answered "retry" and the next ask opens another one.
+#[derive(Clone, Default)]
+struct Relay {
+    /// The next read of the arrangement is the one to hold (other asks of the keeper, a fold
+    /// written, go through).
+    armed: Arc<AtomicBool>,
+    held: Arc<AtomicBool>,
+    open: Arc<Mutex<Vec<(UnixStream, UnixStream)>>>,
+}
+
+impl Relay {
+    fn connector(&self, user: &User) -> Connect {
+        let daemon = user.connector();
+        let relay = self.clone();
+        Arc::new(move || {
+            let toward = daemon()?;
+            if std::thread::current().name() != Some("flottille-keeper") {
+                return Ok(toward);
+            }
+            let (keeper, outside) = UnixStream::pair()?;
+            relay
+                .open
+                .lock()
+                .unwrap()
+                .push((toward.try_clone()?, outside.try_clone()?));
+            // The asks, once the relay lets them go.
+            let (mut from, mut to) = (outside.try_clone()?, toward.try_clone()?);
+            let (armed, held) = (relay.armed.clone(), relay.held.clone());
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                while let Ok(read) = from.read(&mut buffer) {
+                    let asked = &buffer[..read];
+                    let reads = asked.windows(10).any(|part| part == b"window.get");
+                    if read > 0 && reads && armed.swap(false, Ordering::SeqCst) {
+                        held.store(true, Ordering::SeqCst);
+                    }
+                    while read > 0 && held.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if read == 0 || to.write_all(asked).is_err() {
+                        break;
+                    }
+                }
+                let _ = to.shutdown(Shutdown::Both);
+            });
+            // The answers.
+            let (mut from, mut to) = (toward, outside);
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                while let Ok(read) = from.read(&mut buffer) {
+                    if read == 0 || to.write_all(&buffer[..read]).is_err() {
+                        break;
+                    }
+                }
+                let _ = to.shutdown(Shutdown::Both);
+            });
+            Ok(keeper)
+        })
+    }
+
+    /// The next time the keeper reads the arrangement, that ask and what follows stay in the
+    /// relay.
+    fn hold(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an ask is stuck in the relay.
+    fn holding(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
+    }
+
+    /// The connections are lost: what was held never reaches the daemon.
+    fn drop_connections(&self) {
+        for (toward, outside) in self.open.lock().unwrap().drain(..) {
+            let _ = toward.shutdown(Shutdown::Both);
+            let _ = outside.shutdown(Shutdown::Both);
+        }
+        self.armed.store(false, Ordering::SeqCst);
+        self.held.store(false, Ordering::SeqCst);
+    }
+}
+
+#[gpui_kit::test]
+fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "alpha");
+    project(&user, "bravo");
+    let relay = Relay::default();
+    let (shell, cx) = window_through(&user, relay.connector(&user), cx);
+    until(&shell, cx, "the rows", |cx| {
+        present(cx, project_id("bravo"))
+    });
+    settle(&shell, cx);
+
+    // The user makes the group "Work" while the connection is stuck, and drags alpha into it
+    // before the first request is answered: the connection drops then, so that it is asked again
+    // later, and what comes after it must not pass it.
+    relay.hold();
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+    assert_eq!(held(&shell, "Work", cx), names(&["alpha"]));
+    assert!(
+        relay.holding(),
+        "the creation of the group is stuck in the relay"
+    );
+    assert!(
+        kept(&user)["groups"].as_array().is_none_or(Vec::is_empty),
+        "nothing reached the daemon while the connection is held: {}",
+        kept(&user)
+    );
+    relay.drop_connections();
+
+    // A second by step, so that the wait before the asking again is over.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while strings(&kept(&user)["groups"][0]["projects"]) != ["alpha"] {
+        assert!(
+            Instant::now() < deadline,
+            "the move reaches the daemon after the group it names"
+        );
+        step(&shell, Duration::from_secs(1), cx);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    settle(&shell, cx);
+    assert_eq!(
+        held(&shell, "Work", cx),
+        names(&["alpha"]),
+        "the window keeps it too"
     );
 }
