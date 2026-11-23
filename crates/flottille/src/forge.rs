@@ -1492,7 +1492,8 @@ async fn created(
         .read(|store| store.agent(agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none());
+        // A child an agent of another machine launched has no parent here, and is no session.
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
     let events = crate::extensions::subscribed_on_create(daemon, &place.project);
     if !session || events.is_empty() {
         return String::new();

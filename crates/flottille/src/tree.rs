@@ -2841,7 +2841,8 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
     let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
         return;
     };
-    if agent.parent.is_none() {
+    // A child an agent of another machine launched has no parent here, and is a child.
+    if agent.parent.is_none() && agent.depth == 0 {
         return;
     }
     if let Some(brief) = &agent.brief {

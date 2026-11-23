@@ -152,9 +152,10 @@ pub fn events(daemon: &Daemon, project: &str, subject: &str) -> Vec<String> {
 }
 
 /// Whether the agent is one a subject subscribes: a session (a root, led or handed), never a
-/// child nor an extension's agent, which have a parent.
+/// child nor an extension's agent, which have a parent, nor a child an agent of another machine
+/// launched, which has none here and is below the root.
 fn is_session(agent: &Agent) -> bool {
-    agent.parent.is_none() && !agent.state.is_final()
+    agent.parent.is_none() && agent.depth == 0 && !agent.state.is_final()
 }
 
 /// The sessions working in the workspace `workspace` of `project`.
