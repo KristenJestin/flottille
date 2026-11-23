@@ -35,6 +35,8 @@ mod remote_hub_only;
 mod remote_keys;
 #[path = "../remote_launch.rs"]
 mod remote_launch;
+#[path = "../remote_led.rs"]
+mod remote_led;
 #[path = "../remote_link.rs"]
 mod remote_link;
 #[path = "../remote_project_needs.rs"]
