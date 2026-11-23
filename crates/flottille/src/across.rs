@@ -1864,6 +1864,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_caller_of_another_machine_is_given_only_the_session_tools_the_issue_names() {
+        // A tool of the tree added later reaches no caller of another machine until it is
+        // written here.
+        assert_eq!(
+            stand_in_tools(),
+            [
+                "session_read",
+                "session_send",
+                "agent_status",
+                "agent_send",
+                "agent_stop"
+            ]
+        );
+    }
+
+    #[test]
     fn a_close_dropped_names_the_session_and_that_it_was_a_close() {
         let named = json!({"machine": "pc", "kind": "close", "agent": "a1", "title": "Ship it",
             "refused": "the close is older than thirty days"});

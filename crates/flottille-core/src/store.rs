@@ -9265,6 +9265,81 @@ mod tests {
         assert_eq!(read.state, "refused");
     }
 
+    /// A caller of the machine of key `machine` stood in for here.
+    fn a_stand_in(caller: &str, machine: &str) -> Agent {
+        let mut agent = an_agent();
+        agent.id = format!("{caller}@{machine}");
+        agent
+    }
+
+    #[test]
+    fn a_stand_in_is_none_of_this_machine_s_agents() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 64).unwrap();
+
+        assert!(store.agents().unwrap().is_empty());
+        assert!(store.live_agents().unwrap().is_empty());
+        assert!(store.agent("c0@aa").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_machine_keeps_a_bounded_number_of_stand_ins_and_forgets_the_idle_and_the_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        for caller in ["c0", "c1", "c2"] {
+            assert!(
+                store
+                    .keep_stand_in(&a_stand_in(caller, "aa"), 3)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        // A fourth caller of that machine is refused; one already kept and another machine's
+        // are taken.
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c3", "aa"), 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c0", "aa"), 3)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c0", "bb"), 3)
+                .unwrap()
+                .is_some()
+        );
+        let local = an_agent();
+        store
+            .create_agent(&local, ("agent.created", json!({})))
+            .unwrap();
+        store.grant_leave("c0@aa", &local.id, 1).unwrap();
+        store.grant_leave("c0@bb", &local.id, 2).unwrap();
+        store.await_answer("aa", 5, &local.id).unwrap();
+        store.await_answer("bb", 6, &local.id).unwrap();
+
+        // `bb` left the members: its caller goes, with its leave and what is awaited of it.
+        assert_eq!(store.forget_stand_ins(&["aa".to_owned()], 0).unwrap(), 1);
+        assert!(store.agent("c0@bb").unwrap().is_none());
+        assert!(!store.has_leave("c0@bb", &local.id).unwrap());
+        assert!(store.has_leave("c0@aa", &local.id).unwrap());
+        assert!(!store.take_awaited("bb", 6, &local.id).unwrap());
+
+        // Idle for long: every caller goes, and what is awaited since as long.
+        let later = now_ms() + 1;
+        assert_eq!(
+            store.forget_stand_ins(&["aa".to_owned()], later).unwrap(),
+            3
+        );
+        assert!(store.leaves_of(&local.id).unwrap().is_empty());
+        assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
+        assert!(store.agent(&local.id).unwrap().is_some());
+    }
+
     #[test]
     fn a_machine_s_list_is_forgotten_when_it_leaves_the_members_or_stops_being_a_runner() {
         let mut store = Store::open_in_memory().unwrap();
