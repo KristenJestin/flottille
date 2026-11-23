@@ -1563,11 +1563,18 @@ way in:
   daemon says why, in its log and in the form, under the switch (kept there while a call runs),
   never with the real folder. Off, the server gets no display variable of the daemon's; **whether
   the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
-  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's vault folder (below;
-  agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
-  same browser, the removal of a display folder never takes a live socket, and no run reaches the
-  socket, which drives the browser with no gate (an init script, a route, the filled password
-  field read). One browser per
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's **socket folder**, the
+  one folder of its vault folder (below), of a random name (`browser-<random>`, made the first
+  time and found again by listing it; agent-browser puts its daemon's socket there, else under
+  `$XDG_RUNTIME_DIR`, named after its session, `default`, which anyone can tell), so they reach
+  the same browser, the removal of a display folder never takes a live socket, and a run does not
+  reach that socket, which drives the browser with no gate (an init script, a route, the filled
+  password field read). **The browser is not out of every run's reach, though**: agent-browser
+  0.43 starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens on
+  `127.0.0.1`, on a port of its choice, with no token; runs share the machine's network and
+  Landlock rules no port here, so a run that finds the port (in `/proc/net/tcp`, by a scan) drives
+  the browser as well, reads its pages, a password filled in a form, its cookies (`docs/vault.md`,
+  "The gaps"). The adapter keeps `get_cdp_url`, which says the address, off. One browser per
   connection, in the mode the switch says: a login uses the server's display folder (the running
   server's own, else made under the connection's name for the time of the login), and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
@@ -1575,9 +1582,11 @@ way in:
   login is given that folder again, never one made again at its path, which Landlock, holding a
   folder by its inode, would keep out of the browser's reach (#1040). It is closed (`agent-browser close`, on
   that socket folder) when the server is stopped (an edit of what trust is given to, the switch included, turning it off, removing it) and when
-  the daemon stops; one a daemon that died left (an update that killed it, a crash) is closed the
-  same way when the next daemon starts, before it serves any tool call, since the folder it was
-  confined with is made again out of its reach; the next start, of the server or of a login, starts a browser in the mode the
+  the daemon stops; one a daemon that died left (an update that killed it, a crash), shown or
+  not, is closed the same way when the next daemon starts, before it serves any tool call (one
+  whose socket folder holds anything), since the display folder it was confined with is made
+  again out of its reach and it keeps the vault folder within its reach under a mode the switch
+  may have changed since; the next start, of the server or of a login, starts a browser in the mode the
   switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
   X11 the browser can read the keys typed in other windows and type into them (a terminal's
   included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
@@ -1705,16 +1714,22 @@ way in:
   waits for the login cannot read the token nor reach the socket, where a folder of the user's
   under the state folder would give both to any of its processes. Only the connection's server,
   its login's commands, `agent-browser close` and the browser they start are given it (as a
-  display folder is). It is **kept**: made once, never made again nor removed, not even by a
-  daemon that starts after one died: agent-browser's daemon outlives the server, the login and
-  Flottille's daemon, confined with the folder's inode, and is found again by its socket there
-  (one made again would be out of its reach, and its browser left running). `flottille vault provide` (hidden, needs no folder of
+  display folder is). It is **kept**: made once, never made again, not even by a daemon that
+  starts after one died: agent-browser's daemon outlives the server, the login and Flottille's
+  daemon, confined with the folder's inode, and is found again by its socket there (one made
+  again would be out of its reach, and its browser left running). A daemon that starts removes
+  what a login killed with its daemon left in it (`vault.token`, `vault.sock`, `vault.why`),
+  keeping the socket folder, and the configuration and plugin socket an earlier Flottille wrote
+  in the connection's state folder; the folder is removed with the connection, once its browser
+  is closed. `flottille vault provide` (hidden, needs no folder of
   Flottille's) reads agent-browser's request on its standard input, sends the token and the item
   and the URL agent-browser asks for to that socket, and writes the answer on its standard output.
   agent-browser says of a plugin that failed only that it "exited unsuccessfully": the plugin also
   writes why in `vault.why` of the vault folder (temporary file and rename: a link at its name is
   replaced, never written through), and the login's error says it (masked) when the daemon did
-  not refuse the request itself, read without following a link and up to 1 KiB. The daemon answers **only** the token of the run it started, **once**, only
+  not refuse the request itself, read without following a link and up to 1 KiB. Each request on the socket is answered on its own, its question awaited 5 seconds at most, so one
+  that says nothing holds no other; a request after the token was spent is refused and is not
+  taken for why the login failed. The daemon answers **only** the token of the run it started, **once**, only
   for a URL of the entry's own host, and only for the entry that run is for, bound
   to this connection; without the token the plugin is refused before anything is asked. The
   secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or

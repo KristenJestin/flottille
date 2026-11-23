@@ -680,9 +680,19 @@ The gaps, where the platform does not allow more:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
   by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
   (`sandbox.private_mounts` false in `--json`). That includes a connection's vault folder: it
-  cannot list it nor read the login's token or agent-browser's configuration, but it can connect
-  to agent-browser's daemon's socket, and drive the browser, if it guesses its name, and to the
-  login's, which refuses a request without the token;
+  cannot list it nor read the login's token or agent-browser's configuration, and agent-browser's
+  daemon's socket is in a folder of a random name it cannot guess, but it can connect to the
+  login's socket, whose name it can guess and which refuses a request without the token;
+- **a browser of a connection is reachable by any run of the same user while it runs**:
+  agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens
+  on `127.0.0.1`, on a port of its choice, with no token. Runs share the machine's network and
+  Landlock rules no network here, so a run finds the port (`/proc/net/tcp`, a scan of the local
+  ports, the `DevToolsActivePort` file Chrome writes in its profile when that is in a shared
+  `/tmp`) and drives the browser with no gate: it reads the pages that are open, a password
+  Flottille's login filled in a form before it is sent, the cookies and storage of every site
+  signed in to. Flottille never hands the address to an agent (the adapter keeps `get_cdp_url`
+  off, with no setting to turn it on), but that does not keep a run from finding it. The fix
+  planned: agent-browser and its Chrome in a network namespace of their own, which no run shares;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then
