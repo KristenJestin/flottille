@@ -411,7 +411,11 @@ impl Remote {
             };
             // Kept before the file is written: a link judged meanwhile is judged by this list,
             // never by the one before it, which may still hold a machine removed now.
-            self.peers.lock().unwrap().last = peers.clone();
+            {
+                let mut kept = self.peers.lock().unwrap();
+                kept.last = peers.clone();
+                kept.whole = true;
+            }
             // A file broken by hand is written over: the list is what says whom to trust.
             let before = read_json::<Peers>(&file).unwrap_or_default();
             let same = serde_json::to_value(&peers).ok() == serde_json::to_value(&before).ok();
