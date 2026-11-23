@@ -1797,8 +1797,23 @@ fn a_session_this_machine_started_elsewhere_launches_back_only_with_the_user_wha
     assert!(!ask.launched);
     let answers = sent_with(&key, &pc, vec![MachineMessage::Launch(Box::new(ask))]);
 
-    assert!(answers[0].is_ok(), "{answers:?}");
-    held_for_the_chain(&held_there(&pc, "pc"));
+    // Held as base, for the chain: its request comes once its code is there, which a forged
+    // launch never sends, so the launch's record says it.
+    assert_eq!(answers[0], Ok(json!({"state": "held"})), "{answers:?}");
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let asked: String = store
+        .query_row("SELECT asked FROM launches WHERE way = 'in'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let asked: Value = serde_json::from_str(&asked).unwrap();
+    assert_eq!(asked["base"], true, "{asked:#}");
+    assert!(
+        asked["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{asked:#}"
+    );
 }
 
 #[test]
@@ -1908,7 +1923,10 @@ fn a_child_on_another_machine_launches_a_session_only_with_the_user() {
         "{}",
         answer.text
     );
-    held_for_the_chain(&held_there(&server, "server"));
+    eventually(&format!("a request held, answered {}", answer.text), || {
+        !server.requests().is_empty()
+    });
+    held_for_the_chain(&server.requests()[0]);
     assert_eq!(
         server.user.judge_received().len(),
         judged,
