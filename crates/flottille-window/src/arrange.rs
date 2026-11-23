@@ -61,14 +61,16 @@ pub enum Change {
 }
 
 impl Change {
-    /// A new group's change, with an id no other window is likely to give: the clock, in
-    /// microseconds.
+    /// A new group's change, with an id no other group is likely to have, in this window or
+    /// another: the clock in microseconds, and a count for the groups made in the same one.
     pub fn add_group(name: &str) -> Self {
+        static MADE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_micros());
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self::AddGroup {
-            id: format!("g{now:x}"),
+            id: format!("g{now:x}-{made}"),
             name: name.trim().to_owned(),
         }
     }
