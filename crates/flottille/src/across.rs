@@ -476,17 +476,19 @@ pub(crate) fn tell(
     true
 }
 
-/// Tells the agent of another machine that asked `launch`, which never started here: a delivery
-/// of `kind` that ends it there, kept until that machine takes it.
-pub(crate) fn tell_of(
-    daemon: &Arc<Daemon>,
-    launch: &Launch,
-    kind: &str,
-    body: &str,
-    urgency: &str,
-    ended: bool,
-) {
-    tell_with(daemon, launch, kind, body, urgency, false, ended);
+/// Tells the agent of another machine that asked the held `launch` the user's answer here, as a
+/// held call's result comes (an `approval` delivery): `started`, or refused, which ends it there.
+/// Told whatever its kind, a handed session's too: it waited for that answer.
+pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, started: bool) {
+    kept_for_caller(
+        daemon,
+        launch,
+        "approval",
+        body,
+        approval::URGENT,
+        false,
+        !started,
+    );
 }
 
 fn tell_with(
@@ -502,6 +504,18 @@ fn tell_with(
     if launch.kind == "handed" {
         return;
     }
+    kept_for_caller(daemon, launch, kind, body, urgency, back, ended);
+}
+
+fn kept_for_caller(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    kind: &str,
+    body: &str,
+    urgency: &str,
+    back: bool,
+    ended: bool,
+) {
     let id = format!(
         "{kind}-{}",
         flottille_core::agent::new_id().unwrap_or_default()
@@ -943,7 +957,7 @@ fn delivered(
         .read(|store| store.launches("out", Some(&machine), LaunchFilter::Named(&deliver.launch)))
         .map_err(|error| Refused::Now(error.to_string()))?
         .into_iter()
-        .find(|launch| launch.caller == deliver.agent && launch.state != "refused")
+        .find(|launch| delivered_to(launch, &deliver.agent, &deliver.kind))
         .ok_or_else(|| {
             format!(
                 "agent {} of this machine did not start launch {} on {name}: a delivery goes only \
@@ -952,7 +966,9 @@ fn delivered(
                 deliver.launch
             )
         })?;
-    if !KINDS.contains(&deliver.kind.as_str()) {
+    // The user's answer there to a launch held for them.
+    let decided = deliver.kind == "approval";
+    if !KINDS.contains(&deliver.kind.as_str()) && !decided {
         return Err(format!(
             "no delivery of kind {:?} is taken from another machine",
             deliver.kind
@@ -968,16 +984,34 @@ fn delivered(
             format!("a delivery is {LONGEST} characters at most, this one {length}").into(),
         );
     }
+    // Its id never starts with the launch's name: the answer is not what the session said
+    // (`Store::launches_shown`).
+    let id = match decided {
+        true => format!("decided-{}-{}", deliver.launch, deliver.id),
+        false => format!("{}-{}", deliver.launch, deliver.id),
+    };
     deliveries::deliver(
         daemon,
         &deliver.agent,
         &deliver.kind,
-        Some(format!("{}-{}", deliver.launch, deliver.id)),
+        Some(id),
         &deliver.body,
         &deliver.urgency,
     )
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
-    if deliver.ended {
+    if decided {
+        let state = match deliver.ended {
+            true => "refused",
+            false => "started",
+        };
+        daemon
+            .write(|store| {
+                store
+                    .decide_launch(&machine, &launch.launch, state)
+                    .map(|()| ((), None))
+            })
+            .map_err(|error| Refused::Now(error.to_string()))?;
+    } else if deliver.ended {
         daemon
             .write(|store| {
                 store
@@ -987,6 +1021,13 @@ fn delivered(
             .map_err(|error| Refused::Now(error.to_string()))?;
     }
     Ok(json!({}))
+}
+
+/// Whether a delivery of `kind` for `agent` is of `launch`: one its agent started, not refused,
+/// or the user's answer that refused it, sent again by a machine that did not hear it was taken
+/// (stored once by its id).
+fn delivered_to(launch: &Launch, agent: &str, kind: &str) -> bool {
+    launch.caller == agent && (launch.state != "refused" || kind == "approval")
 }
 
 /// A `call` the machine of `from` sent: done as the tool would be here, only when the agent that
@@ -2125,6 +2166,30 @@ fn delivered_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_sent_again_after_a_refusal_still_finds_its_launch() {
+        let launch = Launch {
+            way: "out".into(),
+            machine: "0123456789ab".into(),
+            launch: "first".into(),
+            caller: "caller".into(),
+            kind: "led".into(),
+            project: "app".into(),
+            state: "refused".into(),
+            request: None,
+            agent: None,
+            workspace: None,
+            workspace_id: None,
+            asked: json!({}),
+            at: 1,
+        };
+        // Its first sending refused it; the machine that did not hear it was taken sends it
+        // again, which is answered as taken, never dropped.
+        assert!(delivered_to(&launch, "caller", "approval"));
+        assert!(!delivered_to(&launch, "caller", "child-report"));
+        assert!(!delivered_to(&launch, "another", "approval"));
+    }
 
     #[test]
     fn a_caller_of_another_machine_is_given_only_the_session_tools_the_issue_names() {

@@ -2607,9 +2607,13 @@ async fn played_whole(
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 // The judge takes seconds: a leave the user withdrew meanwhile,
-                                // or a session ended, stops the message it was judging.
-                                let lost = (tool == "session_send")
-                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                // or a session ended, stops the message it was judging. A
+                                // session on another machine is no session here: the check
+                                // before the judge skipped it too.
+                                let lost = (tool == "session_send"
+                                    && crate::across::aimed(daemon, &grant.agent, tool, &args)
+                                        .is_none())
+                                .then(|| crate::tree::needs_leave(daemon, grant, &args));
                                 // A read of another project's session is under the same leave.
                                 let read_lost = tool == "session_read"
                                     && crate::session_read::needs_leave(daemon, grant, &args);
