@@ -770,9 +770,6 @@ pub fn browser_network() -> ! {
     connections::network::hold()
 }
 
-/// What to install where a connection's browser cannot run in a network of its own.
-pub const BROWSER_NETWORK_INSTALL: &str = connections::network::INSTALL;
-
 /// Whether a connection's browser can run in a network of its own here, and why not
 /// (`flottille doctor`).
 pub fn browser_network_available() -> Result<(), String> {

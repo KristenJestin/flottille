@@ -2865,6 +2865,7 @@ fn adapter_said(
                 && let Some(why) = adapter
                     .own_config(words)
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
+                    .or_else(|| adapter.unsafe_start(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }

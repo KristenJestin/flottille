@@ -363,6 +363,57 @@ impl Adapter {
     }
 }
 
+impl Adapter {
+    /// Why login is refused when an option agent-browser itself calls unsafe (those its
+    /// `--allowed-domains` rejects, `UNSAFE`) is set by the server's command, the connection's
+    /// environment, or the environment the daemon started with, which agent-browser inherits:
+    /// the login would type into a browser, a profile or a network other than the one Flottille
+    /// made. No configuration file of the user's is read: agent-browser reads the one `--config`
+    /// Flottille names, and only it.
+    pub fn unsafe_start(&self, words: &[String], env: &BTreeMap<String, String>) -> Option<String> {
+        let options: Vec<&str> = UNSAFE.iter().map(|(option, _)| *option).collect();
+        let variables: Vec<String> = UNSAFE
+            .iter()
+            .flat_map(|(_, variables)| variables.iter().map(|name| (*name).to_owned()))
+            .collect();
+        let (sets, option, from) = set_by(words, env, &options, &variables).or_else(|| {
+            variables
+                .iter()
+                .find(|name| std::env::var_os(name).is_some())
+                .map(|name| {
+                    (
+                        "the environment Flottille's daemon started with sets",
+                        name.clone(),
+                        "the environment the daemon starts with, then restarts it",
+                    )
+                })
+        })?;
+        Some(format!(
+            "login is refused while {sets} {option}, which agent-browser itself calls unsafe: the \
+             login would type the password into a browser, a profile or a network other than the \
+             one Flottille made for it (another profile, a saved or restored session, a browser \
+             reached over CDP or found running, a provider's browser, or launch arguments such as \
+             a proxy). The user takes {option} out of {from}"
+        ))
+    }
+}
+
+/// The options agent-browser itself calls unsafe beside a list of allowed domains, and the
+/// variables it reads as each: another profile, a session saved or restored, a browser reached
+/// over CDP or found running, a provider's browser, launch arguments (a `--proxy-server` among
+/// them).
+const UNSAFE: &[(&str, &[&str])] = &[
+    ("--profile", &["AGENT_BROWSER_PROFILE"]),
+    ("--state", &["AGENT_BROWSER_STATE"]),
+    ("--restore", &["AGENT_BROWSER_RESTORE"]),
+    ("--session-name", &["AGENT_BROWSER_SESSION_NAME"]),
+    ("--cdp", &["AGENT_BROWSER_CDP"]),
+    ("--auto-connect", &["AGENT_BROWSER_AUTO_CONNECT"]),
+    ("--provider", &["AGENT_BROWSER_PROVIDER"]),
+    ("-p", &[]),
+    ("--args", &["AGENT_BROWSER_ARGS"]),
+];
+
 /// Where the first of the options `list`, or of the `variables` that stand for them, is set, by
 /// the server's command `words` or the connection's environment `env`: what sets it, the option
 /// or variable, and where the user takes it out.
@@ -590,16 +641,34 @@ pub fn display(
         "AGENT_BROWSER_SOCKET_DIR".into(),
         sockets(vault)?.into_os_string(),
     );
-    env.insert("TMPDIR".into(), temporary(vault)?.into_os_string());
+    env.insert("TMPDIR".into(), private(vault, TEMPORARY)?.into_os_string());
+    // Chrome writes outside its profile, whatever profile it is given: its crash database (page
+    // memory, a password typed) under its default configuration folder, its caches; never in a
+    // folder of the user's, which runs read and write (`docs/vault.md`, "The browser's network").
+    for (variable, name) in CHROMES_FOLDERS {
+        env.insert(variable.into(), private(vault, name)?.into_os_string());
+    }
+    for name in ["CHROME_CONFIG_HOME", "BREAKPAD_DUMP_LOCATION"] {
+        env.remove(&OsString::from(name));
+    }
     Ok(())
 }
 
-/// The temporary folder of agent-browser and its Chrome, in the vault folder: agent-browser makes
-/// Chrome's profile there (`agent-browser-chrome-…`: cookies, Local Storage, History, and the
-/// `Preferences` that name a proxy), which in the daemon's own (`/tmp`) runs would read and plant
-/// (`docs/vault.md`, "The browser's network").
-fn temporary(vault: &crate::display::Folder) -> Result<PathBuf, String> {
-    let folder = vault.path().join(TEMPORARY);
+/// The variables that say where Chrome and agent-browser write outside the profile, and the
+/// folder of the vault folder each names.
+const CHROMES_FOLDERS: [(&str, &str); 3] = [
+    ("XDG_CONFIG_HOME", "config"),
+    ("XDG_CACHE_HOME", "cache"),
+    ("XDG_DATA_HOME", "data"),
+];
+
+/// The folder `name` of the vault folder, made the user's alone: the temporary folder of
+/// agent-browser and its Chrome, where agent-browser makes Chrome's profile
+/// (`agent-browser-chrome-…`: cookies, Local Storage, History, and the `Preferences` that name a
+/// proxy), which in the daemon's own (`/tmp`) runs would read and plant, and the folders of
+/// [`CHROMES_FOLDERS`] (`docs/vault.md`, "The browser's network").
+fn private(vault: &crate::display::Folder, name: &str) -> Result<PathBuf, String> {
+    let folder = vault.path().join(name);
     flottille_core::paths::ensure_private_dir(&folder)
         .map_err(|error| format!("{}: {error}", folder.display()))?;
     Ok(folder)
@@ -661,6 +730,14 @@ pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
     for vault in folders(paths.runtime.join("vault")) {
         for name in [TOKEN_FILE, WHY_FILE, PLUGIN_SOCKET] {
             let _ = std::fs::remove_file(vault.join(name));
+        }
+        // No browser left to close (`left`), whose `close` would empty it: what is there is a
+        // profile no browser uses, a Chrome that crashed left it.
+        let no_browser = sockets_in(&vault)
+            .and_then(|sockets| std::fs::read_dir(sockets).ok()?.next())
+            .is_none();
+        if no_browser {
+            emptied(&vault.join(TEMPORARY));
         }
     }
     for state in folders(paths.state.join("connections")) {
@@ -725,6 +802,22 @@ pub async fn close(daemon: &Daemon, browser: &Browser) {
     .await;
     // Nothing of the browser's runs in it any more.
     network::ended(browser.vault.path());
+    // A Chrome that crashed left its profile, which agent-browser's close never removes.
+    emptied(&browser.vault.path().join(TEMPORARY));
+}
+
+/// Every entry of `folder` removed, the folder kept (a server's next browser makes its profile
+/// there): never through a link, the entry's own type.
+fn emptied(folder: &Path) {
+    let Ok(listed) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in listed.flatten() {
+        let _ = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(entry.path()),
+            _ => std::fs::remove_file(entry.path()),
+        };
+    }
 }
 
 /// The network of the browser of the vault folder `vault`, found or made, for a command of
@@ -745,17 +838,22 @@ pub async fn network(
             network::made(vault.path()).await?
         }
     };
-    if !outside(&network, vault).is_empty() {
+    if !outside(&network, vault).await.is_empty() {
         closed_in(daemon, program, folder, vault, Some(&network), true).await;
     }
     Ok(network)
 }
 
-/// The browsers that answer on the socket folder of `vault` and do not run in `network`.
-fn outside(network: &Network, vault: &crate::display::Folder) -> Vec<u32> {
-    sockets_in(vault.path())
-        .map(|sockets| network::daemons(&sockets))
-        .unwrap_or_default()
+/// The browsers that answer on the socket folder of `vault` and do not run in `network`. Each
+/// socket is connected to, which blocks: on a thread of its own.
+async fn outside(network: &Network, vault: &crate::display::Folder) -> Vec<u32> {
+    let Some(sockets) = sockets_in(vault.path()) else {
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || network::daemons(&sockets))
+        .await
+        // Not known: as a browser outside, so nothing is filled.
+        .unwrap_or_else(|_| vec![0])
         .into_iter()
         .filter(|pid| !network.holds(*pid))
         .collect()
@@ -928,6 +1026,7 @@ pub async fn perform(
         if let Some(why) = AGENT_BROWSER
             .own_config(&program)
             .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.unsafe_start(&program, &declaration.env))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
@@ -1088,7 +1187,7 @@ async fn run(
         .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
     // The browser the page loaded in is the one the login fills: in the network, as every other
     // that answers on the socket folder.
-    if !outside(network, &vault).is_empty() {
+    if !outside(network, &vault).await.is_empty() {
         return Err(
             "a browser of this connection runs outside its network, where runs reach its \
              DevTools: Flottille fills no password into it. Restarting the connection's server \

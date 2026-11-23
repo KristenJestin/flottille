@@ -97,33 +97,31 @@ fn pasta() -> Option<PathBuf> {
 pub fn available() -> Result<(), String> {
     pasta().ok_or_else(|| format!("{NO_PASTA}: {INSTALL}"))?;
     if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
-        return Err("the kernel refuses user namespaces to this user".into());
+        return Err(
+            "the kernel refuses user namespaces to this user: allowing them (on Ubuntu from \
+             23.10, kernel.apparmor_restrict_unprivileged_userns=0, or an AppArmor profile that \
+             gives Flottille userns) lets the agent's browser sign in"
+                .into(),
+        );
     }
-    out_of_reach(crate::landlock::abi(), yama())
+    out_of_reach(crate::landlock::abi())
 }
 
-/// Yama's `ptrace_scope`, 0 without Yama.
-fn yama() -> u32 {
-    std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
-        .ok()
-        .and_then(|text| text.trim().parse().ok())
-        .unwrap_or(0)
-}
-
-/// Whether a run is kept from attaching to the browser (`ptrace`), which reads its memory, the
-/// password filled included: by Landlock, which confines runs from its second ABI (a confined
-/// process attaches to none outside its domain), or by Yama's `ptrace_scope` from 1 (to its own
-/// descendants alone). The network keeps DevTools out of reach; this keeps the process.
-fn out_of_reach(landlock: i64, yama: u32) -> Result<(), String> {
-    if landlock >= 2 || yama >= 1 {
+/// Whether the browser is out of a run's reach as a process: Landlock confines runs from its
+/// second ABI, and a confined process neither attaches to one outside its domain (`ptrace`, which
+/// reads the password filled in its memory) nor opens its `/proc/<pid>/root`, which leads to the
+/// vault folder and the browser's socket. Yama's `ptrace_scope` keeps the first alone, so it is
+/// no substitute. The network keeps DevTools out of reach; this keeps the process.
+fn out_of_reach(landlock: i64) -> Result<(), String> {
+    if landlock >= 2 {
         return Ok(());
     }
-    Err(
-        "neither Landlock nor Yama keeps a run from attaching to the browser and reading its \
-         memory: a kernel with Landlock, or kernel.yama.ptrace_scope set to 1, lets the \
-         agent's browser sign in"
-            .into(),
-    )
+    Err(format!(
+        "the kernel's Landlock is below its second ABI ({landlock}), so a run could open \
+         /proc/<pid>/root of the user's processes, reach the browser's socket and read the \
+         password filled: a kernel with Landlock's second ABI or later (Linux 5.19), Landlock \
+         enabled (lsm=landlock), lets the agent's browser sign in"
+    ))
 }
 
 /// The namespace recorded in the vault folder `vault`, while its holder runs.
@@ -389,13 +387,13 @@ mod tests {
         // Yama keeps a run from attaching to the browser, not from opening `/proc/<pid>/root`
         // of the user's processes, which leads to the vault folder and the browser's socket:
         // Landlock alone closes both, whatever Yama says.
-        for (landlock, yama) in [(0, 0), (1, 0), (0, 1), (1, 3)] {
-            let refused = out_of_reach(landlock, yama).unwrap_err();
+        for landlock in [0, 1] {
+            let refused = out_of_reach(landlock).unwrap_err();
             for words in ["Landlock", "/proc/<pid>/root", "5.19"] {
-                assert!(refused.contains(words), "{landlock} {yama}: {refused}");
+                assert!(refused.contains(words), "{landlock}: {refused}");
             }
         }
-        assert!(out_of_reach(2, 0).is_ok());
-        assert!(out_of_reach(6, 1).is_ok());
+        assert!(out_of_reach(2).is_ok());
+        assert!(out_of_reach(6).is_ok());
     }
 }

@@ -130,8 +130,7 @@ pub fn sandbox() -> serde_json::Value {
         warnings.push(format!(
             "the agent's browser (a connection to agent-browser) cannot run in a network of its \
              own, where no run reaches its DevTools: {why}. Its login refuses to fill until \
-             then: {}",
-            crate::extensions::BROWSER_NETWORK_INSTALL
+             then"
         ));
     }
     serde_json::json!({
