@@ -1830,10 +1830,10 @@ itself (`fs_*`, `run`, `workspace`, git stay its own project's); the session doe
 #### Following a session
 
 A pilot is woken by a delivery, `session-turn-ended`, between turns (`docs/design.md` §5.2), when
-its led session ends a turn in which it asked (`ask`) or reported (`report`), and when it ends or
-fails. **A plain turn's end wakes nobody.** The wake names the session (its title and id), says why
-(`it asked you a question with ask`, `it reported`, or, for the end of the session, `ended: <why>`
-or `failed: <why>`) and holds the session's last message, masked and cut at 2,000 characters, the
+its led session ends a turn, whether or not the turn asked (`ask`) or reported (`report`), and when
+it ends or fails. **Every end of a turn wakes it, once.** The wake names the session (its title and
+id), says why (`it asked you a question with ask`, `it reported`, nothing for a plain turn, or, for
+the end of the session, `ended: <why>` or `failed: <why>`) and holds the session's last message, masked and cut at 2,000 characters, the
 cut said (`[cut: N more characters; session_read reads the rest]`). The questions it asked its
 pilot in that turn that still wait come before that last message (`Its question to you:`), masked
 and cut the same way, 4,000 characters of them at most in all, those past it counted (`[2 more

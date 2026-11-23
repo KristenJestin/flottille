@@ -147,8 +147,8 @@ fn ask(question: &str) -> Value {
     json!({"mcp": {"tool": "ask", "arguments": {"question": question}}})
 }
 
-/// What the agents play: a led session asks at each turn of its own, so that each wakes its
-/// pilot (a plain turn's end wakes nobody); the lead's own turns ask nothing.
+/// What the agents play: a led session asks at each turn of its own, so that each wake says it
+/// asked its pilot; the lead's own turns ask nothing.
 fn asking() -> Value {
     json!({"turns": [
         {"when": "Fix the login.", "do": [ask("Which scope?"), {"say": "I asked."}]},

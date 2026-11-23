@@ -169,9 +169,8 @@ pub fn all(daemon: &Daemon) -> Vec<Subscription> {
     daemon.read(Store::subscriptions).unwrap_or_default()
 }
 
-/// The agent leads the session it started: it is woken at the end of a turn of it that asked or
-/// reported, and when it ends, until it unsubscribes, the session or the agent ends, or the
-/// following pauses for the user's absence (`docs/tools.md`, "Following a session").
+/// The agent leads the session it started: it is woken at each end of a turn of it, and when it
+/// ends, until it unsubscribes, the session or the agent ends, or the following pauses for the user's absence (`docs/tools.md`, "Following a session").
 pub fn lead(daemon: &Daemon, starter: &str, session: &Agent) -> Result<(), String> {
     let now = now_ms();
     subscribe(
@@ -181,7 +180,7 @@ pub fn lead(daemon: &Daemon, starter: &str, session: &Agent) -> Result<(), Strin
             agent: starter.to_owned(),
             source: SESSION.into(),
             target: json!({"session": session.id, "title": session.title}),
-            events: vec!["asked".into(), "reported".into(), "ended".into()],
+            events: vec!["turn_ended".into(), "ended".into()],
             from: "anyone".into(),
             seen: json!({"exchanges": 0, "paused": false}),
             created_at: now,
@@ -292,10 +291,10 @@ fn reset(daemon: &Daemon, subscription: &Subscription) {
     }
 }
 
-/// A turn of the session ended: when it asked or reported, the agents that lead it are woken, once
-/// each, with why and the last message of that turn, cut and said; a plain turn's end wakes
-/// nobody. A paused following wakes nobody, nor one whose session wrote to its pilot in the
-/// turn: that message woke it already.
+/// A turn of the session ended: the agents that lead it are woken, once each, with why (it asked,
+/// it reported, or neither) and the last message of that turn, cut and said. A paused following
+/// wakes nobody, nor one whose session wrote to its pilot in the turn: that message woke it
+/// already.
 pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
     let last_of = |name: &str| {
         daemon
@@ -307,9 +306,7 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
     let seq_of = |name: &str| last_of(name).0;
     let (prompted, prompted_at) = last_of("agent.prompted");
     let asked = seq_of("agent.asked") > prompted;
-    if !asked && seq_of("agent.reported") <= prompted {
-        return;
-    }
+    let reported = !asked && seq_of("agent.reported") > prompted;
     let woken: Vec<Subscription> = followers(daemon, &session.id)
         .into_iter()
         .filter(|s| s.seen["paused"] != true)
@@ -324,16 +321,16 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
     if woken.is_empty() && !remote {
         return;
     }
-    let reported = !asked;
     // A pilot of another machine was asked while its machine was linked; the user otherwise.
     let pilot_asked = crate::tree::unanswered_to(daemon, &session.id, "pilot").is_ok_and(|open| {
         open.iter()
             .any(|q| q["seq"].as_u64().unwrap_or(0) > prompted)
     });
-    let why = match (asked, remote && !pilot_asked) {
-        (true, false) => "it asked you a question with ask",
-        (true, true) => "it asked the user a question with ask",
-        (false, _) => "it reported",
+    let what = match (asked, reported, remote && !pilot_asked) {
+        (true, _, false) => "ended a turn: it asked you a question with ask.",
+        (true, _, true) => "ended a turn: it asked the user a question with ask.",
+        (false, true, _) => "ended a turn: it reported.",
+        (false, false, _) => "ended a turn.",
     };
     let last = crate::tree::last_messages_after(daemon, &session.id, prompted)
         .pop()
@@ -369,9 +366,8 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
         .chain([format!("Its last message:\n\n{}", cut_said(&last))])
         .collect::<Vec<_>>()
         .join("\n\n");
-    let what = format!("ended a turn: {why}.");
     for follower in &woken {
-        wake_follower(daemon, follower, session, &what, Some(&last));
+        wake_follower(daemon, follower, session, what, Some(&last));
     }
     if remote {
         // Its commits go back with a report, and the delivery names where they came.
@@ -379,7 +375,7 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
             daemon,
             &session.id,
             TURN_ENDED,
-            &wake_body(daemon, session, &what, Some(&last)),
+            &wake_body(daemon, session, what, Some(&last)),
             approval::BETWEEN_TURNS,
             reported,
             false,

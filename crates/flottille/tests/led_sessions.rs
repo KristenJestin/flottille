@@ -364,21 +364,6 @@ fn a_led_session_s_question_wakes_its_pilot_not_the_user() {
 }
 
 #[test]
-fn a_led_session_s_plain_turn_end_does_not_wake_its_pilot() {
-    let user = User::with_fake_agent();
-    let (lead, mcp) = lead(&user);
-
-    let (session, _) = led(&user, &mcp, "Fix the login.");
-
-    eventually("its first turn", || turns(&user, &session) == 1);
-    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
-        .unwrap();
-    eventually("its second turn", || turns(&user, &session) == 2);
-    settle();
-    assert!(wakes(&user, &lead).is_empty());
-}
-
-#[test]
 fn a_led_session_s_report_and_end_wake_its_pilot() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
@@ -590,9 +575,10 @@ fn the_user_talks_to_a_led_session_directly() {
             .iter()
             .any(|body| body.contains("Use the median."))
     );
-    settle();
-    // The pilot is neither asked nor woken.
-    assert!(wakes(&user, &lead).is_empty());
+    // The pilot is not asked; it hears the end of each turn, the user's included.
+    eventually("the pilot woken at both turns", || {
+        wakes(&user, &lead).len() == 2
+    });
     let pending = user.call("approval.list", json!({})).unwrap();
     assert!(
         pending["requests"].as_array().unwrap().is_empty(),
@@ -815,6 +801,7 @@ fn detaching_ends_the_pilot_s_subscription_and_tells_it_once() {
     let (session, _) = led(&user, &mcp, "Fix the login.");
     eventually("its first turn", || turns(&user, &session) == 1);
     assert_eq!(subscriptions_of(&user, &lead).len(), 1);
+    eventually("the first turn's wake", || wakes(&user, &lead).len() == 1);
 
     detach(&user, &session);
 
@@ -829,7 +816,7 @@ fn detaching_ends_the_pilot_s_subscription_and_tells_it_once() {
     );
     settle();
     assert_eq!(delivered(&user, &lead, "detached").len(), 1);
-    assert!(wakes(&user, &lead).is_empty(), "{:?}", wakes(&user, &lead));
+    assert_eq!(wakes(&user, &lead).len(), 1, "{:?}", wakes(&user, &lead));
 }
 
 #[test]

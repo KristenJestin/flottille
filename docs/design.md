@@ -359,8 +359,8 @@ ends: the line, the exit code, the duration and the last lines of the output, ma
 (`docs/tools.md`, "Commands").
 
 An agent that pilots a session (`agent_launch` with `kind: led`) is woken, between turns, by
-`session-turn-ended` when a turn of that session asked it a question (`ask`) or reported, and when
-the session ends or fails; a plain turn's end wakes nobody. The delivery names the session, says
+`session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
+the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
@@ -459,7 +459,7 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **A following** is a subscription whose source is a session the agent leads (`agent_launch`
   with `kind: led`): it has no deadline, and ends when the agent unsubscribes (`forge unsubscribe`
   with `session`), when the session ends or fails, or when the agent ends. It wakes the agent at
-  the end of a turn of the session that asked it or reported, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
+  each end of a turn of the session, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
   unless it says `follow: false`: the rounds of the items read it, and it wakes the agent once
   when it waits on a manual step and when it ends, which ends the following (`docs/forges.md`,
   "Following a run").

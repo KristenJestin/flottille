@@ -1860,7 +1860,7 @@ on a real phone, by hand, and reported.
   machine are refused.
 - What crosses machines (#817): a child's report, question, failure, idle and stuck notices, the
   notice that its process died and it goes on (`child-replaced`), and a led session's
-  `session-turn-ended` (when a turn reported or asked, and when it ends or fails
+  `session-turn-ended` (at each end of a turn, and when it ends or fails
   unless its pilot ended it), and since #818 a child's held request (`child-asks`) and what a led
   session asked the user while its pilot's machine was off (`session-meanwhile`). Not yet:
   `led-integrated`, whose check reads the forge and the base on the session's machine.

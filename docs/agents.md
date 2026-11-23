@@ -1010,7 +1010,7 @@ message included, sent again to a new session), a brief (`brief`: a parent's to 
 extension's first message to its session), the first message of a session an agent started for the user (`launched`, under a first
 line naming that agent: it is the agent's words, never the user's), a message another session
 wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
-the agent leads, when it asked or reported (`session-turn-ended`, `docs/tools.md`, "Following a
+the agent leads, at each end of a turn (`session-turn-ended`, `docs/tools.md`, "Following a
 session"), what a led session asked the user while its pilot's machine was off, once that machine
 is back (`session-meanwhile`, `docs/remote.md`), a led session's pilot that ended (`handed`), a
 parent's message (`parent`), what happens to a child (`child-report`,
