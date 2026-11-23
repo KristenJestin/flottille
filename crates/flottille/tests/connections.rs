@@ -6152,7 +6152,7 @@ fn the_login_fills_and_no_run_reads_it() {
 fn a_run_finds_none_of_the_real_browsers_profile() {
     // The real agent-browser, headless, a page open: its Chrome's profile (cookies, Local
     // Storage, History) is in no folder a run in Ask or in Auto can list, neither the daemon's
-    // temporary folder nor /tmp.
+    // temporary folder nor /tmp where it may list it.
     let Some((user, program)) = real_user() else {
         return;
     };
@@ -6170,8 +6170,13 @@ fn a_run_finds_none_of_the_real_browsers_profile() {
     let folders = [user.path("tmp"), PathBuf::from("/tmp")];
     for mode in ["ask", "auto"] {
         let listing = listed_by_run(&user, &mcp, &id, mode, &folders);
+        // The daemon's temporary folder is listed; /tmp may itself be refused to the run (the
+        // test's runtime folder is under it: `landlock.rs`), its entries then out of its sight.
         assert!(
-            listing["listed"].as_object().unwrap().len() == 2,
+            listing["listed"]
+                .as_object()
+                .unwrap()
+                .contains_key(folders[0].to_str().unwrap()),
             "{mode}: {listing}"
         );
         found_no_profile(&listing, mode);
