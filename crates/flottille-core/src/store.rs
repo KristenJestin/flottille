@@ -9390,6 +9390,54 @@ mod tests {
         );
     }
 
+    fn a_launch_out(state: &str) -> Launch {
+        Launch {
+            way: "out".into(),
+            state: state.into(),
+            ..a_launch_in()
+        }
+    }
+
+    fn state_out(store: &Store) -> String {
+        store.launches("out", None, LaunchFilter::All).unwrap()[0]
+            .state
+            .clone()
+    }
+
+    #[test]
+    fn a_held_launch_decided_before_its_second_record_keeps_the_decision() {
+        for (first, decided) in [("held", "started"), ("accepted", "refused")] {
+            let mut store = Store::open_in_memory().unwrap();
+            let launch = a_launch_out(first);
+            store.record_launch(&launch).unwrap();
+            // The user there answered before the caller recorded what the launch's place said.
+            store
+                .decide_launch(&launch.machine, &launch.launch, decided)
+                .unwrap();
+            assert_eq!(state_out(&store), decided);
+
+            store.record_launch(&a_launch_out("held")).unwrap();
+
+            assert_eq!(state_out(&store), decided, "first recorded {first}");
+        }
+    }
+
+    #[test]
+    fn an_end_told_as_an_answer_on_a_started_launch_ends_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let launch = a_launch_out("held");
+        store.record_launch(&launch).unwrap();
+        store
+            .decide_launch(&launch.machine, &launch.launch, "started")
+            .unwrap();
+
+        store
+            .decide_launch(&launch.machine, &launch.launch, "refused")
+            .unwrap();
+
+        assert_eq!(state_out(&store), "ended");
+    }
+
     #[test]
     fn a_machine_s_projects_stay_beside_the_sessions_it_lists_again() {
         let mut store = Store::open_in_memory().unwrap();
