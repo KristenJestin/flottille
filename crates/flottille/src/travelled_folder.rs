@@ -116,8 +116,9 @@ fn show(daemon: &Daemon) -> Value {
 }
 
 /// The folder `typed` as a project folder is checked: absolute (`~` is the home), reached through
-/// no link, a folder when it exists, outside Flottille's configuration and state, and neither a
-/// project's folder nor inside one.
+/// no link, a folder when it exists, no disk's root nor the home itself, outside Flottille's
+/// configuration and state, holding none of Flottille's folders, and neither a project's folder
+/// nor inside one.
 fn checked(daemon: &Daemon, typed: &str) -> Result<PathBuf, Failure> {
     let refused = |why: String| Failure::refused(why);
     let folder = projects::home_expanded(typed).unwrap_or_else(|| PathBuf::from(typed));
@@ -150,12 +151,37 @@ fn checked(daemon: &Daemon, typed: &str) -> Result<PathBuf, Failure> {
     if existing == folder && !real.is_dir() {
         return Err(refused(format!("{} is not a folder", folder.display())));
     }
-    for (kept, what) in [
-        (&daemon.paths.config, "Flottille's configuration"),
-        (&daemon.paths.state, "Flottille's state"),
+    // A whole disk or the home would be filled with other machines' projects, and taken for
+    // theirs when one is removed.
+    use std::os::unix::fs::MetadataExt as _;
+    let device = |path: &Path| std::fs::metadata(path).map(|metadata| metadata.dev()).ok();
+    let a_root = match folder.parent() {
+        None => true,
+        Some(parent) => existing == folder && device(&folder) != device(parent),
+    };
+    if a_root {
+        return Err(refused(format!(
+            "{} is the root of a disk: give a folder in it",
+            folder.display()
+        )));
+    }
+    if projects::home_expanded("~").is_some_and(|home| folder == home) {
+        return Err(refused(format!(
+            "{} is the home itself: give a folder in it",
+            folder.display()
+        )));
+    }
+    // The default is in Flottille's data: a folder in it is fine, the data folder itself is not.
+    for (kept, what, inside) in [
+        (&daemon.paths.config, "Flottille's configuration", false),
+        (&daemon.paths.state, "Flottille's state", false),
+        (&daemon.paths.data, "Flottille's data", true),
     ] {
         let kept = std::fs::canonicalize(kept).unwrap_or_else(|_| kept.clone());
-        if folder.starts_with(&kept) {
+        if kept.starts_with(&folder) {
+            return Err(refused(format!("{} holds {what}", folder.display())));
+        }
+        if folder.starts_with(&kept) && !inside {
             return Err(refused(format!("{} is in {what}", folder.display())));
         }
     }
