@@ -100,6 +100,9 @@ pub struct AddProject {
     /// The folders another machine listed (`project.folders`): the machine they are of, and each
     /// one's path and how it is shown (`~/code/app`), or why they could not be read.
     folders: Option<(Option<String>, Listed)>,
+    /// The machine the project is added on (`None`: this one): chosen in the form, apart from the
+    /// machine of the page behind, which stays shown (#1271).
+    machine: Option<String>,
     /// The machine the form was last drawn for: what was typed for another is let go.
     drawn_for: Option<String>,
     step: Step,
@@ -137,6 +140,7 @@ impl AddProject {
             pause: None,
             busy: None,
             folders: None,
+            machine: None,
             drawn_for: None,
             step: Step::Folder,
             asks_machine: false,
@@ -171,9 +175,17 @@ impl AddProject {
         self.step
     }
 
-    /// Opens the dialog, on which machine first when `asks_machine`, the user having others.
-    pub fn open(&mut self, asks_machine: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the dialog on `machine`, on which machine first when `asks_machine`, the user having
+    /// others.
+    pub fn open(
+        &mut self,
+        asks_machine: bool,
+        machine: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open = true;
+        self.machine = machine;
         self.error = None;
         self.asks_machine = asks_machine;
         self.step = if asks_machine {
@@ -189,6 +201,27 @@ impl AddProject {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         cx.notify();
+    }
+
+    /// The machine the project is added on, `None` for this one.
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+
+    /// The machine chosen in the form: what it asks goes there.
+    pub fn set_machine(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
+        if self.machine != machine {
+            self.machine = machine;
+            cx.notify();
+        }
+    }
+
+    /// Asks the machine the project is added on.
+    fn ask(&self, command: Command, cx: &mut Context<Self>) {
+        let machine = self.machine.clone();
+        self.shell
+            .update(cx, |shell, _| shell.perform_on(machine.as_deref(), command))
+            .ok();
     }
 
     fn typed(&self, cx: &Context<Self>) -> (String, Option<String>) {
@@ -229,15 +262,8 @@ impl AddProject {
         let (folder, name) = typed.clone();
         self.asked = Some(typed);
         self.detecting = true;
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::DetectProject {
-                    folder,
-                    name,
-                    seq: self.generation,
-                })
-            })
-            .ok();
+        let seq = self.generation;
+        self.ask(Command::DetectProject { folder, name, seq }, cx);
         cx.notify();
     }
 
@@ -257,9 +283,7 @@ impl AddProject {
         };
         self.busy = Some("Adding…");
         self.error = None;
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.ask(command, cx);
         cx.notify();
     }
 
@@ -354,15 +378,14 @@ impl AddProject {
 
     /// Opens the folder `path` of the machine shown: its folders are listed in place of these.
     fn browse_to(&mut self, path: String, cx: &mut Context<Self>) {
-        let machine = crate::machines::shown_machine(cx);
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::ProjectFolders {
-                    machine,
-                    path: Some(path),
-                })
-            })
-            .ok();
+        let machine = self.machine.clone();
+        self.ask(
+            Command::ProjectFolders {
+                machine,
+                path: Some(path),
+            },
+            cx,
+        );
     }
 
     /// From on which machine to the folder there, and back.
@@ -381,12 +404,8 @@ impl AddProject {
     }
 
     /// The folders listed by the machine shown, once it answered.
-    pub fn folders(&self, cx: &gpui_kit::App) -> Option<&Listed> {
-        let shown = crate::machines::shown_machine(cx);
-        self.folders
-            .as_ref()
-            .filter(|(machine, _)| *machine == shown)
-            .map(|(_, listed)| listed)
+    pub fn folders(&self) -> Option<&Listed> {
+        self.folders_of(self.machine.as_deref())
     }
 
     /// The project registered: its name, for the shell to open its settings; or why not.
@@ -418,7 +437,7 @@ impl AddProject {
 
 impl AddProject {
     /// On which machine: this one first, then the other machines that run agents, each with its
-    /// role and state; choosing one shows it, as opening one of its sessions does.
+    /// role and state; the project is added on the one chosen, the page behind staying shown.
     fn machine_choice(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
         let read = self
@@ -427,7 +446,7 @@ impl AddProject {
             .and_then(|shell| shell.read(cx).machines().read(cx).machines().cloned())
             .unwrap_or_default();
         let choices = crate::machines::choices(&read);
-        let shown = crate::machines::shown_machine(cx);
+        let shown = self.machine.clone();
         let chosen = choices
             .iter()
             .position(|choice| choice.name == shown)
@@ -436,8 +455,10 @@ impl AddProject {
         let weak = self.shell.clone();
         let choose = move |at: usize, window: &mut Window, cx: &mut gpui_kit::App| {
             let name = names[at].clone();
-            weak.update(cx, |shell, cx| shell.choose_machine(name, window, cx))
-                .ok();
+            weak.update(cx, |shell, cx| {
+                shell.choose_machine_to_add(name, window, cx)
+            })
+            .ok();
         };
         let control = if choices.len() <= gpui_design_system::radio::MAX_RADIO_CHOICES {
             choices
@@ -488,7 +509,7 @@ impl AddProject {
     /// The folder: typed or picked with the system's dialog on this machine; on another, picked in
     /// that machine's folders, opened one after the other, never typed.
     fn folder_choice(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let Some(machine) = crate::machines::shown_machine(cx) else {
+        let Some(machine) = self.machine.clone() else {
             return div()
                 .flex()
                 .flex_col()
@@ -521,7 +542,7 @@ impl AddProject {
             .child(SharedString::from(format!(
                 "Folders of {machine}. Paths are picked, never typed."
             )));
-        let listed = match self.folders(cx) {
+        let listed = match self.folders() {
             None => {
                 return div()
                     .flex()
@@ -646,7 +667,7 @@ impl AddProject {
 
 impl Render for AddProject {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let shown = crate::machines::shown_machine(cx);
+        let shown = self.machine.clone();
         if self.drawn_for != shown {
             // A folder of one machine is no folder of another.
             self.drawn_for = shown.clone();

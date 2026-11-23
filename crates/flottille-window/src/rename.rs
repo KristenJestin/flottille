@@ -20,8 +20,10 @@ pub const RENAME_LABEL: &str = "Rename…";
 
 pub struct RenameSession {
     shell: WeakEntity<Shell>,
-    /// The session being renamed, while the dialog is open.
+    /// The session being renamed, while the dialog is open, and the actions of its machine,
+    /// taken as it opened (#1271).
     session: Option<String>,
+    asks: Option<crate::actions::Actions>,
     field: Entity<InputState>,
     error: Option<SharedString>,
     _subscription: Subscription,
@@ -38,6 +40,7 @@ impl RenameSession {
         Self {
             shell,
             session: None,
+            asks: None,
             field,
             error: None,
             _subscription: subscription,
@@ -57,10 +60,12 @@ impl RenameSession {
         &mut self,
         session: &str,
         title: &str,
+        asks: Option<crate::actions::Actions>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.session = Some(session.to_owned());
+        self.asks = asks;
         self.error = None;
         self.field
             .update(cx, |field, cx| field.set_value(title, window, cx));
@@ -84,7 +89,10 @@ impl RenameSession {
             cx.notify();
             return;
         }
-        perform_later(&self.shell, Command::Rename { session, title }, cx);
+        match &self.asks {
+            Some(asks) => asks.send(Command::Rename { session, title }),
+            None => perform_later(&self.shell, Command::Rename { session, title }, cx),
+        }
         self.close(cx);
     }
 }

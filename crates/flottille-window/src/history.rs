@@ -7,6 +7,9 @@ use crate::shell::Selection;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Visit {
     pub selection: Selection,
+    /// The machine whose page it was (`None`: this one): Settings, a project's settings and a
+    /// spec are each machine's own (#1271).
+    pub machine: Option<String>,
     /// The sub-agent whose conversation is shown, `None` for the session's own.
     pub agent: Option<String>,
     /// For a project's page, whether its Progress tab was the one shown.
@@ -30,13 +33,18 @@ impl History {
         self.visits.get(self.at)
     }
 
-    /// A page was opened: what was ahead is gone. The page already shown adds nothing.
-    pub fn open(&mut self, selection: Selection) {
-        if self.current().is_some_and(|v| v.selection == selection) {
+    /// A page of `machine` was opened: what was ahead is gone. The page already shown adds
+    /// nothing.
+    pub fn open(&mut self, selection: Selection, machine: Option<String>) {
+        if self
+            .current()
+            .is_some_and(|v| v.selection == selection && v.machine == machine)
+        {
             return;
         }
         self.push(Visit {
             selection,
+            machine,
             agent: None,
             progress: false,
         });
@@ -53,9 +61,10 @@ impl History {
         {
             return;
         }
-        let selection = current.selection.clone();
+        let (selection, machine) = (current.selection.clone(), current.machine.clone());
         self.push(Visit {
             selection,
+            machine,
             agent: None,
             progress,
         });
@@ -70,9 +79,10 @@ impl History {
         if current.selection != Selection::Session(session.to_owned()) || current.agent == agent {
             return;
         }
-        let selection = current.selection.clone();
+        let (selection, machine) = (current.selection.clone(), current.machine.clone());
         self.push(Visit {
             selection,
+            machine,
             agent,
             progress: false,
         });

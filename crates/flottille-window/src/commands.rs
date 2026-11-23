@@ -45,6 +45,22 @@ impl CommandInfo {
 
 /// Asks the daemon through the shell, once the update running now is over: the shell hands its
 /// answers to these views while it is itself being updated, and a view cannot update it then.
+/// Sends `command` the way the entity was given when it was made (`asks`: its machine's actions,
+/// #1271), or, given none, through the shell.
+pub(crate) fn ask(
+    shell: &WeakEntity<Shell>,
+    asks: &Option<crate::actions::Actions>,
+    command: Command,
+    cx: &mut App,
+) {
+    match asks {
+        Some(asks) => asks.send(command),
+        None => {
+            shell.update(cx, |shell, _| shell.perform(command)).ok();
+        }
+    }
+}
+
 pub(crate) fn perform_later(shell: &WeakEntity<Shell>, command: Command, cx: &mut App) {
     let shell = shell.clone();
     cx.defer(move |cx| {

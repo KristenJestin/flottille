@@ -287,6 +287,9 @@ const FINDINGS_HINT: &str = "What agents reported about Flottille itself, one fi
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
+    /// The machine whose Settings these are (`None`: this one): another machine's page enters as
+    /// a page that shows up when it is chosen (#1271).
+    of: Option<String>,
     /// The user's machines: the hub, its devices, this machine's addresses.
     machines: Entity<crate::machines_page::MachinesSection>,
     providers: Providers,
@@ -417,6 +420,12 @@ pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each sess
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
+    /// These Settings are `machine`'s.
+    pub fn of_machine(mut self, machine: Option<String>) -> Self {
+        self.of = machine;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: WeakEntity<Shell>,
@@ -435,6 +444,7 @@ impl SettingsPage {
         check: Entity<crate::check::CheckSection>,
     ) -> Self {
         Self {
+            of: None,
             sign_in,
             check,
             machines,
@@ -2611,7 +2621,11 @@ impl Render for SettingsPage {
             .child(div().flex_1().min_w_0().child(header))
             .children(self.machine_chooser(window, cx))
             .test_support();
-        let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
+        // Each machine's parts have their own: chosen, another machine's page enters.
+        let key = |part: &str| match &self.of {
+            None => ElementId::Name(format!("enter-settings-{part}").into()),
+            Some(machine) => ElementId::Name(format!("enter-settings-{machine}-{part}").into()),
+        };
         let column = |element: AnyElement| {
             div()
                 .w_full()

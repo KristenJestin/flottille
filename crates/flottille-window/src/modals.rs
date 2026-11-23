@@ -16,8 +16,8 @@ use std::rc::Rc;
 
 use gpui_design_system::Modal;
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, Entity, FocusHandle, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window, div,
+    AnyView, App, AppContext as _, Context, Entity, EntityId, FocusHandle, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
 };
 
 /// What gives a dialog's focus handle, when it has a field to take the focus.
@@ -27,6 +27,8 @@ type Focus = Rc<dyn Fn(&App) -> Option<FocusHandle>>;
 struct Slot {
     /// The id of its modal: what a test and `Modals::open` name it by.
     id: &'static str,
+    /// The entity it belongs to: gone with it ([`Modals::forget`]).
+    owner: EntityId,
     view: AnyView,
     open: Rc<dyn Fn(&App) -> bool>,
     /// What takes the focus when it is the top one again, if it has a field to give it to.
@@ -89,6 +91,7 @@ impl Modals {
         let (opened, focused) = (section.clone(), section.clone());
         self.slots.push(Slot {
             id,
+            owner: section.entity_id(),
             view: view.into(),
             open: Rc::new(move |cx| open(opened.read(cx))),
             focus: Rc::new(move |cx| focus(focused.read(cx), cx)),
@@ -109,6 +112,7 @@ impl Modals {
         let opened = view.clone();
         self.slots.push(Slot {
             id,
+            owner: view.entity_id(),
             view: view.clone().into(),
             open: Rc::new(move |cx| open(opened.read(cx))),
             focus: Rc::new(|_| None),
@@ -133,6 +137,15 @@ impl Modals {
         self.slots = others;
         if !opened.is_empty() {
             self.slots.extend(opened);
+            cx.notify();
+        }
+    }
+
+    /// Lets go of the dialogs of `owners`, whose pages are gone (a machine removed, #1271).
+    pub fn forget(&mut self, owners: &[EntityId], cx: &mut Context<Self>) {
+        let held = self.slots.len();
+        self.slots.retain(|slot| !owners.contains(&slot.owner));
+        if self.slots.len() != held {
             cx.notify();
         }
     }

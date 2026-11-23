@@ -49,6 +49,8 @@ const AUTO: &str = "auto";
 
 pub struct ModeSwitch {
     shell: WeakEntity<Shell>,
+    /// How it asks its session's machine, given when its session's page is made (#1271).
+    asks: Option<crate::actions::Actions>,
     /// The ids of its elements, `reply-mode` or `start-mode`.
     prefix: &'static str,
     /// The root agent, whose mode its whole tree takes at its start; empty when the control is
@@ -63,9 +65,16 @@ pub struct ModeSwitch {
 }
 
 impl ModeSwitch {
+    /// Asks through `asks`, its session's machine's actions, whichever machine is shown.
+    pub fn asking(mut self, asks: crate::actions::Actions) -> Self {
+        self.asks = Some(asks);
+        self
+    }
+
     pub fn new(shell: WeakEntity<Shell>, session: String) -> Self {
         Self {
             shell,
+            asks: None,
             prefix: "reply-mode",
             session,
             mode: None,
@@ -154,9 +163,7 @@ impl ModeSwitch {
             session: self.session.clone(),
             mode: wanted.to_owned(),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        crate::commands::ask(&self.shell, &self.asks, command, cx);
         cx.notify();
     }
 }
