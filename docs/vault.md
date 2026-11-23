@@ -822,7 +822,37 @@ its path is no network's. It ends when the browser is closed (`close`, the daemo
 connection's removal); pasta ends with it. A browser that answers on the socket folder from
 outside the namespace (started by a server that ran without one) is closed before a login or a
 server uses the namespace, and a login checks, once its page is loaded, that every browser that
-answers runs in it.
+answers runs in it. Which process answers is asked of the kernel, by connecting to each socket of
+the socket folder (`SO_PEERCRED`), never read from agent-browser's `<session>.pid` files: a socket
+whose process is gone counts as outside. The record is the holder's only while the process at its
+pid has the start time it records: a process that took the pid since is not the holder.
+
+**Chrome's profile is in the vault folder.** agent-browser makes the browser's profile (its
+cookies, Local Storage, History, and Chrome's `Default/Preferences`, which names a proxy) in the
+temporary folder, `/tmp/agent-browser-chrome-…`, and Chrome keeps its passwords there in the clear
+(`--password-store=basic`): in `/tmp`, which runs reach, a run would read them or plant a
+`Preferences` before Chrome reads it. Every command of agent-browser's (the server, `open`, `auth
+login`, `close`) is given `TMPDIR`, the folder `tmp` of the connection's vault folder (`0700`,
+denied to every run), so the profile and Chrome's own temporary files are there. The vault folder
+is in the runtime folder, in memory on most systems: Chrome's disk cache is capped at 32 MiB
+(`--disk-cache-size`, in the `args` of the configuration Flottille writes), so that a browser
+cannot fill it. A folder on disk denied to runs would have needed a rule of its own in every run's
+sandbox; the vault folder already is one.
+
+**Nothing reads the browser's memory.** A run with the user's identity may attach to Chrome
+(`ptrace`) and read the page and the password filled, unless Landlock confines the run (its second
+ABI or later: a confined process cannot attach to one outside its domain) or Yama's
+`ptrace_scope` is 1 or more (a process attaches to its own descendants alone). Where neither holds,
+the browser's isolation is unavailable and the login refuses, saying so.
+
+**Full mode.** The namespace keeps the browser from the runs Flottille confines, Ask's and
+Auto's. A run that reaches the vault folder or the user's other processes as the user does, as a
+run in Full mode may, can enter the namespace (`setns` into its holder) and reach DevTools: the
+browser's isolation is no defence against it.
+
+**After Flottille's program is updated in place**, the daemon that still runs cannot start the
+namespace's holder, which is its own program by its path, and the login refuses until the daemon
+is restarted.
 
 Without pasta on the `PATH`, or where the kernel refuses user namespaces, the server still runs,
 its browser in the runs' network, and the **login refuses to fill**: "install passt (pasta) to let

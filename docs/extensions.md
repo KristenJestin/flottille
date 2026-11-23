@@ -1624,8 +1624,9 @@ way in:
   window (Hyprland with `misc:focus_on_activate` and cursor warps), the mouse. Flottille never
   writes the user's desktop configuration, so it does two things and says the third:
   - **The browser has a window identity of its own.** The configuration the adapter writes gives
-    the shown browser the launch argument `--class=flottille-browser` (`args`; a browser nobody
-    sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
+    the shown browser the launch argument `--class=flottille-browser` (`args`, beside
+    `--disk-cache-size`, which every browser gets, `docs/vault.md`, "The browser's network"; a
+    browser nobody sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
     sets the window's `WM_CLASS` class on X11 and, for a browser window (not an app window), the
     `app_id` Chrome gives `xdg_toplevel` on Wayland, so `--class` is the one flag, and the desktop
     tells this browser from the user's own by that class or app id. It was not run on a real
