@@ -607,9 +607,10 @@ device key from the same keyring item, or the same file, as the command line.
 
 **Built (#1182), in the window: every page works on any machine.** The window addresses another
 machine one way only, the one its sessions use: bringing that machine in front, every connection of
-the window signed with the device key for it and carried by this machine's daemon. Settings opens
-with `Settings of` (the kit's select: this machine, then the other runners, each with its role and
-state, `runner · online`);
+the window signed with the device key for it and carried by this machine's daemon. Settings has the
+machine's picker on its title's line, at the header's right, the title its label (`Settings of`
+to a reader; #1244): the kit's select, this machine, then the other runners, each with its role and
+state, `runner · online`; with no other runner it narrows away and the title stays in place;
 choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
 and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
 that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
@@ -811,7 +812,7 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
-  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
+  chosen where a page is a machine's: Settings' header and Add project's `On` (#1182, #1244), and
   in a project's composer (the machine picker); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
@@ -1707,15 +1708,27 @@ on a real phone, by hand, and reported.
   message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
 - **A held call of a caller of another machine is that machine's user's request** (#1250), as a
   request of a child there goes to that machine's user. The stand-in's own id (`<caller>@<key>`),
-  seen on a request card, is not refused as a target by an agent of that machine: it holds no
-  conversation and runs nothing, so a call to it reaches no one.
+  seen on a request card, is refused as a target by an agent of that machine (#1263), as a session
+  that does not exist (`session_read`, `session_send`, `agent_stop`): it holds no conversation and
+  runs nothing, and nothing is ever started for it.
+- **A caller of another machine reaches the sessions of the machine that stands it in only**
+  (#1263): a session that resolves to a third machine (or to its own) is refused with a sentence
+  of its own, and no call goes out on its behalf.
+- **A member list that cannot be read keeps the stand-ins** (#1263): while the peers' file was never
+  read whole (a broken file at the start), no machine left the members by it: the sweep forgets
+  none of them for that, and still forgets those idle for 30 days, with their leaves and the
+  answers they await; a list read whole that has nobody in it forgets them all.
 - **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
   under the user's runtime folder, never made, rather than refused: a read of a session of another
   project is served as on one machine. The callers of one machine are capped at 64, forgotten after
   30 days idle (as long as a message is kept) and when their machine leaves the members.
 - **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
-  an answer the user gave before that (within the same second) is refused. Answers never given are
-  forgotten after 30 days.
+  an answer the user gave before that (within the same second) is answered "send again later"
+  (#1263) while a call of that caller to that machine is still unanswered, and kept by its
+  sender. An answer that comes when no such call is out (the call was given up, or its answer
+  was lost with the link) is refused for good, as nothing will ever await it, so that it holds
+  back nothing its sender keeps for that machine behind it. Answers never given are forgotten
+  after 30 days.
 - **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
   no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
   signed in or not. The machine has no other reliable signal of having no screen, so the icon is

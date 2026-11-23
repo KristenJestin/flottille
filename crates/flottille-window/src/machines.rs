@@ -1195,11 +1195,14 @@ pub fn narrowing(
     )
     .absolute()
     .size_full();
-    // Clipped only while it moves, so that a list the content opens is not.
+    // Clipped only while it moves, so that a list the content opens is not. A row, so that the
+    // content keeps its own width under the clip and the measure reads it whole: in a block it
+    // would shrink with the clip, and widen in again from nothing.
     let moving = t < 1.0;
     Some(
         div()
             .id(id)
+            .flex()
             .flex_none()
             .when(moving, |d| {
                 d.overflow_hidden().w(px(width.get() * t)).opacity(t)

@@ -79,9 +79,11 @@ pub(crate) fn runner_user() -> User {
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
     let claude = user.path("home/.claude");
     let stopping = user.path("stopping");
+    let slow = user.path("slow-call");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_SLOW_CALL_FILE", slow.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
@@ -276,9 +278,19 @@ pub(crate) fn pc_and_server_as(
     server_user: User,
     server_project: Option<&str>,
 ) -> (TestHub, Machine, Machine) {
-    let hub = TestHub::new();
     let pc_user = runner_user();
     sign_in(&pc_user);
+    pc_and_server_with(pc_role, pc_user, server_user, server_project)
+}
+
+/// [`pc_and_server_as`], `pc` the machine of `pc_user`, who is signed in already.
+pub(crate) fn pc_and_server_with(
+    pc_role: &str,
+    pc_user: User,
+    server_user: User,
+    server_project: Option<&str>,
+) -> (TestHub, Machine, Machine) {
+    let hub = TestHub::new();
     let pc = Machine::of(pc_user);
     pair(&hub, &pc, "pc", pc_role);
     let server = Machine::of(server_user);
