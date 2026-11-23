@@ -7,7 +7,9 @@
 
 use crate::common;
 
-use std::sync::Arc;
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -85,17 +87,32 @@ fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    window_through(user, Arc::new(user.connector()), cx)
+}
+
+/// A window whose connections to the daemon are `connect`'s.
+fn window_through<'a>(
+    user: &User,
+    connect: Connect,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let env = Environment {
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
     cx.update(|cx| flottille_window::init_with(env, cx));
-    open(user, cx)
+    open_through(connect, cx)
 }
 
 /// Another window on the user's daemon.
 fn open<'a>(user: &User, cx: &'a mut TestAppContext) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    let connect: Connect = Arc::new(user.connector());
+    open_through(Arc::new(user.connector()), cx)
+}
+
+fn open_through<'a>(
+    connect: Connect,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));
     (shell, cx)
@@ -879,5 +896,78 @@ fn the_window_draws_no_frame_at_rest_with_groups_and_a_finished_drag(cx: &mut Te
         frames_at_rest(&shell, cx),
         (0, 0),
         "groups and a drag that ended: (drawn, asked)"
+    );
+}
+
+/// The connections the window's keeper opened, so that a test can cut them: the connection the
+/// keeper holds is lost, and its next request is answered "retry".
+#[derive(Clone, Default)]
+struct Cuttable(Arc<Mutex<Vec<UnixStream>>>);
+
+impl Cuttable {
+    fn connector(&self, user: &User) -> Connect {
+        let open = user.connector();
+        let seen = self.0.clone();
+        Arc::new(move || {
+            let stream = open()?;
+            if std::thread::current().name() == Some("flottille-keeper") {
+                seen.lock().unwrap().push(stream.try_clone()?);
+            }
+            Ok(stream)
+        })
+    }
+
+    /// Cuts every connection the keeper holds, and says how many there were.
+    fn cut(&self) -> usize {
+        let mut seen = self.0.lock().unwrap();
+        let cut = seen.len();
+        for stream in seen.drain(..) {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        cut
+    }
+}
+
+#[gpui_kit::test]
+fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "alpha");
+    project(&user, "bravo");
+    let wire = Cuttable::default();
+    let (shell, cx) = window_through(&user, wire.connector(&user), cx);
+    until(&shell, cx, "the rows", |cx| {
+        present(cx, project_id("bravo"))
+    });
+    settle(&shell, cx);
+
+    // The connection to the daemon drops, then the user makes the group "Work" and at once drags
+    // alpha into it: the first request is lost and asked again later.
+    assert!(wire.cut() > 0, "the keeper held a connection to cut");
+    ask_new_group("Work", &shell, cx);
+    for _ in 0..4 {
+        step(&shell, FRAME, cx);
+    }
+    drag(
+        project_id("alpha"),
+        group_header_id(&group_id(&shell, "Work", cx)),
+        0.,
+        &shell,
+        cx,
+    );
+    assert_eq!(held(&shell, "Work", cx), names(&["alpha"]));
+
+    until(&shell, cx, "the daemon to keep the group", |_| {
+        kept(&user)["groups"][0]["name"] == "Work"
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        strings(&kept(&user)["groups"][0]["projects"]),
+        ["alpha"],
+        "the move reaches the daemon after the group it names"
+    );
+    assert_eq!(
+        held(&shell, "Work", cx),
+        names(&["alpha"]),
+        "the window keeps it too"
     );
 }
