@@ -136,7 +136,7 @@ impl SignInRow {
     /// Whether the line to type in a terminal is shown: only for a program known not to be signed
     /// in, never while it checks nor when its check could not be made.
     fn shows_line(&self) -> bool {
-        self.found && self.signed_in != Some(true)
+        self.found && self.signed_in != Some(true) && !self.checking && self.problem.is_none()
     }
 
     /// The window's own request for this row's check failed: the daemon never said anything.
