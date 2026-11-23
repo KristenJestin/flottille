@@ -1273,6 +1273,10 @@ agent does.
   configuration or data folder, the home folder itself, or a default without `<project>`), the
   reason first; a project's refusal is `invalid-config` and names `workspaces_root`. Nothing is
   written then.
+- A folder the daemon cannot make or write as its own user is `refused` (the default's, for each
+  project it would give, and a project's own), saying why: `/srv/nowhere/app: permission denied`.
+  It is found by making a probe folder there and removing it, never by reading permissions, and
+  the folder is never kept.
 
 Only the workspaces made afterwards follow a change; none is moved. `workspaces_folder.set` emits
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
@@ -1328,7 +1332,22 @@ pictures decoded and written off the runtime's threads.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded).
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). The user's
+  arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
+  arrangement writes (a fold or a lead never does, so a window that only folds a project cannot
+  erase what another made): `{"order": [<name>], "groups": [{"id", "name", "open", "projects":
+  [<name>]}]}`, `order` the names of the projects outside any group in the order the user put
+  them, `groups` in order, each with the projects it holds. A project neither names is at the end
+  of the list, outside any group; a name that is no project now (a project of a machine that is
+  not reached) is not drawn and keeps its place for when it is back. A window reads it when it
+  opens, and at each change it reads it again (`window.get`), applies the change to that copy and
+  writes the whole (`window.set`), so that a group another window made meanwhile is not erased
+  (two windows writing at the very same instant can still lose one change: the read and the write
+  are two requests); a window asks one change at a time, the next once the previous is answered
+  (kept or refused), so that its changes are applied in the order the user made them, also when one
+  has to be asked again after a lost connection; the
+  answer is what the window shows from then on. A window that makes no change does not see
+  another's until it is opened again (there is no event for it yet).
 - `window.set {key, value}` keeps one key (`null` forgets it) and answers `{}`.
 
 The pictures of a draft are files of the daemon's state folder (`drafts/`, mode 0700, one folder by
@@ -2156,7 +2175,10 @@ that started a root for the user (`null` for a root the user started, and for a 
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
 starts"), `detached_from` the agent the user detached it from (`agent.detach`; `launched_by` is
-then `null`), `reported_at` when it reported,
+then `null`), `launched_from` (in `agent.show`, `agent.list` and the tree) the agent of another
+machine that started it here, `{"machine", "agent", "kind"}`, `null` for any other: with `kind`
+`child` it is that agent's child, at its depth plus one though it has no parent here, and only that
+agent writes to it (`docs/remote.md`, "A tree across machines"), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
@@ -2454,7 +2476,7 @@ does it with `agent_send` (`docs/tools.md`).
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued", "extensions"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `launched_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and

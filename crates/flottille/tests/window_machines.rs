@@ -72,6 +72,23 @@ impl TestHub {
             .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 
+    /// What the device `name` says of itself to the hub, as the phone's app does at each
+    /// session (`Ask::About`): the facts the hub keeps on its card.
+    fn says_it_is(&self, name: &str, members: &[Value], kind: &str, system: &str) {
+        let key: flottille_link::PublicKey = serde_json::from_value(
+            members
+                .iter()
+                .find(|member| member["name"] == name)
+                .expect("the member")["key"]
+                .clone(),
+        )
+        .unwrap();
+        self.served
+            .as_ref()
+            .unwrap()
+            .with_hub(|hub| hub.about(&key, kind, system).unwrap());
+    }
+
     /// The hub stops: down, as a host that is off.
     fn down(&mut self) {
         let served = self.served.take().unwrap();
@@ -132,6 +149,27 @@ impl Machine {
             .as_array()
             .unwrap()
             .clone()
+    }
+
+    /// Waits until the hub's card of `name` says what the device is, as its daemon told it.
+    fn wait_until_member_says(&self, name: &str) {
+        self.wait_until_member(name, |member| member["kind"].is_string());
+    }
+
+    /// Waits until the hub's card of `name` says the device is `kind`.
+    fn wait_until_member_is(&self, name: &str, kind: &str) {
+        self.wait_until_member(name, |member| member["kind"] == kind);
+    }
+
+    fn wait_until_member(&self, name: &str, check: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if self.member(name).is_some_and(|member| check(&member)) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{name}: {:?}", self.members());
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     fn member(&self, name: &str) -> Option<Value> {
@@ -1684,6 +1722,65 @@ fn a_device_row_shows_its_icon_in_its_colour(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_phone_controller_is_not_offered_to_become_a_runner(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let (pc, phone) = (Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&hub, &phone, "phone", "controller");
+    // The phone's app says what it is to the hub, once a session; the harness's phone is a
+    // computer's daemon, which told "computer" first: the phone's word comes after.
+    pc.wait_until_member_says("phone");
+    hub.says_it_is("phone", &pc.members(), "phone", "android");
+    pc.wait_until_member_is("phone", "phone");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-phone")
+    });
+    settle(&shell, cx);
+    // Its role is said in words, with nothing of what it does not run nor a command to run.
+    assert!(!present(cx, "member-role-phone-command"));
+    assert!(!present(cx, "member-role-phone-said"));
+    // It is still not offered where a machine is chosen.
+    let offered: Vec<_> = shell.read_with(cx, |s, cx| {
+        let read = s.machines().read(cx).machines().expect("read");
+        flottille_window::machines::choices(read)
+            .into_iter()
+            .filter_map(|choice| choice.name)
+            .collect()
+    });
+    assert!(!offered.iter().any(|name| name == "phone"), "{offered:?}");
+}
+
+#[gpui_kit::test]
+fn a_server_paired_as_a_controller_still_shows_the_command_to_make_it_a_runner(
+    cx: &mut TestAppContext,
+) {
+    let hub = TestHub::new();
+    let (pc, server, phone) = (Machine::new(), Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&hub, &server, "server", "controller");
+    pair(&hub, &phone, "phone", "controller");
+    pc.wait_until_member_says("server");
+    pc.wait_until_member_says("phone");
+    hub.says_it_is("phone", &pc.members(), "phone", "android");
+    pc.wait_until_member_is("phone", "phone");
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-server") && present(cx, "member-phone")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, "member-role-server-command").as_deref(),
+        Some("flottille-hub role server runner")
+    );
+    assert!(label(cx, "member-role-server-said").is_some_and(|said| said.contains("runs nothing")));
+    // Beside it, the phone has neither.
+    assert!(!present(cx, "member-role-phone-command"));
+}
+
+#[gpui_kit::test]
 fn a_controller_is_in_the_machines_tab_with_its_role_and_the_hub_command(cx: &mut TestAppContext) {
     let hub = TestHub::new();
     let (pc, laptop, phone) = (Machine::new(), Machine::new(), Machine::new());
@@ -1744,6 +1841,7 @@ fn a_member_with_no_look_gets_the_defaults_of_its_key() {
         machine: None,
         icon: None,
         colour: None,
+        kind: None,
     };
     let (icon, colour) = member.look();
     assert_eq!(icon, "desktop");

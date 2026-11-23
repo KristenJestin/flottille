@@ -1036,6 +1036,17 @@ const EXTENSION_MIGRATIONS: &str = "
     ) STRICT;
 ";
 
+/// A child an agent of another machine launched here was stored with no parent at depth 0 before
+/// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
+/// tree across machines"). Made at every open rather than as a numbered migration: it changes
+/// nothing once done, as such a child is never stored so again, and every check of a root then
+/// reads the depth alone.
+const REMOTE_CHILDREN_DEPTH: &str = "
+    UPDATE agents SET depth = 1
+    WHERE parent IS NULL AND depth = 0
+      AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child');
+";
+
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place, digest";
 
@@ -3582,6 +3593,20 @@ impl Store {
         Ok(())
     }
 
+    /// Settles the launch `out` `launch` to `machine`, held for the user there, as their answer
+    /// came: `started` or `refused`. Only a launch not settled yet, still `accepted` when the
+    /// answer came before its place was recorded: an answer sent again changes nothing. A launch
+    /// started told it is refused ended there: it is `ended`.
+    pub fn decide_launch(&mut self, machine: &str, launch: &str, state: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = CASE WHEN state = 'started' THEN 'ended' ELSE ?3 END \
+             WHERE way = 'out' AND machine = ?1 AND launch = ?2 \
+             AND (state IN ('held', 'accepted') OR (state = 'started' AND ?3 = 'refused'))",
+            params![machine, launch, state],
+        )?;
+        Ok(())
+    }
+
     /// Keeps `list`, the sessions the machine of key `machine` (named `name`) told at `at`, in
     /// place of the one it told before. The projects it told apart (`keep_machine_projects`) stay.
     pub fn keep_machine_sessions(
@@ -5182,13 +5207,18 @@ impl Space<'_> {
 
 /// Records a launch, in place of the one of the same name with the same machine: a launch `in`
 /// already recorded keeps its workspace, its name and its id, as `place_launch` alone writes them.
+/// A launch `out` the user's answer settled (`decide_launch`) is never made held again by the
+/// record of its place, which may come after that answer.
 fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
     connection.execute(
         "INSERT INTO launches (way, machine, launch, caller, kind, project, state, request, \
          agent, workspace, workspace_id, asked, at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT (way, machine, launch) DO UPDATE SET caller = excluded.caller, \
-         kind = excluded.kind, project = excluded.project, state = excluded.state, \
+         kind = excluded.kind, project = excluded.project, \
+         state = CASE WHEN launches.way = 'out' AND excluded.state IN ('held', 'accepted') \
+         AND launches.state IN ('started', 'refused', 'ended') THEN launches.state \
+         ELSE excluded.state END, \
          request = excluded.request, agent = excluded.agent, \
          workspace = CASE WHEN launches.way = 'in' THEN launches.workspace \
          ELSE excluded.workspace END, asked = excluded.asked, at = excluded.at",
@@ -5590,6 +5620,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch(migration)?;
     }
     transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    transaction.execute_batch(REMOTE_CHILDREN_DEPTH)?;
     if alpha {
         transaction.execute_batch(
             "INSERT INTO extension_migrations (name, applied) \
@@ -9404,6 +9435,54 @@ mod tests {
             (read.state.as_str(), read.workspace_id),
             ("refused", Some(id))
         );
+    }
+
+    fn a_launch_out(state: &str) -> Launch {
+        Launch {
+            way: "out".into(),
+            state: state.into(),
+            ..a_launch_in()
+        }
+    }
+
+    fn state_out(store: &Store) -> String {
+        store.launches("out", None, LaunchFilter::All).unwrap()[0]
+            .state
+            .clone()
+    }
+
+    #[test]
+    fn a_held_launch_decided_before_its_second_record_keeps_the_decision() {
+        for (first, decided) in [("held", "started"), ("accepted", "refused")] {
+            let mut store = Store::open_in_memory().unwrap();
+            let launch = a_launch_out(first);
+            store.record_launch(&launch).unwrap();
+            // The user there answered before the caller recorded what the launch's place said.
+            store
+                .decide_launch(&launch.machine, &launch.launch, decided)
+                .unwrap();
+            assert_eq!(state_out(&store), decided);
+
+            store.record_launch(&a_launch_out("held")).unwrap();
+
+            assert_eq!(state_out(&store), decided, "first recorded {first}");
+        }
+    }
+
+    #[test]
+    fn an_end_told_as_an_answer_on_a_started_launch_ends_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let launch = a_launch_out("held");
+        store.record_launch(&launch).unwrap();
+        store
+            .decide_launch(&launch.machine, &launch.launch, "started")
+            .unwrap();
+
+        store
+            .decide_launch(&launch.machine, &launch.launch, "refused")
+            .unwrap();
+
+        assert_eq!(state_out(&store), "ended");
     }
 
     #[test]

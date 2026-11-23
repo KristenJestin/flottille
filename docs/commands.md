@@ -164,6 +164,27 @@ the workspace's variables are not applied to it: they are a file a run may write
 (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. The dry run the project's commit checks
 read before a push runs the same way.
 
+**SSH from a run.** A run's `git fetch`, `pull`, `ls-remote`, `clone` (anything that reaches an SSH
+remote) runs inside the sandbox with the user's `ssh` and its configuration, as their shell would.
+The run's user namespace maps the user's id alone, so a file root owns is seen there as owned by
+no one, and `ssh` refuses a configuration file it includes that is owned by neither root nor the
+user (`Bad owner or permissions on /etc/ssh/ssh_config.d/…`). So each root-owned file that the
+machine's `/etc/ssh/ssh_config` and the user's `~/.ssh/config` include (followed through their
+`Include`s) is copied, as it is when the run starts, into a file system the run's namespace
+makes, read-only, and put over the file at its own path: the same name and text, owned by the
+user in the run. The text is root's, which no run can write; nothing of it is logged or shown. A
+file `ssh` would refuse anyway, one its group or others may write, is not copied, so that `ssh`
+still refuses it. What a run can write steers none of it: the machine's configuration is followed
+only through root's files, the user's only inside `~/.ssh` (as the lent push reads it), and each
+file is opened without following a link or waiting on a FIFO, then judged on what was opened, up
+to 1 MB. A copy that cannot be made fails no command: it starts without the copies, `ssh` refuses
+as before, and the daemon's log says it once. Two
+other ways were weighed and set aside. Mapping root into the namespace too needs a setuid helper
+(`newuidmap`), which an unprivileged daemon does not have. Running a run's fetches outside the
+sandbox, as the push the gate let through, would read the repository's settings, which the run
+writes, with the user's sign-in and no judge: the push is lifted because the gate read it, a fetch
+is not judged.
+
 **No hook.** Every line an agent runs gets `core.hooksPath=/dev/null`, given through
 `GIT_CONFIG_COUNT` in its environment so that the agent's line is unchanged: the hooks are files of
 the repository or of its configured hooks folder, which the agent writes. The repository's own

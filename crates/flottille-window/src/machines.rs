@@ -173,9 +173,17 @@ pub struct Member {
     /// How the list signs it; `None` for a member added before pair mode.
     pub icon: Option<String>,
     pub colour: Option<String>,
+    /// What the device said it is to the hub (`computer`, `phone`), once it did.
+    pub kind: Option<String>,
 }
 
 impl Member {
+    /// Whether the device could run agents if it were given the role: a phone's app has no
+    /// daemon, so what it said it is is the one fact that tells it, never its icon nor its name.
+    pub fn could_run_agents(&self) -> bool {
+        self.kind.as_deref() != Some("phone")
+    }
+
     /// Its icon and its colour, as words: what the list signs, else the defaults of its key (a
     /// desktop, and the colour its key proposes), as the command line draws it.
     pub fn look(&self) -> (String, String) {
@@ -883,6 +891,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 machine: member["machine"].as_str().map(str::to_owned),
                 icon: member["icon"].as_str().map(str::to_owned),
                 colour: member["colour"].as_str().map(str::to_owned),
+                kind: member["kind"].as_str().map(str::to_owned),
             })
             .collect();
     }
@@ -1195,11 +1204,14 @@ pub fn narrowing(
     )
     .absolute()
     .size_full();
-    // Clipped only while it moves, so that a list the content opens is not.
+    // Clipped only while it moves, so that a list the content opens is not. A row, so that the
+    // content keeps its own width under the clip and the measure reads it whole: in a block it
+    // would shrink with the clip, and widen in again from nothing.
     let moving = t < 1.0;
     Some(
         div()
             .id(id)
+            .flex()
             .flex_none()
             .when(moving, |d| {
                 d.overflow_hidden().w(px(width.get() * t)).opacity(t)
@@ -1563,6 +1575,7 @@ mod tests {
                 machine: None,
                 icon: None,
                 colour: None,
+                kind: None,
             }],
             ..Machines::default()
         }

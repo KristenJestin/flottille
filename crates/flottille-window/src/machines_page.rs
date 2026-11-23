@@ -950,9 +950,10 @@ impl MachinesSection {
             .flex_none()
             .child(mark(&icon, &colour))
             .test_support();
-        // What a machine that runs nothing is for, and how it changes: built on every frame, as
+        // What a machine that runs nothing is for, and how it changes (a phone has nothing to
+        // change: its role is all that is said): built on every frame, as
         // a presence is its own state, so that it folds away when the hub's host changes the role.
-        let runs_nothing = member.role != "runner";
+        let runs_nothing = member.role != "runner" && member.could_run_agents();
         let p = palette(cx);
         let command = SharedString::from(format!("flottille-hub role {name} runner"));
         let role_block = presence(

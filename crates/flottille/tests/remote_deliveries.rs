@@ -6,12 +6,14 @@
 //! same folders; throwaway repositories.
 
 use crate::common;
+use crate::remote_asks::{led_on_server, offline};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server, prompted,
     refused, restarted, sent_with, server_user, titled,
 };
 
 use common::mcp::Mcp;
+use flottille_core::store::Store;
 use flottille_link::{Call, Deliver, MachineMessage};
 use serde_json::{Value, json};
 
@@ -44,7 +46,7 @@ pub(crate) fn child_on_server(
 }
 
 /// The launch's name in the answer of a launch on `server`.
-fn launch_in(text: &str) -> String {
+pub(crate) fn launch_in(text: &str) -> String {
     let marker = "refs/flottille/machines/server/";
     let at = text
         .find(marker)
@@ -261,6 +263,8 @@ fn a_call_from_an_agent_that_did_not_start_the_session_is_refused() {
             agent: child.clone(),
             tool: tool.into(),
             arguments: json!({"agent_id": child, "message": "Stop everything."}).to_string(),
+            // A read carries the caller's project, as any call to a session of another machine.
+            project: "app".into(),
             ..Call::default()
         }))
     };
@@ -638,4 +642,83 @@ fn an_old_ended_launch_is_not_listed() {
             .iter()
             .all(|listed| listed["launch"] != launch.as_str())
     });
+}
+
+/// The plain end of a turn, as the pilot is told it: JSON, so its line end is escaped.
+const PLAIN_END: &str = "ended a turn.\\nIt runs on";
+
+/// How many turns of `session` ended on `machine`.
+fn turns_of(machine: &Machine, session: &str) -> usize {
+    Store::open_read_only(&machine.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_agent_events(session, "agent.turn_ended", 300)
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn a_plain_turn_end_of_a_led_session_wakes_its_pilot_on_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "do": [{"say": "Halfway through."}]}]),
+    );
+
+    let (_session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    prompted(&pc, "Halfway through.");
+    let told = pc
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("Halfway through."))
+        .unwrap();
+    assert!(told.contains("[flottille:session-turn-ended]"), "{told}");
+    assert!(told.contains(PLAIN_END), "{told}");
+    assert!(!told.contains("it reported"), "{told}");
+}
+
+#[test]
+fn plain_turn_ends_kept_for_a_machine_never_push_out_a_report() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([
+            {"when": "Finish the export.", "do": [{"say": "Started."}]},
+            {"when": "More.", "do": [{"say": "More done."}]},
+            {"when": "Report now.", "do": [
+                {"mcp": {"tool": "report", "arguments": {"text": "Done."}}},
+                {"say": "The export is finished."}
+            ]}
+        ]),
+    );
+    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "Started.");
+    off(&pc);
+    offline(&server, "pc");
+
+    // More turns than the messages that may wait for one machine.
+    for turn in 2..=106 {
+        server
+            .user
+            .call("agent.send", json!({"agent": session, "message": "More."}))
+            .unwrap();
+        eventually("a turn of the session", || {
+            turns_of(&server, &session) == turn
+        });
+    }
+    server
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": session, "message": "Report now."}),
+        )
+        .unwrap();
+    eventually("its report", || turns_of(&server, &session) == 107);
+    on(&pc);
+
+    pc.wait_for("server");
+    prompted(&pc, "The export is finished.");
+    a_while();
+    // The one it was told of before the machine went off, and the latest after.
+    assert_eq!(prompts_with(&pc, PLAIN_END), 2, "{:#?}", pc.prompts());
 }

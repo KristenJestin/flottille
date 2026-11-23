@@ -251,8 +251,8 @@ fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
     assert!(led.contains("is waiting for the user"), "{led}");
     assert!(
         led.contains(
-            "Once the user allows it there, it runs as a session led by you: its questions, \
-             reports and end wake you as a local led session's do, and session_send reaches it."
+            "Once the user allows it there, it runs as a session led by you: each end of its \
+             turns wakes you as a local led session's does, and session_send reaches it."
         ),
         "{led}"
     );

@@ -22,7 +22,12 @@ const QUESTION: &str = "Which format first, CSV or JSON?";
 /// A session led by `pc`'s root, started on `server` with `brief`: its id there, and the root's
 /// MCP session.
 /// The root is in `mode`: in Full, its `session_send` is let through without a judge on pc.
-fn led_on_server(pc: &Machine, server: &Machine, brief: &str, mode: &str) -> (String, Mcp) {
+pub(crate) fn led_on_server(
+    pc: &Machine,
+    server: &Machine,
+    brief: &str,
+    mode: &str,
+) -> (String, Mcp) {
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root(mode);
     let answer = launched(
@@ -58,7 +63,7 @@ fn tool_answer(machine: &Machine, text: &str) -> String {
 }
 
 /// Waits until `machine` sees `name` offline.
-fn offline(machine: &Machine, name: &str) {
+pub(crate) fn offline(machine: &Machine, name: &str) {
     eventually(&format!("{name} offline"), || {
         machine.seen(name)["state"] != "online"
     });
