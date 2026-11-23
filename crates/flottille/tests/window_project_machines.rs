@@ -486,9 +486,10 @@ fn group_by_machine_off_brings_the_users_groups_back_as_they_were(cx: &mut TestA
     let before = shell.read_with(cx, |s, _| s.listing());
     assert_eq!(before.groups[0].projects, ["notes", "docs"]);
     assert_eq!(before.groups[1].projects, ["app"]);
-    assert_eq!(before.loose, ["zeta", "extra"]);
+    // The other machine's project is in the list too, at the end.
+    assert_eq!(before.loose, ["zeta", "extra", "site"]);
     let drawn = drawn_order(&shell, cx);
-    assert_eq!(drawn, ["notes", "docs", "app", "zeta", "extra"]);
+    assert_eq!(drawn, ["notes", "docs", "app", "zeta", "extra", "site"]);
     let id = before.groups[0].id.clone();
     assert!(present(cx, group_header_id(&id)));
 

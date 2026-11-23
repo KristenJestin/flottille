@@ -248,12 +248,15 @@ fn drag(
     release(end, shell, cx);
 }
 
-/// The dialog of New group… asked for `name` and Create pressed, nothing settled after it.
+/// The dialog of New group… asked for `name` and Create pressed, nothing settled after it. A
+/// dialog that is open already (a refusal keeps it) is not opened again.
 fn ask_new_group(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
-    cx.update(|window, cx| window.click(projects_menu_id(), cx));
-    settle(shell, cx);
-    cx.update(|window, cx| window.click(new_group_id(), cx));
-    settle(shell, cx);
+    if !shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()) {
+        cx.update(|window, cx| window.click(projects_menu_id(), cx));
+        settle(shell, cx);
+        cx.update(|window, cx| window.click(new_group_id(), cx));
+        settle(shell, cx);
+    }
     assert!(shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()));
     let field = shell.read_with(cx, |s, cx| s.group_form().read(cx).field().clone());
     let name = name.to_owned();
@@ -396,7 +399,7 @@ fn removing_a_group_keeps_its_projects(cx: &mut TestAppContext) {
         "no project was removed"
     );
     eventually("the daemon forgot the group", || {
-        kept(&user)["groups"].is_null()
+        kept(&user)["groups"].as_array().is_some_and(Vec::is_empty)
     });
 }
 
