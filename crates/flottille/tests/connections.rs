@@ -7481,14 +7481,22 @@ fn the_browsers_socket_folder_cannot_be_guessed() {
     assert!(name.len() >= 20, "{name}");
     let other = user_named_socket_folder();
     assert_ne!(other, name);
-    // The next daemon finds the same folder.
+    // The next daemon finds the same folder, for its server (the tests' keyring is the dead
+    // daemon's, gone with it: no login).
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
     killed(&user);
     done(mcp_after_restart(&user).call(
         "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
     ));
-    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
-    assert_eq!(login["AGENT_BROWSER_SOCKET_DIR"], named.to_str().unwrap());
+    assert_eq!(
+        display_of(&user, "browser")["AGENT_BROWSER_SOCKET_DIR"],
+        named.to_str().unwrap()
+    );
 }
 
 /// The name of the socket folder another user's connection `browser` gets.
