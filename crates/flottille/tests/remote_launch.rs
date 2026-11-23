@@ -1744,3 +1744,21 @@ fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
         "{child}"
     );
 }
+
+#[test]
+fn a_led_session_started_on_another_machine_says_what_follows() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Started led", "brief": "Do it."}),
+    ))
+    .to_owned();
+
+    assert!(text.contains("Started a session led by you"), "{text}");
+    assert!(text.contains("[flottille:session-turn-ended]"), "{text}");
+    assert!(text.contains("when it asks, reports or ends"), "{text}");
+    assert!(text.contains("session_send"), "{text}");
+}
