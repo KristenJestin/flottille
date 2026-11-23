@@ -730,7 +730,7 @@ impl Composer {
             message,
             images: self.attached.sending(),
             texts: self.attached.texts(cx),
-            mode: self.mode.read(cx).mode().unwrap_or("auto").to_owned(),
+            mode: self.mode.read(cx).chosen().map(str::to_owned),
         };
         self.sending = Some(target);
         self.sent = Some(self.pick.clone());

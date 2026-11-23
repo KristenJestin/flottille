@@ -116,6 +116,12 @@ impl ModeSwitch {
         self.pending.as_deref().or(self.mode.as_deref())
     }
 
+    /// The mode the user chose for the session this control starts: none until they choose, so
+    /// that a start leaves the mode to the machine's default, whatever this control last read.
+    pub fn chosen(&self) -> Option<&str> {
+        self.chosen_here.then(|| self.mode()).flatten()
+    }
+
     /// What the daemon said when it refused the last change, shown beside the control.
     pub fn said(&self) -> Option<String> {
         self.refused.clone()

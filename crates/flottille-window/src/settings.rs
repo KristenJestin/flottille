@@ -1261,11 +1261,6 @@ impl SettingsPage {
     /// The daemon's answer to what new sessions start on: a toast says it.
     pub fn new_session_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.new_session_pending = false;
-        // Taken, the mode stays on the choice while the providers are read again: it never slides
-        // back to the old one and forward once more.
-        if let (None, Some(mode)) = (&refused, self.new_session_mode_pending.take()) {
-            self.providers.new_session_mode = Some(mode);
-        }
         match refused {
             Some(why) => toast(
                 Toast::failure("New sessions were not changed").detail(why),
@@ -1273,6 +1268,28 @@ impl SettingsPage {
             ),
             None => toast(
                 Toast::success("New sessions saved").detail("They apply to the next session."),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// The daemon's answer to the mode new sessions start in: a toast of its own says it.
+    pub fn new_session_mode_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        // Taken, the mode stays on the choice while the providers are read again: it never slides
+        // back to the old one and forward once more.
+        let asked = self.new_session_mode_pending.take();
+        if let (None, Some(mode)) = (&refused, asked) {
+            self.providers.new_session_mode = Some(mode);
+        }
+        match refused {
+            Some(why) => toast(
+                Toast::failure("The mode of new sessions was not changed").detail(why),
+                cx,
+            ),
+            None => toast(
+                Toast::success("New session mode saved")
+                    .detail("It applies to the next session you start."),
                 cx,
             ),
         }
@@ -2237,12 +2254,8 @@ impl SettingsPage {
                 div()
                     .id("new-sessions-full-note")
                     .aria_label(said.clone())
-                    .px(space::MD)
-                    .py(space::SM)
-                    .rounded(px(8.))
-                    .bg(p.fail_bg)
                     .text_size(px(12.5))
-                    .text_color(p.fail)
+                    .text_color(p.wait)
                     .child(said)
                     .test_support()
                     .into_any_element()
