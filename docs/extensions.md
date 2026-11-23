@@ -1686,17 +1686,22 @@ way in:
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
   or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has. **A login that
   fails** (or runs out of time) is followed by Flottille's own `open <the entry's URL>`, on the same
-  command line, folder, environment (without the token) and session: the page is loaded afresh, so
+  command line, folder, environment and session: the page is loaded afresh, so
   a secret typed into its form does not stay there (a browser does not restore a password field).
   It is Flottille's call, not an agent's, so it does not need `open` on. If it fails too, the
   login's error is still returned, masked, and says that the page could not be loaded again.
 - **The plugin is Flottille.** The daemon refuses every client that descends from it, so the
   login does not go through its socket: for that run alone the daemon listens on
   `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
-  and gives the run a **one-time token** in `FLOTTILLE_VAULT_TOKEN`. `flottille vault provide` (hidden, needs no
-  folder of Flottille's) reads agent-browser's request on its standard input, sends the token and
-  the item and the URL agent-browser asks for to that socket, and writes the answer on its
-  standard output. The daemon answers **only** the token of the run it started, **once**, only
+  and gives the run a **one-time token** in `connections/<name>/vault.token` (the user's alone,
+  written once the page is loaded, removed when the run ends). A file and not a variable:
+  agent-browser's session daemon, not the login's command line, starts the plugin, with the
+  environment it was started with. `flottille vault provide` (hidden, needs no folder of
+  Flottille's) reads agent-browser's request on its standard input, sends the token and the item
+  and the URL agent-browser asks for to that socket, and writes the answer on its standard output.
+  agent-browser says of a plugin that failed only that it "exited unsuccessfully": the plugin also
+  writes why in `connections/<name>/vault.why`, and the login's error says it (masked) when the
+  daemon did not refuse the request itself. The daemon answers **only** the token of the run it started, **once**, only
   for a URL of the entry's own host, and only for the entry that run is for, bound
   to this connection; without the token the plugin is refused before anything is asked. The
   secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or

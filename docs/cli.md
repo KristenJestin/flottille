@@ -949,9 +949,10 @@ Shared jira with server: its keyring holds it now.
 Not a command for the user: the credential plugin agent-browser starts during a `login` of its
 connection's adapter (`docs/extensions.md`, "Adapters"), named in the configuration Flottille
 writes for it. It reads one `agent-browser.plugin.v1` request on its standard input, asks the
-daemon's login that runs, at `<socket>`, with the one-time token of that run
-(`FLOTTILLE_VAULT_TOKEN`), and writes the answer on its standard output. Without that token, it
-is refused before anything is asked. Hidden from `--help`.
+daemon's login that runs, at `<socket>`, with the one-time token of that run (the file
+`vault.token` beside the socket), and writes the answer on its standard output; why it failed is
+also written beside the socket, in `vault.why`, for the login to say. Without that token, it is
+refused before anything is asked. Hidden from `--help`.
 
 ## Workspaces
 

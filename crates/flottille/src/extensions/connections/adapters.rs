@@ -131,8 +131,12 @@ const PLUGIN: &str = "flottille";
 const PROTOCOL: &str = "agent-browser.plugin.v1";
 /// The launch argument that names a shown browser's window.
 const BROWSER_CLASS_ARG: &str = "--class=flottille-browser";
-/// The variable that gives a login's run its one-time token.
-pub const TOKEN_VARIABLE: &str = "FLOTTILLE_VAULT_TOKEN";
+/// Beside the plugin's socket, the file that holds a login run's one-time token, and the one
+/// where the plugin says why it failed: agent-browser's session daemon starts the plugin, with the
+/// environment it was started with and not the login's command line's, and says of a plugin that
+/// failed only that it "exited unsuccessfully".
+const TOKEN_FILE: &str = "vault.token";
+const WHY_FILE: &str = "vault.why";
 /// How long a login has, as a call of the server has.
 const LOGIN_LIMIT: Duration = Duration::from_secs(120);
 /// How long `agent-browser close` may take.
@@ -823,6 +827,9 @@ async fn run(
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).map_err(|error| format!("{error}"))?;
     let _gone = Removed(socket.clone());
+    let why_file = socket.with_file_name(WHY_FILE);
+    let _ = std::fs::remove_file(&why_file);
+    let _why_gone = Removed(why_file.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
     display(&mut env, shown.as_ref().map(|shown| &shown.env), &folder);
@@ -834,22 +841,16 @@ async fn run(
     {
         env.insert(OsString::from(variable), OsString::from(secret));
     }
-    // The loads of the page need no token: they ask for no secret.
-    let without_token = env.clone();
-    env.insert(TOKEN_VARIABLE.into(), token.clone().into());
     // Loaded first, then filled without navigating: agent-browser then checks, before each field
     // and the submit, that the page is still of the URL's origin (scheme, host and port), so a
     // page that redirects elsewhere gets no secret. Its own navigation checks nothing after it.
-    reload(
-        program,
-        &options,
-        &without_token,
-        reached.as_ref(),
-        &folder,
-        url,
-    )
-    .await
-    .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
+    reload(program, &options, &env, reached.as_ref(), &folder, url)
+        .await
+        .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
+    // Written once the page is loaded, which needs no token: it asks for no secret.
+    let token_file = socket.with_file_name(TOKEN_FILE);
+    written(&token_file, token.as_bytes()).map_err(|error| format!("{error}"))?;
+    let _token_gone = Removed(token_file);
     let mut command = tokio::process::Command::new(&program[0]);
     command
         .args(&program[1..])
@@ -910,7 +911,7 @@ async fn run(
             reloaded(
                 program,
                 &options,
-                &without_token,
+                &env,
                 reached.as_ref(),
                 &folder,
                 url,
@@ -927,7 +928,7 @@ async fn run(
     if status.success() {
         return Ok(said);
     }
-    let mut why = match refused {
+    let mut why = match &refused {
         Some(refused) => format!("Flottille refused agent-browser's request: {refused}"),
         None => "agent-browser could not sign in".to_owned(),
     };
@@ -935,10 +936,17 @@ async fn run(
     if let Some(line) = first {
         why.push_str(&format!("; it said: {line}"));
     }
+    // The plugin's own reason, when it failed before the daemon could refuse it.
+    if refused.is_none()
+        && let Ok(said) = std::fs::read_to_string(&why_file)
+        && let Some(line) = said.lines().find(|line| !line.trim().is_empty())
+    {
+        why.push_str(&format!("; Flottille's credential plugin said: {line}"));
+    }
     reloaded(
         program,
         &options,
-        &without_token,
+        &env,
         reached.as_ref(),
         &folder,
         url,
@@ -1130,8 +1138,9 @@ async fn credential(daemon: &Daemon, login: &Login, page: Option<&str>) -> Resul
 
 /// `flottille vault provide <socket>`: agent-browser's credential provider, one request on the
 /// standard input, one answer on the standard output (`agent-browser.plugin.v1`). It asks the
-/// daemon's login that runs, at `socket`, with the token of that run; without one, it is refused
-/// before anything is asked.
+/// daemon's login that runs, at `socket`, with the token of that run, read beside it; without
+/// one, it is refused before anything is asked. Why it failed is also written beside it, for the
+/// login: agent-browser does not relay it.
 pub fn provide(socket: &Path) -> std::process::ExitCode {
     use std::io::{BufRead, Read, Write};
     let mut text = String::new();
@@ -1150,7 +1159,7 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
     {
         failed("Flottille resolves credentials alone (credential.read)")
     } else {
-        match std::env::var(TOKEN_VARIABLE) {
+        match std::fs::read_to_string(socket.with_file_name(TOKEN_FILE)) {
             Err(_) => failed("refused: no login of Flottille's runs this request"),
             Ok(token) => {
                 let asked = json!({"token": token, "item": request["request"]["itemRef"],
@@ -1177,6 +1186,9 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
             }
         }
     };
+    if let Some(why) = answer["error"].as_str() {
+        let _ = std::fs::write(socket.with_file_name(WHY_FILE), why);
+    }
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{answer}");
     let _ = out.flush();
