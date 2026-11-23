@@ -104,10 +104,21 @@ pub fn resolve(
             {
                 break;
             }
-            if let Some(away) = crate::across::sessions_elsewhere(daemon, None)
+            let mut listing: Vec<Away> = crate::across::sessions_elsewhere(daemon, None)
                 .into_iter()
-                .find(|away| away.session.id == id)
-            {
+                .filter(|away| away.session.id == id)
+                .collect();
+            // Ids are each machine's own: two machines listing one is no session to pick from.
+            if listing.len() > 1 {
+                let machines: Vec<&str> = listing.iter().map(|away| away.name.as_str()).collect();
+                return Err(Outcome::Refused(format!(
+                    "refused: more than one machine lists a session {}: {}; name it by its title \
+                     instead, or ask the user which one is meant",
+                    label(&id),
+                    machines.join(", ")
+                )));
+            }
+            if let Some(away) = listing.pop() {
                 args[field] = Value::String(id);
                 return Ok(Resolved::Away(args, away));
             }
