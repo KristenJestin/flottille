@@ -314,7 +314,7 @@ pub(crate) async fn lay(
             lacking.push(need.path.clone());
             continue;
         };
-        crate::vault::mask_lines(&secret);
+        crate::vault::mask_lines(&secret, Some(&need.bound));
         let written = write_new(&root, &need.path, &secret);
         if let Err(why) = written {
             return Err(format!("{} cannot be made: {why}", need.path));
@@ -331,19 +331,31 @@ pub(crate) async fn lay(
 }
 
 /// Writes `text` as the new file `path` of `root`, readable by the user alone: its folders made one
-/// at a time, none of them a link (`travel::folders_inside`), and the file itself never one nor
-/// over one.
+/// at a time, none of them a link (`travel::folders_inside`) and each opened again from the one
+/// before without following a link, and the file itself never one nor over one.
 fn write_new(root: &Path, path: &str, text: &str) -> Result<(), String> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
     crate::travel::folders_inside(root, path)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(root.join(path))
-        .map_err(|error| error.kind().to_string())?;
+    // Walked again from the project's folder, each folder opened from the one before and never
+    // through a link: one swapped for a link since it was made is refused, not followed.
+    let said = |error: rustix::io::Errno| std::io::Error::from(error).kind().to_string();
+    let folder = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC;
+    let mut dir = openat(CWD, root, folder, Mode::empty()).map_err(said)?;
+    let path = Path::new(path);
+    for part in path.parent().into_iter().flat_map(Path::components) {
+        dir = openat(
+            &dir,
+            part.as_os_str(),
+            folder | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(said)?;
+    }
+    let name = path.file_name().ok_or("not a file")?;
+    let made = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut file =
+        std::fs::File::from(openat(&dir, name, made, Mode::from_raw_mode(0o600)).map_err(said)?);
     file.write_all(text.as_bytes())
         .map_err(|error| error.kind().to_string())
 }

@@ -527,6 +527,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     };
     if let Some(secret) = &asked.secret {
         // Masked before it is kept anywhere, so that nothing written after can hold it.
+        mask_lines(secret, entry.bound.as_deref());
         secrets::add_vault_login(entry.username.as_deref(), secret);
         daemon
             .vault
@@ -579,7 +580,23 @@ async fn from_file(
         .map_err(|error| Failure::refused(format!("{}: {error}", found.folder.display())))?;
     let file = root.join(path);
     let cannot = |why: &str| Failure::refused(format!("{path} of {project} {why}"));
-    let metadata = std::fs::symlink_metadata(&file).map_err(|_| cannot("is not there"))?;
+    // Opened once, never through a link: what is checked is the file that is read, whatever is
+    // planted at the path between the two.
+    let mut opened = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&file)
+            .map_err(|error| match error.raw_os_error() {
+                _ if error.kind() == std::io::ErrorKind::NotFound => cannot("is not there"),
+                Some(libc::ELOOP) => {
+                    cannot("is not a file: a link or a folder is not made an entry")
+                }
+                _ => cannot("cannot be read"),
+            })?
+    };
+    let metadata = opened.metadata().map_err(|_| cannot("cannot be read"))?;
     if !metadata.is_file() {
         return Err(cannot(
             "is not a file: a link or a folder is not made an entry",
@@ -594,11 +611,19 @@ async fn from_file(
             crate::travelled::LARGEST_COPIED / 1024
         )));
     }
-    let text = std::fs::read(&file).map_err(|_| cannot("cannot be read"))?;
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut opened, crate::travelled::LARGEST_COPIED + 1),
+        &mut text,
+    )
+    .map_err(|_| cannot("cannot be read"))?;
+    if text.len() as u64 > crate::travelled::LARGEST_COPIED {
+        return Err(cannot("grew while it was read"));
+    }
     let text = zeroize::Zeroizing::new(String::from_utf8(text).map_err(|_| cannot("is not text"))?);
-    mask_lines(&text);
-    let name = name.unwrap_or_else(|| crate::travelled::entry_for(project, path));
     let bound = uses::file_use(project, path);
+    mask_lines(&text, Some(&bound));
+    let name = name.unwrap_or_else(|| crate::travelled::entry_for(project, path));
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -663,13 +688,16 @@ pub(crate) async fn of_file(
     Some(zeroize::Zeroizing::new(secret))
 }
 
-/// Masks each line of a secret of several lines, and each line's value, from now on: a file's
-/// (`vault.from_file`), of which an agent may come across one line alone. A value is what follows
+/// Masks each line of a secret of several lines, or of any secret bound to a file (`file:`), and
+/// each line's value, from now on: a file's (`vault.from_file`), of which an agent may come
+/// across one line alone. A value is what follows
 /// a line's first `=` or `:` (`KEY=v`, `key: v`, `"key": "v",`), its quotes and final comma left
 /// out, and the password of an address's `user:password@`. A comment and a part too short to be
 /// told from an ordinary word are left.
-pub(crate) fn mask_lines(secret: &str) {
-    if !secret.contains('\n') {
+pub(crate) fn mask_lines(secret: &str, bound: Option<&str>) {
+    // A file of one line, with no final newline, is as much a file as any: an agent may read it
+    // from an offset.
+    if !secret.contains('\n') && !bound.is_some_and(|bound| bound.starts_with("file:")) {
         return;
     }
     for line in secret.lines().map(str::trim) {
@@ -865,7 +893,7 @@ pub async fn receive(
         None => None,
     };
     // Masked before it is kept anywhere, so that nothing written after can hold it.
-    mask_lines(secret);
+    mask_lines(secret, entry.bound.as_deref());
     secrets::add_vault_login(entry.username.as_deref(), secret);
     daemon
         .vault
@@ -1343,7 +1371,7 @@ pub async fn load(daemon: &Daemon) {
                 for inner in crate::extensions::secrets_in(&secret) {
                     secrets::add_vault_value(&inner);
                 }
-                mask_lines(&secret);
+                mask_lines(&secret, entry.bound.as_deref());
                 secrets::add_vault_login(entry.username.as_deref(), &secret);
             }
             Ok(None) => {}
@@ -2270,6 +2298,7 @@ mod tests {
             "token: plainyamlvalue\n  \"json_key\": \"plainjsonvalue\",\n\
              url = https://alice:plainurlpassword@example.test/x\n\
              DATABASE_URL=postgres://bob:plainpgpassword@db.example.test/ledger\n",
+            None,
         );
         let env = std::collections::BTreeMap::new();
         for value in [
@@ -2285,7 +2314,7 @@ mod tests {
 
     #[test]
     fn a_one_line_file_s_value_is_masked_alone_without_a_final_newline() {
-        mask_lines("API_TOKEN=oneline-Value-41");
+        mask_lines("API_TOKEN=oneline-Value-41", Some("file:app/.env"));
         let env = std::collections::BTreeMap::new();
         let said = secrets::mask("it is oneline-Value-41 now", &env);
         assert_eq!(said, "it is [masked] now");
