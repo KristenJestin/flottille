@@ -426,6 +426,9 @@ Parameters that do not fit a method are answered `invalid-params`.
 No parameters. The result is `{"projects": [...], "errors": [...]}`: the projects by name, and the
 files that cannot be used, each `{"name", "file", "message"}` (`file` is `projects/<name>.toml`, the
 message starts with the key at fault). A file with an error does not hide the other projects.
+It also holds `unconfigured`: the projects with no file at all that the store still holds live
+sessions or workspaces of, each `{"name", "sessions", "workspaces"}` (the sessions are the roots not
+ended). `project.remove` removes them as any project ("Removing a project", `docs/projects.md`).
 
 #### `project.show`
 

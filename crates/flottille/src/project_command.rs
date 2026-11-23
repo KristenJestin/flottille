@@ -471,7 +471,11 @@ fn detected_text(found: &Value, file: &std::path::Path) -> String {
 
 fn list_text(list: &Value) -> String {
     let projects = list["projects"].as_array().map_or(&[][..], Vec::as_slice);
-    if projects.is_empty() && list["errors"].as_array().is_none_or(Vec::is_empty) {
+    let left = list["unconfigured"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if projects.is_empty() && list["errors"].as_array().is_none_or(Vec::is_empty) && left.is_empty()
+    {
         return "No project is registered. Add one with `flottille project add <folder>`.\n".into();
     }
     let width = |key: &str, title: &str| {
@@ -491,6 +495,20 @@ fn list_text(list: &Value) -> String {
             text(project, "name"),
             text(project, "folder"),
         ));
+    }
+    if !left.is_empty() {
+        table.push_str(
+            "\nNo settings file, with sessions or workspaces left \
+             (`flottille project remove <name>` removes them):\n",
+        );
+        for project in left {
+            table.push_str(&format!(
+                "{}  {} sessions  {} workspaces\n",
+                text(project, "name"),
+                project["sessions"],
+                project["workspaces"],
+            ));
+        }
     }
     table
 }

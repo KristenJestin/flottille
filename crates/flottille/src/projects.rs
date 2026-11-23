@@ -238,11 +238,87 @@ fn run_json(run: &Run) -> Value {
     json!({"run": run.id, "name": run.name, "line": run.line, "agent": run.agent})
 }
 
+/// What a project whose file is gone still holds in the store: its live sessions (roots) and its
+/// workspaces. A project that holds neither is not left over: its ended sessions are history.
+struct Left {
+    name: String,
+    sessions: usize,
+    workspaces: usize,
+}
+
+/// The projects the store holds sessions or workspaces of, whose file is not there: what
+/// `project.remove` still removes (`docs/projects.md`, "Removing a project"). `known` are the
+/// names of the files there are, usable or not.
+fn left_over(daemon: &Daemon, known: &[String]) -> std::result::Result<Vec<Left>, Failure> {
+    let mut left: BTreeMap<String, Left> = BTreeMap::new();
+    let mut hold = |project: &str, session: bool| {
+        let held = left.entry(project.to_owned()).or_insert_with(|| Left {
+            name: project.to_owned(),
+            sessions: 0,
+            workspaces: 0,
+        });
+        match session {
+            true => held.sessions += 1,
+            false => held.workspaces += 1,
+        }
+    };
+    for agent in daemon.read(Store::agents)? {
+        if agent.parent.is_none() && !agent.state.is_final() && !known.contains(&agent.project) {
+            hold(&agent.project, true);
+        }
+    }
+    for workspace in daemon.read(|store| store.workspaces(None))? {
+        if !known.contains(&workspace.project) {
+            hold(&workspace.project, false);
+        }
+    }
+    Ok(left.into_values().collect())
+}
+
+/// Whether the project's file is there, for a project that can be removed: one with a file, or
+/// one without that still holds sessions or workspaces. Any other is refused as it was.
+fn removable(daemon: &Daemon, name: &str) -> std::result::Result<bool, Failure> {
+    match load_project(daemon, name) {
+        Ok(_) => Ok(true),
+        Err(failure) if failure.code == "not-found" => {
+            let left = left_over(daemon, &[])?;
+            match left.iter().any(|left| left.name == name) {
+                true => Ok(false),
+                false => Err(failure),
+            }
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+/// `project.list`: the projects, the files that cannot be used, and the `unconfigured` projects
+/// (no file, but sessions or workspaces left), each with how many it holds.
+pub fn list(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+    let mut listed = call(daemon, "project.list", params)?;
+    let names = |key: &str| -> Vec<String> {
+        listed[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let known: Vec<String> = names("projects")
+        .into_iter()
+        .chain(names("errors"))
+        .collect();
+    listed["unconfigured"] = left_over(daemon, &known)?
+        .into_iter()
+        .map(|left| json!({"name": left.name, "sessions": left.sessions, "workspaces": left.workspaces}))
+        .collect();
+    Ok(listed)
+}
+
 /// `project.removal`: what removing the project would do, asked before it is: its sessions and
 /// command runs still running, and each workspace with what removing it would lose.
 pub async fn removal(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let ProjectName { name } = serde_json::from_value(params)?;
-    load_project(&daemon, &name)?;
+    removable(&daemon, &name)?;
     let sessions: Vec<Value> = live_agents(&daemon, &name)?
         .iter()
         .filter(|agent| agent.parent.is_none())
@@ -278,7 +354,7 @@ pub async fn removal(daemon: Arc<Daemon>, params: Value) -> std::result::Result<
 /// checkouts of its repositories are never touched. Nothing starts in it meanwhile.
 pub async fn remove(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let ProjectRemove { name, discard } = serde_json::from_value(params)?;
-    load_project(&daemon, &name)?;
+    let filed = removable(&daemon, &name)?;
     // Marked before anything is stopped: nothing may start between a stop and the mark.
     if !daemon
         .removing_projects
@@ -290,7 +366,7 @@ pub async fn remove(daemon: Arc<Daemon>, params: Value) -> std::result::Result<V
             "project {name} is being removed already"
         )));
     }
-    let removed = remove_marked(&daemon, &name, discard.as_deref()).await;
+    let removed = remove_marked(&daemon, &name, discard.as_deref(), filed).await;
     daemon.removing_projects.lock().unwrap().remove(&name);
     removed
 }
@@ -344,6 +420,7 @@ async fn remove_marked(
     daemon: &Arc<Daemon>,
     name: &str,
     discard: Option<&[ShownWorkspace]>,
+    filed: bool,
 ) -> std::result::Result<Value, Failure> {
     let mut done = Done::default();
     // Read before the agents stop, whose runs end with them: all are said stopped. None starts
@@ -470,7 +547,8 @@ async fn remove_marked(
     }
 
     let mut projects = daemon.projects.lock().unwrap();
-    if !projects.registry.remove(name)? {
+    // A project whose file was gone at the start has nothing to forget but what was made for it.
+    if !projects.registry.remove(name)? && filed {
         return Err(done.partway(name, "its file is gone already"));
     }
     projects.known.remove(name);

@@ -719,7 +719,9 @@ NAME  FOLDER      REPOSITORIES
 shop  /work/shop  1
 ```
 
-`--json` prints `project.list`: `{"projects": [...], "errors": [...]}`.
+`--json` prints `project.list`: `{"projects": [...], "errors": [...], "unconfigured": [...]}`. A
+project whose file is gone but whose sessions or workspaces are still there is listed under the
+table, with how many it holds: `flottille project remove <name>` removes them.
 
 ### `flottille project show <name>`
 
