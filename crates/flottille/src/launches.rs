@@ -397,7 +397,9 @@ fn answer_to_caller(
             &format!("#{number} on {machine}."),
             1,
         );
-        return format!("{waiting}\nIt will run on {machine} {place}, once allowed. {back}");
+        return format!(
+            "{waiting}\nIt will run as {named} on {machine} {place}, once allowed. {back}"
+        );
     }
     match kind {
         "child" => format!(
