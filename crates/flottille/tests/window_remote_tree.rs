@@ -199,12 +199,13 @@ fn frame_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Opti
     Some(format!("tree-row-{}", row.as_u64()))
 }
 
-/// The height of `frame`, `None` once it is gone.
+/// The height of `frame`, `None` once it is gone, and while it is in two places at once: a row
+/// that moves between two projects of the tree (the one its pilot has and the one its machine
+/// lists) is in both until the one it leaves has folded away.
 fn height(cx: &mut VisualTestContext, frame: &str) -> Option<f32> {
-    cx.update(|window, _| {
-        window
-            .try_find(frame.to_owned())
-            .map(|found| f32::from(found.bounds().size.height))
+    cx.update(|window, _| match window.find_all(frame.to_owned()).as_slice() {
+        [found] => Some(f32::from(found.bounds().size.height)),
+        _ => None,
     })
 }
 
