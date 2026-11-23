@@ -542,8 +542,11 @@ Attached to its key: renamed, it keeps the rest; paired again with the same key,
 - **Signed in the list**: its name, its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`), its
   colour (`grey`, `red`, `orange`, `yellow`, `green`, `teal`, `blue`, `purple`), its role, who added
   it.
-- **What it says itself**, kept by the hub: what it is (`computer`), its system (`linux`), Flottille's
-  version (from its hello, at each session).
+- **What it says itself**, kept by the hub: what it is (`computer`, or `phone` for the app), its system
+  (`linux`), Flottille's version (from its hello, at each session). It is what tells a device that
+  cannot run agents (`phone`) from one that could: Settings explains and offers the command to make a
+  controller or a viewer a runner only to the second (#1286), as a card that has said nothing yet is
+  taken for one that could.
 - **What the hub knows**: when it was paired, when it was last seen (a session that starts or
   ends).
 
@@ -591,7 +594,9 @@ join request: a device is added on the hub's host. Then the page shows the devic
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
 "⋯", Remove asking once; the row of a controller or a viewer, which runs nothing and so is not
 offered in Settings or the composer, says so and shows `flottille-hub role <name> runner`, which
-changes it on the hub's host, copyable, #1247); #1177 took this machine's addresses off the page.
+changes it on the hub's host, copyable, #1247; a phone, which never runs agents, has only its role in
+words, #1286: the window tells it by what the device said it is, `phone`, and never by its icon or its
+name); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
