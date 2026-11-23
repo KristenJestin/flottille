@@ -957,7 +957,7 @@ fn delivered(
         .read(|store| store.launches("out", Some(&machine), LaunchFilter::Named(&deliver.launch)))
         .map_err(|error| Refused::Now(error.to_string()))?
         .into_iter()
-        .find(|launch| launch.caller == deliver.agent && launch.state != "refused")
+        .find(|launch| delivered_to(launch, &deliver.agent, &deliver.kind))
         .ok_or_else(|| {
             format!(
                 "agent {} of this machine did not start launch {} on {name}: a delivery goes only \
@@ -1021,6 +1021,13 @@ fn delivered(
             .map_err(|error| Refused::Now(error.to_string()))?;
     }
     Ok(json!({}))
+}
+
+/// Whether a delivery of `kind` for `agent` is of `launch`: one its agent started, not refused,
+/// or the user's answer that refused it, sent again by a machine that did not hear it was taken
+/// (stored once by its id).
+fn delivered_to(launch: &Launch, agent: &str, kind: &str) -> bool {
+    launch.caller == agent && (launch.state != "refused" || kind == "approval")
 }
 
 /// A `call` the machine of `from` sent: done as the tool would be here, only when the agent that
