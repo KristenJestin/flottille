@@ -2736,3 +2736,28 @@ fn the_window_draws_no_frame_at_rest_on_the_version_section_with_a_download_s_ba
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_new_sessions_settings_with_full_chosen(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the note of Full is shown", |cx| {
+        cx.update(|window, _| window.try_find("new-sessions-full-note").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

@@ -141,8 +141,9 @@ pub enum Command {
         images: Vec<Picture>,
         /// The large pasted texts that go with it, as files.
         texts: Vec<Pasted>,
-        /// The mode the session starts in: `ask`, `auto` or `full`.
-        mode: String,
+        /// The mode the user chose for this session (`ask`, `auto` or `full`); none when they
+        /// chose nothing, so that the daemon applies the machine's default.
+        mode: Option<String>,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -163,6 +164,10 @@ pub enum Command {
         provider: Option<String>,
         model: Option<String>,
         effort: Option<String>,
+    },
+    /// Chooses the mode a new session starts in (`provider.set_new_session_mode`).
+    SetNewSessionMode {
+        mode: String,
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
@@ -1091,6 +1096,10 @@ pub enum Outcome {
     },
     /// What a new session starts on was chosen, or the daemon refused with why.
     NewSessionSet {
+        refused: Option<String>,
+    },
+    /// The mode new sessions start in was chosen, or the daemon refused with why.
+    NewSessionModeSet {
         refused: Option<String>,
     },
     ProviderSet {
@@ -2322,7 +2331,13 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             match ask_with_files(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message, &mode),
+                start_params(
+                    &project,
+                    workspace.as_deref(),
+                    &pick,
+                    &message,
+                    mode.as_deref(),
+                ),
                 (&images, &texts),
                 bounds.quick,
             ) {
@@ -2367,6 +2382,19 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::NewSessionSet { refused }
+        }
+        Command::SetNewSessionMode { mode } => {
+            let params = json!({"mode": mode});
+            let refused = match ask_alone(
+                connect,
+                "provider.set_new_session_mode",
+                params,
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::NewSessionModeSet { refused }
         }
         Command::JudgeNoticed => {
             // Shown or not, the notice goes once it was seen: the providers say it.
@@ -3869,7 +3897,7 @@ fn start_params(
     workspace: Option<&str>,
     pick: &Pick,
     message: &str,
-    mode: &str,
+    mode: Option<&str>,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
@@ -4141,7 +4169,7 @@ mod tests {
             message: "Fix the timeout".into(),
             images: Vec::new(),
             texts: Vec::new(),
-            mode: "auto".into(),
+            mode: None,
         }
     }
 

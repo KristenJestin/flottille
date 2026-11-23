@@ -116,6 +116,15 @@ The user chose what a new session starts on, or no choice, through the daemon
 |---|---|
 | `new_session` | `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for the provider's to propose; `null` when none is chosen. |
 
+### `provider.new_session_mode_changed`
+
+The user chose the mode a session the user starts is in, through the daemon
+(`provider.set_new_session_mode`). An edit of `providers.toml` by hand is not announced.
+
+| Field | |
+|---|---|
+| `mode` | `"ask"`, `"auto"` or `"full"`. |
+
 ### `provider.judge_changed`
 
 The user chose the Auto judge, or none, through the daemon (`provider.set_judge`), Flottille picked
