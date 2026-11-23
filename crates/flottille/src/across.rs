@@ -772,12 +772,11 @@ pub(crate) fn drop_old(daemon: &Daemon) {
     let before = now_ms().saturating_sub(KEPT_FOR.as_millis() as u64);
     // The callers of other machines stood in for here: those of a machine that left the members,
     // and those idle as long as a message is kept, with what they were let do.
-    if let Ok(remote) = crate::link::remote_of(daemon) {
-        let machines: Vec<String> = remote
-            .trusted_keys()
-            .iter()
-            .map(|key| hex(key.as_bytes()))
-            .collect();
+    // A member list that cannot be read is no list of nobody: nothing leaves the members by it.
+    if let Ok(remote) = crate::link::remote_of(daemon)
+        && let Some(keys) = remote.trusted_keys()
+    {
+        let machines: Vec<String> = keys.iter().map(|key| hex(key.as_bytes())).collect();
         let _ = daemon.write(|store| {
             store
                 .forget_stand_ins(&machines, before)
@@ -1528,7 +1527,16 @@ pub(crate) fn stand_in_name(agent: &Agent) -> Option<String> {
 /// The project of a caller whose own this machine has not, named as the caller names it, in the
 /// place that does not exist (`nowhere`).
 fn project_nowhere(nowhere: &std::path::Path, name: &str) -> flottille_core::project::Project {
-    flottille_core::project::Project::new(name, nowhere.to_path_buf(), Vec::new(), nowhere)
+    // Made under a fixed name: the folders `Project::new` builds from its name never hold the
+    // caller's word, which another machine chose.
+    let mut project = flottille_core::project::Project::new(
+        "stand-in",
+        nowhere.to_path_buf(),
+        Vec::new(),
+        nowhere,
+    );
+    project.name = name.to_owned();
+    project
 }
 
 /// The grant of a caller of another machine stood in for here: the tools of the tree that
@@ -1729,6 +1737,14 @@ pub(crate) async fn forward(
         "" => format!("the session agent {}", away.session.id),
         title => format!("the session \"{title}\" (agent {})", away.session.id),
     };
+    // A caller of another machine stood in for here reaches this machine's sessions only: no
+    // call goes out on its behalf.
+    if is_stand_in(&caller.id) {
+        return Outcome::Refused(format!(
+            "refused: {session} runs on {name}: a caller of another machine reaches only the \
+             sessions of this machine, and calls those of {name} from its own machine"
+        ));
+    }
     let link = crate::link::remote_of(daemon)
         .map_err(|failure| failure.message)
         .and_then(|remote| remote.link_to(name).map(|(link, _)| link));
@@ -1877,12 +1893,13 @@ fn delivered_answer(
                 .map(|taken| (taken, None))
         })
         .map_err(|error| Refused::Now(error.to_string()))?;
+    // The caller records what it awaits once the call's answer is back: an answer that came
+    // first is sent again, and dropped by its sender after 30 days when nothing ever awaits it.
     if !awaited {
-        return Err(format!(
-            "agent {} of this machine waits for no answer of request #{number} of {name}",
+        return Err(Refused::Now(format!(
+            "agent {} of this machine waits for no answer of request #{number} of {name} yet",
             deliver.agent.chars().take(64).collect::<String>()
-        )
-        .into());
+        )));
     }
     deliveries::deliver(
         daemon,

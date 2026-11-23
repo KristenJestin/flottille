@@ -364,6 +364,9 @@ pub fn deliver_answer(
 /// Wakes the agent for what is queued: mid-turn, an urgent delivery is pinned as a note and a
 /// redirect cancels the turn; between turns, its task pumps them.
 pub fn ring(daemon: &Arc<Daemon>, agent: &str) {
+    if crate::across::is_stand_in(agent) {
+        return;
+    }
     let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
         return;
     };

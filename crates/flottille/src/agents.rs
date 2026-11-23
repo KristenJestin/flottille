@@ -1289,6 +1289,11 @@ fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64, failed: Opti
 
 /// Hands an order to the agent's task, starting the task when it has none.
 pub fn order(daemon: &Arc<Daemon>, id: &str, order: Order) {
+    // A caller of another machine stood in for here is no agent of this machine's: nothing is
+    // ever started for it.
+    if crate::across::is_stand_in(id) {
+        return;
+    }
     let mut tasks = daemon.agents.tasks.lock().unwrap();
     let sender = match tasks.get(id) {
         Some((sender, _)) if !sender.is_closed() => sender.clone(),

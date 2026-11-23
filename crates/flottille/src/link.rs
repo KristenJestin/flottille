@@ -68,6 +68,9 @@ struct Peer {
 /// it was, and is said once.
 struct Kept {
     last: Peers,
+    /// Whether `last` is a file that was read whole: false while the file never was, so that an
+    /// empty list is not taken for a member list with nobody in it.
+    whole: bool,
     said: bool,
     /// What the file was when it was last read, whole or not.
     read: Option<Stamp>,
@@ -334,6 +337,7 @@ impl Remote {
             hello: hello(),
             peers: Mutex::new(Kept {
                 last: Peers::default(),
+                whole: false,
                 said: false,
                 read: None,
             }),
@@ -527,6 +531,7 @@ impl Remote {
         match read_json::<Peers>(&file) {
             Ok(peers) => {
                 kept.said = false;
+                kept.whole = true;
                 kept.last = peers.clone();
                 peers
             }
@@ -1675,13 +1680,12 @@ impl Remote {
         });
     }
 
-    /// The keys of the other machines the member list trusts.
-    pub(crate) fn trusted_keys(&self) -> Vec<PublicKey> {
-        self.peers()
-            .machines
-            .into_iter()
-            .map(|peer| peer.key)
-            .collect()
+    /// The keys of the other machines the member list trusts; none while the list was never read
+    /// whole (a broken file at the start), which is not a list of nobody.
+    pub(crate) fn trusted_keys(&self) -> Option<Vec<PublicKey>> {
+        let peers = self.peers();
+        let whole = self.peers.lock().unwrap().whole;
+        whole.then(|| peers.machines.into_iter().map(|peer| peer.key).collect())
     }
 
     /// The live root sessions each other machine of the user's last listed, without those whose

@@ -1635,14 +1635,23 @@ on a real phone, by hand, and reported.
   message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
 - **A held call of a caller of another machine is that machine's user's request** (#1250), as a
   request of a child there goes to that machine's user. The stand-in's own id (`<caller>@<key>`),
-  seen on a request card, is not refused as a target by an agent of that machine: it holds no
-  conversation and runs nothing, so a call to it reaches no one.
+  seen on a request card, is refused as a target by an agent of that machine (#1263), as a session
+  that does not exist (`session_read`, `session_send`, `agent_stop`): it holds no conversation and
+  runs nothing, and nothing is ever started for it.
+- **A caller of another machine reaches the sessions of the machine that stands it in only**
+  (#1263): a session that resolves to a third machine (or to its own) is refused with a sentence
+  of its own, and no call goes out on its behalf.
+- **A member list that cannot be read keeps the stand-ins** (#1263): while the peers' file was never
+  read whole (a broken file at the start), the sweep forgets none, with their leaves and the
+  answers they await; a list read whole that has nobody in it forgets them all.
 - **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
   under the user's runtime folder, never made, rather than refused: a read of a session of another
   project is served as on one machine. The callers of one machine are capped at 64, forgotten after
   30 days idle (as long as a message is kept) and when their machine leaves the members.
 - **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
-  an answer the user gave before that (within the same second) is refused. Answers never given are
+  an answer the user gave before that (within the same second) is answered "send again later"
+  (#1263), and kept by its sender, which drops it after 30 days; an answer nothing ever awaits is
+  told the same, since "not yet" and "never" cannot be told apart. Answers never given are
   forgotten after 30 days.
 - **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
   no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
