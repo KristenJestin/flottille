@@ -1368,10 +1368,18 @@ fn removed_by_the_user(server: &Machine, agent: &Value) -> String {
     server.git(&folder, &["commit", "--quiet", "-m", "kept"]);
     server.git(&folder, &["remote", "add", "kept", kept.to_str().unwrap()]);
     server.git(&folder, &["push", "--quiet", "kept", &branch]);
-    server
-        .user
-        .call("workspace.remove", json!({"project": "app", "name": name}))
-        .unwrap();
+    // The removal the end of its held agent started may still run: the user's waits for it,
+    // and finds the workspace gone when it removed it.
+    eventually("the workspace removed", || {
+        match server
+            .user
+            .call("workspace.remove", json!({"project": "app", "name": name}))
+        {
+            Ok(_) => true,
+            Err((_, why)) if why.contains("is being removed") => false,
+            Err((_, why)) => why.contains("no workspace") || panic!("{why}"),
+        }
+    });
     server.git(&server.folder(), &["branch", "-D", &branch]);
     name
 }
