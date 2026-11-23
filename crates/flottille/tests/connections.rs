@@ -5140,10 +5140,10 @@ fn a_plugin_that_fails_tells_the_agent_why() {
 }
 
 /// The files of the plugin's last login beside its socket (`vault.token`, `vault.why`), found by
-/// the socket the configuration names.
+/// the socket the configuration of its page's load names (a login stopped logs nothing).
 fn plugin_file(user: &User, file: &str) -> PathBuf {
-    let login = logged(user, "browser", "login");
-    let socket = login.last().unwrap()["config"]["plugins"][0]["args"][2]
+    let opened = logged(user, "browser", "open");
+    let socket = opened.last().unwrap()["config"]["plugins"][0]["args"][2]
         .as_str()
         .unwrap()
         .to_owned();
