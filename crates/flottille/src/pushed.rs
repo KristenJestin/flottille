@@ -639,7 +639,11 @@ pub(crate) fn ssh_words(line: &str) -> Vec<String> {
 /// The files the `Include` pattern names, read as `ssh` reads it: `~` the account's home, a
 /// relative path in `~/.ssh`. One outside `~/.ssh`, or that Flottille does not read (a variable, a
 /// token, a class of characters), is refused, saying how to fix it.
-fn includes(pattern: &str, ssh_folder: &Path, account: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn includes(
+    pattern: &str,
+    ssh_folder: &Path,
+    account: &Path,
+) -> Result<Vec<PathBuf>, String> {
     if pattern.contains(['$', '%', '[', '\\', '{']) {
         return Err("a pattern Flottille does not read: name the files in ~/.ssh plainly".into());
     }

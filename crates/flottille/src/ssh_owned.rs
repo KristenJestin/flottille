@@ -44,100 +44,138 @@ pub fn copies() -> Vec<(PathBuf, Vec<u8>)> {
 /// The files `owner` owns that `system` and the `account`'s `~/.ssh/config` include, with their
 /// text: root's at every start, the test's own in a test.
 fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut files = Vec::new();
+    let mut walk = Walk {
+        account,
+        owner,
+        ssh: None,
+        seen: 0,
+        copies: Vec::new(),
+    };
     // `ssh` reads a relative `Include` of the machine's configuration in its folder, of the
     // user's in `~/.ssh`.
     if let Some(folder) = system.parent() {
-        included(system, folder, account, 0, &mut files);
+        walk.visit(system, folder, 0);
     }
     if let Some(account) = account {
         let ssh = account.join(".ssh");
-        included(&ssh.join("config"), &ssh, Some(account), 0, &mut files);
-    }
-    let mut copies: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    for file in files {
-        let Ok(path) = file.canonicalize() else {
-            continue;
-        };
-        if copies.len() >= COPIES_MAX || copies.iter().any(|(done, _)| *done == path) {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() || meta.uid() != owner || meta.len() > CONFIG_MAX {
-            continue;
-        }
-        if let Ok(text) = std::fs::read(&path) {
-            copies.push((path, text));
+        walk.ssh = ssh.canonicalize().ok().map(|real| (ssh, real));
+        if let Some((ssh, _)) = walk.ssh.clone() {
+            walk.visit(&ssh.join("config"), &ssh, 0);
         }
     }
-    copies
+    walk.copies
 }
 
-/// Adds to `files` what `file` includes, and what that includes in turn.
-fn included(
-    file: &Path,
-    folder: &Path,
-    account: Option<&Path>,
-    depth: usize,
-    files: &mut Vec<PathBuf>,
-) {
-    if depth > INCLUDES_MAX || files.len() >= FILES_MAX {
-        return;
-    }
-    let Ok(meta) = std::fs::metadata(file) else {
-        return;
-    };
-    if !meta.is_file() || meta.len() > CONFIG_MAX {
-        return;
-    }
-    let Ok(text) = std::fs::read(file) else {
-        return;
-    };
-    for line in String::from_utf8_lossy(&text).lines() {
-        let words = crate::pushed::ssh_words(line.trim());
-        let Some((keyword, patterns)) = words.split_first() else {
-            continue;
-        };
-        if !keyword.eq_ignore_ascii_case("include") {
-            continue;
+/// A walk of the files `ssh` includes. What a run can write never steers it: the machine's
+/// configuration is followed only through files `ssh` reads, root's (or the walk's first), and
+/// the user's only inside `~/.ssh`, which no run writes, as the lent push reads it
+/// (`pushed::includes`). Each file is opened without following a link nor waiting on a FIFO, and
+/// judged on what was opened.
+struct Walk<'a> {
+    account: Option<&'a Path>,
+    owner: u32,
+    /// `~/.ssh` and its real path, once the user's configuration is walked.
+    ssh: Option<(PathBuf, PathBuf)>,
+    seen: usize,
+    copies: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl Walk<'_> {
+    /// Gives `file` when `ssh` would read it and it is the owner's, and follows what it includes.
+    fn visit(&mut self, file: &Path, folder: &Path, depth: usize) {
+        if depth > INCLUDES_MAX || self.seen >= FILES_MAX {
+            return;
         }
-        for pattern in patterns {
-            for found in expanded(pattern, folder, account) {
-                if files.len() >= FILES_MAX {
-                    return;
+        self.seen += 1;
+        let Ok(path) = file.canonicalize() else {
+            return;
+        };
+        if let Some((_, real)) = &self.ssh
+            && !path.starts_with(real)
+        {
+            return;
+        }
+        let Some((meta, text)) = read(&path) else {
+            return;
+        };
+        // As `ssh` judges an included file: owned by root or the user, written by no one else.
+        let read_by_ssh = meta.mode() & 0o022 == 0;
+        let given = depth > 0 && read_by_ssh && meta.uid() == self.owner;
+        if given
+            && self.copies.len() < COPIES_MAX
+            && !self.copies.iter().any(|(done, _)| *done == path)
+        {
+            self.copies.push((path.clone(), text.clone()));
+        }
+        if self.ssh.is_none() && depth > 0 && !given {
+            return;
+        }
+        for line in String::from_utf8_lossy(&text).lines() {
+            let words = crate::pushed::ssh_words(line.trim());
+            let Some((keyword, patterns)) = words.split_first() else {
+                continue;
+            };
+            if !keyword.eq_ignore_ascii_case("include") {
+                continue;
+            }
+            for pattern in patterns {
+                for found in self.expanded(pattern, folder) {
+                    if self.seen >= FILES_MAX {
+                        return;
+                    }
+                    self.visit(&found, folder, depth + 1);
                 }
-                files.push(found.clone());
-                included(&found, folder, account, depth + 1, files);
             }
         }
     }
+
+    /// The files the `Include` pattern names, as `ssh` reads it: `~` the account's home, a
+    /// relative path in `folder`; in the user's configuration, inside `~/.ssh` alone. A pattern
+    /// with a token, a variable or a class of characters names none here.
+    fn expanded(&self, pattern: &str, folder: &Path) -> Vec<PathBuf> {
+        if let (Some((ssh, _)), Some(account)) = (&self.ssh, self.account) {
+            return crate::pushed::includes(pattern, ssh, account).unwrap_or_default();
+        }
+        if pattern.contains(['$', '%', '[', '\\', '{']) {
+            return Vec::new();
+        }
+        let path = match pattern.strip_prefix("~/") {
+            Some(rest) => match self.account {
+                Some(account) => account.join(rest),
+                None => return Vec::new(),
+            },
+            None if pattern.starts_with('~') => return Vec::new(),
+            None => folder.join(pattern),
+        };
+        let rest = path.strip_prefix("/").unwrap_or(&path);
+        flottille_core::glob::expand(Path::new("/"), &rest.to_string_lossy())
+            .map(|found| {
+                found
+                    .into_iter()
+                    .map(|rest| Path::new("/").join(rest))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
-/// The files the `Include` pattern names, as `ssh` reads it: `~` the account's home, a relative
-/// path in `folder`. A pattern with a token, a variable or a class of characters names none here.
-fn expanded(pattern: &str, folder: &Path, account: Option<&Path>) -> Vec<PathBuf> {
-    if pattern.contains(['$', '%', '[', '\\', '{']) {
-        return Vec::new();
+/// What the regular file at `path`, a real path, holds, with what it was when opened: none for a
+/// link put there since, a FIFO, a device, a folder or a file past the size read.
+fn read(path: &Path) -> Option<(std::fs::Metadata, Vec<u8>)> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > CONFIG_MAX {
+        return None;
     }
-    let path = match pattern.strip_prefix("~/") {
-        Some(rest) => match account {
-            Some(account) => account.join(rest),
-            None => return Vec::new(),
-        },
-        None if pattern.starts_with('~') => return Vec::new(),
-        None => folder.join(pattern),
-    };
-    let rest = path.strip_prefix("/").unwrap_or(&path);
-    flottille_core::glob::expand(Path::new("/"), &rest.to_string_lossy())
-        .map(|found| {
-            found
-                .into_iter()
-                .map(|rest| Path::new("/").join(rest))
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut text = Vec::new();
+    file.take(CONFIG_MAX + 1).read_to_end(&mut text).ok()?;
+    (text.len() as u64 <= CONFIG_MAX).then_some((meta, text))
 }
 
 #[cfg(test)]
@@ -148,25 +186,22 @@ mod tests {
     #[test]
     fn what_ssh_includes_is_followed_as_it_reads_it() {
         let dir = tempfile::tempdir().unwrap();
-        let etc = dir.path().join("etc");
-        std::fs::create_dir_all(etc.join("conf.d")).unwrap();
-        let account = dir.path().join("home");
-        std::fs::create_dir_all(&account).unwrap();
-        std::fs::write(
-            etc.join("ssh_config"),
+        let etc = dir.path().canonicalize().unwrap().join("etc");
+        let account = dir.path().canonicalize().unwrap().join("home");
+        file(
+            &etc.join("ssh_config"),
             "Host *\n  include conf.d/*.conf\nInclude=~/mine \"~other\" $X/y\n",
-        )
-        .unwrap();
-        std::fs::write(etc.join("conf.d/10-a.conf"), "Include deeper\n").unwrap();
-        std::fs::write(etc.join("conf.d/20-b.txt"), "").unwrap();
-        std::fs::write(etc.join("deeper"), "").unwrap();
-        std::fs::write(account.join("mine"), "").unwrap();
+            0o644,
+        );
+        file(&etc.join("conf.d/10-a.conf"), "Include deeper\n", 0o644);
+        file(&etc.join("conf.d/20-b.txt"), "", 0o644);
+        file(&etc.join("deeper"), "", 0o644);
+        file(&account.join("mine"), "", 0o644);
 
-        let mut files = Vec::new();
-        included(&etc.join("ssh_config"), &etc, Some(&account), 0, &mut files);
+        let copies = copies_of(&etc.join("ssh_config"), Some(&account), me());
 
         assert_eq!(
-            files,
+            given(&copies),
             vec![
                 etc.join("conf.d/10-a.conf"),
                 etc.join("deeper"),
@@ -178,13 +213,14 @@ mod tests {
     #[test]
     fn an_include_of_itself_ends() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config"), "Include config\n").unwrap();
+        let config = dir.path().canonicalize().unwrap().join("config");
+        file(&config, "Include config\n", 0o644);
 
-        let mut files = Vec::new();
-        included(&dir.path().join("config"), dir.path(), None, 0, &mut files);
+        let copies = copies_of(&config, None, me());
 
-        assert_eq!(files.len(), INCLUDES_MAX + 1);
+        assert_eq!(given(&copies), vec![config]);
     }
+
     /// A file of `text` at `path`, of `mode`.
     fn file(path: &Path, text: &str, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
