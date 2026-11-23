@@ -1416,12 +1416,18 @@ impl ConnectionsSection {
                             .insert(name.clone(), (machine.clone(), Elsewhere::SignedOut));
                         let this = cx.entity().downgrade();
                         let (to_sign, on) = (name.clone(), machine.clone());
+                        // Clicked once another machine is in front: still this section's.
+                        let acting = crate::commands::acting(cx);
                         toast(
                             Toast::success(format!("Connection {name} shared with {machine}"))
                                 .detail(format!("It signs in on {machine} for itself."))
                                 .action(format!("Sign in on {machine}"), move |_, cx| {
-                                    this.update(cx, |this, cx| this.sign_in_on(&to_sign, &on, cx))
+                                    crate::commands::acting_as(acting.clone(), cx, |cx| {
+                                        this.update(cx, |this, cx| {
+                                            this.sign_in_on(&to_sign, &on, cx)
+                                        })
                                         .ok();
+                                    });
                                 }),
                             cx,
                         );
@@ -1542,11 +1548,13 @@ impl ConnectionsSection {
                 let given = saved["given"] == true;
                 let reviewing = |toast: Toast, name: &str, cx: &mut Context<Self>| {
                     let review = cx.weak_entity();
-                    let name = name.to_owned();
+                    let (name, acting) = (name.to_owned(), crate::commands::acting(cx));
                     toast.action("Review", move |_, cx| {
-                        review
-                            .update(cx, |this, cx| this.open_review(&name, cx))
-                            .ok();
+                        crate::commands::acting_as(acting.clone(), cx, |cx| {
+                            review
+                                .update(cx, |this, cx| this.open_review(&name, cx))
+                                .ok();
+                        });
                     })
                 };
                 let said = match &writing {
@@ -2208,13 +2216,15 @@ impl ConnectionsSection {
             && let Some(name) = self.review.as_ref().map(|review| review.name.clone())
         {
             let section = cx.weak_entity();
-            let again = name.clone();
+            let (again, acting) = (name.clone(), crate::commands::acting(cx));
             let said = Toast::success(format!("The server {name} still waits for your review"))
                 .detail("Agents get none of its new actions until you review it.")
                 .action("Review", move |_, cx| {
-                    section
-                        .update(cx, |this, cx| this.open_review_after_request(&again, cx))
-                        .ok();
+                    crate::commands::acting_as(acting.clone(), cx, |cx| {
+                        section
+                            .update(cx, |this, cx| this.open_review_after_request(&again, cx))
+                            .ok();
+                    });
                 });
             toast(said, cx);
         }

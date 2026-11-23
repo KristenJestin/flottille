@@ -326,11 +326,13 @@ impl Registry {
 
     /// An event says what is listed changed: it is read again once they go quiet.
     pub fn changed(&mut self, cx: &mut Context<Self>) {
+        // Read again from the machine that said it changed, whichever is in front by then.
+        let acting = crate::commands::acting(cx);
         self.quiet = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(QUIET).await;
             this.update(cx, |this, cx| {
                 this.quiet = None;
-                this.read(cx);
+                crate::commands::acting_as(acting, cx, |cx| this.read(cx));
             })
             .ok();
         }));

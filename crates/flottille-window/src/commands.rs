@@ -43,8 +43,6 @@ impl CommandInfo {
     }
 }
 
-/// Asks the daemon through the shell, once the update running now is over: the shell hands its
-/// answers to these views while it is itself being updated, and a view cannot update it then.
 /// Sends `command` the way the entity was given when it was made (`asks`: its machine's actions,
 /// #1271), or, given none, through the shell.
 pub(crate) fn ask(
@@ -61,10 +59,42 @@ pub(crate) fn ask(
     }
 }
 
+/// The machine whose pages act now (`None`: this one): the machine in front, or the one whose
+/// answer its pages are taking aside (#1271).
+#[derive(Default)]
+pub(crate) struct Acting(pub Option<String>);
+
+impl gpui_kit::Global for Acting {}
+
+/// The machine whose pages act now: what they ask goes there, even once another is in front.
+pub(crate) fn acting(cx: &App) -> Option<String> {
+    cx.try_global::<Acting>()
+        .and_then(|acting| acting.0.clone())
+}
+
+/// Runs `then` as the pages of `machine` (`None`: this one): a toast's action or a timer, made
+/// by a machine's section, asks that machine whichever is in front when it runs.
+pub(crate) fn acting_as<R>(
+    machine: Option<String>,
+    cx: &mut App,
+    then: impl FnOnce(&mut App) -> R,
+) -> R {
+    let was = std::mem::replace(&mut cx.default_global::<Acting>().0, machine);
+    let done = then(cx);
+    cx.default_global::<Acting>().0 = was;
+    done
+}
+
+/// Asks the daemon of the machine whose pages act now ([`acting`]), once the update running now
+/// is over: the shell hands its answers to these views while it is itself being updated, and a
+/// view cannot update it then. The machine is the one of the call, not of the moment it is sent:
+/// a page swapped back meanwhile does not take it (#1271).
 pub(crate) fn perform_later(shell: &WeakEntity<Shell>, command: Command, cx: &mut App) {
-    let shell = shell.clone();
+    let (shell, machine) = (shell.clone(), acting(cx));
     cx.defer(move |cx| {
-        shell.update(cx, |shell, _| shell.perform(command)).ok();
+        shell
+            .update(cx, |shell, _| shell.perform_on(machine.as_deref(), command))
+            .ok();
     });
 }
 

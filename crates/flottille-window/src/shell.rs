@@ -1313,6 +1313,7 @@ impl Shell {
         let was = std::mem::replace(&mut self.front, machine);
         self.sides.insert(was, left);
         cx.set_global(crate::machines::Shown(self.front.clone()));
+        cx.set_global(crate::commands::Acting(self.front.clone()));
         if cx.has_global::<crate::shown_files::ShownFiles>() {
             let connect = self.follow.connect.clone();
             cx.global_mut::<crate::shown_files::ShownFiles>()
@@ -1406,23 +1407,32 @@ impl Shell {
 
     /// Runs `then` with the pages of `machine` in front, as if they were: what it answered
     /// fills its own Settings, never those of the machine shown.
-    fn on_pages(&mut self, machine: Option<String>, then: impl FnOnce(&mut Self)) {
-        let answering = std::mem::replace(&mut self.answering, machine.clone());
-        if machine == self.front {
-            then(self);
-            self.answering = answering;
+    /// What its pages ask meanwhile, or later from what they did then, goes to `machine`.
+    fn on_pages(
+        &mut self,
+        machine: Option<String>,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Context<Self>),
+    ) {
+        if machine != self.front && !self.sides.contains_key(&machine) {
             return;
         }
-        let Some(pages) = self.sides.remove(&machine) else {
-            self.answering = answering;
-            return;
-        };
-        let front = self.swap_pages(pages);
-        let aside = std::mem::replace(&mut self.aside, true);
-        then(self);
-        self.aside = aside;
-        let pages = self.swap_pages(front);
-        self.sides.insert(machine, pages);
+        let answering = std::mem::replace(&mut self.answering, machine.clone());
+        let acting = std::mem::replace(
+            &mut cx.default_global::<crate::commands::Acting>().0,
+            machine.clone(),
+        );
+        if machine == self.front {
+            then(self, cx);
+        } else if let Some(pages) = self.sides.remove(&machine) {
+            let front = self.swap_pages(pages);
+            let aside = std::mem::replace(&mut self.aside, true);
+            then(self, cx);
+            self.aside = aside;
+            let pages = self.swap_pages(front);
+            self.sides.insert(machine, pages);
+        }
+        cx.default_global::<crate::commands::Acting>().0 = acting;
         self.answering = answering;
     }
 
@@ -2703,7 +2713,7 @@ impl Shell {
             Update::Machine { machine, update } => self.apply_of(machine, *update, window, cx),
             // This machine's: what fills its pages goes to them, wherever they wait.
             update if self.front.is_some() && of_this_machine_s_pages(&update) => {
-                self.on_pages(None, |shell| shell.take(update, window, cx));
+                self.on_pages(None, cx, |shell, cx| shell.take(update, window, cx));
             }
             update => self.take(update, window, cx),
         }
@@ -2742,7 +2752,9 @@ impl Shell {
             Update::Session { .. } => self.take(update, window, cx),
             // What fills its pages (its answers, its events) goes to them, wherever they wait.
             update if of_this_machine_s_pages(&update) => {
-                self.on_pages(Some(machine), |shell| shell.take(update, window, cx))
+                self.on_pages(Some(machine), cx, |shell, cx| {
+                    shell.take(update, window, cx)
+                })
             }
             _ => {}
         }
