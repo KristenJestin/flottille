@@ -489,8 +489,10 @@ verification words.
    pins, and a secret of 128 bits. The device types nothing else and knows it reaches the right
    hub: one that answers with another key is refused before anything is proved.
 3. **The device proposes its card and confirms it**: its name (the host's name), its icon (a
-   laptop with a battery, a desktop with a screen, a server without either), its role (a computer
-   with agents signed in: `runner`; without: `controller`; a phone: `controller`), and a colour of
+   laptop with a battery, a desktop with a screen, a server without either), its role (a machine
+   with no screen, a server: `runner`, signed in or not, the agents being signed in later; a
+   desktop or a laptop with agents signed in: `runner`, without: `controller`; a phone:
+   `controller`), and a colour of
    its key's; the user changes any of them before confirming. In the window: one modal, **Connect
    to your hub** (paste the code or scan its QR, then the card, then confirm). On the command line:
    `flottille remote pair [--name] [--role] [--icon] [--colour]`, the code on its standard input.
@@ -587,7 +589,9 @@ device is, a select of the five icons, This device can, Run agents / Control onl
 a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
 join request: a device is added on the hub's host. Then the page shows the devices of the
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
-"⋯", Remove asking once); #1177 took this machine's addresses off the page.
+"⋯", Remove asking once; the row of a controller or a viewer, which runs nothing and so is not
+offered in Settings or the composer, says so and shows `flottille-hub role <name> runner`, which
+changes it on the hub's host, copyable, #1247); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
@@ -695,6 +699,9 @@ cannot reach it (its words say that an older hub is updated on its host) instead
 an update; a device of before reads this hub's hello as it did, the signature beside it ignored. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 
+A new kind of message that a machine of before refuses alone, as the projects of a runner (#1181),
+leaves the number: that machine says it so in its log, and nothing else of the link is lost.
+
 Pair mode (#1146) raised it from 1 to 2: its frames and its changes (`hub`, `pair`, `role`,
 `look`) are ones a build of before cannot read, so that a device and a hub of different builds say
 to update rather than refuse each other's frames without saying why.
@@ -800,13 +807,32 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
 ### One list of every machine
 
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
-  project: a project registered on several machines under the same name is one group. Sessions
+  project: a project that several machines have is one group, whatever its name there (the next
+  bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
   chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
   in a project's composer (the machine picker); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
+- **The same project.** Two projects are the same when the remotes of their repositories are the
+  same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
+  `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
+  `.git`, the host in lower case, the case of the path kept), and a project of several
+  repositories matches when all of them match. A repository with no remote, or at a path of the
+  machine, says nothing: its project matches none. Each runner tells the machines it links to its
+  projects by those remotes in a message of its own, after its sessions (`projects`, "What a
+  machine may send"; `remote.sessions` says them), and the copy kept for a machine that is off
+  holds them too, so that its projects stay in the sidebar, greyed. A machine whose list came before projects were
+  listed says none: its sessions' project names are matched by name, as before. The message is
+  one a machine of before does not know, so that it refuses it alone (`not a message a machine may
+  send`) and goes on taking the sessions: the protocol number is not raised, two machines of
+  different builds keep their lists of sessions, and the one that sent the projects says in its
+  log, once for the link, that the other runs an older Flottille (`flottille update`) and sends
+  it no more of them; the older machine, which draws no project by machine, loses nothing. The
+  remote's address is the only thing of a repository that travels in this list: no credential (a user or a
+  password in the address is dropped), no path of the machine. The window draws one row for a
+  project the machines share, with a mark for each (`docs/design.md` §10).
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
   changes (a session that starts, ends, is written to, answers or asks). The window reads it from
@@ -855,6 +881,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `projects` | A runner's projects, each one's name and the normalised remotes of its repositories (`github.com/acme/app`), 1024 at most, 64 remotes of 256 characters at most each; sent after the sessions and again when they change, kept by the receiver beside them. A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link ("One list of every machine"). |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
 Nothing else: no user method but the kept close, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
@@ -929,8 +956,14 @@ local child's work; nothing moves your branch.*
   branch and pull request conventions (its template is text given to the agents, as the rules
   are), and a repository the project lacks, which is checked as one the user adds there: no link
   out of the project's folder, no repository of another project (`It adds the repository lib to
-  the project`). In a project Flottille made, a repository whose folder leads out of the project
-  is never the launch's. The
+  the project`). A repository not there yet is checked too: no folder on its way may lead out
+  through a link. It is checked again when its code comes, right before its folders are made, and
+  those are made one at a time, a link at any of them refused: nothing lands outside the project
+  through a link planted after the launch was allowed. A link is refused wherever it leads,
+  inside the project too (`sub is a link: nothing is made through it`): following it is what a
+  link planted since the check would use. The commits a machine lists (`Has`) are those of a
+  repository inside the project folder only. In a project Flottille made, a repository
+  whose folder leads out of the project is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
   judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
   Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
@@ -1585,7 +1618,17 @@ on a real phone, by hand, and reported.
 - **The folder for projects from other machines is not moved** (#1214): changing it applies to the
   projects made afterwards; those made before stay, and a launch that did not start removes its
   project from where it was made.
-
+- **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
+  no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
+  signed in or not. The machine has no other reliable signal of having no screen, so the icon is
+  the one already proposed and shown, and a headless machine that has a screen connected is a
+  desktop and stays a `controller` until its role is changed on the hub's host.
+- **A controller or a viewer is explained on its own row, not once for the page** (#1247): each
+  member that runs nothing says, under its row, its role, that it runs nothing and so is not offered
+  in Settings or the composer, and the command of the hub's host that changes it, copyable
+  (`flottille-hub role <name> runner`). One block per member, because the command holds the name and
+  each folds away by itself when the role changes; the window never offers a button that changes a
+  role.
 - **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
   project's choosers switch the whole window, as opening a session there does, rather than a page
   aimed at a machine of its own while the rest stays: one way to address a machine, and the
@@ -1736,7 +1779,8 @@ on a real phone, by hand, and reported.
   paired and last seen) is the hub's word, unsigned: nothing in it gives a right.
 - The proposed icon is the machine's: a battery (`/sys/class/power_supply`, type `Battery`) makes
   it a laptop, a screen connected (`/sys/class/drm`) a desktop, neither a server. The proposed role
-  is `runner` when an agent CLI is signed in on the machine, `controller` otherwise.
+  is `runner` for a server (#1247), and for any machine where an agent CLI is signed in,
+  `controller` otherwise. `flottille remote pair` says the role it takes before it asks the hub.
 - `flottille-hub pair`'s QR is drawn in half blocks, light modules as blocks and dark ones blank,
   as a dark console shows them, with a quiet zone of two modules; the code is printed above it,
   to copy.

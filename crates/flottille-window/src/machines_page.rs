@@ -58,6 +58,8 @@ const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines w
 const HUB_SENTENCE: &str = "The hub keeps the list of your devices and carries their links, \
                             encrypted end to end: it reads nothing of what they say to each \
                             other.";
+const NOT_OFFERED: &str = "It runs nothing, so Settings and the composer do not offer it. A role \
+                           changes on the hub's host:";
 const FORGOTTEN: &str = "The hub no longer knows this machine";
 const FORGOTTEN_SENTENCE: &str = "The list below is the one this machine saw last, kept as it \
                                   was. Pair again with your hub's code to be one of its devices \
@@ -948,11 +950,44 @@ impl MachinesSection {
             .flex_none()
             .child(mark(&icon, &colour))
             .test_support();
+        // What a machine that runs nothing is for, and how it changes: built on every frame, as
+        // a presence is its own state, so that it folds away when the hub's host changes the role.
+        let runs_nothing = member.role != "runner";
+        let p = palette(cx);
+        let command = SharedString::from(format!("flottille-hub role {name} runner"));
+        let role_block = presence(
+            format!("member-role-{name}-block"),
+            runs_nothing,
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::XS)
+                .child(
+                    div()
+                        .id(ElementId::Name(format!("member-role-{name}-said").into()))
+                        .aria_label(NOT_OFFERED)
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(NOT_OFFERED)
+                        .test_support(),
+                )
+                .child(crate::programs::command_row(
+                    format!("member-role-{name}-command"),
+                    command,
+                    p,
+                )),
+        )
+        .space(space::SM);
+        let below = div()
+            .flex()
+            .flex_col()
+            .when_some(link, |column, link| column.child(link))
+            .child(role_block);
         ListRow::new(ElementId::Name(format!("member-{name}").into()), name)
             .leading(leading)
             .tag(state)
             .line(format!("{said}. {added}"))
-            .when_some(link, |row, link| row.below(link))
+            .below(below)
             .more(menu)
     }
 

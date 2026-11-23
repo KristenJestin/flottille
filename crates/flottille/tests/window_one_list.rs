@@ -33,7 +33,8 @@ fn fake_user() -> User {
     user
 }
 
-/// The projects `projects` on `machine`, each over a throwaway repository.
+/// The projects `projects` on `machine`, each over a throwaway repository with the remote its
+/// name says.
 fn add(machine: &Machine, projects: &[&str]) {
     let user = &machine.user;
     for name in projects {
@@ -42,6 +43,17 @@ fn add(machine: &Machine, projects: &[&str]) {
         std::fs::write(folder.join("README.md"), "app\n").unwrap();
         user.git(&folder, &["add", "README.md"]);
         user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+        // The same remote on both machines: one project (`docs/remote.md`, "One list of every
+        // machine").
+        user.git(
+            &folder,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("https://git.example/acme/{name}.git"),
+            ],
+        );
         user.call("project.add", json!({"folder": folder, "name": name}))
             .unwrap();
     }

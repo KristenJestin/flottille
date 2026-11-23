@@ -37,7 +37,8 @@ pub enum RemoteAction {
         /// This device's name among the user's [default: the host's name]
         #[arg(long)]
         name: Option<String>,
-        /// What it may do [default: runner with agents signed in, controller without]
+        /// What it may do [default: runner with agents signed in or no screen (a server),
+        /// controller otherwise]
         #[arg(long, value_enum)]
         role: Option<RoleArg>,
         /// How it is drawn [default: laptop with a battery, desktop with a screen, server]
@@ -289,6 +290,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             let proposed = &machines["proposed"];
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(machines["this"]["key"].clone())?;
+            let given = role.is_some();
             let card = flottille_link::Proposed {
                 key: device.public(),
                 name: match name {
@@ -313,6 +315,17 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     ColourArg::colour,
                 ),
             };
+            // Said before the hub is asked, on stderr so that `--json` stays one document: there
+            // is no confirmation to change it on, so `--role` is how.
+            eprintln!(
+                "pairing as a {}{}",
+                json!(card.role).as_str().unwrap_or_default(),
+                if given {
+                    ""
+                } else {
+                    " (what this machine proposes; --role chooses another)"
+                }
+            );
             let paired = ask(
                 "remote.pair",
                 json!({"code": code.as_str(), "proposed": card, "replace": replace}),
