@@ -89,12 +89,13 @@ shown. The account's name is masked to its first letter, and its domain's for an
 (`o***`, `s***@e***`).
 
 **A row of the forges and trackers says what it knows** (#1315): while its check runs it says
-**Checking…** with the kit's indeterminate bar, offers nothing and its Check again waits; the
+**Checking…** over the kit's skeleton (a progress bar is for transfers), offers nothing and its Check again waits; the
 rows come in the page's fixed order (`gh`, `acli`, `bkt`, `glab`) and each is replaced where it
 stands by its own result, never re-sorted. A result is **Signed in as …** (Sign out, Check again),
 **Not signed in** only when the command line says it holds no login (Sign in, Check again),
-**Could not check: …** for any other failure, with the command line's first error line, masked,
-under the row, and Check again only (never Sign in), or **Not installed**. The state changes with
+**Could not check: …** for any other failure, with the command line's error line, masked, under
+the row, and Check again only (never Sign in, and no line to type in a terminal), or **Not
+installed**. A check the window could not even ask the daemon says so, not that the program failed. The state changes with
 the same fade as any other.
 
 **What a sign-in shows and keeps.** The daemon runs the program's command below, spawned without

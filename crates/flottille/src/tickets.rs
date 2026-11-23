@@ -552,7 +552,7 @@ async fn jira_site(site: &str, nothing: &str) -> Result<(), String> {
         Ok((true, stdout, _)) => stdout.clone(),
         _ => {
             return Err(match forge::auth_of("acli", ran) {
-                forge::Auth::Unchecked(why) => forge::unchecked("acli", &why),
+                forge::Auth::Unchecked(why) => forge::unchecked("acli", &why, nothing == "written"),
                 forge::Auth::NotSignedIn | forge::Auth::SignedIn => {
                     "acli is not signed in to Jira: run `acli jira auth login` to read Jira \
                      tickets; the rest of Flottille works without it"
@@ -2396,7 +2396,7 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let milestone = match milestones::chosen(&forge, asked.milestone_named()).await {
@@ -2496,7 +2496,7 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let milestone = match milestones::chosen(&forge, asked.milestone_named()).await {
@@ -3610,7 +3610,7 @@ async fn status(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &K
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let (repo, slug, number) = (forge.gh_repository(), forge.slug(), number.to_string());

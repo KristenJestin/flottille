@@ -56,14 +56,18 @@ with the system's default handler.
 
 **A check says one of three things** (#1315), for `gh`, `glab`, `acli` and `bkt` alike: **signed in**
 (exit 0, or for `bkt` a context for the host), **not signed in** (the command line says it holds no
-login: `gh auth status` says `You are not logged into any GitHub hosts` or that its token is
-invalid, `acli` and `glab` that they are not logged in or not authenticated, a `bkt` listing with no
-context for the host), and **could not check** (any other failure: the network, a service that is
-down, a keyring that is locked, a command that gives no answer in 30 s). When unsure, a failure that
-is not a clear "not logged in" is "could not check": it says nothing of who is signed in, and is
-never answered with a sign-in. It carries the command line's first error line, masked, or `no answer
-in N s`; the daemon's log says the same line (`gh could not be checked: <line>; what is shown could
-not be refreshed`). What the projects show of a forge or a tracker (pull requests, tickets) keeps its
+login: `gh auth status` says `You are not logged into any GitHub hosts`, or its `- Error:` line is a
+401, bad credentials or an expired token, `acli` and `glab` that they are not logged in or not
+authenticated, a `bkt` listing with no context for the host), and **could not check** (any other
+failure: the network, a service that is down, a rate limit, a command that gives no answer in 30 s).
+`gh` prints every failure of its API call but a timeout in the shape of a bad token (`X Failed to
+log in…`, `- The token in keyring is invalid.`), with the real cause on its `- Error:` line, so for
+`gh` that line, not the shape, says which it is. When unsure, a failure that is not a clear "not
+logged in" is "could not check": it says nothing of who is signed in, and is never answered with a
+sign-in. It carries the command line's `- Error:` line for `gh`, else its first error line (for
+`glab`, what its failed call answered), masked, with no login said, or `no answer in N s`; the
+daemon's log says the same line (`gh could not be checked: <line>; what is shown could not be
+refreshed`). A write that finds the check could not be made says nothing was written instead. What the projects show of a forge or a tracker (pull requests, tickets) keeps its
 last known state when a check could not be made, and says it could not be refreshed, rather than
 "not signed in".
 

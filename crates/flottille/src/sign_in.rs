@@ -372,7 +372,7 @@ fn unknown_status() -> Status {
 
 /// What is shown of an account's name: its first letter, and its domain's first letter for an
 /// address (`octocat` is `o***`, `someone@example.com` is `s***@e***`).
-fn account_masked(account: &str) -> Option<String> {
+pub(crate) fn account_masked(account: &str) -> Option<String> {
     let first = |part: &str| part.chars().next().map(|letter| format!("{letter}***"));
     match account.trim().split_once('@') {
         Some((name, domain)) => Some(format!("{}@{}", first(name)?, first(domain)?)),
