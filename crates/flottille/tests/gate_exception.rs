@@ -480,3 +480,180 @@ fn the_exceptions_are_listed_and_withdrawn_from_the_command_line() {
         String::from_utf8_lossy(&user.run(&["exception", "list", &agent]).stdout).into_owned();
     assert!(text.contains("holds no exception"), "{text}");
 }
+
+/// GitHub's pull requests #12 of `app/login` and #13 of `app/other`, both into `main`, a required
+/// check of each failing.
+fn two_failing_pulls() -> Value {
+    let pull = |number: u64, branch: &str| {
+        json!({"number": number, "title": branch, "state": "OPEN", "isDraft": false,
+            "baseRefName": "main", "isCrossRepository": false,
+            "url": format!("https://github.com/acme/app/pull/{number}"),
+            "reviewDecision": "APPROVED",
+            "statusCheckRollup": [{"__typename": "CheckRun", "name": "secrets",
+                "status": "COMPLETED", "conclusion": "FAILURE"}]})
+    };
+    json!({"pulls": {"acme/app": {"app/login": pull(12, "app/login"),
+        "app/other": pull(13, "app/other")}}})
+}
+
+/// The reasons of the pending request `number`.
+fn reasons_of(user: &User, number: u64) -> Vec<String> {
+    let request = requests(user)
+        .into_iter()
+        .find(|request| request["number"] == number)
+        .unwrap();
+    request["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn an_exception_for_one_pull_request_never_merges_another() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    user.gh_script(two_failing_pulls());
+    let (_, mcp) = root(&user, "login");
+    let asked = held(&mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "exception": WHY}),
+    ));
+    answer(&user, asked, "approval.approve");
+    assert_eq!(
+        merges(&user),
+        ["pr merge 12 -R github.com/acme/app --squash --admin"]
+    );
+
+    // The workspace switches to another branch, whose pull request is #13.
+    let folder = user.path("data/flottille/workspaces/app/login");
+    user.git(&folder, &["switch", "--quiet", "-c", "app/other"]);
+    user.git(
+        &folder,
+        &["update-ref", "refs/remotes/origin/app/other", "HEAD"],
+    );
+
+    // Its merge is stopped by its checks as before: no check skipped, no bypass.
+    let merged = mcp.call("forge", json!({"action": "merge", "repository": "."}));
+    assert!(merged.error, "{}", merged.text);
+    assert!(merged.text.contains("its checks fail"), "{}", merged.text);
+    assert_eq!(merges(&user).len(), 1, "{:?}", merges(&user));
+    // With the user's own waive asked, it is the user's again, not the exception's.
+    let waived = mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "waive": "the user said so"}),
+    );
+    held(&waived);
+    assert_eq!(merges(&user).len(), 1, "{:?}", merges(&user));
+}
+
+#[test]
+fn an_exception_for_one_branch_never_forces_another() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    app(&user);
+    workspace(&user, "w");
+    let (_, mcp) = root(&user, "w");
+    let asked = held(&ask_force_push(&mcp, "app/w"));
+    answer(&user, asked, "approval.approve");
+    passed(&user, &force_push(&mcp, "app/w"));
+
+    let folder = user.path("data/flottille/workspaces/app/w");
+    user.git(&folder, &["switch", "--quiet", "-c", "app/x"]);
+    held(&force_push(&mcp, "app/x"));
+}
+
+#[test]
+fn a_branch_the_workspace_resumed_is_never_forced_by_an_exception() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let folder = app(&user);
+    user.git(&folder, &["branch", "--quiet", "shared"]);
+    user.git(&folder, &["push", "--quiet", "origin", "shared"]);
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "s", "branch": "shared"}),
+    )
+    .unwrap();
+    eventually("the workspace", || {
+        user.call("workspace.show", json!({"project": "app", "name": "s"}))
+            .unwrap()["state"]
+            == "ready"
+    });
+    let (_, mcp) = root(&user, "s");
+
+    let answer = ask_force_push(&mcp, "shared");
+    refused_with_no_ask(&user, &answer);
+    assert!(answer.text.contains("exception"), "{}", answer.text);
+}
+
+#[test]
+fn the_ask_of_a_merge_says_the_pull_request_and_what_blocks_it_from_flottille_s_own_read() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    user.gh_script(failing_pull());
+    let (_, mcp) = root(&user, "login");
+
+    // The agent's words say nothing of the pull request: the card says it from the forge.
+    let asked = held(&mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "exception": "please"}),
+    ));
+    let reasons = reasons_of(&user, asked);
+    let action = &reasons[0];
+    for said in [
+        "merge-blocked",
+        "#12",
+        "app/login",
+        "acme/app",
+        "its checks fail (secrets)",
+        "bypass",
+    ] {
+        assert!(action.contains(said), "{said}: {reasons:?}");
+    }
+    // The agent's reason is its own, below.
+    assert!(!action.contains("please"), "{reasons:?}");
+    assert!(
+        reasons[1..]
+            .iter()
+            .any(|reason| reason == "the agent's reason: please"),
+        "{reasons:?}"
+    );
+    answer(&user, asked, "approval.approve");
+    assert_eq!(
+        merges(&user),
+        ["pr merge 12 -R github.com/acme/app --squash --admin"]
+    );
+}
+
+#[test]
+fn a_merge_nothing_blocks_needs_no_exception_and_no_bypass() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    let mut passing = failing_pull();
+    passing["pulls"]["acme/app"]["app/login"]["statusCheckRollup"][0]["conclusion"] =
+        json!("SUCCESS");
+    user.gh_script(passing);
+    let (_, mcp) = root(&user, "login");
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "exception": WHY}),
+    );
+    refused_with_no_ask(&user, &answer);
+    assert!(answer.text.contains("#12"), "{}", answer.text);
+    assert!(merges(&user).is_empty());
+}
+
+#[test]
+fn the_reason_of_an_ask_is_one_line_of_a_bounded_length() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    app(&user);
+    workspace(&user, "w");
+    let (_, mcp) = root(&user, "w");
+    let line = "git push --force origin app/w";
+    for why in ["first line\nsecond line".to_owned(), "x".repeat(8_001)] {
+        let answer = mcp.call("run", json!({"line": line, "exception": why}));
+        refused_with_no_ask(&user, &answer);
+        assert!(answer.text.contains("exception"), "{}", answer.text);
+    }
+}

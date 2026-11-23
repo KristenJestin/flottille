@@ -598,6 +598,31 @@ mod tests {
     }
 
     #[test]
+    fn a_forced_push_exception_lifts_the_line_s_own_push_alone_never_a_service_s() {
+        let own = format!("git push --force {}: it can rewrite", gate::FORCES);
+        let service = format!(
+            "the service web, started first, its line `git push --force origin x`: git push \
+             --force {}: it can rewrite",
+            gate::FORCES
+        );
+        assert_eq!(
+            lift(Rule::ForcePush, &ask(&[&own, &service], &[])),
+            Verdict::Ask(ask(&[&service], &[gate::PUSH]))
+        );
+    }
+
+    #[test]
+    fn the_reason_of_an_ask_is_one_line_of_a_bounded_length() {
+        let (_, why) = split("run", json!({"line": "x", "exception": "one\ntwo"}));
+        assert!(why.is_err(), "{why:?}");
+        let long = "x".repeat(crate::judge::WHOLE_CHARS + 1);
+        let (_, why) = split("run", json!({"line": "x", "exception": long}));
+        assert!(why.is_err(), "{why:?}");
+        let (_, why) = split("run", json!({"line": "x", "exception": "one line"}));
+        assert_eq!(why, Ok(Some("one line".into())));
+    }
+
+    #[test]
     fn the_exception_an_allowed_request_grants_is_read_from_its_first_reason() {
         let reason = format!(
             "{ASKS}: {} ({}): a check refuses: an old commit",
