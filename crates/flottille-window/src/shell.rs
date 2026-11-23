@@ -70,6 +70,8 @@ pub const NARROW: f32 = 860.;
 const SIDEBAR: f32 = 280.;
 const SIDEBAR_MEDIUM: f32 = 260.;
 /// How often the times ago are looked at; a row is drawn again only when its text changes.
+/// The key of the daemon's window state that holds the user's order and groups of projects.
+const ARRANGEMENT_KEY: &str = "arrangement";
 const CLOCK: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +231,14 @@ pub struct Shell {
     /// ends with the next try.
     kept_failures: u32,
     kept_retry: Option<Task<()>>,
+    /// The user's order and groups of projects: one key of the daemon's window state, apart from
+    /// the sidebar's folds, written only when the user arranges (`arranged`), so that a window
+    /// that only folds a project never writes over what another made. Read when the window opens.
+    arrangement_kept: Arrangement,
+    /// What was last asked of the daemon and not answered yet, and the retries of a refusal.
+    arrangement_asked: Option<Arrangement>,
+    arrangement_failures: u32,
+    arrangement_retry: Option<Task<()>>,
     /// The sessions the daemon kept a draft of when the window opened: their rows say it before
     /// their pages are opened.
     listed_drafts: HashSet<String>,
@@ -660,6 +670,10 @@ impl Shell {
             kept_asked: None,
             kept_failures: 0,
             kept_retry: None,
+            arrangement_kept: Arrangement::default(),
+            arrangement_asked: None,
+            arrangement_failures: 0,
+            arrangement_retry: None,
             listed_drafts: HashSet::new(),
             closed: false,
             sessions: HashMap::new(),
@@ -1248,15 +1262,13 @@ impl Shell {
 
     /// A group made, from the dialog: at the end of the groups, unfolded.
     pub fn add_group(&mut self, name: &str, cx: &mut Context<Self>) {
-        let present = self.project_names();
-        self.arrangement.add_group(&present, name);
+        self.arrangement.add_group(name);
         self.arranged(cx);
     }
 
     /// A group removed: its projects go back to the list, at the end, none removed.
     pub fn remove_group(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        let present = self.project_names();
-        self.arrangement.remove_group(&present, id);
+        self.arrangement.remove_group(id);
         self.arranged(cx);
     }
 
@@ -1283,8 +1295,7 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let present = self.project_names();
-        self.arrangement.move_group(&present, group, index);
+        self.arrangement.move_group(group, index);
         self.arranged(cx);
     }
 
@@ -1327,15 +1338,70 @@ impl Shell {
         }
     }
 
-    /// The arrangement changed: the list draws it, and the daemon keeps it.
-    fn arranged(&mut self, cx: &mut Context<Self>) {
+    /// The list draws the arrangement.
+    fn show_arrangement(&mut self, cx: &mut Context<Self>) {
         let present = self.project_names();
         let arranged = self.arranged_rows(&present, &self.projects);
         if self.sidebar.read(cx).arranged() != &arranged {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
         }
-        self.sidebar_changed(cx);
+    }
+
+    /// The user changed the arrangement: the list draws it, and the daemon keeps it, under its
+    /// own key. This is the only place it is written.
+    fn arranged(&mut self, cx: &mut Context<Self>) {
+        self.show_arrangement(cx);
+        self.keep_arrangement();
+    }
+
+    fn keep_arrangement(&mut self) {
+        if !self.kept_read {
+            return;
+        }
+        let last = self
+            .arrangement_asked
+            .as_ref()
+            .unwrap_or(&self.arrangement_kept);
+        if *last == self.arrangement {
+            return;
+        }
+        self.perform(Command::WindowSet {
+            key: ARRANGEMENT_KEY.into(),
+            value: self.arrangement.to_json(),
+        });
+        self.arrangement_asked = Some(self.arrangement.clone());
+    }
+
+    /// The daemon answered a write of the arrangement: asked again, later, when it could not take
+    /// it.
+    fn arrangement_written(
+        &mut self,
+        value: serde_json::Value,
+        result: Written,
+        cx: &mut Context<Self>,
+    ) {
+        let value = Arrangement::of(&value);
+        if self.arrangement_asked.as_ref() == Some(&value) {
+            self.arrangement_asked = None;
+        }
+        match result {
+            Written::Kept => {
+                self.arrangement_failures = 0;
+                self.arrangement_kept = value;
+            }
+            Written::Retry => {
+                let wait = (crate::kept::DEBOUNCE * 2u32.pow(self.arrangement_failures.min(6)))
+                    .min(Duration::from_secs(30));
+                self.arrangement_failures += 1;
+                self.arrangement_retry = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |shell, _| shell.keep_arrangement()).ok();
+                }));
+            }
+            // Refused for good, or gone: asking again would be answered the same.
+            Written::Gone | Written::Refused => {}
+        }
     }
 
     /// The quick switcher.
@@ -1908,7 +1974,6 @@ impl Shell {
                     .collect(),
             },
             by_machine: self.by_machine,
-            arrangement: self.arrangement.clone(),
             machines: match by_machine {
                 true => self
                     .sections
@@ -2061,18 +2126,20 @@ impl Shell {
                     self.read_texts(cx);
                 }
             }
-            Update::Kept(folds, drafts) => {
+            Update::Kept(folds, arrangement, drafts) => {
                 let by_machine = folds.by_machine;
-                let arrangement = folds.arrangement.clone();
                 self.kept = folds;
                 self.kept_read = true;
                 // What the daemon keeps of how the projects are shown comes after the first rows.
+                // It is read once, as the window opens: another window's later changes are seen by
+                // the windows opened after them.
+                self.arrangement_kept = arrangement.clone();
                 let moved =
                     std::mem::replace(&mut self.arrangement, arrangement) != self.arrangement;
                 if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
                     self.rearrange(window, cx);
                 } else if moved {
-                    self.arranged(cx);
+                    self.show_arrangement(cx);
                 }
                 self.listed_drafts = drafts;
                 self.say_drafts(cx);
@@ -2851,7 +2918,10 @@ impl Shell {
                     }
                 }
             },
-            Outcome::WindowKept { value, result } => self.kept_written(value, result, cx),
+            Outcome::WindowKept { key, value, result } => match key.as_str() {
+                ARRANGEMENT_KEY => self.arrangement_written(value, result, cx),
+                _ => self.kept_written(value, result, cx),
+            },
             Outcome::ToolResults { written, shown } => {
                 self.settings.update(cx, |page, cx| {
                     page.tool_results_answered(shown, written, cx)

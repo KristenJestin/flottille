@@ -1187,8 +1187,9 @@ pub enum Outcome {
         key: DraftKey,
         result: Written,
     },
-    /// How the write of a value of the window's state ended, with the value.
+    /// How the write of a value of the window's state ended, with its key and the value.
     WindowKept {
+        key: String,
         value: Value,
         result: Written,
     },
@@ -1783,7 +1784,7 @@ fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update
                     params,
                     bounds.quick,
                 ));
-                Outcome::WindowKept { value, result }
+                Outcome::WindowKept { key, value, result }
             }
             _ => unreachable!("only what the window keeps is sent to the keeper"),
         };
