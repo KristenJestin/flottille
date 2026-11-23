@@ -53,8 +53,6 @@ struct Relay {
     asked: Arc<Mutex<Vec<(String, Value)>>>,
     delay: Arc<AtomicU64>,
     silent: Arc<AtomicBool>,
-    /// Each connection that asks the server is cut: its link keeps breaking.
-    cut: Arc<AtomicBool>,
 }
 
 impl Relay {
@@ -100,9 +98,6 @@ impl Relay {
                     .and_then(|params| serde_json::from_str(params).ok())
                     .unwrap_or_default();
                 self.asked.lock().unwrap().push((method, params));
-                if self.cut.load(Ordering::SeqCst) {
-                    return;
-                }
                 if self.silent.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -1059,8 +1054,7 @@ fn the_does_not_answer_line_shows_on_a_project_page_of_a_silent_machine(cx: &mut
     shell.update(cx, |_, _| {
         flottille_window::link::not_answering_after_on_this_thread(Duration::from_secs(2))
     });
-    // Nothing of the server answers: its link's own words (cut, made again) are no answer.
-    relay.cut.store(true, Ordering::SeqCst);
+    relay.silent.store(true, Ordering::SeqCst);
 
     shell.update_in(cx, |shell, window, cx| {
         shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
@@ -1082,6 +1076,16 @@ fn the_does_not_answer_line_shows_on_a_project_page_of_a_silent_machine(cx: &mut
         label(cx, "machine-not-answering").as_deref(),
         Some("server does not answer")
     );
+    // The page's own link then says it waits: its words are no answer of the server.
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        step(&shell, cx);
+        assert!(
+            present(cx, "machine-not-answering"),
+            "the line went while the server still does not answer"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[gpui_kit::test]
@@ -1226,7 +1230,16 @@ fn run_for(by: Duration, cx: &mut VisualTestContext) {
 
 fn y_of(cx: &mut VisualTestContext, id: &str) -> f32 {
     let id = id.to_owned();
-    cx.update(|window, _| f32::from(window.find(id).bounds().origin.y))
+    cx.update(|window, _| {
+        let found = window.try_find(id.clone());
+        f32::from(
+            found
+                .unwrap_or_else(|| panic!("{id} is not drawn"))
+                .bounds()
+                .origin
+                .y,
+        )
+    })
 }
 
 #[gpui_kit::test]
