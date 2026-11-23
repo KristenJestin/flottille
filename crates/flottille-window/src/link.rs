@@ -179,10 +179,8 @@ impl Updates {
         }
     }
 
-    pub fn unbounded_send(
-        &self,
-        update: Update,
-    ) -> std::result::Result<(), futures::channel::mpsc::TrySendError<Update>> {
+    /// Fails once the window is gone: nothing takes the updates any more.
+    pub fn unbounded_send(&self, update: Update) -> std::result::Result<(), Gone> {
         let update = match &self.machine {
             Some(machine) => Update::Machine {
                 machine: machine.clone(),
@@ -190,13 +188,17 @@ impl Updates {
             },
             None => update,
         };
-        self.sender.unbounded_send(update)
+        self.sender.unbounded_send(update).map_err(|_| Gone)
     }
 
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
 }
+
+/// The window that took the updates is gone.
+#[derive(Debug)]
+pub struct Gone;
 
 impl From<UnboundedSender<Update>> for Updates {
     fn from(sender: UnboundedSender<Update>) -> Updates {
@@ -1042,6 +1044,7 @@ mod tests {
         let asking = Arc::new(AtomicU64::new(0));
         let (updates, mut said) = unbounded();
         let watched = asking.clone();
+        let updates = Updates::from(updates);
         let watcher =
             std::thread::spawn(move || watch(&watched, &updates, Duration::from_millis(100)));
         let next = |said: &mut UnboundedReceiver<Update>| {
