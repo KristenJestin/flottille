@@ -2929,6 +2929,13 @@ impl Store {
         ))
     }
 
+    /// Whether the stand-in `id` counts in the cap `most` of its machine once it does (it leads
+    /// a session): it counts already, or the others of its machine leave room.
+    pub fn stand_in_fits(&self, id: &str, most: usize) -> Result<bool> {
+        let _ = (id, most);
+        Ok(true)
+    }
+
     /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
     /// machine whose key is none of `machines` (it left the members), or idle since before
     /// `idle_before`, with their leaves and requests; and the answers awaited from such a
@@ -9700,6 +9707,45 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn an_ended_pilot_starts_counting_again_only_where_the_cap_has_room() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut lead = |store: &mut Store, name: &str, ended: bool| {
+            store.keep_stand_in(&a_stand_in(name, "aa"), 64).unwrap();
+            let mut led = an_agent();
+            led.id = format!("led-{name}");
+            led.launched_by = Some(format!("{name}@aa"));
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+            if ended {
+                store
+                    .change_agent(
+                        &led.id,
+                        AgentChange {
+                            state: Some(AgentState::Ended),
+                            ..AgentChange::default()
+                        },
+                        None,
+                    )
+                    .unwrap();
+            }
+        };
+        // One pilot whose only session ended (it counts no more), then 64 with a live one.
+        lead(&mut store, "old", true);
+        for n in 0..64 {
+            lead(&mut store, &format!("c{n}"), false);
+        }
+        assert!(
+            !store.stand_in_fits("old@aa", 64).unwrap(),
+            "the ended pilot takes a place the cap does not have"
+        );
+        // A live pilot has its place already, and a machine with room takes the ended one.
+        assert!(store.stand_in_fits("c0@aa", 64).unwrap());
+        assert!(store.stand_in_fits("old@aa", 65).unwrap());
     }
 
     #[test]
