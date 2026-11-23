@@ -751,4 +751,30 @@ mod tests {
             String::from_utf8_lossy(&output.stdout)
         );
     }
+    #[test]
+    fn a_copy_that_cannot_be_given_fails_no_command() {
+        use std::os::unix::process::CommandExt;
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // Its folder is gone since the plan was made: the copies are not given, and the command
+        // runs as it would without them.
+        let temp = tempfile::tempdir().unwrap();
+        let gone = temp.path().join("gone/ssh_config");
+        let mut plan = plan(&[temp.path().to_owned()], &[], &[], None)
+            .unwrap()
+            .giving(vec![(gone, b"Host *\n".to_vec())])
+            .unwrap();
+        let mut command = std::process::Command::new("true");
+        // SAFETY: as in `landlock::confine`.
+        unsafe { command.pre_exec(move || plan.enter()) };
+
+        let status = command.status();
+
+        assert!(
+            status.as_ref().is_ok_and(|status| status.success()),
+            "{status:?}"
+        );
+    }
 }

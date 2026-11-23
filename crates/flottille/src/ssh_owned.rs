@@ -143,6 +143,7 @@ fn expanded(pattern: &str, folder: &Path, account: Option<&Path>) -> Vec<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
 
     #[test]
     fn what_ssh_includes_is_followed_as_it_reads_it() {
@@ -183,5 +184,83 @@ mod tests {
         included(&dir.path().join("config"), dir.path(), None, 0, &mut files);
 
         assert_eq!(files.len(), INCLUDES_MAX + 1);
+    }
+    /// A file of `text` at `path`, of `mode`.
+    fn file(path: &Path, text: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn me() -> u32 {
+        // SAFETY: getuid cannot fail.
+        unsafe { libc::getuid() }
+    }
+
+    fn given(copies: &[(PathBuf, Vec<u8>)]) -> Vec<PathBuf> {
+        copies.iter().map(|(path, _)| path.clone()).collect()
+    }
+
+    #[test]
+    fn a_file_ssh_refuses_for_its_mode_is_not_given() {
+        // `ssh` refuses an included file that its group or others may write, root's or not: a copy
+        // of the user's own, 0644, would make it one ssh reads.
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().canonicalize().unwrap().join("etc");
+        file(
+            &etc.join("ssh_config"),
+            "Include kept.conf group.conf others.conf\n",
+            0o644,
+        );
+        file(&etc.join("kept.conf"), "", 0o644);
+        file(&etc.join("group.conf"), "", 0o664);
+        file(&etc.join("others.conf"), "", 0o646);
+
+        let copies = copies_of(&etc.join("ssh_config"), None, me());
+
+        assert_eq!(given(&copies), vec![etc.join("kept.conf")]);
+    }
+
+    #[test]
+    fn an_include_of_the_user_s_outside_ssh_is_not_followed() {
+        // What a run can write steers no walk of the daemon's: outside `~/.ssh`, by a path or a
+        // link, the user's configuration includes nothing here.
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        let ssh = account.join(".ssh");
+        file(
+            &ssh.join("config"),
+            "Include ~/.config/ssh/* inside.conf linked.conf\n",
+            0o644,
+        );
+        file(&ssh.join("inside.conf"), "", 0o644);
+        file(&account.join(".config/ssh/outside.conf"), "", 0o644);
+        file(&account.join("dots/linked.conf"), "", 0o644);
+        std::os::unix::fs::symlink(account.join("dots/linked.conf"), ssh.join("linked.conf"))
+            .unwrap();
+
+        let copies = copies_of(&account.join("no-system"), Some(&account), me());
+
+        assert_eq!(given(&copies), vec![ssh.join("inside.conf")]);
+    }
+
+    #[test]
+    fn a_fifo_include_does_not_block_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().canonicalize().unwrap();
+        file(&etc.join("ssh_config"), "Include fifo\n", 0o644);
+        let fifo = CString::new(etc.join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a C string alive for the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        let (done, walked) = std::sync::mpsc::channel();
+        let system = etc.join("ssh_config");
+        std::thread::spawn(move || done.send(copies_of(&system, None, me())));
+
+        let copies = walked
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the walk blocked on a FIFO");
+
+        assert!(copies.is_empty());
     }
 }

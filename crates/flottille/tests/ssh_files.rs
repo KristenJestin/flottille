@@ -687,63 +687,97 @@ fn a_run_still_cannot_read_an_ssh_setting_it_can_write() {
         return;
     }
     // A root-owned file ssh includes is the run's own in its namespace, as its owner: never one
-    // it may change, by a write, a rename onto it, its mode or an unmount. `~/.ssh` stays
-    // read-only. The daemon is told the machine's configuration is a file of the test's that
-    // includes the machine's own, so that one root-owned file is always given.
+    // it may change, by a write or its mode, nor from a namespace of its own made inside, where it
+    // holds every capability, by a remount or an unmount of the copy. The daemon is told the
+    // machine's configuration is a file of the test's that includes the machine's own, so that
+    // one root-owned file is always given.
     let root_owned = PathBuf::from("/etc/ssh/ssh_config");
     if !std::fs::metadata(&root_owned).is_ok_and(|m| m.is_file()) {
         eprintln!("skipped: no /etc/ssh/ssh_config on this machine");
         return;
     }
     let user = User::with_fake_agent().with_allowing_judge();
-    ssh_config(&user, "Host forge.invalid\n  User git\n");
     std::fs::create_dir_all(user.path("system")).unwrap();
     let system = user.path("system/ssh_config");
     std::fs::write(&system, "Include /etc/ssh/ssh_config\n").unwrap();
     let before = std::fs::read(&root_owned).unwrap();
     let user = user.with_env("FLOTTILLE_TEST_SSH_SYSTEM_CONFIG", system.to_str().unwrap());
-    let (mcp, place) = session(&user);
+    let (mcp, place) = session_with_empty_ssh(&user);
+    // In a user and mount namespace of the run's own: what each attempt came to, as JSON.
+    std::fs::write(
+        place.join("nested.py"),
+        "import ctypes, errno, json, os, sys\n\
+         libc = ctypes.CDLL(None, use_errno=True)\n\
+         target = sys.argv[1].encode()\n\
+         out = {'root': os.getuid() == 0}\n\
+         def call(name, result):\n\
+         \x20   out[name] = 'done' if result == 0 else errno.errorcode.get(ctypes.get_errno())\n\
+         MS_RDONLY, MS_REMOUNT, MS_BIND = 1, 32, 4096\n\
+         call('remount_bind_rw', libc.mount(None, target, None, MS_REMOUNT | MS_BIND, None))\n\
+         call('remount_rw', libc.mount(None, target, None, MS_REMOUNT, None))\n\
+         call('unmounted', libc.umount2(target, 2))\n\
+         try:\n\
+         \x20   open(sys.argv[1], 'a').write('ProxyCommand sh -c planted\\n')\n\
+         \x20   out['write'] = 'done'\n\
+         except OSError as e:\n\
+         \x20   out['write'] = errno.errorcode.get(e.errno)\n\
+         print(json.dumps(out))\n",
+    )
+    .unwrap();
 
     let out = ran(
         &mcp,
         &place,
         &format!(
-            "import ctypes, subprocess\n\
-             libc = ctypes.CDLL(None, use_errno=True)\n\
-             def unmount(path):\n\
-             \x20   def action():\n\
-             \x20       if libc.umount2(path.encode(), 2) != 0:\n\
-             \x20           e = ctypes.get_errno()\n\
-             \x20           raise OSError(e, os.strerror(e))\n\
-             \x20   return action\n\
+            "import subprocess\n\
              target = {root_owned}\n\
-             open('planted', 'w').write('ProxyCommand sh -c planted\\n')\n\
              attempt('write', write(target))\n\
-             attempt('replaced', lambda: os.replace('planted', target))\n\
              attempt('mode', lambda: os.chmod(target, 0o666))\n\
-             attempt('unmounted', unmount(target))\n\
-             attempt('config', write({ssh} + '/config'))\n\
              out['owner'] = os.stat(target).st_uid == os.getuid()\n\
+             nested = subprocess.run(['unshare', '-Urm', 'python3', 'nested.py', target],\n\
+             \x20   capture_output=True, text=True)\n\
+             out['nested'] = json.loads(nested.stdout) if nested.returncode == 0 \\\n\
+             \x20   else nested.stderr[-500:]\n\
              out['ssh'] = subprocess.run(['ssh', '-G', '-F', {system}, 'example.invalid'],\n\
              \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n\
              out['planted'] = 'planted' in open(target).read()\n",
             root_owned = py(&root_owned),
-            ssh = py(&user.path("home/.ssh")),
             system = py(&system),
         ),
     );
 
-    for name in ["write", "replaced", "mode", "unmounted", "config"] {
-        assert_ne!(out[name], "done", "{name}: {out}");
-    }
+    // Refused for the copy's file system being read-only, not for the file being root's.
+    assert_eq!(out["write"], "EROFS", "{out}");
+    assert_eq!(out["mode"], "EROFS", "{out}");
     assert_eq!(out["owner"], true, "{out}");
+    let nested = &out["nested"];
+    assert_eq!(nested["root"], true, "{out}");
+    for name in ["remount_bind_rw", "remount_rw", "unmounted", "write"] {
+        assert_ne!(nested[name], "done", "{name}: {out}");
+    }
     assert_eq!(out["ssh"], 0, "{out}");
     assert_eq!(out["planted"], false, "{out}");
     assert_eq!(std::fs::read(&root_owned).unwrap(), before);
-    assert_eq!(
-        std::fs::read_to_string(user.path("home/.ssh/config")).unwrap(),
-        "Host forge.invalid\n  User git\n"
-    );
+}
+
+#[test]
+fn a_fifo_included_by_the_user_s_ssh_config_blocks_no_run() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    // Read at every confined start: a FIFO, which a read waits on for a writer, is not read.
+    let user = User::with_fake_agent().with_allowing_judge();
+    ssh_config(&user, "Include fifo\n");
+    let made = std::process::Command::new("mkfifo")
+        .arg(user.path("home/.ssh/fifo"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (mcp, place) = session(&user);
+
+    let out = ran(&mcp, &place, "out['ran'] = True\n");
+
+    assert_eq!(out["ran"], true, "{out}");
 }
 
 #[test]
