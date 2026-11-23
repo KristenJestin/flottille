@@ -7,7 +7,7 @@
 use crate::common;
 use crate::remote_deliveries::{child_on_server, off, on, prompts_with, script};
 use crate::remote_launch::{
-    allowing, eventually, launch_ask, pc_and_server, sent_with, server_user,
+    allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
 };
 
 use common::mcp::{Mcp, server_of};
@@ -139,7 +139,8 @@ fn has_a_root_s_tool(tools: &Value) -> bool {
 #[test]
 fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_and_a_resume() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
-    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
     assert!(!has_a_root_s_tool(&server.agent(&child)["tools"]));
     // As a Flottille of before stored it: no parent, at depth 0, a root's tools.
     off(&server);
@@ -156,7 +157,8 @@ fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_an
 
     let shown = server.agent(&child);
     assert_eq!(shown["depth"], 1, "{shown}");
-    // Made again at its next start, from its depth: a child's.
+    // Ended, then resumed by the user: its tools are made again at its next start, which its
+    // parent's message wakes, from its depth: a child's.
     server
         .user
         .call("agent.stop", json!({"agent": child}))
@@ -168,7 +170,13 @@ fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_an
         .user
         .call("agent.resume", json!({"agent": child}))
         .unwrap();
-    eventually("the child back", || server.agent(&child)["state"] == "idle");
+    server.wait_for("pc");
+    let sent = mcp.call(
+        "agent_send",
+        json!({"agent_id": child, "message": "Cover the CSV export too."}),
+    );
+    assert!(!sent.error, "{}", sent.text);
+    prompted(&server, "Cover the CSV export too.");
     let resumed = server.agent(&child);
     assert_eq!(resumed["depth"], 1, "{resumed}");
     assert!(!has_a_root_s_tool(&resumed["tools"]), "{resumed}");
