@@ -282,3 +282,94 @@ fn doctor_starts_no_daemon() {
     assert!(report["sandbox"]["landlock_abi"].is_number(), "{report}");
     assert!(!daemon_runs(&user), "doctor started a daemon");
 }
+
+/// A cookie file in the profile of the browser of the connection `browser`, where the daemon
+/// keeps it (`docs/extensions.md`, "Adapters"): made by the test, as Chrome would.
+fn browser_cookies(user: &User) -> PathBuf {
+    let cookies = user.path("state/flottille/browsers/browser/profile/Default/Cookies");
+    std::fs::create_dir_all(cookies.parent().unwrap()).unwrap();
+    std::fs::write(&cookies, "session=signed-in").unwrap();
+    cookies
+}
+
+/// The Python that reads the file at `path` without its path in the run's line nor in the
+/// program as written (reversed): `read`, or the error's class, under `out[name]`.
+fn read_unnamed(name: &str, path: &Path) -> String {
+    let reversed: String = path.to_str().unwrap().chars().rev().collect();
+    format!(
+        "try:\n\
+         \x20   open({reversed:?}[::-1]).read()\n\
+         \x20   out[{name:?}] = 'read'\n\
+         except OSError as e:\n\
+         \x20   out[{name:?}] = type(e).__name__\n"
+    )
+}
+
+#[test]
+fn a_run_naming_a_browser_s_cookies_is_refused() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, _) = session(&user);
+    let cookies = browser_cookies(&user);
+
+    // In every mode, Full included: the gate refuses the path as a login's place, wherever the
+    // kernel would let the run reach it.
+    let ran = mcp.call("run", json!({"line": format!("cat {}", cookies.display())}));
+    assert!(ran.error, "{}", ran.text);
+    assert!(ran.text.contains("login's place"), "{}", ran.text);
+    assert!(!ran.text.contains("signed-in"), "{}", ran.text);
+    let read = mcp.call("fs_read", json!({"path": cookies}));
+    assert!(read.error, "{}", read.text);
+    assert!(read.text.contains("login's place"), "{}", read.text);
+    // A line that reads every file below the state folder is refused too.
+    let state = user.path("state/flottille");
+    let grep = mcp.call(
+        "run",
+        json!({"line": format!("grep -r signed {}", state.display())}),
+    );
+    assert!(grep.error, "{}", grep.text);
+    assert!(!grep.text.contains("signed-in"), "{}", grep.text);
+}
+
+#[test]
+fn a_run_cannot_open_a_browser_s_profile_without_naming_it() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, place) = session(&user);
+    let cookies = browser_cookies(&user);
+    let other = user.path("state/flottille/other");
+    std::fs::write(&other, "not a login").unwrap();
+
+    let out = ran(
+        &mcp,
+        &place,
+        &(read_unnamed("cookies", &cookies) + &read_unnamed("other", &other)),
+    );
+
+    // The browsers' folder is an empty one in the run's namespace, whatever Landlock's ABI.
+    assert_eq!(out["cookies"], "FileNotFoundError", "{out}");
+    // The rest of the state folder is not hidden by it.
+    assert_eq!(out["other"], "read", "{out}");
+}
+
+#[test]
+fn a_run_cannot_open_a_browser_s_profile_where_user_namespaces_are_refused() {
+    if landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            landlock_abi()
+        );
+        return;
+    }
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
+    let (mcp, place) = session(&user);
+    let cookies = browser_cookies(&user);
+
+    let out = ran(&mcp, &place, &read_unnamed("cookies", &cookies));
+
+    // No namespace: Landlock denies the folder itself.
+    assert_eq!(out["cookies"], "PermissionError", "{out}");
+}

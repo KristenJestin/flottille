@@ -121,6 +121,22 @@ fn loaded_config(args: &[String]) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Whether the program writes and reads back a file in the profile its configuration names, as a
+/// browser does: null without one.
+fn profile_reached(args: &[String]) -> Value {
+    let Some(profile) = loaded_config(args)["profile"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+    else {
+        return Value::Null;
+    };
+    let file = profile.join("reached");
+    let reached = std::fs::create_dir_all(&profile).is_ok()
+        && std::fs::write(&file, std::process::id().to_string()).is_ok()
+        && std::fs::read_to_string(&file).is_ok_and(|read| read == std::process::id().to_string());
+    json!(reached)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let option = |name: &str| {
@@ -170,7 +186,7 @@ fn main() {
         "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
         "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
         "cwd": std::env::current_dir().ok(), "args": args, "child": child,
-        "config": loaded_config(&args),
+        "config": loaded_config(&args), "profile_reached": profile_reached(&args),
         "display": display_environment()}),
     );
     if let Some(line) = script["stderr"].as_str() {
@@ -1060,6 +1076,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
         "cwd": std::env::current_dir().ok(), "display": display_environment(),
+        "profile_reached": profile_reached(args),
         "plugin": {"success": success, "error": answer["error"]}});
     if behaviour["replay"] == true {
         let again = ask(&plugin);
@@ -1103,7 +1120,8 @@ fn open(args: &[String], script: &Value, log: &Option<String>) {
     write_log(
         log,
         json!({"event": "open", "args": args, "config": loaded_config(args),
-            "cwd": std::env::current_dir().ok(), "display": display_environment()}),
+            "cwd": std::env::current_dir().ok(), "display": display_environment(),
+            "profile_reached": profile_reached(args)}),
     );
     let behaviour = &script["login"];
     if behaviour["open_fail"] == true {

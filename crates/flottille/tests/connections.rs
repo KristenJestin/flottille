@@ -4828,6 +4828,8 @@ fn agent_browser_logs_in_with_a_vault_entry() {
     // Run by Flottille, without a shell, on the server's own command line and browser session.
     let login = logged(&user, "browser", "login");
     assert_eq!(login.len(), 1, "{login:?}");
+    // A login reaches the browser's profile as its server does: it may start the browser.
+    assert_eq!(login[0]["profile_reached"], json!(true), "{login:?}");
     let args = login[0]["args"].to_string();
     for word in [
         "\"--config\"",
@@ -6350,9 +6352,13 @@ fn switching_to_headed_restarts_the_browser_and_keeps_its_profile() {
     assert_eq!(std::fs::read_to_string(&profile).unwrap(), "signed in");
     // The profile is a folder of the connection's own, which Flottille names itself: a browser
     // started afresh in the other mode finds the sign-ins of the last one.
-    let kept = user.path("state/flottille/connections/browser/profile");
+    // It is in the browsers' folder, which every other command Flottille runs is kept out of;
+    // the server is given its own (`private_mounts::a_run_cannot_open_a_browser_s_profile_…`).
+    let kept = user.path("state/flottille/browsers/browser/profile");
     assert_eq!(first["config"]["profile"], json!(kept.to_str().unwrap()));
     assert_eq!(shown["config"]["profile"], first["config"]["profile"]);
+    assert_eq!(first["profile_reached"], json!(true), "{first}");
+    assert_eq!(shown["profile_reached"], json!(true), "{shown}");
 
     // Shown again: nothing restarts.
     let starts = logged(&user, "browser", "start").len();
@@ -6379,6 +6385,26 @@ fn switching_to_headed_restarts_the_browser_and_keeps_its_profile() {
     eventually("its display folder is removed", || {
         !user.path("runtime/flottille/display/browser").exists()
     });
+}
+
+#[test]
+fn a_removed_connection_takes_its_browser_s_profile_with_it() {
+    let user = user_with_display();
+    let (_, mcp) = browser_ready(&user, &agent_browser("0.43.0"));
+    open_page(&mcp, None);
+    let folder = user.path("state/flottille/browsers/browser");
+    assert!(folder.join("profile/reached").exists());
+    let started = logged(&user, "browser", "start").last().unwrap().clone();
+
+    user.call("connection.remove", json!({"name": "browser"}))
+        .unwrap();
+
+    // Its sign-ins are not found again by a connection made later under the same name.
+    eventually("the server stops", || {
+        !pid_alive(started["pid"].as_u64().unwrap())
+    });
+    assert!(!folder.exists(), "{} is left", folder.display());
+    assert!(user.path("state/flottille/browsers").exists());
 }
 
 #[test]
@@ -6892,8 +6918,9 @@ fn signing_in_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
                 "agent": headers.get("user-agent").cloned().unwrap_or(Value::Null),
                 "cookie": cookie}));
             let (extra, body) = match path.as_str() {
+                // A sign-in that lasts, and a cookie of the browser's session (no Max-Age).
                 "/login" => (
-                    "Set-Cookie: signed=in; Max-Age=86400; Path=/\r\n",
+                    "Set-Cookie: signed=in; Max-Age=86400; Path=/\r\nSet-Cookie: visit=once; Path=/\r\n",
                     "welcome",
                 ),
                 _ if cookie.as_str().is_some_and(|c| c.contains("signed=in")) => ("", "signed in"),
@@ -6994,15 +7021,36 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
         "the display folder is lent"
     );
 
-    // The agent goes on headless, signed in.
+    // The same browser keeps both cookies while it runs.
+    let again = open("/", Some(true));
+    assert_eq!(again["cookie"], json!("signed=in; visit=once"), "{again}");
+
+    // The agent goes on headless, signed in: the lasting cookie is in the profile, the session's
+    // is gone with the browser that was closed (`docs/extensions.md`, "Adapters").
     let after = open("/", None);
     assert!(headless(&after), "{after}");
     assert_eq!(after["cookie"], json!("signed=in"), "{after}");
     eventually("the display folder is removed", || {
         !user.path("runtime/flottille/display/browser").exists()
     });
+    // The profile is where Flottille keeps it, out of every run's reach.
+    assert!(
+        user.path("state/flottille/browsers/browser/profile")
+            .is_dir(),
+        "the profile is kept"
+    );
     done(mcp.call(
         "conn_browser",
         json!({"action": "agent_browser_close", "arguments": {}}),
     ));
+
+    // A browser started by a call kept to some domains: agent-browser refuses it beside the
+    // profile, and says so; the limit is the user's, in the command.
+    let kept = mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open",
+            "arguments": {"url": format!("{site}/"), "allowedDomains": ["127.0.0.1"]}}),
+    );
+    assert!(kept.error, "{}", kept.text);
+    assert!(kept.text.contains("profile"), "{}", kept.text);
 }
