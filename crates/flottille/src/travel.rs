@@ -628,7 +628,14 @@ fn received_before(folder: &Path) -> Result<bool, String> {
 
 /// `Has`: the commits of the repository's branches and of `refs/flottille/machines/*`.
 async fn has(daemon: &Daemon, asked: &GitRepository) -> Result<Value, String> {
-    let (_, folder) = repository_of(daemon, &asked.project, &asked.repository)?;
+    let (root, folder) = repository_of(daemon, &asked.project, &asked.repository)?;
+    // A repository behind a link out of the project is not one of it: its commits are not listed.
+    if !projects::stays_inside(&root, &asked.repository) {
+        return Err(format!(
+            "{} leads outside the project folder",
+            asked.repository
+        ));
+    }
     if !received_before(&folder)? {
         return Ok(json!({"commits": null}));
     }
