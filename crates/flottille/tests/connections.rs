@@ -7111,17 +7111,11 @@ fn a_secret_is_given_only_to_its_entrys_site() {
 }
 
 #[test]
-fn login_runs_beside_the_options_a_domain_list_refused() {
+fn login_runs_beside_a_domain_list_and_a_config_it_never_reads() {
+    // The options agent-browser calls unsafe beside a domain list refuse the login
+    // (`login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set`); the list itself,
+    // and a configuration agent-browser never reads, do not.
     let mut cases: Vec<(Vec<&str>, Option<&str>)> = [
-        vec!["--cdp", "9222"],
-        vec!["--auto-connect"],
-        vec!["--profile", "Default"],
-        vec!["--state=auth.json"],
-        vec!["--restore"],
-        vec!["--session-name", "work"],
-        vec!["-p", "ios"],
-        vec!["--provider=browserbase"],
-        vec!["--args", "--no-sandbox"],
         vec!["--allowed-domains", "example.com"],
         // Not read by agent-browser, which reads `--config <file>` alone.
         vec!["--config=my-agent-browser.json"],
@@ -7129,12 +7123,7 @@ fn login_runs_beside_the_options_a_domain_list_refused() {
     .into_iter()
     .map(|options| (options, None))
     .collect();
-    for variable in [
-        "AGENT_BROWSER_ALLOWED_DOMAINS",
-        "AGENT_BROWSER_PROFILE",
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_CONFIG",
-    ] {
+    for variable in ["AGENT_BROWSER_ALLOWED_DOMAINS", "AGENT_BROWSER_CONFIG"] {
         cases.push((Vec::new(), Some(variable)));
     }
     for (options, variable) in cases {
@@ -7313,6 +7302,13 @@ fn login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set() {
             false,
             "--session-name",
         ),
+        (
+            command(&["--provider", "a-cloud"]),
+            None,
+            false,
+            "--provider",
+        ),
+        (command(&["-p", "a-cloud"]), None, false, "-p"),
     ];
     for variable in [
         "AGENT_BROWSER_PROFILE",
@@ -7322,6 +7318,7 @@ fn login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set() {
         "AGENT_BROWSER_STATE",
         "AGENT_BROWSER_RESTORE",
         "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_PROVIDER",
     ] {
         cases.push((Vec::new(), Some(variable), false, variable));
         cases.push((Vec::new(), Some(variable), true, variable));
