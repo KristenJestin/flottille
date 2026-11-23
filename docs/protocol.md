@@ -332,6 +332,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `provider.disable` | drive |
 | `provider.set_judge` | drive |
 | `provider.set_new_session` | drive |
+| `provider.set_new_session_mode` | drive |
 | `provider.judge_noticed` | drive |
 | `signin.list` | read |
 | `signin.start` | drive |
@@ -2195,10 +2196,11 @@ Each method answers `not-found` when the agent does not exist.
 `{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?, "texts"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
 `{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
-§7.1), `auto` when left out: it is the root's before its first message is given, so that the
-first turn's calls already follow it. Only the user's door names it: `agent.start` is answered on
-the user's socket alone (a client an agent started is refused), and no tool of an agent, nor the
-pilot door's `agent_start`, takes a mode. `invalid-params` for another mode, and nothing is
+§7.1), the default mode of new sessions when left out (Auto unless set, `provider.set_new_session_mode`):
+it is the root's before its first message is given, so that the first turn's calls already
+follow it. Only the user's door names it: `agent.start` is answered on the user's socket alone (a
+client an agent started is refused), and no tool of an agent, nor the pilot door's `agent_start`,
+takes a mode; the pilot door starts its session in `auto`, whatever the default. `invalid-params` for another mode, and nothing is
 started. `images` is as in `agent.send`, and goes with the first message; with
 images, the message may be empty (pictures alone are a first message). They are judged and stored
 before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
@@ -2446,8 +2448,8 @@ agent started (a root of the user's, a child) and for one already detached. Ther
 call to judge and every base call passes without a request, and what the gate refuses stays
 refused. A tree has one mode, its root's: a
 child named switches its root, and every agent of the tree reads the root's mode at each call
-(an agent's `gate_mode` is its root's). A new session starts in `auto` unless the user's `agent.start`
-names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
+(an agent's `gate_mode` is its root's). A new session starts in the default mode of new sessions (Auto
+unless set) unless the user's `agent.start` names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
 (no tool of an agent names one); the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
 `agent.gate_mode_changed` for the root (`docs/events.md`).
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
@@ -2763,7 +2765,9 @@ chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the pro
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
 there is none. `new_session` is what the user chose for new sessions to start on
 (`provider.set_new_session`), `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for
-the provider's to propose, or `null` when none is chosen. `not-found` when the project
+the provider's to propose, or `null` when none is chosen. `new_session_mode` is the mode a session
+the user starts is in (`provider.set_new_session_mode`): `"ask"`, `"auto"` or `"full"`, `"auto"`
+when the user chose none. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
@@ -2796,6 +2800,19 @@ removes it, keeping the rest of the file as `provider.enable` keeps it, and answ
 `provider.new_session_changed` (`docs/events.md`). `not-found` when there is no provider of that
 name; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches it: no
 tool of an agent chooses it.
+
+### `provider.set_new_session_mode`
+
+`{"mode"}`, `"ask"`, `"auto"` or `"full"`. Chooses the mode a session the user starts is in
+(`agent.start`, when it names none: the window's composer always names one, which it shows before
+the first message; `flottille agent start --mode` names its own). The daemon writes
+`new_session_mode` in `providers.toml`, or removes it for `"auto"`, which is what a file that says
+nothing means, keeping the rest of the file as `provider.enable` keeps it, and answers
+`{"new_session_mode"}`, as `provider.list` gives it. A session an agent starts, and a child, are not
+affected: they keep the rules of `docs/design.md` §7.1. When this changes the file it emits
+`provider.new_session_mode_changed` (`docs/events.md`). `invalid-params` when the word is none of
+the three; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches
+it: no tool of an agent chooses it.
 
 ### `provider.set_judge`
 

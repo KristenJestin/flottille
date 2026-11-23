@@ -160,22 +160,29 @@ claude: enabled, its agents can run
 codex: enabled, its agents cannot run: codex is not on PATH
 opencode: disabled
 Auto judge: claude (haiku), picked by Flottille: change it in Settings, or choose no judge there.
+New session mode: Auto.
 New sessions: what the provider proposes.
 ```
 
-### `flottille provider new-session <provider> [--model <model>] [--effort <effort>]`
+### `flottille provider new-session [<provider>] [--model <model>] [--effort <effort>] [--mode ask|auto|full]`
 
 Chooses the provider, model and effort a new session starts on (`docs/agents.md`, "Providers"),
 as the window's settings page does ("New sessions"): `[new_session]` in `providers.toml`, the rest
 of the file kept as you wrote it. What is left out is the provider's to propose. `--clear` goes back
 to what the provider proposes. `provider list` says it on its last line, and `--json` gives it as
-`"new_session"`.
+`"new_session"`. `--mode` chooses the mode a session you start is in (the window's "Mode",
+`new_session_mode`, Auto until you choose; `docs/design.md` §7.1), alone or with a provider: a
+session an agent starts and a child keep their own rules, and `agent start --mode` still names a
+session's own. It is kept for this machine, and `provider list` says it, and `--json` gives it as
+`"new_session_mode"`.
 
 ```
 $ flottille provider new-session claude --model opus --effort high
 New sessions start on claude, opus, high.
 $ flottille provider new-session --clear
 New sessions start on what the provider proposes.
+$ flottille provider new-session --mode full
+New sessions start in Full.
 ```
 
 ### `flottille provider enable <name>`
@@ -1141,8 +1148,8 @@ own. `--workspace <name>` runs it in a ready workspace (the project folder other
 `--provider <provider>` on a provider (the project's otherwise, for the agent's life), `--model
 <model>` asks for a model (the project's otherwise; never replaced by another), `--effort
 <effort>` for an effort of the model, `--role lead|worker` (`lead` by default), `--mode
-ask|auto|full` for the session's mode, its gate's from its first message (`auto` by default,
-design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
+ask|auto|full` for the session's mode, its gate's from its first message (the default mode of
+new sessions by default: Auto unless set, design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
 what is available.
 `--json` prints `agent.start`: `{"agent": {...}, "after": <n>}`, where `after` is the event number
 to follow it from (`flottille watch --after <n>`, `flottille agent read <id> --after <n>`).
