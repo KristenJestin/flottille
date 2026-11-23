@@ -24,7 +24,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::channel::mpsc::UnboundedSender;
 use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
@@ -63,7 +62,7 @@ use crate::conversation::{
 use crate::end_led::{self, LedEnd};
 use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
-use crate::link::{Connect, Update};
+use crate::link::{Connect, Updates};
 use crate::links_card::{LinksCard, Open};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
@@ -263,7 +262,7 @@ fn local_offset(ms: u64) -> i64 {
 #[derive(Clone)]
 pub struct Follow {
     pub connect: Connect,
-    pub updates: UnboundedSender<Update>,
+    pub updates: Updates,
     pub opener: Opener,
 }
 
@@ -6149,7 +6148,7 @@ impl Render for Row {
                     .detail(SharedString::from(agent.runs_on.clone()))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         let Some(page) = page.upgrade() else {
                             return;
                         };
@@ -6160,7 +6159,7 @@ impl Render for Row {
                                 let (machine, agent) = (there.machine.clone(), there.agent.clone());
                                 shell
                                     .update(cx, |shell, cx| {
-                                        shell.open_elsewhere(machine, agent, cx)
+                                        shell.open_elsewhere(machine, agent, window, cx)
                                     })
                                     .ok();
                             }
@@ -7868,11 +7867,11 @@ fn remote_row(
                         ))),
                 ),
         )
-        .on_click(move |_, _, cx| {
+        .on_click(move |_, window, cx| {
             if let Some(shell) = &shell {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.open_elsewhere(machine.clone(), agent.clone(), cx)
+                        shell.open_elsewhere(machine.clone(), agent.clone(), window, cx)
                     })
                     .ok();
             }
@@ -8905,7 +8904,6 @@ impl Render for SessionRail {
             (None, _) => facts.push(("Place", "the project folder".into())),
             _ => {}
         }
-        facts.push(("Machine", "this PC".into()));
         let workspace = div()
             .id("rail-workspace")
             .flex()

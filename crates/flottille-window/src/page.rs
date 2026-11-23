@@ -83,6 +83,10 @@ pub struct MainArea {
     read: bool,
     /// Whether Flottille can be reached: when it cannot, the page does not wait for it.
     reachable: bool,
+    /// A page of another machine waits for that machine's first read: its pane is a skeleton.
+    reading: bool,
+    /// The machine of the page shown does not answer: the page says so, nothing else does.
+    machine_silent: Option<String>,
 }
 
 impl MainArea {
@@ -109,6 +113,32 @@ impl MainArea {
             restarted: false,
             read: false,
             reachable: true,
+            reading: false,
+            machine_silent: None,
+        }
+    }
+
+    /// The Settings of the machine whose pages are in front: each machine has its own.
+    pub fn set_settings(&mut self, settings: Entity<SettingsPage>, cx: &mut Context<Self>) {
+        if self.settings != settings {
+            self.settings = settings;
+            cx.notify();
+        }
+    }
+
+    /// Whether the page shown waits for its machine's first read.
+    pub fn set_reading(&mut self, reading: bool, cx: &mut Context<Self>) {
+        if self.reading != reading {
+            self.reading = reading;
+            cx.notify();
+        }
+    }
+
+    /// What the page shown says of its machine that does not answer, `None` once it does.
+    pub fn set_machine_silent(&mut self, said: Option<String>, cx: &mut Context<Self>) {
+        if self.machine_silent != said {
+            self.machine_silent = said;
+            cx.notify();
         }
     }
 
@@ -290,7 +320,10 @@ impl Render for MainArea {
         let not_answering = self
             .not_answering
             .filter(|_| !holding.as_ref().is_some_and(|holding| holding.offline));
-        let waiting = !self.read && self.reachable && not_answering.is_none();
+        let waiting = (!self.read || self.reading)
+            && self.reachable
+            && not_answering.is_none()
+            && self.machine_silent.is_none();
         let veil = crate::loading::veil(waiting, &p, window, cx);
         let root = div()
             .id("main")
@@ -338,6 +371,7 @@ impl Render for MainArea {
             .flex_col()
             .child(self.not_answering_banner(not_answering, cx))
             .child(held_line(holding.map(|holding| holding.line), cx))
+            .child(silent_line(self.machine_silent.clone(), cx))
             .child(page)
     }
 }
@@ -414,6 +448,31 @@ impl MainArea {
                 .into_any_element()
         })
     }
+}
+
+/// The line above a page of another machine that does not answer: it unfolds and fades in, and
+/// folds away with its words once that machine is heard, or another page is shown.
+fn silent_line(line: Option<String>, cx: &mut Context<MainArea>) -> impl IntoElement {
+    let p = palette(cx);
+    presence_of(
+        "machine-not-answering-block",
+        line.map(SharedString::from),
+        move |line| {
+            div()
+                .id("machine-not-answering")
+                .aria_label(line.clone())
+                .px(space::LG)
+                .py(space::SM)
+                .bg(p.wait_bg)
+                .border_b_1()
+                .border_color(p.wait_line)
+                .text_size(px(12.5))
+                .text_color(p.text)
+                .child(line)
+                .test_support()
+                .into_any_element()
+        },
+    )
 }
 
 /// The line above a page of the machine in front while it takes no change

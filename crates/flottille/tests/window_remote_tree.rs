@@ -663,7 +663,9 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
     let (shell, cx) = window(&pc, cx);
     settle(&shell, cx);
 
-    shell.update(cx, |s, cx| s.choose_machine(Some("server".to_owned()), cx));
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
     until(&shell, cx, "server's question in the inbox", |cx| {
         shell.read_with(cx, |s, _| {
             s.machine_shown().as_deref() == Some("server")

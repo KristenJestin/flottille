@@ -149,6 +149,58 @@ pub enum Update {
         token: u64,
         update: crate::session_link::SessionUpdate,
     },
+    /// An update of another machine's connections ([`Updates::of`]): what its pages asked, or
+    /// read of it.
+    Machine {
+        machine: String,
+        update: Box<Update>,
+    },
+}
+
+/// Where the window's updates go: each one of another machine's connections is said of that
+/// machine ([`Update::Machine`]), so that what is read of one machine never fills a page of
+/// another.
+#[derive(Clone, Debug)]
+pub struct Updates {
+    sender: UnboundedSender<Update>,
+    machine: Option<String>,
+}
+
+impl Updates {
+    /// The same updates, said of `machine`.
+    pub fn of(&self, machine: &str) -> Updates {
+        Updates {
+            sender: self.sender.clone(),
+            machine: Some(machine.to_owned()),
+        }
+    }
+
+    pub fn unbounded_send(
+        &self,
+        update: Update,
+    ) -> std::result::Result<(), futures::channel::mpsc::TrySendError<Update>> {
+        let update = match &self.machine {
+            Some(machine) => Update::Machine {
+                machine: machine.clone(),
+                update: Box::new(update),
+            },
+            None => update,
+        };
+        self.sender.unbounded_send(update)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+}
+
+impl From<UnboundedSender<Update>> for Updates {
+    fn from(sender: UnboundedSender<Update>) -> Updates {
+        Updates {
+            sender,
+            machine: None,
+        }
+    }
 }
 
 /// What the link has seen, readable from any thread: the number of the last event, and how many
@@ -175,7 +227,7 @@ pub struct Seen {
 pub const NOT_ANSWERING: Duration = Duration::from_secs(30);
 
 /// [`NOT_ANSWERING`], or what a scenario of the window set for the window it opens on its thread.
-fn not_answering() -> Duration {
+pub(crate) fn not_answering() -> Duration {
     #[cfg(feature = "test-support")]
     if let Some(limit) = NOT_ANSWERING_HERE.with(std::cell::Cell::get) {
         return limit;
@@ -221,7 +273,7 @@ pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
 }
 
 /// Starts the link's thread, sending its updates to `sender`.
-pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen> {
+pub fn spawn_into(connect: Connect, sender: impl Into<Updates>) -> Arc<Seen> {
     spawn_aimed_into(connect, Arc::default(), sender)
 }
 
@@ -230,8 +282,9 @@ pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen
 pub fn spawn_aimed_into(
     connect: Connect,
     aimed: Arc<AtomicU64>,
-    sender: UnboundedSender<Update>,
+    sender: impl Into<Updates>,
 ) -> Arc<Seen> {
+    let sender: Updates = sender.into();
     let seen = Arc::new(Seen {
         aimed,
         ..Seen::default()
@@ -260,7 +313,7 @@ fn now_ms() -> u64 {
 
 /// Says when what the link asked waits past `limit`, and when it is answered after that; ends
 /// with the window.
-fn watch(asking: &AtomicU64, updates: &UnboundedSender<Update>, limit: Duration) {
+fn watch(asking: &AtomicU64, updates: &Updates, limit: Duration) {
     let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
     let mut told = None;
     while !updates.is_closed() {
@@ -282,7 +335,7 @@ fn watch(asking: &AtomicU64, updates: &UnboundedSender<Update>, limit: Duration)
     }
 }
 
-fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
+fn run(connect: Connect, updates: Updates, seen: Arc<Seen>) {
     let mut retry = FIRST_RETRY;
     let mut briefs = Briefs::default();
     let reads = ProviderReads::default();
@@ -324,7 +377,7 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
 fn follow(
     stream: UnixStream,
     connect: &Connect,
-    updates: &UnboundedSender<Update>,
+    updates: &Updates,
     seen: &Seen,
     briefs: &mut Briefs,
     reads: &ProviderReads,
@@ -582,7 +635,7 @@ struct ReadState {
 }
 
 impl ProviderReads {
-    fn start(&self, connect: &Connect, updates: &UnboundedSender<Update>) {
+    fn start(&self, connect: &Connect, updates: &Updates) {
         let (reads, connect, updates) = (self.clone(), connect.clone(), updates.clone());
         self.begin(move || {
             std::thread::Builder::new()
@@ -622,7 +675,7 @@ impl ProviderReads {
         state.running
     }
 
-    fn run(&self, connect: &Connect, updates: &UnboundedSender<Update>) {
+    fn run(&self, connect: &Connect, updates: &Updates) {
         loop {
             // Numbered as it is asked, whoever asks (`providers::next_read`).
             let read = crate::providers::next_read();

@@ -294,8 +294,8 @@ fn on_the_server(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
         })
     });
     settle(shell, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine(Some("server".to_owned()), window, cx)
     });
     until(shell, cx, "the server's project is in the tree", |cx| {
         shell.read_with(cx, |s, _| {

@@ -317,18 +317,11 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
     settle(&shell, cx);
-    // Said once, at the top: the machine's name in the path line.
-    assert_eq!(
-        label(cx, "settings-where").as_deref(),
-        Some("server / Settings / Agents")
-    );
+    // Said once, by the chooser: no path line above the page (#1271).
+    assert!(!present(cx, "settings-where"));
 
     // A change of its General tab is the server's, not this machine's.
     click(&shell, "settings-tabs-general", cx);
-    assert_eq!(
-        label(cx, "settings-where").as_deref(),
-        Some("server / Settings / General")
-    );
     assert!(!developer_on(&server.user));
     until(&shell, cx, "the server's developer mode is read", |cx| {
         present(cx, "developer-switch")
@@ -339,12 +332,9 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
     });
     assert!(!developer_on(&pc.user), "this machine's is unchanged");
 
-    // Back on this machine: its own, and no path line.
+    // Back on this machine: its own.
     settings_of(&shell, "here", cx);
-    assert!(
-        !present(cx, "settings-where"),
-        "this machine's page names none"
-    );
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
 }
 
 /// #1248: gh copies its one-time code to the clipboard of the machine it runs on, so the code the
@@ -627,10 +617,7 @@ fn a_project_of_another_machine_opens_its_whole_page(cx: &mut TestAppContext) {
         })
     });
     settle(&shell, cx);
-    assert_eq!(
-        label(cx, "project-where").as_deref(),
-        Some("server / reports")
-    );
+    assert!(!present(cx, "project-where"), "no path line (#1271)");
     // Its whole page: its tabs and its work.
     for id in [
         "project-tabs",
@@ -659,7 +646,9 @@ fn a_project_setting_of_another_machine_is_changed_there(cx: &mut TestAppContext
             .unwrap();
     }
     let (shell, cx) = window(&pc, cx);
-    shell.update(cx, |s, cx| s.choose_machine(Some("server".to_owned()), cx));
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
     until(&shell, cx, "the server is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
@@ -677,9 +666,9 @@ fn a_project_setting_of_another_machine_is_changed_there(cx: &mut TestAppContext
             })
     });
     settle(&shell, cx);
-    assert_eq!(
-        label(cx, "project-settings-where").as_deref(),
-        Some("server / app / Settings")
+    assert!(
+        !present(cx, "project-settings-where"),
+        "no path line (#1271)"
     );
     click(&shell, "project-settings-tabs-features", cx);
     until(&shell, cx, "Specs is a row", |cx| {
@@ -826,8 +815,12 @@ fn a_viewer_s_controls_are_disabled_with_the_reason(cx: &mut TestAppContext) {
     // Reading still works: the tabs are not held.
     click(&shell, "settings-tabs-agents", cx);
     assert_eq!(
-        label(cx, "settings-where").as_deref(),
-        Some("server / Settings / Agents")
+        shell.read_with(cx, |s, cx| s
+            .main()
+            .read(cx)
+            .settings_page()
+            .map(|p| p.read(cx).tab())),
+        Some(0)
     );
 }
 

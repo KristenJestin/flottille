@@ -2548,9 +2548,7 @@ impl Render for SettingsPage {
         let pad = if self.narrow { space::LG } else { space::XXL };
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
-        let header = PageHeader::new("settings-header", "Settings").crumb(
-            crate::machines::where_line("settings-where", &["Settings", SECTIONS[tab].1], cx),
-        );
+        let header = PageHeader::new("settings-header", "Settings");
         if SECTIONS[tab].0 == "general" {
             self.check.update(cx, |check, cx| check.ensure(cx));
         }
@@ -2704,14 +2702,14 @@ impl SettingsPage {
                         })
                         .ok();
                 },
-                move |name, _, cx| {
+                move |name, window, cx| {
                     page.update(cx, |page, cx| {
                         page.machine_menu = false;
                         cx.notify();
                     })
                     .ok();
                     shell
-                        .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                        .update(cx, |shell, cx| shell.choose_machine(name, window, cx))
                         .ok();
                 },
             )

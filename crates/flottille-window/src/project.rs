@@ -533,11 +533,6 @@ impl Render for ProjectPage {
         let header = {
             let (shell, name) = (self.shell.clone(), self.name.clone());
             let mut header = PageHeader::new("project-header", self.name.clone())
-                .crumb(crate::machines::where_line(
-                    "project-where",
-                    &[&self.name],
-                    cx,
-                ))
                 .path(home_relative(&self.folder))
                 .action(
                     "project-settings",

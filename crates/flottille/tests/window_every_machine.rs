@@ -576,8 +576,8 @@ fn no_page_has_a_path_line(cx: &mut TestAppContext) {
         assert!(!present(cx, "settings-where"), "Settings, {tab}");
     }
     // The server's page of a project: its name and its machines' marks say it, no path above.
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine_for(Some("server".to_owned()), "app", cx)
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
     });
     until(&shell, cx, "the server's page of app is shown", |cx| {
         shell.read_with(cx, |s, cx| {
@@ -687,7 +687,9 @@ fn the_side_panel_of_another_machine_s_session_never_says_this_pc(cx: &mut TestA
 #[gpui_kit::test]
 #[ignore = "a measure, run by hand"]
 fn the_time_from_the_click_to_the_page_drawn(cx: &mut TestAppContext) {
-    let (_hub, pc, _server, here, there) = two_machines();
+    let (_hub, pc, server, here, there) = two_machines();
+    set_settings(&pc.user, "Pc person", true);
+    set_settings(&server.user, "Server person", false);
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     until(&shell, cx, "the server's session is listed", |cx| {
@@ -695,7 +697,7 @@ fn the_time_from_the_click_to_the_page_drawn(cx: &mut TestAppContext) {
     });
     settle(&shell, cx);
     relay.delay.store(150, Ordering::SeqCst);
-    let mut measure = |cx: &mut VisualTestContext, what: &str| {
+    let measure = |cx: &mut VisualTestContext, what: &str| {
         let began = Instant::now();
         click(cx, row_there(&there));
         until(&shell, cx, "the server's session is drawn", |cx| {
@@ -703,7 +705,12 @@ fn the_time_from_the_click_to_the_page_drawn(cx: &mut TestAppContext) {
         });
         println!("{what}: {} ms", began.elapsed().as_millis());
         settle(&shell, cx);
-        click(cx, session_id(&here));
+        // Before #1271 this machine's row was another one while the server was in front.
+        let home = match present(cx, session_id(&here)) {
+            true => session_id(&here),
+            false => session_id(&elsewhere_id("pc", &here)),
+        };
+        click(cx, home);
         until(&shell, cx, "this machine's session is drawn", |cx| {
             shows_reply(&shell, cx, &here)
         });
@@ -720,13 +727,12 @@ fn the_time_from_the_click_to_the_page_drawn(cx: &mut TestAppContext) {
         let began = Instant::now();
         settings_of(&shell, cx, "server");
         until(&shell, cx, "the server's settings are drawn", |cx| {
-            settings_shown(&shell, cx).0.is_some()
-                && shell.read_with(cx, |s, _| s.machine_shown()).is_some()
+            settings_shown(&shell, cx).0.as_deref() == Some("Server person")
         });
         println!("{what}: {} ms", began.elapsed().as_millis());
         settings_of(&shell, cx, "here");
         until(&shell, cx, "this machine's settings are drawn", |cx| {
-            shell.read_with(cx, |s, _| s.machine_shown()).is_none()
+            settings_shown(&shell, cx).0.as_deref() == Some("Pc person")
         });
         settle(&shell, cx);
     }

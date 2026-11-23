@@ -2008,9 +2008,9 @@ impl Render for SessionRow {
                         // Its machine is off: nothing of it can be read now.
                         Some(there) if there.offline => {}
                         // This machine's, listed while another is in front: this one comes back.
-                        Some(there) if there.here => shell.open_here(there.agent, cx),
-                        // Another machine's: the window shows that machine, on that session.
-                        Some(there) => shell.open_elsewhere(there.machine, there.agent, cx),
+                        Some(there) if there.here => shell.open_here(there.agent, window, cx),
+                        // Another machine's: its page is that machine's, on that session.
+                        Some(there) => shell.open_elsewhere(there.machine, there.agent, window, cx),
                         None => shell.open(Selection::Session(session), window, cx),
                     })
                     .ok();

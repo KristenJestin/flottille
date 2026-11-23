@@ -2933,11 +2933,6 @@ impl Render for ProjectSettingsPage {
         let header = div()
             .flex()
             .flex_col()
-            .child(crate::machines::where_line(
-                "project-settings-where",
-                &[&self.name, "Settings"],
-                cx,
-            ))
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)

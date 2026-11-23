@@ -341,7 +341,9 @@ fn the_machines_and_their_state_are_in_settings_not_in_the_sidebar(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
+fn opening_a_session_of_another_machine_shows_it_signed_and_the_list_stays(
+    cx: &mut TestAppContext,
+) {
     let server_user = User::with_fake_agent();
     server_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let (_hub, pc, server) = pc_and_server(server_user);
@@ -370,11 +372,19 @@ fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
         knows(&shell, cx, "server")
     });
     settle(&shell, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
+    // Its row of the one list opens its page: that machine's, nothing else switching (#1271).
+    let row = flottille_window::model::elsewhere_id("server", &id);
+    until(&shell, cx, "the server's session is in the list", |cx| {
+        present(cx, &format!("session-{row}"))
     });
-    until(&shell, cx, "the server's session is in the tree", |cx| {
-        present(cx, &format!("session-{id}"))
+    click(&shell, cx, &format!("session-{row}"));
+    until(&shell, cx, "the server's session is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .is_some_and(|page| page.read(cx).id() == id)
+        })
     });
     assert_eq!(
         shell.read_with(cx, |s, _| s.machine_shown()),
@@ -382,13 +392,8 @@ fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
     );
     // Served for pc's device, signed.
     assert!(server.log().contains("asked by pc"), "{}", server.log());
-
-    // This machine again: the server's session is its light row of the one list.
-    shell.update(cx, |shell, cx| shell.choose_machine(None, cx));
-    until(&shell, cx, "this machine is in front again", |cx| {
-        !present(cx, &format!("session-{id}"))
-    });
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
+    // Its row stays where it was: the list is this machine's.
+    assert!(present(cx, &format!("session-{row}")));
 }
 
 /// Settings, Machines: Connect to your hub opened, the code of `hub`'s pair mode pasted,
@@ -660,8 +665,8 @@ fn a_machine_that_needs_an_update_says_so_not_offline(cx: &mut TestAppContext) {
     assert!(!said.contains("offline"), "{said}");
 
     // Brought in front, it is not: a failure toast says why.
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine(Some("server".to_owned()), window, cx)
     });
     settle(&shell, cx);
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
@@ -960,164 +965,6 @@ fn the_link_change_of_a_row_fades(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_millis(500));
     let rest = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
     assert!(rest.is_some(), "the page came to rest after the change");
-}
-
-#[gpui_kit::test]
-fn a_machine_that_goes_down_before_its_first_read_is_given_up(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the server is read", |cx| {
-        knows(&shell, cx, "server")
-    });
-    settle(&shell, cx);
-
-    // This machine's daemon knows the server is gone; the window, which has not polled, still
-    // takes it for online.
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    pc.wait_for("server", "offline");
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned())
-    );
-
-    // No first read comes: it waits for the limit the window gives a daemon that does not answer.
-    for _ in 0..40 {
-        step(&shell, Duration::from_millis(16), cx);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(visible(cx, "sidebar-loading"), "the tree waits");
-    step(&shell, flottille_window::link::NOT_ANSWERING / 2, cx);
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned()),
-        "still within the limit"
-    );
-
-    // Past it, the window is on this machine again, and says why.
-    step(&shell, flottille_window::link::NOT_ANSWERING, cx);
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-    until(&shell, cx, "this machine's tree is read", |cx| {
-        !visible(cx, "sidebar-loading")
-    });
-    let failed = shell.read_with(cx, |s, cx| {
-        s.toasts()
-            .read(cx)
-            .toasts()
-            .find(|t| t.is_failure())
-            .map(|t| (t.title().to_owned(), t.second_line().map(str::to_owned)))
-    });
-    let (title, why) = failed.expect("a failure toast");
-    assert_eq!(title, "server cannot be shown");
-    assert!(
-        why.as_deref()
-            .is_some_and(|why| why.starts_with("server is offline since ")),
-        "{why:?}"
-    );
-}
-
-/// The project `name` on `user`'s machine, a throwaway repository.
-fn project(user: &User, name: &str) {
-    let folder = user.path(&format!("work/{name}"));
-    user.git_init(&folder);
-    std::fs::write(folder.join("README.md"), format!("{name}\n")).unwrap();
-    user.git(&folder, &["add", "README.md"]);
-    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-    user.call("project.add", json!({"folder": folder, "name": name}))
-        .unwrap();
-}
-
-/// Waits until the link has sent more reads of the shell than `before`, without the window
-/// taking them: they wait in its queue.
-fn queued(shell: &Entity<Shell>, before: u64, cx: &mut VisualTestContext) {
-    let deadline = Instant::now() + WAIT;
-    while snapshots(shell, cx) <= before {
-        assert!(Instant::now() < deadline, "no read was sent");
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn snapshots(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> u64 {
-    shell.read_with(cx, |s, _| {
-        s.seen().snapshots.load(std::sync::atomic::Ordering::SeqCst)
-    })
-}
-
-#[gpui_kit::test]
-fn a_read_of_this_machine_queued_before_the_switch_does_not_end_the_wait(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the server is read", |cx| {
-        knows(&shell, cx, "server")
-    });
-    settle(&shell, cx);
-
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    pc.wait_for("server", "offline");
-    // A read of this machine, sent and not yet taken, when the server is chosen.
-    let before = snapshots(&shell, cx);
-    project(&pc.user, "anchor");
-    queued(&shell, before, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned())
-    );
-
-    // That read is this machine's, not the server's: the wait goes on, and ends in a toast.
-    step(&shell, Duration::from_millis(16), cx);
-    step(&shell, flottille_window::link::NOT_ANSWERING / 2, cx);
-    step(&shell, flottille_window::link::NOT_ANSWERING, cx);
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-    assert!(
-        toasts(&shell, cx).contains(&"server cannot be shown".to_owned()),
-        "{:?}",
-        toasts(&shell, cx)
-    );
-}
-
-#[gpui_kit::test]
-fn a_read_of_the_machine_given_up_is_not_shown(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    project(&server.user, "harbor");
-    let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the server is read", |cx| {
-        knows(&shell, cx, "server")
-    });
-    settle(&shell, cx);
-
-    // The server's first read is sent, and the limit passes before the window takes it.
-    let before = snapshots(&shell, cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        shell.read_with(cx, |s, _| s.machine_shown()),
-        Some("server".to_owned())
-    );
-    queued(&shell, before, cx);
-    cx.executor()
-        .advance_clock(flottille_window::link::NOT_ANSWERING + Duration::from_secs(1));
-    cx.run_until_parked();
-    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
-
-    // Back on this machine, the server's late read is not drawn as this machine's.
-    shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
-    assert!(
-        shell.read_with(cx, |s, _| s
-            .snapshot()
-            .projects
-            .iter()
-            .all(|project| project.name != "harbor")),
-        "the server's project is in this machine's tree"
-    );
 }
 
 #[test]

@@ -124,10 +124,15 @@ impl Modals {
     }
 
     /// The dialog `id` is being opened: it goes on top of the ones already open.
+    /// Each machine's Settings has its own sections, and so its own dialog of the same id: they
+    /// all go on top, and the one whose section opened it is drawn.
     pub fn open(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        if let Some(at) = self.slots.iter().position(|slot| slot.id == id) {
-            let slot = self.slots.remove(at);
-            self.slots.push(slot);
+        let (opened, others) = std::mem::take(&mut self.slots)
+            .into_iter()
+            .partition::<Vec<_>, _>(|slot| slot.id == id);
+        self.slots = others;
+        if !opened.is_empty() {
+            self.slots.extend(opened);
             cx.notify();
         }
     }

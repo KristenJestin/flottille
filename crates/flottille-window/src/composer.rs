@@ -876,7 +876,7 @@ impl Composer {
             chosen,
             self.open_of(Menu::Machine),
             Self::handler(cx, |this, _, cx| this.toggle_menu(Menu::Machine, cx)),
-            move |name, _, cx| {
+            move |name, window, cx| {
                 this.update(cx, |this, cx| {
                     this.menu = None;
                     this.back_to_main(cx);
@@ -884,7 +884,9 @@ impl Composer {
                 .ok();
                 let project = project.clone();
                 shell
-                    .update(cx, |shell, cx| shell.choose_machine_for(name, &project, cx))
+                    .update(cx, |shell, cx| {
+                        shell.choose_machine_for(name, &project, window, cx)
+                    })
                     .ok();
             },
         );

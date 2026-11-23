@@ -426,9 +426,9 @@ impl AddProject {
             .unwrap_or(0);
         let names: Vec<Option<String>> = choices.iter().map(|choice| choice.name.clone()).collect();
         let weak = self.shell.clone();
-        let choose = move |at: usize, _: &mut Window, cx: &mut gpui_kit::App| {
+        let choose = move |at: usize, window: &mut Window, cx: &mut gpui_kit::App| {
             let name = names[at].clone();
-            weak.update(cx, |shell, cx| shell.choose_machine(name, cx))
+            weak.update(cx, |shell, cx| shell.choose_machine(name, window, cx))
                 .ok();
         };
         let control = if choices.len() <= gpui_design_system::radio::MAX_RADIO_CHOICES {

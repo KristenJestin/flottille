@@ -431,7 +431,7 @@ fn window_showing_after<'a>(
         });
     }
     let name = shown.to_owned();
-    shell.update(cx, |s, cx| s.choose_machine(Some(name), cx));
+    shell.update_in(cx, |s, window, cx| s.choose_machine(Some(name), window, cx));
     until(&shell, cx, "the machine is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some(shown)
             && !present(cx, "sidebar-loading")

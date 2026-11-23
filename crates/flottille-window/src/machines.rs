@@ -1305,53 +1305,6 @@ pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
     cx.try_global::<Held>().and_then(|held| held.0.clone())
 }
 
-/// The line at the top of a page of another machine that names it, then where the page is:
-/// `server / Settings / Agents`; nothing on this machine. It unfolds and fades in when another
-/// machine comes in front, and folds away with its words when this one comes back.
-pub fn where_line(
-    id: &'static str,
-    parts: &[&str],
-    cx: &gpui_kit::App,
-) -> gpui_design_system::PresenceOf {
-    use gpui_design_system::{Type as _, palette, presence_of};
-    use gpui_kit::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
-    use gpui_kit::{SharedString, StatefulInteractiveElement as _, TestSupportExt as _, div, px};
-    let p = palette(cx);
-    let said = shown_machine(cx).map(|machine| {
-        SharedString::from(
-            std::iter::once(machine.as_str())
-                .chain(parts.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" / "),
-        )
-    });
-    presence_of(format!("{id}-block"), said, move |said| {
-        let (machine, rest) = said.split_once(" / ").unwrap_or((said.as_ref(), ""));
-        div()
-            .id(id)
-            .aria_label(said.clone())
-            .flex()
-            .items_center()
-            .gap(gpui_design_system::space::XS)
-            .text_size(px(13.))
-            .child(
-                div()
-                    .medium()
-                    .text_color(p.text)
-                    .child(SharedString::from(machine.to_owned())),
-            )
-            .when(!rest.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_color(p.faint)
-                        .child(SharedString::from(format!("/ {rest}"))),
-                )
-            })
-            .test_support()
-            .into_any_element()
-    })
-}
-
 /// `page`, the controls of a page of the machine in front, held while [`Held`] says so: its ink
 /// fades over `HOVER` and no click reaches it, while it still scrolls and is read. The same
 /// element held or not: what the controls keep between frames stays theirs.
