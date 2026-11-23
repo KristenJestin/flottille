@@ -8,6 +8,7 @@
 
 use crate::common;
 use crate::remote::{Machine, TestHub, pair, pc_and_server_on};
+use flottille_link::Role;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -270,7 +271,7 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
 
     // The chooser says whose settings these are, this machine first, then the runners.
     assert_eq!(
-        label(cx, "settings-machine-field-label").as_deref(),
+        label(cx, "settings-machine-field").as_deref(),
         Some("Settings of")
     );
     click(&shell, "settings-machine", cx);
@@ -412,6 +413,124 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
         theirs,
         "the server's is not touched"
     );
+}
+
+/// Where the element `id` is drawn, `None` when it is not drawn at all.
+fn bounds_of(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.try_find(id).map(|found| found.bounds()))
+}
+
+/// The hub's host gives the server the role `role`; this machine's window reads it.
+fn server_role(hub: &TestHub, shell: &Entity<Shell>, role: Role, cx: &mut VisualTestContext) {
+    hub.with_hub(|hub| hub.change_role("server", role).unwrap());
+    let runs = role == Role::Runner;
+    until(shell, cx, "the server's role is read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| server.runs() == runs)
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn two_machines_put_the_settings_picker_on_the_title_s_line(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    settings(&shell, "agents", cx);
+
+    let row = bounds_of(cx, "settings-header-line").expect("the header's row");
+    let title = bounds_of(cx, "settings-header-title").expect("the title");
+    let picker = bounds_of(cx, "settings-machine").expect("the picker");
+    // On the title's line: within the header's row, level with the title, after it.
+    assert!(
+        picker.top() >= row.top() && picker.bottom() <= row.bottom(),
+        "{picker:?} in {row:?}"
+    );
+    assert!(
+        picker.top() >= title.top() - gpui_kit::px(1.)
+            && picker.bottom() <= title.bottom() + gpui_kit::px(1.),
+        "{picker:?} level with {title:?}"
+    );
+    assert!(picker.left() > title.right(), "{picker:?} after {title:?}");
+    // The title is its label: "Settings of" is said to a reader, never written.
+    assert_eq!(
+        label(cx, "settings-machine-field").as_deref(),
+        Some("Settings of")
+    );
+    assert!(
+        !present(cx, "settings-machine-field-label"),
+        "no words \"Settings of\" drawn"
+    );
+    let tabs = bounds_of(cx, "settings-tabs").expect("the tabs");
+    assert!(tabs.top() >= row.bottom(), "the tabs under the header");
+}
+
+#[gpui_kit::test]
+fn one_machine_leaves_no_settings_picker_and_the_title_in_place(cx: &mut TestAppContext) {
+    let (hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    settings(&shell, "agents", cx);
+    let title = bounds_of(cx, "settings-header-title").expect("the title");
+    assert!(
+        present(cx, "settings-machine-fold"),
+        "the picker, in the header"
+    );
+
+    // The server only controls now: this machine is the only one that runs agents.
+    server_role(&hub, &shell, Role::Controller, cx);
+    until(&shell, cx, "the picker is gone", |cx| {
+        !present(cx, "settings-machine-fold")
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, "settings-machine"));
+    assert!(!present(cx, "settings-machine-field"));
+    assert_eq!(bounds_of(cx, "settings-header-title"), Some(title));
+}
+
+#[gpui_kit::test]
+fn the_tabs_and_content_do_not_move_when_the_settings_picker_comes_or_goes(
+    cx: &mut TestAppContext,
+) {
+    let (hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    settings(&shell, "agents", cx);
+    let tabs = bounds_of(cx, "settings-tabs").expect("the tabs");
+    let page = bounds_of(cx, "settings-page").expect("the content");
+    let whole = width_of(cx, "settings-machine-fold").expect("the picker's fold");
+
+    // It goes, then comes back: frame by frame, it narrows or widens, and nothing else moves.
+    for (role, gone) in [(Role::Controller, true), (Role::Runner, false)] {
+        hub.with_hub(|hub| hub.change_role("server", role).unwrap());
+        let widths = std::cell::RefCell::new(Vec::new());
+        until(&shell, cx, "the picker has folded or unfolded", |cx| {
+            assert_eq!(bounds_of(cx, "settings-tabs"), Some(tabs), "the tabs moved");
+            assert_eq!(
+                bounds_of(cx, "settings-page"),
+                Some(page),
+                "the content moved"
+            );
+            let width = width_of(cx, "settings-machine-fold");
+            widths.borrow_mut().extend(width);
+            match gone {
+                true => width.is_none(),
+                false => width.is_some_and(|width| (width - whole).abs() < 0.5),
+            }
+        });
+        let widths = widths.into_inner();
+        assert!(
+            widths
+                .iter()
+                .any(|width| *width > 1. && *width < whole - 1.),
+            "it folds, it does not jump: {widths:?}"
+        );
+    }
+    settle(&shell, cx);
+    assert_eq!(bounds_of(cx, "settings-tabs"), Some(tabs));
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
 }
 
 #[gpui_kit::test]
