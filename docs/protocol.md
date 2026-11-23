@@ -1447,13 +1447,15 @@ was removed on 2026-11-21).
   the hub knows of the device (`docs/remote.md`, "A device's card"): `kind` and `system` as it said
   them, `version` its Flottille's, `paired_at` and `last_seen` in seconds since the Unix epoch, each
   `null` until told. `refused` when this machine is paired with no hub.
-- `vault.from_file {project, path, name?}` makes the vault entry of the file `path` of the
-  project `project`, which its setup copies, so that it is shared with another machine that lacks
-  it (`docs/remote.md`, "What travels"): the file is read only then, inside the project's folder,
-  reached through no link, a text of 64 KiB at most; it is masked, line by line too, before it is
-  kept, as `vault.set` keeps a secret, under `name` or, left out, the name a launch that needs it
-  asks for (`<project>-<path>`, each `/` a `-`). Answers as `vault.set`; `refused` for a path out of
-  the project, a link, a folder, a file too large or not text, never with a word of what it holds.
+- `vault.from_file {project, path, name?, replace?}` makes the vault entry of the file `path` of
+  the project `project`, which its setup copies, so that it is shared with another machine that
+  lacks it (`docs/remote.md`, "What travels"): the file is read only then, inside the project's
+  folder, reached through no link, a text of 64 KiB at most; it is masked, line by line too, before
+  it is kept, as `vault.set` keeps a secret, under `name` or, left out, the name a launch that needs
+  it asks for (`<project>-<path>`, each `/` a `-`), bound to the file (`for`
+  `file:<project>/<path>`). Answers as `vault.set`; `refused` for a path out of the project, a link,
+  a folder, a file too large or not text, never with a word of what it holds, and for a name an
+  entry has already: another entry's always, the same file's unless `replace` is `true`.
 - `remote.launches` answers the sessions and children this machine's agents started on other
   machines (`docs/remote.md`, "A tree across machines"), as the window's tree shows them under
   their pilot: those that started a session there, not refused, not handed to the user, and not

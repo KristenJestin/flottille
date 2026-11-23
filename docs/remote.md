@@ -978,23 +978,28 @@ local child's work; nothing moves your branch.*
   (#1214): Settings, General, "Projects from other machines" (`travelled_folder.set`), on that
   machine or from another's window through "Settings of"; `$XDG_DATA_HOME/flottille/projects`
   until the user types another. It is checked as a project's folder is: absolute, reached through
-  no link, neither a project's folder nor inside one, outside Flottille's configuration and state.
+  no link, neither a project's folder nor inside one, outside Flottille's configuration and state;
+  and it is no disk's root (`/`, a mount point), not the home itself nor Flottille's data folder
+  itself, and holds none of Flottille's configuration, state or data folders.
   Only the projects made afterwards go there; those made before stay where they are.
 - **A setup that copies files the receiving machine lacks** (#1214): the caller's machine names,
   with the launch, the files its project's `copy` steps match in its folder, their paths only,
   never what they hold. Each that the project there lacks is made from a vault entry,
   `<project>-<path>` (`app-.env`), which the user shares from the caller's machine through the
-  vault's sharing, keyring to keyring: never a file between machines. A launch that lacks one
-  whose entry is not there is held for the user whatever the mode, the judge not asked, and asks
-  once, on every device, as any held launch does: its request's words start with `app needs .env
-  on server: share it?`, its reasons name each entry, and its card's `needs` gives them
-  (`{"from", "files": [{"path", "entry"}]}`). On the caller's machine, `vault.from_file` makes the
+  vault's sharing, keyring to keyring: never a file between machines. The entry is bound to that
+  file (`file:<project>/<path>`), and only an entry bound to it and shared from the launch's
+  machine is ever laid: one of the machine's own, or another machine's, of the same name is not
+  (it counts as missing). **A launch that lays a file is held for the user whatever the mode**,
+  Full included, the judge not asked, and asks once, on every device, as any held launch does: its
+  words name each file and entry there already (`app lays .env from the vault entry app-.env shared
+  by pc`); one still missing starts them with `app needs .env on server: share it?`, its reasons
+  name each entry, and its card's `needs` gives them (`{"from", "files": [{"path", "entry"}]}`). On the caller's machine, `vault.from_file` makes the
   entry from the file, read only then, masked before it is kept; `vault.share` sends it. Allowed,
   the receiving machine makes each file from its vault entry in the project's folder, never over
   a file, readable by the user alone, before the setup runs, whose `copy` step then copies it as
   any; one still missing refuses the launch, naming it. Refused, the launch ends and the agent that
-  asked it is told what was missing (`child-failed`). A launch whose entries are there already
-  makes the files and starts as it would.
+  asked it is told what was missing (`child-failed`). A file is laid through no link: each folder
+  to it is made one at a time, a link refused, the file never over one.
 - **A launch refused on the caller's machine names the window's action**, never a command line
   (#1214): `claude is not signed in on server. Sign in to Claude on server in Settings › Agents`,
   `server is offline since 22:14: …. Settings › Machines says when server is back`, a machine that
@@ -1613,8 +1618,16 @@ on a real phone, by hand, and reported.
   says nothing while the setup runs, so the row cannot tell the setup's end from the first turn's;
   its next delivery says what it does.
 - **A secret of several lines is masked line by line too** (#1214), each line and each value after
-  its `=` of 6 characters or more, comments left: a file's entry would otherwise be masked only
-  whole, and an agent reads one line of a `.env`.
+  its first `=` or `:` (quotes and a final comma left out) and an address's password, of 6
+  characters or more, comments left: a file's entry would otherwise be masked only whole, and an
+  agent reads one line of a `.env`. A secret transformed is not recognised (`docs/vault.md`).
+- **Two files whose entry would have one name are told apart by the entry's binding** (#1214):
+  `a/b` and `a-b` both name `app-a-b`; the entry is bound to the file it was made of, so the other
+  is refused its entry, naming the first, rather than the name carrying a hash of the path (names
+  stay readable on the card). A launch that copies both lays the first and lacks the second,
+  saying so; a hash in the name is the change if that case is met.
+- **A file is laid only after the user allows it, in every mode** (#1214): even in Full and with
+  the entry shared already, a secret written into a project's folder is the user's to allow.
 - **The folder for projects from other machines is not moved** (#1214): changing it applies to the
   projects made afterwards; those made before stay, and a launch that did not start removes its
   project from where it was made.
