@@ -1008,7 +1008,9 @@ async fn statuses_of(forge: &Forge, context: &str, id: &str) -> Result<Vec<Value
 fn latest(forge: &Forge, statuses: Vec<Value>) -> Vec<Value> {
     let check = |status: &Value| {
         let build = build_of(forge, status["url"].as_str());
-        format!("{}\0{build:?}", check_of(status).0)
+        // By its key, which Bitbucket keeps one status of: two jobs showing one name are two checks.
+        let key = status["key"].as_str().or(status["name"].as_str());
+        format!("{}\0{build:?}", key.unwrap_or("check"))
     };
     let made = |status: &Value| match &status["created_on"] {
         Value::String(at) => crate::session_read::form(at),

@@ -529,12 +529,23 @@ fn rollup(value: &Value) -> Vec<&Value> {
             .and_then(crate::session_read::form)
     };
     let all = value["statusCheckRollup"].as_array().into_iter().flatten();
-    latest(all.collect(), |check| check_of(check).0, started)
+    // A job is a check of its workflow, a commit status one of its own: the same name in two
+    // workflows, or as a status and a run, is two checks (as `forge checks` groups by workflow).
+    let key = |check: &&Value| match check["__typename"].as_str() {
+        Some("StatusContext") => format!("status\0{}", check["context"].as_str().unwrap_or("")),
+        _ => format!(
+            "{}\0{}",
+            check["workflowName"].as_str().unwrap_or(""),
+            check["name"].as_str().unwrap_or("")
+        ),
+    };
+    latest(all.collect(), key, started)
 }
 
-/// The latest run of each check, in the order the checks first appear: by its start, a run
-/// with none being older than any that has one, and of two that started together the one listed
-/// last. A run superseded by a newer one of the same check (run again, replaced, cancelled and
+/// The latest run of each check, in the order the checks first appear: by its start, and of two
+/// that started together the one listed last. A run with no start (queued, not begun) is placed
+/// by the listing alone: it is the latest when listed after the other, so a re-run queued after a
+/// pass blocks, and a stale entry listed before the run that replaced it does not count. A run superseded by a newer one of the same check (run again, replaced, cancelled and
 /// started again) counts no more, whatever it said; the forges list them all for a head.
 pub(crate) fn latest<T>(
     runs: Vec<T>,
@@ -545,7 +556,9 @@ pub(crate) fn latest<T>(
     for run in runs {
         let (name, at) = (check(&run), started(&run));
         match kept.iter_mut().find(|(other, ..)| *other == name) {
-            Some(newest) if at >= newest.1 => *newest = (name, at, run),
+            Some(newest) if at.is_none() || newest.1.is_none() || at >= newest.1 => {
+                *newest = (name, at, run)
+            }
             Some(_) => {}
             None => kept.push((name, at, run)),
         }
