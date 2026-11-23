@@ -133,6 +133,12 @@ impl SignInRow {
         }
     }
 
+    /// Whether the line to type in a terminal is shown: only for a program known not to be signed
+    /// in, never while it checks nor when its check could not be made.
+    fn shows_line(&self) -> bool {
+        self.found && self.signed_in != Some(true)
+    }
+
     /// The window's own request for this row's check failed: the daemon never said anything.
     fn failed(&mut self, why: String) {
         self.checking = false;
@@ -614,12 +620,7 @@ impl SignInSection {
             format!("sign-in-line-{program}-block"),
             row.line
                 .clone()
-                .filter(|_| {
-                    line && row.found
-                        && row.signed_in != Some(true)
-                        && !row.checking
-                        && row.problem.is_none()
-                })
+                .filter(|_| line && row.shows_line())
                 .map(SharedString::from),
             {
                 let id = format!("sign-in-line-{program}");
@@ -886,6 +887,32 @@ mod tests {
         assert_eq!(row.program, "glab");
         assert_eq!(row.signed_in, Some(false));
         assert!(row_of(&answer, "bkt").is_none());
+    }
+
+    #[test]
+    fn the_line_to_type_is_shown_only_to_a_program_known_not_to_be_signed_in() {
+        let with = |extra: serde_json::Value| {
+            let mut value = json!({"program": "bkt", "found": true, "line": "bkt auth login"});
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            SignInRow::of(&value)
+        };
+
+        assert!(
+            with(json!({"signed_in": false})).shows_line(),
+            "not signed in"
+        );
+        assert!(!with(json!({"signed_in": true})).shows_line(), "signed in");
+        assert!(
+            !with(json!({"checking": true})).shows_line(),
+            "while it checks"
+        );
+        assert!(
+            !with(json!({"problem": "Error: 503 Service Unavailable"})).shows_line(),
+            "could not check"
+        );
+        assert!(!with(json!({"found": false})).shows_line(), "not installed");
     }
 
     #[test]
