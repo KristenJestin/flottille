@@ -446,16 +446,18 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
 
     // Another window, on the same daemon, shows the same arrangement.
     let (again, cx) = open(&user, cx);
-    until(&again, cx, "the group of the new window", |cx| {
-        present(cx, group_header_id(&id))
-    });
+    until(
+        &again,
+        cx,
+        "the group and the rows of the new window",
+        |cx| present(cx, group_header_id(&id)) && present(cx, project_id("charlie")),
+    );
     settle(&again, cx);
     assert_eq!(
         held(&again, "Work", cx),
         names(&["alpha"]),
-        "the daemon holds {}, the window lists {:?}",
-        kept(&user),
-        again.read_with(cx, |s, _| s.listing())
+        "the daemon holds {}",
+        kept(&user)
     );
     assert_eq!(loose(&again, cx), names(&["charlie", "bravo"]));
     assert!(
