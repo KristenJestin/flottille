@@ -236,7 +236,7 @@ pub struct Shell {
     arrangement_kept: Arrangement,
     /// What the user did that the daemon has not kept yet, and whether it was asked: the daemon
     /// applies each to the arrangement it holds, which another window may have changed since this
-    /// one read it. They are asked at once, in order, and answered in order.
+    /// one read it. One is asked at a time, the oldest, and the next once it is answered.
     arrangement_queue: VecDeque<(Change, bool)>,
     /// How many asks in a row the daemon did not take, and the wait that ends with the next try.
     arrangement_failures: u32,
@@ -1365,23 +1365,23 @@ impl Shell {
         self.keep_arrangement();
     }
 
-    /// The changes not asked yet are asked of the daemon, unless it could not take one lately.
+    /// The oldest change not kept yet is asked of the daemon, unless one is asked already and not
+    /// answered, or it could not take one lately: the changes are applied in the order the user
+    /// made them, which one asked again after a lost connection would not be if the next were
+    /// already on its way.
     fn keep_arrangement(&mut self) {
         if !self.kept_read || self.arrangement_waiting {
             return;
         }
-        let unasked: Vec<Change> = self
-            .arrangement_queue
-            .iter_mut()
-            .filter(|(_, sent)| !*sent)
-            .map(|(change, sent)| {
-                *sent = true;
-                change.clone()
-            })
-            .collect();
-        for change in unasked {
-            self.perform(Command::ArrangementChange { change });
+        let Some((change, sent)) = self.arrangement_queue.front_mut() else {
+            return;
+        };
+        if *sent {
+            return;
         }
+        *sent = true;
+        let change = change.clone();
+        self.perform(Command::ArrangementChange { change });
     }
 
     /// What the daemon holds, with what the user did since and it has not kept yet.
@@ -1433,6 +1433,7 @@ impl Shell {
                 if let Some(at) = at {
                     self.arrangement_queue.remove(at);
                 }
+                self.keep_arrangement();
             }
         }
         let now = self.arrangement_now();
