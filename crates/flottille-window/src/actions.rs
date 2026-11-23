@@ -597,6 +597,13 @@ pub enum Command {
         place: Option<String>,
         path: Option<String>,
     },
+    /// Where this machine makes the projects of other machines' launches
+    /// (`travelled_folder.show`).
+    TravelledFolderRead,
+    /// Keeps it (`travelled_folder.set`): the user's folder, or none for the data folder.
+    TravelledFolderSet {
+        folder: Option<String>,
+    },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
@@ -1248,6 +1255,12 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// Where this machine makes the projects of other machines' launches, after a read
+    /// (`written` false) or a choice.
+    TravelledFolder {
+        written: bool,
+        shown: Result<crate::travelled_folder::Shown, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -3059,6 +3072,29 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                     .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
                 written: true,
                 project,
+            }
+        }
+        Command::TravelledFolderRead => {
+            let shown = ask_alone(connect, "travelled_folder.show", json!({}), bounds.quick);
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::TravelledFolderSet { folder } => {
+            let shown = ask_alone(
+                connect,
+                "travelled_folder.set",
+                json!({"folder": folder}),
+                bounds.quick,
+            );
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: true,
             }
         }
         Command::RulesWrite { project, text } => {

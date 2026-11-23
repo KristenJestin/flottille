@@ -65,10 +65,11 @@ const AGENTS_BLOCKS: [&str; 6] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 6] = [
+const GENERAL_BLOCKS: [&str; 7] = [
     "about",
     "appearance",
     "workspaces",
+    "travelled",
     "developer",
     "check",
     "version",
@@ -315,6 +316,8 @@ pub struct SettingsPage {
     compaction_pending: bool,
     /// Where the workspaces of every project go, chosen on this page.
     workspaces: Entity<WorkspacesFolder>,
+    /// Where this machine makes the projects of other machines' launches, chosen on this page.
+    travelled: Entity<crate::travelled_folder::TravelledFolder>,
     /// The vault's entries, set and removed on this page.
     vault: Entity<VaultSection>,
     connections: Entity<ConnectionsSection>,
@@ -429,6 +432,7 @@ impl SettingsPage {
         judge_guidance: Entity<RulesEditor>,
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
+        travelled: Entity<crate::travelled_folder::TravelledFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
         machines: Entity<crate::machines_page::MachinesSection>,
@@ -449,6 +453,7 @@ impl SettingsPage {
             compaction: None,
             compaction_pending: false,
             workspaces,
+            travelled,
             vault,
             connections,
             shell,
@@ -1002,6 +1007,10 @@ impl SettingsPage {
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
         &self.workspaces
+    }
+
+    pub fn travelled_folder(&self) -> &Entity<crate::travelled_folder::TravelledFolder> {
+        &self.travelled
     }
 
     pub fn sign_in(&self) -> &Entity<crate::sign_in::SignInSection> {
@@ -2634,6 +2643,7 @@ impl Render for SettingsPage {
                     self.notifications_section(cx).into_any_element(),
                 ),
                 ("workspaces", self.workspaces.clone().into_any_element()),
+                ("travelled", self.travelled.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
                 ("check", self.check.clone().into_any_element()),
                 ("version", self.version.clone().into_any_element()),
