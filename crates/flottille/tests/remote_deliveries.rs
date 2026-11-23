@@ -44,7 +44,7 @@ pub(crate) fn child_on_server(
 }
 
 /// The launch's name in the answer of a launch on `server`.
-fn launch_in(text: &str) -> String {
+pub(crate) fn launch_in(text: &str) -> String {
     let marker = "refs/flottille/machines/server/";
     let at = text
         .find(marker)

@@ -6,7 +6,7 @@
 //! each with its own temporary HOME and XDG folders and fake agents.
 
 use crate::common;
-use crate::remote_deliveries::{child_on_server, off, prompts_with, script};
+use crate::remote_deliveries::{child_on_server, launch_in, off, prompts_with, script};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
     pc_and_server_as, prompted, refused, sent_with, server_user, titled,
@@ -817,6 +817,151 @@ fn a_read_of_a_session_it_started_elsewhere_comes_back_masked() {
         assert!(text.contains("The token is"), "{text}");
         assert!(!text.contains("pc-only"), "{text}");
     }
+}
+
+#[test]
+fn a_refusal_of_a_session_it_started_elsewhere_comes_back_masked() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = caller(&pc, &server, "full");
+    let led = id_in(done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Night lead",
+            "brief": "Finish the export."}),
+    )));
+    idle(&server, &led);
+    // A secret only pc knows, in a secret file of the caller's place.
+    std::fs::write(pc.folder().join(".env"), "API_TOKEN=pc-only-token-7f3a9c\n").unwrap();
+
+    // The server's refusal says the date it was given back.
+    let answer = mcp.call(
+        "session_read",
+        json!({"session": led, "since": "pc-only-token-7f3a9c"}),
+    );
+
+    let text = refused(&answer);
+    assert!(text.contains("is not a date"), "{text}");
+    assert!(!text.contains("pc-only"), "{text}");
+}
+
+/// A session or child pc's root started on the server, in Full: the hub, the two machines, the
+/// root's id, its MCP session, and the id and launch of what it started.
+fn started_on_server(
+    kind: &str,
+) -> (
+    crate::remote_launch::TestHub,
+    Machine,
+    Machine,
+    String,
+    Mcp,
+    String,
+    String,
+) {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = caller(&pc, &server, "full");
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": kind, "machine": "server", "title": "Night lead",
+            "brief": "Finish the export."}),
+    ))
+    .to_owned();
+    let id = id_in(&text).to_owned();
+    idle(&server, &id);
+    (hub, pc, server, root, mcp, id, launch_in(&text))
+}
+
+/// A read of `caller` of pc of what it started on the server as `launch`, `led`, with `args`,
+/// from a daemon of pc sending `project`.
+fn own_read(
+    id: &str,
+    caller: &str,
+    launch: &str,
+    led: &str,
+    args: Value,
+    project: &str,
+) -> MachineMessage {
+    MachineMessage::Call(Box::new(Call {
+        id: id.into(),
+        launch: launch.into(),
+        caller: caller.into(),
+        agent: led.into(),
+        tool: "session_read".into(),
+        arguments: args.to_string(),
+        project: project.into(),
+        mode: "auto".into(),
+        ..Call::default()
+    }))
+}
+
+#[test]
+fn a_read_of_a_session_it_started_from_an_older_daemon_is_refused_saying_to_update_it() {
+    let (_hub, pc, server, root, _mcp, led, launch) = started_on_server("led");
+    let key = pc.stand_in();
+
+    // An older daemon of pc names no project with a read of what its agent started.
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![own_read(
+            "call-r1",
+            &root,
+            &launch,
+            &led,
+            json!({"session": led}),
+            "",
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("daemon of pc"), "{refused}");
+    assert!(refused.contains("needs updating"), "{refused}");
+}
+
+#[test]
+fn a_read_naming_its_launch_and_another_session_is_judged_as_by_a_caller_that_started_neither() {
+    let (_hub, pc, server, root, _mcp, led, launch) = started_on_server("led");
+    let other = user_session(&server, NIGHT);
+    let key = pc.stand_in();
+
+    // From another project: a session it did not start asks the user's leave, the one it
+    // started does not.
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![
+            own_read(
+                "call-r2",
+                &root,
+                &launch,
+                &led,
+                json!({"session": led}),
+                "elsewhere",
+            ),
+            own_read(
+                "call-r3",
+                &root,
+                &launch,
+                &led,
+                json!({"session": other}),
+                "elsewhere",
+            ),
+        ],
+    );
+
+    let ok = answers[0].clone().unwrap();
+    assert_eq!(ok["outcome"], "ok", "{ok:#}");
+    let asked = answers[1].clone().unwrap();
+    assert_eq!(asked["outcome"], "held", "{asked:#}");
+    let number = asked["request"].as_u64().unwrap();
+    let request = request(&server, number);
+    assert_eq!(request["tool"], "session_read", "{request:#}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("has not reached that one, of another project, before"),
+        "{request:#}"
+    );
 }
 
 /// A call of `caller` of pc to the session `night`, as pc's daemon would send it, in `mode`
