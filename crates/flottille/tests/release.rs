@@ -4856,7 +4856,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     let verify = job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
         ),
         "{verify}"
     );
@@ -5575,7 +5575,7 @@ fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
     let verify = ci_job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
         ),
         "{verify}"
     );
@@ -5608,6 +5608,7 @@ fn every_job_that_compiles_links_with_mold() {
         "check",
         "build-tests",
         "test-selected",
+        "guards",
         "doc-tests",
         "build",
         "hub",
@@ -5630,6 +5631,7 @@ fn a_pull_request_passes_verify_on_its_checks_and_its_selected_tests() {
                     ("DOC", "skipped"),
                     ("TEST", "skipped"),
                     ("SELECTED", selected),
+                    ("GUARDS", "success"),
                     ("SUITE", suite),
                     ("RUST", "true"),
                 ],
@@ -5651,6 +5653,70 @@ fn a_pull_request_passes_verify_on_its_checks_and_its_selected_tests() {
     // The decision that failed (no `suite`) or says "whole": the selected tests are not the suite.
     for suite in ["", "true"] {
         assert!(!run(suite, "success", "success"), "suite: {suite:?}");
+    }
+}
+
+#[test]
+fn a_pull_request_runs_the_guards_whatever_it_changes() {
+    // The tests that hold a rule over the whole repository (every command has its section of the
+    // docs and its place in the window, every gap is a step of the scale, every child is spawned
+    // by the daemon) failed dev eleven times in two days (21-23 November 2026): no pull request
+    // selected them, as none changed their files. They run on every pull request the Rust suite
+    // runs for, beside the selected tests, whatever it selects.
+    let guards = ci_job("guards");
+    assert!(
+        guards.contains("needs: [verified-on-dev, changes]"),
+        "{guards}"
+    );
+    let condition = condition_of(&guards);
+    let context = |rust: &'static str, suite: &'static str| {
+        [
+            ("needs.verified-on-dev.outputs.verified", ""),
+            ("needs.changes.outputs.rust", rust),
+            ("needs.changes.outputs.suite", suite),
+        ]
+    };
+    assert!(holds(&condition, &context("true", "false")));
+    // The whole suite holds them already; a change of the Android app or the site alone does not
+    // build the Rust code.
+    assert!(!holds(&condition, &context("true", "")));
+    assert!(!holds(&condition, &context("false", "false")));
+    for guard in [
+        "--bin flottille",
+        "--test window_rules",
+        "--test group_daemon",
+        "test(/^window_parity::/)",
+    ] {
+        assert!(guards.contains(guard), "{guard}: {guards}");
+    }
+    assert!(guards.contains("--profile ci"), "{guards}");
+}
+
+#[test]
+fn verify_fails_a_pull_request_whose_guards_did_not_pass() {
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |guards: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", "success"),
+                    ("BUILD", "skipped"),
+                    ("DOC", "skipped"),
+                    ("TEST", "skipped"),
+                    ("SELECTED", "success"),
+                    ("GUARDS", guards),
+                    ("SUITE", "false"),
+                    ("RUST", "true"),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    assert!(run("success"));
+    for guards in ["failure", "cancelled", "skipped"] {
+        assert!(!run(guards), "guards: {guards}");
     }
 }
 

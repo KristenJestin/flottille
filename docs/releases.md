@@ -207,7 +207,11 @@ about five minutes, not twenty.
   running them again picks up a line written after the push). When it selects no binary, it runs the unit tests of the crates whose
   `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
   to build for that). `.github/scripts/pr-tests.sh` decides, from the files and the description,
-  nothing else. A pull request that touches no test and no such source runs `check` alone. A push
+  nothing else. A pull request that touches no test and no such source runs `check` alone.
+  Beside them, **the guards** (`guards`) run on every pull request the Rust suite runs for,
+  whatever it changes: the tests that hold a rule over the whole repository, which no pull
+  request's files select (the unit tests of the `flottille` binary, every command's section of
+  `docs/cli.md` among them, `window_parity`, and the window's `window_rules`). A push
   to a feature branch (`feat/**`, `fix/**`) runs **nothing**: its pull request's run is its run.
 - **A push** to `dev` (each merge), `main`, `stable/*`, `next/*` or a tag runs **the whole suite**
   (below). It **blocks nothing**: a pull request's `verify` never waits for it, and a failure there
@@ -237,8 +241,8 @@ The jobs of the whole suite's run:
   any test, and every test task reads it from there with `robolectric.offline=true`: a test that
   needs a jar it was not given fails, it never goes to the network.
 - **`verify`**, the required check, always concludes. On a push it fails unless `check`,
-  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check` and
-  `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
+  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check`,
+  `guards` and `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
   pass). Skipped is also a pass when `changes` said the Rust suite is not needed, and when `hub`
   ran, it must have passed.
 
