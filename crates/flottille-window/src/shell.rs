@@ -1700,10 +1700,11 @@ impl Shell {
             return Some(open);
         }
         let session = self.snapshot.session(id)?;
-        let (project, started_by, led_by) = (
+        let (project, started_by, led_by, child_of) = (
             session.project.clone(),
             session.started_by.clone(),
             session.led_by.clone(),
+            session.child_of.clone(),
         );
         let folder = match place {
             None => self
@@ -1727,6 +1728,7 @@ impl Shell {
             folder: folder.map(Into::into),
             started_by,
             led_by,
+            child_of,
         };
         let this = cx.entity().downgrade();
         let reply = match self.replies.get(id) {

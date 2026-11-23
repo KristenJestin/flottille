@@ -18,7 +18,7 @@ use flottille_core::store::{LaunchFilter, LaunchRefused, now_ms};
 use flottille_link::{LaunchAsk, MachineMessage, Message, PublicKey, Received, Role};
 use serde_json::{Value, json};
 
-use crate::agents::{self, New};
+use crate::agents::{self, DEPTH_LIMIT, New};
 use crate::daemon::Daemon;
 use crate::link::Remote;
 use crate::mcp::Outcome;
@@ -254,6 +254,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         repositories: repositories.clone(),
         identities,
         settings: Some(settings),
+        depth: caller.depth,
         copied: crate::travelled::copied(&project, &repositories),
     };
     let judged = link
@@ -589,6 +590,22 @@ async fn judged(
         "handed" => LaunchKind::Handed,
         other => return Err(format!("there is no kind of launch {other}")),
     };
+    // A child is at its parent's depth plus one, on whichever machine it runs: the limit holds
+    // across machines. A caller that sends no depth is a root (`LaunchAsk::depth`).
+    if kind == LaunchKind::Child && asked.depth >= DEPTH_LIMIT {
+        return Err(format!(
+            "agent {} of {sender} is at the depth limit ({DEPTH_LIMIT}): it cannot launch \
+             children",
+            asked.caller
+        ));
+    }
+    // Only a root starts a session, here as on its own machine.
+    if kind != LaunchKind::Child && asked.depth > 0 {
+        return Err(format!(
+            "agent {} of {sender} is a child: only a root starts a session, led or handed",
+            asked.caller
+        ));
+    }
     if asked.title.trim().is_empty() || asked.brief.trim().is_empty() {
         return Err("a launch needs a title and a brief".to_owned());
     }
@@ -1089,6 +1106,8 @@ async fn with_agent(
             preparing: true,
             role,
             parent: None,
+            // A child here of an agent of there: at that agent's depth plus one.
+            remote_parent_depth: child.then_some(asked.depth),
             title: Some(asked.title.trim().to_owned()),
             brief: asked.brief.clone(),
             provider: Some(asked.provider.clone()),
@@ -1487,8 +1506,8 @@ pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
 }
 
 /// For an agent started here for an agent of another machine: that agent, its machine's name,
-/// and whether it is a child.
-pub(crate) fn launched_from(daemon: &Daemon, agent: &str) -> Option<(String, String, bool)> {
+/// and the launch's kind (`child`, `led` or `handed`).
+pub(crate) fn launched_from(daemon: &Daemon, agent: &str) -> Option<(String, String, String)> {
     let launch = daemon
         .read(|store| store.launches("in", None, LaunchFilter::Agent(agent)))
         .ok()?
@@ -1498,7 +1517,17 @@ pub(crate) fn launched_from(daemon: &Daemon, agent: &str) -> Option<(String, Str
         .as_str()
         .unwrap_or("another machine")
         .to_owned();
-    Some((launch.caller, from, launch.kind == "child"))
+    Some((launch.caller, from, launch.kind))
+}
+
+/// [`launched_from`] as `agent.list` and `agent.show` say it, `{machine, agent, kind}`: the window,
+/// the CLI and the phone draw a child of it as that agent's, never as a session of the user's;
+/// `null` for an agent started here.
+pub(crate) fn launched_from_shown(daemon: &Daemon, agent: &str) -> Value {
+    match launched_from(daemon, agent) {
+        Some((caller, machine, kind)) => json!({"machine": machine, "agent": caller, "kind": kind}),
+        None => Value::Null,
+    }
 }
 
 /// Whether `agent` was started here for another machine's agent, and allowed: its first message
