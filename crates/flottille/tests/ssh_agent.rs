@@ -2667,7 +2667,10 @@ fn an_include_made_after_the_daemon_s_start_gives_a_lifted_push_none_of_its_sett
     // The user's settings include a file that is not there yet (a machine-local one, made by a
     // later `gh auth setup-git`, a dotfiles update, or a run in Full).
     let later = user.path("home/later.gitconfig");
-    let user = user_settings(user, &format!("[include]\n\tpath = {}\n", later.display()));
+    let user = credential_helper(user);
+    let mut settings = std::fs::read_to_string(user.path("home/.gitconfig")).unwrap();
+    settings.push_str(&format!("[include]\n\tpath = {}\n", later.display()));
+    std::fs::write(user.path("home/.gitconfig"), settings).unwrap();
     let mcp = session(&user, &url);
     // After the start: a proxy nobody listens on, which a push given it could not get through.
     std::fs::write(&later, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();

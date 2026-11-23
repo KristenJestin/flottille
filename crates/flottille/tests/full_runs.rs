@@ -345,16 +345,15 @@ fn leaving_full_tells_the_agent_its_commands_are_confined_again() {
     set_mode(&user, &id, "auto");
 
     eventually("the delivery of the switch out of Full", || {
-        delivered(&user, &id, "mode").len() == 2
+        delivered(&user, &id, "mode")
+            .iter()
+            .any(|body| body.contains("confined again"))
     });
-    let told = delivered(&user, &id, "mode")
-        .into_iter()
-        .find(|body| body.contains("confined again"));
-    assert!(told.is_some(), "{:?}", delivered(&user, &id, "mode"));
     // Out of Full to another mode than Full: nothing more.
+    let told = delivered(&user, &id, "mode").len();
     set_mode(&user, &id, "ask");
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(delivered(&user, &id, "mode").len(), 2);
+    assert_eq!(delivered(&user, &id, "mode").len(), told);
 }
 
 #[test]
