@@ -445,6 +445,10 @@ fn of_a_page(outcome: &Outcome) -> bool {
     )
 }
 
+/// How long the row of a session started on another machine stands for it, in ms, while that
+/// machine does not list it: its lists come through this machine's daemon within seconds.
+const STARTED_LISTED_WITHIN: u64 = 60_000;
+
 /// What this machine's link and actions say that fills this machine's pages: taken with them
 /// in front, wherever they wait, while another machine's are shown.
 fn of_this_machine_s_pages(update: &Update) -> bool {
@@ -916,10 +920,13 @@ impl Shell {
         self.say_held(cx);
         self.forget_gone_machines(window, cx);
         if let Some(lists) = self.machines.read(cx).machines().map(|read| &read.lists) {
+            // Listed by its machine, or never in a while: its row is the machine's, or none.
+            let now = now_ms();
             self.started_there.retain(|(machine, started)| {
-                !lists.machines.iter().any(|(name, listed)| {
-                    name == machine && listed.iter().any(|s| s.id == started.id)
-                })
+                now.saturating_sub(started.created_at) < STARTED_LISTED_WITHIN
+                    && !lists.machines.iter().any(|(name, listed)| {
+                        name == machine && listed.iter().any(|s| s.id == started.id)
+                    })
             });
         }
         if let Some(read) = self.machines.read(cx).machines() {
@@ -2932,7 +2939,11 @@ impl Shell {
                 }
             }
             // The session opens only if the user is still on the page they started it from.
-            Outcome::Started { project, agent } => {
+            Outcome::Started {
+                project,
+                agent,
+                title,
+            } => {
                 if let Some(composer) = self.composer_of(&project).cloned()
                     && let Some(used) =
                         composer.update(cx, |composer, cx| composer.started(window, cx))
@@ -2948,7 +2959,7 @@ impl Shell {
                             machine,
                             crate::machines::Listed {
                                 id: agent.clone(),
-                                title: String::new(),
+                                title,
                                 project: project.clone(),
                                 state: "running".to_owned(),
                                 exchanged_at: now_ms(),

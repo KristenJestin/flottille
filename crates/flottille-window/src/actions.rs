@@ -975,6 +975,8 @@ pub enum Outcome {
     Started {
         project: String,
         agent: String,
+        /// Its title, as the daemon gave it, or else the first line of its brief.
+        title: String,
     },
     /// No session started, and why, in a sentence.
     NotStarted {
@@ -2311,7 +2313,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 (&images, &texts),
                 bounds.quick,
             ) {
-                Ok(Ok(started)) => started_outcome(&project, &started),
+                Ok(Ok(started)) => started_outcome(&project, &message, &started),
                 Ok(Err(why)) | Err(why) => Outcome::NotStarted { project, why },
             }
         }
@@ -3868,11 +3870,21 @@ fn start_params(
     })
 }
 
-fn started_outcome(project: &str, started: &Value) -> Outcome {
+fn started_outcome(project: &str, message: &str, started: &Value) -> Outcome {
+    let title = match started["agent"]["title"].as_str() {
+        Some(title) if !title.trim().is_empty() => title.to_owned(),
+        _ => message
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_owned(),
+    };
     match started["agent"]["id"].as_str() {
         Some(agent) => Outcome::Started {
             project: project.to_owned(),
             agent: agent.to_owned(),
+            title,
         },
         None => Outcome::NotStarted {
             project: project.to_owned(),
@@ -4144,7 +4156,8 @@ mod tests {
             next(&mut updates, Duration::from_secs(5)),
             Some(Outcome::Started {
                 project: "atlas".into(),
-                agent: "made-up-agent".into()
+                agent: "made-up-agent".into(),
+                title: "Fix the timeout".into()
             })
         );
     }
