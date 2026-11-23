@@ -663,12 +663,20 @@ link's own words (cut, made again). Each request is still signed for its machine
 
 Every page asks its own machine, whichever machine's page is shown when it asks: a session's page
 and its composer take the actions of their session's machine when they are made, so the kept page
-of another machine's session gets its pictures there while it is hidden; a row's Rename goes to its
-session's machine. Add project's choice of machine is the form's own: the project is added there,
-and the page behind stays shown, its machine in front. Back and Forward return to the page of the
-machine it was a page of (Settings, a project's settings and a spec are each machine's own). What a
-machine answers acts on its own pages only: a project it removed leaves its copy, never this
-machine's list, and a session started from its project's page opens, its row in the list at once.
+of another machine's session gets its pictures there while it is hidden, and every answer of that
+machine (a message sent, a mode or a model changed, an interruption, its draft) reaches its
+composer; a Rename, from a row or from the page's header, goes to its session's machine. What a
+machine's Settings ask later (a list read again after an answer, a toast's action, a read after a
+quiet while) goes to that machine even once another is in front, and an agent's request to write a
+connection is the dialog of the machine whose page opened it, closed if that machine is removed.
+Add project's choice of machine is the form's own: the project is added there, held only while that
+machine takes no change, and the page behind stays shown, its machine in front. Back and Forward
+return to the page of the machine it was a page of (Settings, a project's settings and a spec are
+each machine's own); one of a machine that cannot be shown now is said so, and the history stays
+where it was. What a machine answers acts on its own pages only: a project it removed leaves its
+copy, never this machine's list, and a session started from its project's page opens, its row in
+the list at once with the first line of its brief, until that machine lists it (a minute at most).
+A read of the user's machines that fails lets go of none of them.
 The link of a project's page of another machine lives while a project's page of that machine is
 shown, its events filling that machine's pages; left, it ends at once, idle or not, and the page
 coming back reads again. A machine removed from the user's lets go of everything the window held of it. Another
