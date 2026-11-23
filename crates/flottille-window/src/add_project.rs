@@ -438,6 +438,15 @@ impl AddProject {
 impl AddProject {
     /// On which machine: this one first, then the other machines that run agents, each with its
     /// role and state; the project is added on the one chosen, the page behind staying shown.
+    /// Whether the form's machine takes no change now: it is the one added on, whichever
+    /// machine's page is behind (#1271).
+    fn held(&self, cx: &gpui_kit::App) -> bool {
+        self.shell.upgrade().is_some_and(|shell| {
+            let machines = shell.read(cx).machines().read(cx).machines();
+            crate::machines::holding(self.machine.as_deref(), machines).is_some()
+        })
+    }
+
     fn machine_choice(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
         let read = self
@@ -726,7 +735,7 @@ impl Render for AddProject {
             )
             .into_any_element(),
             None => Button::primary("add-project-next", "Add project")
-                .disabled(self.detected.is_none() || crate::machines::held(cx).is_some())
+                .disabled(self.detected.is_none() || self.held(cx))
                 .on_click(cx.listener(|this, _, _, cx| this.next(cx)))
                 .into_any_element(),
         };
