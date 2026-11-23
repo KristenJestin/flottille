@@ -59,6 +59,9 @@ struct Relay {
     refuse: Arc<Mutex<Vec<&'static str>>>,
     /// The links to the server that follow it as a window (a copy's) and are still open.
     watching: Arc<AtomicU64>,
+    /// The methods of this machine's daemon held this long (ms) before they are sent on.
+    slow: Arc<Mutex<Vec<&'static str>>>,
+    slow_by: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -108,6 +111,12 @@ impl Relay {
             if refused {
                 request["method"] = json!("test.refused");
                 line = format!("{request}\n");
+            }
+            let slow = request["method"]
+                .as_str()
+                .is_some_and(|method| self.slow.lock().unwrap().contains(&method));
+            if slow {
+                std::thread::sleep(Duration::from_millis(self.slow_by.load(Ordering::SeqCst)));
             }
             if request["machine"] == "server" {
                 let method = request["signed"]["method"]
@@ -1771,4 +1780,40 @@ fn add_project_on_this_pc_is_not_held_by_the_server_behind_gone_offline(cx: &mut
             .to_string()
             .contains("\"notes\"")
     });
+}
+
+#[gpui_kit::test]
+fn a_session_started_on_the_server_is_listed_with_its_brief_before_the_server_lists_it(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's page of app is drawn", |cx| {
+        present(cx, "composer-field")
+            && shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    // The lists of the machines come late: the row is the window's own until then.
+    relay.slow_by.store(8000, Ordering::SeqCst);
+    relay.slow.lock().unwrap().push("remote.machines");
+    let before = agents_of(&server.user);
+    click(cx, "composer-field");
+    cx.simulate_input("Count the files");
+    click(cx, "send");
+    eventually("the session started on the server", || {
+        started_on(&server.user, &before).is_some()
+    });
+    let started = started_on(&server.user, &before).unwrap();
+    let row = elsewhere_id("server", &started);
+    until(&shell, cx, "the started session is listed", |cx| {
+        shell.read_with(cx, |s, _| s.snapshot().elsewhere(&row).is_some())
+    });
+    let title = shell.read_with(cx, |s, _| {
+        s.snapshot().elsewhere(&row).unwrap().title.clone()
+    });
+    assert_eq!(title, "Count the files");
 }
