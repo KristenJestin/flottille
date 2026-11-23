@@ -1120,7 +1120,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
   sidebar's folds so that one window's fold never erases another's groups, read by a window when
   it opens and again at each change it makes (applied to what the daemon holds, so that a window
-  that was open before another made a group does not erase it), never in a project; a project is
+  that was open before another made a group does not erase it, but two windows changing it at the
+  very same instant can still lose one of the two changes: the daemon reads, then writes), never
+  in a project; a project is
   dragged from its own row, never from the sessions and buttons it holds; New group… is not offered while the projects are shown by machine
   (the entry says "Shown by machine"), and a project that a machine does not give for now keeps its
   place and group for when it is back; Group by machine shows the sections instead of

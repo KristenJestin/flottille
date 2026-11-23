@@ -5216,6 +5216,7 @@ mod tests {
                     home: Some(base.join("home")),
                 },
                 launched: false,
+                reads: None,
             };
             Fixture {
                 own: vec![base.join("xdg/data/flottille")],

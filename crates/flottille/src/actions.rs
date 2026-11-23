@@ -2938,6 +2938,7 @@ mod tests {
                 home: None,
             },
             launched: false,
+            reads: None,
         };
 
         for kind in ["led", "handed"] {
