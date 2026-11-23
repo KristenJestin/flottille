@@ -874,8 +874,8 @@ pub(crate) fn environment(
 
 /// The environment of a run of a session in Full: the daemon's, as a command the user typed (the
 /// SSH agent, the session bus, the display, the forge command lines' sign-ins, the user's git
-/// settings and hooks), with the place's variables filled. Only Landlock keeps Flottille's own
-/// folders from it (`start`).
+/// settings and hooks), with the place's variables filled. Nothing is held back from it, the
+/// keyring the bus reaches included (`start`).
 fn own_environment(
     place: &Place,
     repository: &str,
@@ -886,18 +886,6 @@ fn own_environment(
         filled.insert(name.clone(), variables::fill(template, &names)?);
     }
     Ok(variables::environment(std::env::vars_os(), &[&filled]))
-}
-
-/// What a run in Full is kept from: Flottille's runtime folder (the daemon's socket, the vault's
-/// and the bridges' sockets and tokens, the pushes' folders, the displays), its state (the store,
-/// the connections' folders and their vault sockets, its keys) and the agents' own folders (each
-/// session's of its provider).
-fn flottille_s_own(daemon: &Daemon) -> Vec<std::path::PathBuf> {
-    vec![
-        daemon.paths.runtime.clone(),
-        daemon.paths.state.clone(),
-        daemon.paths.data.join("agents"),
-    ]
 }
 
 /// The environment of a program the daemon runs beside it for every project, in no place (a
@@ -1192,8 +1180,8 @@ fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
 /// what it is in from the start: a run that ends at once must find it already detached to have
 /// its end delivered. It runs in the sandbox with `env`, or outside it with `lifted`, the
 /// environment of a push the gate let through (`fn lifted`); its probes run in the sandbox with
-/// `env` either way. A run of a session in `full` is the user's own: no namespace, its `env` the
-/// daemon's (`own_environment`), Landlock alone keeping Flottille's own folders out of its reach.
+/// `env` either way. A run of a session in `full` is the user's own, as in their terminal: no
+/// namespace, no Landlock, its `env` the daemon's (`own_environment`).
 #[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
@@ -1238,14 +1226,9 @@ fn start(
         .stderr(writer)
         .kill_on_drop(true);
     crate::children::in_own_session(&mut command);
-    match (outside, full) {
-        (true, _) => {}
-        (false, true) => {
-            crate::landlock::kept_from(&mut command, &flottille_s_own(daemon));
-        }
-        (false, false) => {
-            crate::landlock::confined_but(&mut command, display.as_ref());
-        }
+    // A run in Full is the user's own, as in their terminal: confined in no way.
+    if !outside && !full {
+        crate::landlock::confined_but(&mut command, display.as_ref());
     }
     let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
