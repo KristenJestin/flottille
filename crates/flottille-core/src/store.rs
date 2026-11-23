@@ -2894,9 +2894,15 @@ impl Store {
     pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
         if self.agent(&agent.id)?.is_none() {
             let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
+            // The pilot of sessions that all ended is kept for them only, never forgotten while
+            // they are: it calls no more, and counts no more.
             let kept: i64 = self.connection.query_row(
-                "SELECT count(*) FROM agents WHERE instr(id, '@') > 0 \
-                 AND substr(id, instr(id, '@') + 1) = ?1",
+                "SELECT count(*) FROM agents AS s WHERE instr(s.id, '@') > 0 \
+                 AND substr(s.id, instr(s.id, '@') + 1) = ?1 \
+                 AND NOT (EXISTS (SELECT 1 FROM agents WHERE launched_by = s.id \
+                 OR detached_from = s.id) AND NOT EXISTS (SELECT 1 FROM agents \
+                 WHERE (launched_by = s.id OR detached_from = s.id) \
+                 AND state NOT IN ('ended', 'failed')))",
                 params![machine],
                 |row| row.get(0),
             )?;
