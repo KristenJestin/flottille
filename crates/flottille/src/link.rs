@@ -1093,13 +1093,21 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .map(|agent| root_of(&agent.id))
         .collect();
     // The trees a request held for the user waits in, by their root: a launch held for the user
-    // among them, as the session's own window says it (`needs_user`).
-    let held: HashSet<String> = daemon
+    // among them, as the session's own window says it (`needs_user`), and those whose agent asked
+    // for a vault entry, as the window counts them.
+    let mut held: HashSet<String> = daemon
         .read(|store| store.pending_requests(flottille_core::approval::USER))
         .unwrap_or_default()
         .iter()
         .map(|request| root_of(&request.agent))
         .collect();
+    held.extend(
+        daemon
+            .read(crate::vault::asking)
+            .unwrap_or_default()
+            .iter()
+            .map(|agent| root_of(agent)),
+    );
     let mut sessions: Vec<flottille_link::LightSession> = agents
         .iter()
         // A child an agent of another machine launched here is that agent's, no session to list.
@@ -1121,7 +1129,8 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
                 })
                 .unwrap_or_default();
             let busy = busy.contains(&agent.id);
-            let state = if agent.waiting_on_answer || held.contains(&agent.id) {
+            // A question to its pilot is the pilot's to answer, not the user's.
+            let state = if crate::tree::asks_the_user(daemon, agent) || held.contains(&agent.id) {
                 "needs you"
             } else if busy {
                 "running"
