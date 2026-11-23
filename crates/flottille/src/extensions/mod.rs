@@ -118,6 +118,12 @@ pub async fn family_call(
     connections::requests::tool(daemon, args, approved, place).await
 }
 
+/// Whether `kind` is the name an extension tells a lead of another machine under (a review's
+/// result), as it tells one here: the only one ever sent across.
+pub(crate) fn tells_across(kind: &str) -> bool {
+    kind == review::EXTENSION.name
+}
+
 /// Every extension, in the order of their settings' tabs.
 pub const ALL: &[&Extension] = &[
     &specs::EXTENSION,

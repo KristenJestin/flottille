@@ -1041,9 +1041,7 @@ fn delivered(
     // The user's answer there to a launch held for them.
     let decided = deliver.kind == "approval";
     // An extension tells a lead of another machine under its own name, as it does one here.
-    let extension = crate::extensions::ALL
-        .iter()
-        .any(|extension| extension.name == deliver.kind);
+    let extension = crate::extensions::tells_across(&deliver.kind);
     if !KINDS.contains(&deliver.kind.as_str()) && !extension && !decided {
         return Err(format!(
             "no delivery of kind {:?} is taken from another machine",
