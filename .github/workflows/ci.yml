@@ -365,7 +365,7 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # The real programs the sandbox's test runs (`real_programs`): the runner has all but pnpm.
       - name: Have pnpm
-        run: sudo npm install --global pnpm
+        run: sudo npm install --global pnpm@10
       - run: mkdir -p "$GITHUB_WORKSPACE/target/tmp"
       - run: cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
       # Whatever the tests said: the flaky ones are seen (job summary `Flaky tests`), and kept for
@@ -438,7 +438,7 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # The real programs the sandbox's test runs (`real_programs`): the runner has all but pnpm.
       - name: Have pnpm
-        run: sudo npm install --global pnpm
+        run: sudo npm install --global pnpm@10
       # The profile `ci` retries a failed test twice, as on the partitions: a flaky one is listed.
       - run: cargo nextest run --locked --profile ci $SELECTED
       - name: Flaky tests
