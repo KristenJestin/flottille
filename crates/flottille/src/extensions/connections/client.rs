@@ -623,7 +623,11 @@ async fn start_with(
             };
             let mut env = crate::runs::beside(daemon)?;
             if let Some(vault) = &vault {
-                super::adapters::display(&mut env, display.as_ref().map(|shown| &shown.env), vault);
+                super::adapters::display(
+                    &mut env,
+                    display.as_ref().map(|shown| &shown.env),
+                    vault,
+                )?;
             }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
@@ -993,6 +997,16 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
     if running {
         super::changed_event(daemon, name, None);
     }
+}
+
+/// The vault folder of the connection `name`, once it is removed and its browser closed
+/// (`stop`), removed with it: the next connection of its name gets one afresh.
+pub async fn vault_removed(daemon: &Arc<Daemon>, name: &str) {
+    let server = server_of(daemon, name);
+    // Under the turn: no login nor start of a server of its name makes anything there meanwhile.
+    let _turn = server.turn.lock().await;
+    server.vault.lock().unwrap().take();
+    let _ = std::fs::remove_dir_all(daemon.paths.runtime.join("vault").join(name));
 }
 
 /// The browser the server or a login of it started, closed: the next start applies the switch.

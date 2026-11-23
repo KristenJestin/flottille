@@ -101,6 +101,10 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         // A browser, or a session, that someone else controls: a login would type into it.
         "agent_browser_connect",
         "agent_browser_state_load",
+        // Chrome's DevTools address: anything of this user's on this machine that has it drives
+        // the browser with no gate (no token guards the port), and reads its pages, a password
+        // filled and the cookies.
+        "agent_browser_get_cdp_url",
         // Not served by 0.43.0: named should a 0.43 patch serve it, since off alone the user could
         // turn agent-browser's own login on beside Flottille's.
         "agent_browser_with_login",
@@ -109,7 +113,8 @@ pub static AGENT_BROWSER: Adapter = Adapter {
                  arguments, and its plugins run commands with its credential providers: \
                  Flottille's vault is the only way to sign in, with the action login; connect and \
                  state_load bring a browser or a session someone else controls, which a login \
-                 would type into",
+                 would type into; get_cdp_url hands out Chrome's DevTools address, which drives \
+                 the browser with no gate",
     actions: &[Own {
         name: LOGIN,
         description: "Signs in to a site in the browser with a vault entry of the user's: \
@@ -414,14 +419,17 @@ pub fn folder(daemon: &Daemon, name: &str) -> PathBuf {
     daemon.paths.state.join("connections").join(name)
 }
 
+const CONFIG_FILE: &str = "agent-browser.json";
+const PLUGIN_SOCKET: &str = "vault.sock";
+
 fn config_file(folder: &Path) -> PathBuf {
-    folder.join("agent-browser.json")
+    folder.join(CONFIG_FILE)
 }
 
 /// The plugin's socket, in the connection's vault folder (`display::vault`): out of every run's
 /// reach, as the token beside it is.
 fn socket_file(vault: &crate::display::Folder) -> PathBuf {
-    vault.path().join("vault.sock")
+    vault.path().join(PLUGIN_SOCKET)
 }
 
 /// Where the configuration it writes is, as the review names it: in the connection's vault folder
@@ -544,14 +552,15 @@ pub fn shown(
 /// whether the browser is shown or not, and the display folder's variables (`shown`, a
 /// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
 /// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
-/// name the connection's vault folder, so they reach the same browser, the removal of a display
-/// folder never takes a live socket, and no run reaches the socket, which drives the browser with
-/// no gate.
+/// name the connection's socket folder in its vault folder ([`sockets`]), so they reach the same
+/// browser, the removal of a display folder never takes a live socket, and a run, which the vault
+/// folder is out of the reach of, does not reach the socket, which drives the browser with no
+/// gate (`docs/vault.md`, "The gaps", says what is still within its reach).
 pub fn display(
     env: &mut BTreeMap<OsString, OsString>,
     shown: Option<&BTreeMap<OsString, OsString>>,
     vault: &crate::display::Folder,
-) {
+) -> Result<(), String> {
     for name in [
         "WAYLAND_DISPLAY",
         "DISPLAY",
@@ -565,8 +574,74 @@ pub fn display(
     }
     env.insert(
         "AGENT_BROWSER_SOCKET_DIR".into(),
-        vault.path().as_os_str().to_owned(),
+        sockets(vault)?.into_os_string(),
     );
+    Ok(())
+}
+
+/// What the name of the socket folder starts with.
+const SOCKETS: &str = "browser-";
+
+/// The folder agent-browser's daemon puts its socket in: the one folder of the vault folder, of
+/// a random name made the first time and found again by listing, by this daemon and the next.
+/// agent-browser names its socket after its session (`default`): in a folder of a name anyone can
+/// tell, a program that may connect by its path (a run where neither a namespace nor Landlock
+/// keeps the vault folder) would find it.
+fn sockets(vault: &crate::display::Folder) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(found) = sockets_in(vault.path()) {
+        return Ok(found);
+    }
+    let folder = vault
+        .path()
+        .join(format!("{SOCKETS}{}", super::oauth::random(16)?));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .map_err(|error| format!("{}: {error}", folder.display()))?;
+    Ok(folder)
+}
+
+/// The socket folder of the vault folder `vault`, when there is one.
+fn sockets_in(vault: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(vault).ok()?.flatten().find_map(|entry| {
+        // Never through a link: the type of the entry itself.
+        let folder = entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && entry.file_name().to_string_lossy().starts_with(SOCKETS);
+        folder.then(|| entry.path())
+    })
+}
+
+/// What a daemon that died during a login left in the vault folders (its token, its plugin's
+/// socket, the plugin's reason: a login ends with them, a SIGKILL does not), and what an earlier
+/// Flottille kept in the connections' state folders, which runs reach (agent-browser's
+/// configuration, the plugin's socket). Called before any connection starts: no login runs. The
+/// socket folders stay, a browser left may answer on them (`left`).
+pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
+    let folders = |base: PathBuf| -> Vec<PathBuf> {
+        std::fs::read_dir(base)
+            .map(|listed| listed.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    };
+    for vault in folders(paths.runtime.join("vault")) {
+        for name in [TOKEN_FILE, WHY_FILE, PLUGIN_SOCKET] {
+            let _ = std::fs::remove_file(vault.join(name));
+        }
+    }
+    for state in folders(paths.state.join("connections")) {
+        for name in [CONFIG_FILE, PLUGIN_SOCKET] {
+            let _ = std::fs::remove_file(state.join(name));
+        }
+    }
+}
+
+/// The browser a daemon that died left for `declaration`, shown or not: one whose socket folder
+/// holds something. Only an adapter's server has a vault folder, so no other server's program is
+/// run to close anything.
+pub fn left(daemon: &Daemon, declaration: &Declaration) -> Option<Browser> {
+    let vault = daemon.paths.runtime.join("vault").join(&declaration.name);
+    std::fs::read_dir(sockets_in(&vault)?).ok()?.next()?;
+    browser(daemon, declaration, None)
 }
 
 /// How the browser agent-browser's daemon runs for a connection is closed: its command line, the
@@ -601,7 +676,9 @@ pub async fn close(daemon: &Daemon, browser: &Browser) {
     let Ok(mut env) = crate::runs::beside(daemon) else {
         return;
     };
-    display(&mut env, None, &browser.vault);
+    if display(&mut env, None, &browser.vault).is_err() {
+        return;
+    }
     let mut command = tokio::process::Command::new(&browser.program[0]);
     command
         .args(&browser.program[1..])
@@ -857,7 +934,7 @@ async fn run(
     let _why_gone = Removed(why_file.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
-    display(&mut env, shown.as_ref().map(|shown| &shown.env), &vault);
+    display(&mut env, shown.as_ref().map(|shown| &shown.env), &vault)?;
     // The folders the login's commands may reach: the daemon's own, never what a variable of the
     // connection (the vault's, below) names. The browser they may start runs the plugin, which
     // reaches the token and the socket in the vault's.
@@ -919,8 +996,11 @@ async fn run(
     let mut stray = false;
     // Each request answered on its own: one that says nothing does not hold the plugin's.
     let mut asks = tokio::task::JoinSet::new();
+    // The first refusal is the login's: one that follows is a stray request's, never its reason.
     let mut heard = |done: Result<Option<Refused>, tokio::task::JoinError>| match done {
-        Ok(Some(Refused::Asked(why))) => refused = Some(why),
+        Ok(Some(Refused::Asked(why))) => {
+            refused.get_or_insert(why);
+        }
         Ok(Some(Refused::Untokened)) => stray = true,
         _ => {}
     };
@@ -1101,6 +1181,9 @@ enum Refused {
     Asked(String),
     /// Without the token: from anything that reached the socket.
     Untokened,
+    /// Once the token was spent, by the request that was given the credential: anything's,
+    /// which says nothing of why the login failed.
+    Spent,
 }
 
 /// Answers one request of the plugin: the credential, for the run's own token once and for its
@@ -1134,9 +1217,7 @@ async fn answer(
                 }
             }
             Some(_) => Err(Refused::Untokened),
-            None => Err(Refused::Asked(
-                "the token of this login was used already".to_owned(),
-            )),
+            None => Err(Refused::Spent),
         }
     };
     let (said, refused) = match allowed {
@@ -1148,11 +1229,16 @@ async fn answer(
             json!({"refused": "the request does not carry the token of this login"}),
             Some(Refused::Untokened),
         ),
+        Err(Refused::Spent) => (
+            json!({"refused": "the token of this login was used already"}),
+            Some(Refused::Spent),
+        ),
         Err(Refused::Asked(why)) => (json!({"refused": why}), Some(Refused::Asked(why))),
     };
     let mut bytes = serde_json::to_vec(&said).expect("JSON");
     bytes.push(b'\n');
-    let _ = write.write_all(&bytes).await;
+    // Bounded as its question is: one that never reads holds nothing.
+    let _ = tokio::time::timeout(ASK_LIMIT, write.write_all(&bytes)).await;
     refused
 }
 
