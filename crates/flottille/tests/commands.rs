@@ -2146,24 +2146,43 @@ fn gh_merges(user: &User) -> Vec<String> {
         .collect()
 }
 
-/// A run of the check `name` in `statusCheckRollup`, started at the minute `at` of 10 o'clock on
-/// the pull request's one head, and ended a minute later once `COMPLETED` (gh says the year 1
-/// for no end).
-fn check_run(name: &str, status: &str, conclusion: &str, at: u32) -> Value {
+/// A run of the job `name` of the workflow `workflow` in `statusCheckRollup`, started at the
+/// minute `at` of 10 o'clock on the pull request's one head, and ended a minute later once
+/// `COMPLETED` (gh says the year 1 for no end).
+fn job_run(workflow: &str, name: &str, status: &str, conclusion: &str, at: u32) -> Value {
     let ended = match status {
         "COMPLETED" => format!("2026-01-01T10:{:02}:00Z", at + 1),
         _ => "0001-01-01T00:00:00Z".to_owned(),
     };
-    json!({"__typename": "CheckRun", "name": name, "workflowName": name, "status": status,
+    json!({"__typename": "CheckRun", "name": name, "workflowName": workflow, "status": status,
         "conclusion": conclusion, "startedAt": format!("2026-01-01T10:{at:02}:00Z"),
         "completedAt": ended})
 }
 
+/// A run of the check `name`, in a workflow of its own name.
+fn check_run(name: &str, status: &str, conclusion: &str, at: u32) -> Value {
+    job_run(name, name, status, conclusion, at)
+}
+
+/// A run that gh lists with no start yet (the year 1), as a queued one is.
+fn unstarted_run(name: &str) -> Value {
+    let mut run = check_run(name, "QUEUED", "", 0);
+    run["startedAt"] = json!("0001-01-01T00:00:00Z");
+    run
+}
+
+/// A commit status of GitHub (not a check run) made at the minute `at` of 10 o'clock.
+fn commit_status(context: &str, state: &str, at: u32) -> Value {
+    json!({"__typename": "StatusContext", "context": context, "state": state,
+        "startedAt": format!("2026-01-01T10:{at:02}:00Z")})
+}
+
 /// A commit status of a Bitbucket pull request made at the minute `at` of 10 o'clock, by another
-/// CI than the repository's pipelines (its key names the run).
+/// CI than the repository's pipelines (its key names the check, as Bitbucket has one status per
+/// key: a status posted again under it replaces it).
 fn status_at(name: &str, state: &str, at: u32) -> Value {
     let made = format!("2026-01-01T10:{at:02}:00Z");
-    json!({"state": state, "name": name, "key": format!("{name}-{at}"), "url": "https://ci.example.com",
+    json!({"state": state, "name": name, "key": name.to_lowercase(), "url": "https://ci.example.com",
         "created_on": made, "updated_on": made})
 }
 
@@ -2257,6 +2276,95 @@ fn a_stopped_run_replaced_by_a_newer_one_does_not_block_the_merge() {
     );
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
+}
+
+#[test]
+fn two_workflows_with_a_job_of_the_same_name_are_two_checks() {
+    // `ci/test` failed and `compat/test` passed two seconds later: the later does not hide it.
+    let (user, shown, answer) = github_shown_and_merged(json!([
+        job_run("ci", "test", "COMPLETED", "FAILURE", 1),
+        job_run("compat", "test", "COMPLETED", "SUCCESS", 2)
+    ]));
+    assert_eq!(shown, "checks: failing (test failing, test passing)");
+    assert!(
+        answer.text.contains("its checks fail (test)"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(gh_merges(&user).len(), 0);
+
+    // The same two, the failing one listed last.
+    let (user, shown, _) = github_shown_and_merged(json!([
+        job_run("compat", "test", "COMPLETED", "SUCCESS", 2),
+        job_run("ci", "test", "COMPLETED", "FAILURE", 3)
+    ]));
+    assert_eq!(shown, "checks: failing (test passing, test failing)");
+    assert_eq!(gh_merges(&user).len(), 0);
+}
+
+#[test]
+fn a_status_and_a_check_run_of_the_same_name_are_two_checks() {
+    let (user, shown, answer) = github_shown_and_merged(json!([
+        commit_status("build", "FAILURE", 1),
+        check_run("build", "COMPLETED", "SUCCESS", 5)
+    ]));
+    assert_eq!(shown, "checks: failing (build failing, build passing)");
+    assert!(
+        answer.text.contains("its checks fail (build)"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(gh_merges(&user).len(), 0);
+}
+
+#[test]
+fn a_latest_run_still_running_blocks_the_merge() {
+    // Passed at minute 1, run again and running at minute 5.
+    let (user, shown, answer) = github_shown_and_merged(json!([
+        check_run("privacy", "COMPLETED", "SUCCESS", 1),
+        check_run("privacy", "IN_PROGRESS", "", 5)
+    ]));
+    assert_eq!(shown, "checks: pending (privacy pending)");
+    assert!(
+        answer
+            .text
+            .contains("its checks are still running (privacy)"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(gh_merges(&user).len(), 0);
+}
+
+#[test]
+fn a_run_queued_with_no_start_after_a_pass_blocks_the_merge() {
+    // A re-run gh lists with no start yet, after the run that passed.
+    let (user, shown, answer) = github_shown_and_merged(json!([
+        check_run("privacy", "COMPLETED", "SUCCESS", 1),
+        unstarted_run("privacy")
+    ]));
+    assert_eq!(shown, "checks: pending (privacy pending)");
+    assert!(
+        answer
+            .text
+            .contains("its checks are still running (privacy)"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(gh_merges(&user).len(), 0);
+}
+
+#[test]
+fn a_superseded_run_with_no_start_does_not_bring_back_a_pending_check() {
+    // The stale entry of the issue: queued and never started, listed before the run that replaced
+    // it and passed.
+    let (user, shown, answer) = github_shown_and_merged(json!([
+        check_run("privacy", "COMPLETED", "FAILURE", 1),
+        unstarted_run("privacy"),
+        check_run("privacy", "COMPLETED", "SUCCESS", 5)
+    ]));
+    assert_eq!(shown, "checks: passing (privacy passing)");
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(gh_merges(&user).len(), 1);
 }
 
 #[test]

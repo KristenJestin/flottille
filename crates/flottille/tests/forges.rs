@@ -1396,18 +1396,18 @@ fn a_failed_branch_pipeline_fails_the_pull_request_s_checks() {
 
 #[test]
 fn a_bitbucket_check_listed_twice_counts_once() {
-    // Another CI posts a status per run of the same check: the latest counts, once, whichever
-    // the list says first.
-    let status = |key: &str, state: &str, at: &str| {
-        json!({"state": state, "key": key, "name": "Jenkins", "url": "https://ci.example.com",
+    // Another CI posts a status per run of the same check, under the one key: the latest counts,
+    // once, whichever the list says first.
+    let status = |state: &str, at: &str| {
+        json!({"state": state, "key": "jenkins", "name": "Jenkins", "url": "https://ci.example.com",
             "created_on": at, "updated_on": at})
     };
     let text = shown_with(
         &now_text(),
         json!([
-            status("jenkins-2", "SUCCESSFUL", "2026-01-01T10:05:00Z"),
-            status("jenkins-1", "FAILED", "2026-01-01T10:01:00Z"),
-            status("jenkins-3", "SUCCESSFUL", "2026-01-01T10:05:00Z")
+            status("SUCCESSFUL", "2026-01-01T10:05:00Z"),
+            status("FAILED", "2026-01-01T10:01:00Z"),
+            status("SUCCESSFUL", "2026-01-01T10:05:00Z")
         ]),
         json!([]),
     );
@@ -1415,6 +1415,29 @@ fn a_bitbucket_check_listed_twice_counts_once() {
     assert_eq!(
         checks_line(&text),
         "checks: passing (Jenkins passing)",
+        "{text}"
+    );
+}
+
+#[test]
+fn two_bitbucket_statuses_of_one_name_and_two_keys_are_two_checks() {
+    // Two jobs of another CI show the same name: a failed one is not hidden by a passing one.
+    let status = |key: &str, state: &str| {
+        json!({"state": state, "key": key, "name": "Jenkins", "url": "https://ci.example.com",
+            "created_on": "2026-01-01T10:05:00Z", "updated_on": "2026-01-01T10:05:00Z"})
+    };
+    let text = shown_with(
+        &now_text(),
+        json!([
+            status("jenkins-a", "FAILED"),
+            status("jenkins-b", "SUCCESSFUL")
+        ]),
+        json!([]),
+    );
+
+    assert_eq!(
+        checks_line(&text),
+        "checks: failing (Jenkins failing, Jenkins passing)",
         "{text}"
     );
 }
