@@ -551,9 +551,13 @@ fn a_project_is_added_on_another_machine_with_its_folder_picked_there(cx: &mut T
         Some(shade_of(&shell, Some("server"), cx))
     );
     click(&shell, "add-project-machine-server", cx);
-    until(&shell, cx, "the server is shown", |cx| {
-        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    // The form's machine: the page behind and its machine stay (#1271).
+    until(&shell, cx, "the server is chosen", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.add_project_form().read(cx).machine() == Some("server")
+        })
     });
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
     click(&shell, "add-project-step-next", cx);
     // The folder is picked in the server's folders, opened one after the other, never typed.
     until(&shell, cx, "the server's home is listed", |cx| {
