@@ -1885,8 +1885,8 @@ on a real phone, by hand, and reported.
   `<caller>@<machine's key>`, `led`), kept while it leads a session there or did before it was
   detached; a handed session records the caller the same way, not `led`. Such a stand-in counts
   in the cap of 64 of its machine no more once every session that names it has ended. Its first
-  message says where a question goes as a local one's, then `While pc is not linked to this
-  machine, ask reaches the user's inbox instead.`; the launch's answer says what a local one's
+  message says where a question goes as a local one's, after `While pc is not linked to this
+  machine, ask reaches the user's inbox instead of the agent named below.`; the launch's answer says what a local one's
   says, with the place and its return, and a held launch says what follows once the user allows it
   there. Its pilot follows it on its own machine, a subscription of the source `session`
   naming the machine (`forge show`, `subscription.list`, the window's rail): `forge unsubscribe`
