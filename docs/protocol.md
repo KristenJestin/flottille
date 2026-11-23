@@ -1273,6 +1273,10 @@ agent does.
   configuration or data folder, the home folder itself, or a default without `<project>`), the
   reason first; a project's refusal is `invalid-config` and names `workspaces_root`. Nothing is
   written then.
+- A folder the daemon cannot make or write as its own user is `refused` (the default's, for each
+  project it would give, and a project's own), saying why: `/srv/nowhere/app: permission denied`.
+  It is found by making a probe folder there and removing it, never by reading permissions, and
+  the folder is never kept.
 
 Only the workspaces made afterwards follow a change; none is moved. `workspaces_folder.set` emits
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
