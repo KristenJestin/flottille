@@ -498,8 +498,7 @@ fn added_json(name: &str, role: Role, key: &PublicKey, members: &Members, by: &P
 
 /// What this machine proposes for itself when it pairs (`docs/remote.md`, "Pairing"): its host's
 /// name, an icon by what it is (a battery: a laptop; a screen connected: a desktop; neither: a
-/// server), and the role of a machine with agents signed in (`runner`) or with none
-/// (`controller`). The user changes them before confirming.
+/// server), and its role (`role_proposed`). The user changes them before confirming.
 pub(crate) fn proposed(daemon: &crate::daemon::Daemon) -> Value {
     let any = |folder: &str, holds: &dyn Fn(&std::path::Path) -> bool| {
         std::fs::read_dir(folder)
@@ -524,9 +523,11 @@ pub(crate) fn proposed(daemon: &crate::daemon::Daemon) -> Value {
     json!({"name": host_name(), "icon": icon, "role": role})
 }
 
-/// The role proposed for a machine of this icon, with agents signed in or not.
-fn role_proposed(_icon: flottille_link::Icon, agents: bool) -> Role {
-    if agents {
+/// The role proposed for a machine of this icon, with agents signed in or not: a machine with
+/// no screen is where agents run, and they are signed in later, so it is a `runner` either way; a
+/// desktop or a laptop is one with agents signed in, a `controller` without.
+fn role_proposed(icon: flottille_link::Icon, agents: bool) -> Role {
+    if agents || icon == flottille_link::Icon::Server {
         Role::Runner
     } else {
         Role::Controller

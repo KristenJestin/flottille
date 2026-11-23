@@ -683,7 +683,13 @@ fn the_name_icon_and_role_proposed_are_this_machines_own() {
         ["desktop", "laptop", "server"].contains(&proposed["icon"].as_str().unwrap()),
         "{proposed}"
     );
-    assert_eq!(proposed["role"], "controller", "{proposed}");
+    // A machine with no screen is a runner without agents signed in, any other a controller.
+    let role = if proposed["icon"] == "server" {
+        "runner"
+    } else {
+        "controller"
+    };
+    assert_eq!(proposed["role"], role, "{proposed}");
     // Paired with nothing given, the device is what was proposed.
     let output = pc
         .user
@@ -697,7 +703,7 @@ fn the_name_icon_and_role_proposed_are_this_machines_own() {
     let this = &members["members"][0];
     assert_eq!(this["name"], proposed["name"]);
     assert_eq!(this["icon"], proposed["icon"]);
-    assert_eq!(this["role"], "controller");
+    assert_eq!(this["role"], role);
     assert_eq!(this["added_by"], "the hub");
     assert_eq!(this["colour"], json!(Colour::of(&pc.device().public())));
 }
