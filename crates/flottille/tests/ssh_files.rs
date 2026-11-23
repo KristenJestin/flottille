@@ -611,3 +611,137 @@ fn the_agent_is_lent_to_no_push_where_landlock_is_absent() {
         "{report}"
     );
 }
+
+/// Whether the real `ssh` client is on the `PATH`: the tests of #1302 run it, never a stand-in,
+/// since a stand-in reads no configuration as OpenSSH does and so misses what it refuses.
+fn ssh_client() -> bool {
+    let found = std::process::Command::new("ssh")
+        .arg("-V")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !found {
+        eprintln!(
+            "skipped: no ssh client on the PATH, and only the real one reads its configuration"
+        );
+    }
+    found
+}
+
+/// The session of a root agent in Full, its home's `~/.ssh` empty: what `ssh` reads there adds
+/// nothing to the machine's own `/etc/ssh/ssh_config` and what it includes.
+fn session_with_empty_ssh(user: &User) -> (Mcp, PathBuf) {
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
+    session(user)
+}
+
+#[test]
+fn a_run_s_ssh_reads_the_root_owned_system_config() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // The machine's configuration is root's, and so are the fragments it includes: in the run's
+    // namespace they were owned by no one ssh knows, and it refused them (#1302). What ssh says
+    // is not looked at, only whether it read its configuration.
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, place) = session_with_empty_ssh(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        "import subprocess\n\
+         out['ssh'] = subprocess.run(['ssh', '-G', 'example.invalid'],\n\
+         \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n",
+    );
+
+    assert_eq!(out["ssh"], 0, "{out}");
+}
+
+#[test]
+fn a_run_fetches_from_an_ssh_remote_with_a_root_owned_system_config() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // The real git and ssh, to a host that does not resolve: they get as far as the network,
+    // past the configuration that stopped them before (#1302).
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, place) = session_with_empty_ssh(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        "import subprocess\n\
+         for name, line in [('ls-remote', ['git', 'ls-remote', 'ssh://nohost.invalid/x']),\n\
+         \x20   ('fetch', ['git', 'fetch', 'ssh://nohost.invalid/x'])]:\n\
+         \x20   said = subprocess.run(line, capture_output=True, text=True).stderr\n\
+         \x20   out[name] = 'refused' if 'Bad owner or permissions' in said else \\\n\
+         \x20       'unresolved' if 'nohost.invalid' in said and 'resolve' in said else said[-500:]\n",
+    );
+
+    assert_eq!(out["ls-remote"], "unresolved", "{out}");
+    assert_eq!(out["fetch"], "unresolved", "{out}");
+}
+
+#[test]
+fn a_run_still_cannot_read_an_ssh_setting_it_can_write() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // A root-owned file ssh includes is the run's own in its namespace, as its owner: never one
+    // it may change, by a write, a rename onto it, its mode or an unmount. `~/.ssh` stays
+    // read-only. The daemon is told the machine's configuration is a file of the test's that
+    // includes the machine's own, so that one root-owned file is always given.
+    let root_owned = PathBuf::from("/etc/ssh/ssh_config");
+    if !std::fs::metadata(&root_owned).is_ok_and(|m| m.is_file()) {
+        eprintln!("skipped: no /etc/ssh/ssh_config on this machine");
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    ssh_config(&user, "Host forge.invalid\n  User git\n");
+    std::fs::create_dir_all(user.path("system")).unwrap();
+    let system = user.path("system/ssh_config");
+    std::fs::write(&system, "Include /etc/ssh/ssh_config\n").unwrap();
+    let before = std::fs::read(&root_owned).unwrap();
+    let user = user.with_env("FLOTTILLE_TEST_SSH_SYSTEM_CONFIG", system.to_str().unwrap());
+    let (mcp, place) = session(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        &format!(
+            "import ctypes, subprocess\n\
+             libc = ctypes.CDLL(None, use_errno=True)\n\
+             def unmount(path):\n\
+             \x20   def action():\n\
+             \x20       if libc.umount2(path.encode(), 2) != 0:\n\
+             \x20           e = ctypes.get_errno()\n\
+             \x20           raise OSError(e, os.strerror(e))\n\
+             \x20   return action\n\
+             target = {root_owned}\n\
+             open('planted', 'w').write('ProxyCommand sh -c planted\\n')\n\
+             attempt('write', write(target))\n\
+             attempt('replaced', lambda: os.replace('planted', target))\n\
+             attempt('mode', lambda: os.chmod(target, 0o666))\n\
+             attempt('unmounted', unmount(target))\n\
+             attempt('config', write({ssh} + '/config'))\n\
+             out['owner'] = os.stat(target).st_uid == os.getuid()\n\
+             out['ssh'] = subprocess.run(['ssh', '-G', '-F', {system}, 'example.invalid'],\n\
+             \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n\
+             out['planted'] = 'planted' in open(target).read()\n",
+            root_owned = py(&root_owned),
+            ssh = py(&user.path("home/.ssh")),
+            system = py(&system),
+        ),
+    );
+
+    for name in ["write", "replaced", "mode", "unmounted", "config"] {
+        assert_ne!(out[name], "done", "{name}: {out}");
+    }
+    assert_eq!(out["owner"], true, "{out}");
+    assert_eq!(out["ssh"], 0, "{out}");
+    assert_eq!(out["planted"], false, "{out}");
+    assert_eq!(std::fs::read(&root_owned).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(user.path("home/.ssh/config")).unwrap(),
+        "Host forge.invalid\n  User git\n"
+    );
+}
