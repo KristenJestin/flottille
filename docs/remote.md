@@ -657,8 +657,21 @@ keeps following it, and its Settings are as they were left, then read again. The
 page says it is reading that machine (its own skeletons, in the pane). A machine that does not
 answer within the window's limit (30 s) is said on its page only, `server does not answer`, a
 line above it that folds away once it answers or another page is shown; the rest of the window is
-untouched and nothing goes back to another machine. Each request is still signed for its machine
-alone.
+untouched and nothing goes back to another machine; only that machine's answers count, never its
+link's own words (cut, made again). Each request is still signed for its machine alone.
+
+Every page asks its own machine, whichever machine's page is shown when it asks: a session's page
+and its composer take the actions of their session's machine when they are made, so the kept page
+of another machine's session gets its pictures there while it is hidden; a row's Rename goes to its
+session's machine. Add project's choice of machine is the form's own: the project is added there,
+and the page behind stays shown, its machine in front. Back and Forward return to the page of the
+machine it was a page of (Settings, a project's settings and a spec are each machine's own). What a
+machine answers acts on its own pages only: a project it removed leaves its copy, never this
+machine's list, and a session started from its project's page opens, its row in the list at once.
+The link of a project's page of another machine lives while a project's page of that machine is
+shown, its events filling that machine's pages; left, it ends, and the page coming back reads
+again. A machine removed from the user's lets go of everything the window held of it. Another
+machine's Settings chosen in the picker enter as a page that shows up, staggered.
 
 ## Roles
 
