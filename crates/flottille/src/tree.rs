@@ -862,11 +862,11 @@ pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
         let guide = match agent.led {
             true => format!(
                 "\n\n{WHERE_QUESTIONS_GO} this session is led by agent {caller} of {machine}: \
-                 what you need answered goes through ask, which reaches it while {machine} is \
-                 linked to this machine and the user's inbox while it is not, and its answer \
-                 comes as [flottille:session]; the user may also write to you directly. A \
-                 question left in a report or in your last message is a follow-up, not a wait: \
-                 nobody is told to answer it."
+                 what you need answered goes through ask, which reaches it, and its answer comes \
+                 as [flottille:session]; the user may also write to you directly. A question \
+                 left in a report or in your last message is a follow-up, not a wait: nobody is \
+                 told to answer it.\n\nWhile {machine} is not linked to this machine, ask \
+                 reaches the user's inbox instead."
             ),
             false => String::new(),
         };
@@ -1180,8 +1180,6 @@ pub fn grant_leave(daemon: &Daemon, writer: &str, session: &str, request: u64) {
 
 /// What follows the sender's name on the first line of a message `session_send` delivers.
 pub const SESSION_WROTE: &str = " wrote to this session:";
-/// How the reason of a session its pilot ended starts.
-pub const ENDED_BY_ITS_PILOT: &str = "ended by the session that led it";
 
 /// `session_send`: a message to another session of the caller's project, once the gate let it
 /// through (`Relation`), delivered as `session` under a line naming the sender: an agent's words, never the user's.
@@ -2686,18 +2684,18 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         _ => format!("ended: {reason}"),
     };
     crate::subscriptions::followed_ended(daemon, &agent, &why);
-    // Its pilot on another machine is told, unless it ended it.
-    if crate::across::remote_led(daemon, &agent)
-        && !reason.starts_with(ENDED_BY_ITS_PILOT)
-        && reason != ITS_PILOT_ENDED
-    {
+    // Its pilot on another machine is told, as one here is, unless it ended with its pilot.
+    if crate::across::remote_led(daemon, &agent) && reason != ITS_PILOT_ENDED {
         crate::across::tell(
             daemon,
             id,
             crate::subscriptions::TURN_ENDED,
-            &format!(
-                "Session {} {why}. Your following of it is over.",
-                named(&agent)
+            // As the wake of a session led here says it.
+            &crate::subscriptions::wake_body(
+                daemon,
+                &agent,
+                &format!("{why}. Your following of it is over."),
+                None,
             ),
             approval::BETWEEN_TURNS,
             false,
