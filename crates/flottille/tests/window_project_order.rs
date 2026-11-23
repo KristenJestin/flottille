@@ -989,6 +989,11 @@ fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut Test
     let id = group_id(&shell, "Work", cx);
     drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["alpha"]));
+    assert!(
+        kept(&user)["groups"].as_array().is_none_or(Vec::is_empty),
+        "nothing reached the daemon while the connection is held: {}",
+        kept(&user)
+    );
     relay.drop_connections();
 
     // A second by step, so that the wait before the asking again is over.
