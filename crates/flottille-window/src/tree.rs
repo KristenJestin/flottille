@@ -692,6 +692,24 @@ pub struct Arranged {
     pub loose: Vec<Entity<ProjectNode>>,
 }
 
+/// The place the list says a row was dropped at, among the rows of `group` once the row has left
+/// its own, as a place among the rows the arrangement holds: the rows still folding away
+/// (`going`) are drawn, and counted by the list, but are not the arrangement's.
+fn counted(
+    drawn: &[(String, Option<String>)],
+    going: &HashSet<String>,
+    moved: &str,
+    group: Option<&str>,
+    index: usize,
+) -> usize {
+    drawn
+        .iter()
+        .filter(|(key, place)| key != moved && place.as_deref() == group)
+        .take(index)
+        .filter(|(key, _)| !going.contains(key))
+        .count()
+}
+
 impl Sidebar {
     /// The user's list: the groups and the rows outside any, dragged to their place. The rows
     /// are the listing's items (one that comes unfolds, one that goes folds away), the list as a
@@ -761,6 +779,21 @@ impl Sidebar {
             }
         }
         self.drawn = order.clone();
+        // The list counts the rows that are still folding away; the arrangement does not.
+        let arranged: HashSet<String> = self
+            .arranged
+            .groups
+            .iter()
+            .flat_map(|group| group.rows.iter())
+            .chain(&self.arranged.loose)
+            .map(|node| name(node))
+            .collect();
+        let going: HashSet<String> = order
+            .iter()
+            .filter(|(key, _)| !arranged.contains(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let drawn = order.clone();
         if self.opening.is_none() && !order.is_empty() {
             self.opening = Some(order.iter().map(|(key, _)| key.clone()).collect());
         }
@@ -792,7 +825,9 @@ impl Sidebar {
         let (moved, groups, toggled) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
         let list = list
             .on_move_row(move |row, window, cx| {
-                let (name, group, index) = (row.row.to_string(), row.group.clone(), row.index);
+                let name = row.row.to_string();
+                let group = row.group.clone();
+                let index = counted(&drawn, &going, &name, group.as_deref(), row.index);
                 moved
                     .update(cx, |shell, cx| {
                         shell.project_moved(&name, group.as_deref(), index, window, cx)
