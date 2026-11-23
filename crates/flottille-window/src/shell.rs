@@ -2072,8 +2072,10 @@ impl Shell {
         page.update(cx, |page, cx| page.set_providers(&providers, cx));
         self.chose_on(&page, id, cx);
         self.session_page = Some(page.clone());
-        // Another machine's, it is kept, following its session: one a machine.
+        // Another machine's, it enters staggered, as a page that shows up, and it is kept,
+        // following its session: one a machine.
         if agent != *id {
+            page.update(cx, |page, cx| page.arrive(cx));
             let machine = self.machine_of(&Selection::Session(id.clone()), cx);
             let same: Vec<String> = self
                 .kept_pages

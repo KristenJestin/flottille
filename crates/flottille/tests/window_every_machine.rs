@@ -669,7 +669,7 @@ fn the_side_panel_of_another_machine_s_session_never_says_this_pc(cx: &mut TestA
     settle(&shell, cx);
     // Its Workspace is read: the place of the session says where it is.
     until(&shell, cx, "the side panel's Workspace is read", |cx| {
-        present(cx, "rail-workspace") && !present(cx, "rail-workspace-skeleton")
+        present(cx, "rail-workspace-read")
     });
     settle(&shell, cx);
     let said = cx.update(|window, _| {

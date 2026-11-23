@@ -1253,7 +1253,7 @@ impl SessionPage {
 
     /// [`SessionPage::select`], for the window's history going back to a place: it does not
     /// record it again.
-    /// Opened by a switch to the machine it runs on: its header, its conversation and its
+    /// Opened from the row of another machine's session: its header, its conversation and its
     /// composer enter staggered, as a page that shows up.
     pub fn arrive(&mut self, cx: &mut Context<Self>) {
         if !self.arrived {
@@ -8923,6 +8923,7 @@ impl Render for SessionRail {
                 !self.place_known,
                 workspace_skeleton(),
                 div()
+                    .id("rail-workspace-read")
                     .flex()
                     .flex_col()
                     .child(presence(

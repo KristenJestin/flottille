@@ -193,7 +193,7 @@ fn open_rail<'a>(user: &User, lead: &str, cx: &'a mut TestAppContext) -> &'a mut
             let _ = session_page(&shell, cx);
             present(cx, "rail-ticket")
                 && present(cx, "rail-pull-api")
-                && !present(cx, "rail-workspace-skeleton")
+                && present(cx, "rail-workspace-read")
         },
     );
     settle(cx);
@@ -378,7 +378,7 @@ fn open_session<'a>(
     cx.update(|window, cx| window.click(session_id(id), cx));
     until(&shell, cx, "the rail's facts", |cx| {
         let _ = session_page(&shell, cx);
-        !present(cx, "rail-workspace-skeleton") && present(cx, "rail-workspace")
+        present(cx, "rail-workspace-read")
     });
     settle(cx);
     (shell, cx)
