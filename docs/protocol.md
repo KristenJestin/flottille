@@ -1328,7 +1328,18 @@ pictures decoded and written off the runtime's threads.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded).
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). The user's
+  arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
+  arrangement writes (a fold or a lead never does, so a window that only folds a project cannot
+  erase what another made): `{"order": [<name>], "groups": [{"id", "name", "open", "projects":
+  [<name>]}]}`, `order` the names of the projects outside any group in the order the user put
+  them, `groups` in order, each with the projects it holds. A project neither names is at the end
+  of the list, outside any group; a name that is no project now (a project of a machine that is
+  not reached) is not drawn and keeps its place for when it is back. A window reads it when it
+  opens, and at each change it reads it again (`window.get`), applies the change to that copy and
+  writes the whole (`window.set`), so that a group another window made meanwhile is not erased; the
+  answer is what the window shows from then on. A window that makes no change does not see
+  another's until it is opened again (there is no event for it yet).
 - `window.set {key, value}` keeps one key (`null` forgets it) and answers `{}`.
 
 The pictures of a draft are files of the daemon's state folder (`drafts/`, mode 0700, one folder by

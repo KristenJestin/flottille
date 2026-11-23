@@ -61,6 +61,8 @@ mod window_programs;
 mod window_project_images;
 #[path = "../window_project_machines.rs"]
 mod window_project_machines;
+#[path = "../window_project_order.rs"]
+mod window_project_order;
 #[path = "../window_project_page.rs"]
 mod window_project_page;
 #[path = "../window_project_sessions.rs"]

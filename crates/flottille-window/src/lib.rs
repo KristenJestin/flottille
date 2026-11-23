@@ -5,6 +5,7 @@
 pub mod about;
 pub mod actions;
 pub mod add_project;
+pub mod arrange;
 pub mod ask_dock;
 pub mod attachments;
 pub mod check;
@@ -20,6 +21,7 @@ pub mod end_led;
 pub mod extensions;
 pub mod findings;
 pub mod glyphs;
+pub mod group_name;
 pub mod history;
 pub mod instance;
 pub mod items;
