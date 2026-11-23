@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
+use crate::arrange::{self, Arrangement, Change};
 use crate::commands::CommandInfo;
 use crate::kept::{Draft, DraftKey, Written};
 use crate::link::{Conn, Connect, Sign, Update};
@@ -267,6 +268,12 @@ pub enum Command {
     WindowSet {
         key: String,
         value: Value,
+    },
+    /// Keeps a change of the user's arrangement of the projects: the daemon's arrangement is
+    /// read, the change applied to it and the whole written (`window.get`, `window.set`), so
+    /// that what another window arranged meanwhile stays.
+    ArrangementChange {
+        change: Change,
     },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
@@ -586,6 +593,13 @@ pub enum Command {
         project: Option<String>,
         place: Option<String>,
         path: Option<String>,
+    },
+    /// Where this machine makes the projects of other machines' launches
+    /// (`travelled_folder.show`).
+    TravelledFolderRead,
+    /// Keeps it (`travelled_folder.set`): the user's folder, or none for the data folder.
+    TravelledFolderSet {
+        folder: Option<String>,
     },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
@@ -1187,9 +1201,17 @@ pub enum Outcome {
         key: DraftKey,
         result: Written,
     },
-    /// How the write of a value of the window's state ended, with the value.
+    /// How the write of a value of the window's state ended, with its key and the value.
     WindowKept {
+        key: String,
         value: Value,
+        result: Written,
+    },
+    /// How the keeping of a change of the arrangement ended, with the arrangement the daemon
+    /// holds then (none when it could not be read).
+    ArrangementKept {
+        change: Change,
+        arrangement: Option<Arrangement>,
         result: Written,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
@@ -1238,6 +1260,12 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// Where this machine makes the projects of other machines' launches, after a read
+    /// (`written` false) or a choice.
+    TravelledFolder {
+        written: bool,
+        shown: Result<crate::travelled_folder::Shown, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -1584,7 +1612,10 @@ impl Actions {
     pub fn send(&self, command: Command) {
         if matches!(
             command,
-            Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. }
+            Command::DraftRead { .. }
+                | Command::DraftWrite { .. }
+                | Command::WindowSet { .. }
+                | Command::ArrangementChange { .. }
         ) {
             let _ = self.keeper.send(Keep::Do(command));
             return;
@@ -1783,7 +1814,41 @@ fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update
                     params,
                     bounds.quick,
                 ));
-                Outcome::WindowKept { value, result }
+                Outcome::WindowKept { key, value, result }
+            }
+            Command::ArrangementChange { change } => {
+                let read = coded(&connect, &mut conn, "window.get", json!({}), bounds.quick);
+                match read {
+                    Ok(Ok(state)) => {
+                        let mut arrangement = Arrangement::of(&state["state"][arrange::KEY]);
+                        let before = arrangement.clone();
+                        arrangement.apply(&change);
+                        // What the change does not change is not written.
+                        let result = match arrangement == before {
+                            true => Written::Kept,
+                            false => written(coded(
+                                &connect,
+                                &mut conn,
+                                "window.set",
+                                json!({"key": arrange::KEY, "value": arrangement.to_json()}),
+                                bounds.quick,
+                            )),
+                        };
+                        Outcome::ArrangementKept {
+                            change,
+                            arrangement: Some(arrangement),
+                            result,
+                        }
+                    }
+                    other => Outcome::ArrangementKept {
+                        change,
+                        arrangement: None,
+                        result: match other {
+                            Ok(Err(refused)) => written(Ok(Err(refused))),
+                            _ => Written::Retry,
+                        },
+                    },
+                }
             }
             _ => unreachable!("only what the window keeps is sent to the keeper"),
         };
@@ -2235,7 +2300,10 @@ fn sign_in_step(
 fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Bounds) -> Outcome {
     match command {
         Command::Details(_) => unreachable!("the details have their own thread"),
-        Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. } => {
+        Command::DraftRead { .. }
+        | Command::DraftWrite { .. }
+        | Command::WindowSet { .. }
+        | Command::ArrangementChange { .. } => {
             unreachable!("what the window keeps has its own thread")
         }
         Command::Start {
@@ -2953,6 +3021,29 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                     .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
                 written: true,
                 project,
+            }
+        }
+        Command::TravelledFolderRead => {
+            let shown = ask_alone(connect, "travelled_folder.show", json!({}), bounds.quick);
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::TravelledFolderSet { folder } => {
+            let shown = ask_alone(
+                connect,
+                "travelled_folder.set",
+                json!({"folder": folder}),
+                bounds.quick,
+            );
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: true,
             }
         }
         Command::RulesWrite { project, text } => {

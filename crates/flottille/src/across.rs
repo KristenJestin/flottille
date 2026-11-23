@@ -110,6 +110,62 @@ fn serving(remote: &Remote) -> Result<Arc<Daemon>, Refused> {
         .ok_or_else(|| Refused::Now("the daemon is stopping".to_owned()))
 }
 
+/// Whether a test plays a machine slow to record what its agent waits for once another machine
+/// answered its call: in a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE` names exists.
+fn playing_slow_call() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_SLOW_CALL_FILE")
+            .is_some_and(|file| std::path::Path::new(&file).exists())
+}
+
+/// The calls of this machine's agents sent to another machine whose answer is not back yet, by
+/// that machine's key and the caller, each with how many: the answer of a request held there may
+/// come before the call's own answer, which says what is awaited.
+#[derive(Default)]
+pub(crate) struct Calling(Mutex<BTreeMap<(String, String), usize>>);
+
+impl Calling {
+    fn sent(remote: &Arc<Remote>, machine: &str, caller: &str) -> Sent {
+        let key = (machine.to_owned(), caller.to_owned());
+        *remote
+            .calling
+            .0
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default() += 1;
+        Sent {
+            remote: remote.clone(),
+            key,
+        }
+    }
+
+    fn any(&self, machine: &str, caller: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .contains_key(&(machine.to_owned(), caller.to_owned()))
+    }
+}
+
+/// A call of [`Calling`], until its answer was taken, or it was given up.
+struct Sent {
+    remote: Arc<Remote>,
+    key: (String, String),
+}
+
+impl Drop for Sent {
+    fn drop(&mut self) {
+        let mut calling = self.remote.calling.0.lock().unwrap();
+        if let Some(count) = calling.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                calling.remove(&self.key);
+            }
+        }
+    }
+}
+
 /// The machines whose kept messages are being sent now, each with whether more were kept since.
 static SENDING: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
 
@@ -416,9 +472,35 @@ pub(crate) fn tell(
     let Some(launch) = launch_here(daemon, agent) else {
         return false;
     };
+    tell_with(daemon, &launch, kind, body, urgency, back, ended);
+    true
+}
+
+/// Tells the agent of another machine that asked `launch`, which never started here: a delivery
+/// of `kind` that ends it there, kept until that machine takes it.
+pub(crate) fn tell_of(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    kind: &str,
+    body: &str,
+    urgency: &str,
+    ended: bool,
+) {
+    tell_with(daemon, launch, kind, body, urgency, false, ended);
+}
+
+fn tell_with(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    kind: &str,
+    body: &str,
+    urgency: &str,
+    back: bool,
+    ended: bool,
+) {
     // A session handed to the user is theirs: the agent that started it is told nothing.
     if launch.kind == "handed" {
-        return true;
+        return;
     }
     let id = format!(
         "{kind}-{}",
@@ -467,7 +549,6 @@ pub(crate) fn tell(
             dropped(daemon, &outgoing, None, Some(&why)),
         );
     }
-    true
 }
 
 fn outgoing(
@@ -772,15 +853,15 @@ pub(crate) fn drop_old(daemon: &Daemon) {
     let before = now_ms().saturating_sub(KEPT_FOR.as_millis() as u64);
     // The callers of other machines stood in for here: those of a machine that left the members,
     // and those idle as long as a message is kept, with what they were let do.
+    // A member list that cannot be read is no list of nobody: nothing leaves the members by it,
+    // and the idle go all the same.
     if let Ok(remote) = crate::link::remote_of(daemon) {
-        let machines: Vec<String> = remote
+        let machines: Option<Vec<String>> = remote
             .trusted_keys()
-            .iter()
-            .map(|key| hex(key.as_bytes()))
-            .collect();
+            .map(|keys| keys.iter().map(|key| hex(key.as_bytes())).collect());
         let _ = daemon.write(|store| {
             store
-                .forget_stand_ins(&machines, before)
+                .forget_stand_ins(machines.as_deref(), before)
                 .map(|_| ((), None))
         });
     }
@@ -856,7 +937,7 @@ fn delivered(
             .into());
     }
     if deliver.launch.starts_with("request-") {
-        return delivered_answer(daemon, &machine, &name, &deliver);
+        return delivered_answer(daemon, remote, &machine, &name, &deliver);
     }
     let launch = daemon
         .read(|store| store.launches("out", Some(&machine), LaunchFilter::Named(&deliver.launch)))
@@ -1276,6 +1357,9 @@ pub(crate) fn launched(daemon: &Daemon) -> Result<Value, String> {
                 "kind": launch.kind,
                 "project": launch.project,
                 "title": launch.asked["title"],
+                // The project it runs in there, as that machine answered, and whether that
+                // machine made it for this launch.
+                "there": launch.asked["there"],
                 "agent": launch.agent,
                 "state": launch.state,
                 "request": launch.request,
@@ -1525,14 +1609,27 @@ pub(crate) fn stand_in_name(agent: &Agent) -> Option<String> {
     )
 }
 
+/// The project of a caller whose own this machine has not, named as the caller names it, in the
+/// place that does not exist (`nowhere`).
+fn project_nowhere(nowhere: &std::path::Path, name: &str) -> flottille_core::project::Project {
+    // Made under a fixed name: the folders `Project::new` builds from its name never hold the
+    // caller's word, which another machine chose.
+    let mut project = flottille_core::project::Project::new(
+        "stand-in",
+        nowhere.to_path_buf(),
+        Vec::new(),
+        nowhere,
+    );
+    project.name = name.to_owned();
+    project
+}
+
 /// The grant of a caller of another machine stood in for here: the tools of the tree that
 /// address a session, in its project here when this machine has one of that name, in a place
 /// that does not exist otherwise (it reaches no file).
 pub(crate) fn stand_in_grant(daemon: &Daemon, agent: &Agent) -> crate::mcp::Grant {
-    let project = crate::projects::load_project(daemon, &agent.project).unwrap_or_else(|_| {
-        let nowhere = no_place(daemon);
-        flottille_core::project::Project::new(&agent.project, nowhere.clone(), Vec::new(), &nowhere)
-    });
+    let project = crate::projects::load_project(daemon, &agent.project)
+        .unwrap_or_else(|_| project_nowhere(&no_place(daemon), &agent.project));
     crate::mcp::Grant {
         agent: agent.id.clone(),
         epoch: agent.epoch,
@@ -1725,10 +1822,18 @@ pub(crate) async fn forward(
         "" => format!("the session agent {}", away.session.id),
         title => format!("the session \"{title}\" (agent {})", away.session.id),
     };
+    // A caller of another machine stood in for here reaches this machine's sessions only: no
+    // call goes out on its behalf.
+    if is_stand_in(&caller.id) {
+        return Outcome::Refused(format!(
+            "refused: {session} runs on {name}: a caller of another machine reaches only the \
+             sessions of this machine, and calls those of {name} from its own machine"
+        ));
+    }
     let link = crate::link::remote_of(daemon)
         .map_err(|failure| failure.message)
-        .and_then(|remote| remote.link_to(name).map(|(link, _)| link));
-    let link = match link {
+        .and_then(|remote| remote.link_to(name).map(|(link, _)| (remote, link)));
+    let (remote, link) = match link {
         Ok(link) => link,
         Err(why) => {
             return Outcome::Refused(format!(
@@ -1762,6 +1867,9 @@ pub(crate) async fn forward(
         mode: mode.to_owned(),
         switch,
     };
+    // Until what it awaits is recorded, or the call is given up: an answer that comes before is
+    // sent again, one that comes after none is refused.
+    let _sent = Calling::sent(&remote, &away.machine, &caller.id);
     match link
         .send(&Message::Machine(MachineMessage::Call(Box::new(call))))
         .await
@@ -1773,6 +1881,9 @@ pub(crate) async fn forward(
         )),
         Ok(answer) => {
             let text = answer["text"].as_str().unwrap_or_default().to_owned();
+            while playing_slow_call() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             if let Some(number) = answer["request"].as_u64() {
                 let _ = daemon.write(|store| {
                     store
@@ -1831,9 +1942,11 @@ pub(crate) fn answer_back(daemon: &Arc<Daemon>, request: &Request, body: &str) -
 
 /// The answer of a request of another machine a caller of this one waited for (`forward`),
 /// `launch` naming it as `request-<n>`: stored for that agent as its `approval` delivery, once;
-/// refused when that agent waits for no such answer of that machine.
+/// refused when that agent waits for no such answer of that machine, for now while a call of it
+/// to that machine is not answered yet.
 fn delivered_answer(
     daemon: &Arc<Daemon>,
+    remote: &Remote,
     machine: &str,
     name: &str,
     deliver: &Deliver,
@@ -1866,6 +1979,8 @@ fn delivered_answer(
     {
         return Ok(json!({}));
     }
+    // Looked at before what is awaited: a call answered meanwhile has recorded its wait.
+    let calling = remote.calling.any(machine, &deliver.agent);
     let awaited = daemon
         .write(|store| {
             store
@@ -1873,12 +1988,19 @@ fn delivered_answer(
                 .map(|taken| (taken, None))
         })
         .map_err(|error| Refused::Now(error.to_string()))?;
+    // The caller records what it awaits once the call's answer is back: an answer that came
+    // first is sent again. Any other is refused for good, so that it holds back nothing kept
+    // behind it on its machine.
     if !awaited {
-        return Err(format!(
-            "agent {} of this machine waits for no answer of request #{number} of {name}",
-            deliver.agent.chars().take(64).collect::<String>()
-        )
-        .into());
+        let agent = deliver.agent.chars().take(64).collect::<String>();
+        let why = format!(
+            "agent {agent} of this machine waits for no answer of request #{number} of {name}"
+        );
+        return Err(if calling {
+            Refused::Now(format!("{why} yet"))
+        } else {
+            Refused::Never(why)
+        });
     }
     deliveries::deliver(
         daemon,
@@ -1910,6 +2032,27 @@ mod tests {
                 "agent_stop"
             ]
         );
+    }
+
+    #[test]
+    fn a_stand_in_s_project_path_stays_in_its_folder() {
+        // The caller's project name is the remote machine's word: whatever it holds, nothing built
+        // from it leaves the stand-in's own folder.
+        let nowhere = std::path::Path::new("/run/user/1000/flottille/stand-in-no-place");
+        for name in ["../../../etc", "a/../../b", "/etc/cron.d", "..", "app"] {
+            let project = project_nowhere(nowhere, name);
+            assert_eq!(project.folder, nowhere, "{name}");
+            assert!(project.workspaces_root.starts_with(nowhere), "{name}");
+            assert!(
+                !project
+                    .workspaces_root
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir),
+                "{name}: {}",
+                project.workspaces_root.display()
+            );
+            assert_eq!(project.name, name);
+        }
     }
 
     #[test]

@@ -39,6 +39,8 @@ mod remote_keys;
 mod remote_launch;
 #[path = "../remote_link.rs"]
 mod remote_link;
+#[path = "../remote_project_needs.rs"]
+mod remote_project_needs;
 #[path = "../remote_project_travels.rs"]
 mod remote_project_travels;
 #[path = "../remote_relay.rs"]
@@ -59,6 +61,8 @@ mod remote_uploads;
 mod ssh_agent;
 #[path = "../ssh_files.rs"]
 mod ssh_files;
+#[path = "../tree_parity.rs"]
+mod tree_parity;
 #[path = "../vault.rs"]
 mod vault;
 #[path = "../vault_ask.rs"]

@@ -559,7 +559,11 @@ fn last_known(
     // Allowed there, a held launch is told nothing more here: what it sent since says it runs.
     match launched.heard.as_deref() {
         None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
-        None => ("running".to_owned(), Some(AgentState::Running)),
+        // Nothing heard yet of a project made for it there: that machine is preparing it.
+        None => match &launched.making {
+            Some(project) => (format!("preparing {project}"), Some(AgentState::Running)),
+            None => ("running".to_owned(), Some(AgentState::Running)),
+        },
         Some("child-report") => ("reported".to_owned(), None),
         Some("child-failed") => ("failed".to_owned(), None),
         Some(_) => ("waiting".to_owned(), Some(AgentState::Waiting)),
@@ -2782,6 +2786,7 @@ mod tests {
             heard: heard.map(str::to_owned),
             heard_at: None,
             at: 1,
+            making: None,
         };
         let machine = |state: &str| crate::machines::Machine {
             name: "server".into(),

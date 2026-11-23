@@ -237,6 +237,11 @@ pub struct LaunchAsk {
     /// a machine launches, so a launch without it is a root's.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub depth: u32,
+    /// The files the project's setup copies that the caller's machine has, by their paths in the
+    /// project: their names only, never what they hold. The receiver asks the user for those it
+    /// lacks (`docs/remote.md`, "What travels").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied: Vec<String>,
 }
 
 fn is_zero(depth: &u32) -> bool {

@@ -1015,9 +1015,11 @@ pub fn session_of(
     caller: &Agent,
     asked: &SessionSend,
 ) -> Result<(Agent, Relation), Outcome> {
+    // A caller of another machine stood in for here runs nothing: it is no session.
     let found = daemon
         .read(|store| store.agent(&asked.session))
-        .map_err(failed)?;
+        .map_err(failed)?
+        .filter(|agent| !crate::across::is_stand_in(&agent.id));
     let id = &asked.session;
     let session = match found {
         None => {
@@ -1660,7 +1662,11 @@ enum Stopped {
 /// of another session, an unknown id or a session that ended. A session of another project is
 /// ended as one of the caller's: its own when it leads it, the user's to allow otherwise.
 fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome> {
-    let found = daemon.read(|store| store.agent(id)).map_err(failed)?;
+    // A caller of another machine stood in for here runs nothing: it is no agent to stop.
+    let found = daemon
+        .read(|store| store.agent(id))
+        .map_err(failed)?
+        .filter(|agent| !crate::across::is_stand_in(&agent.id));
     match found {
         None => Err(refused(format!(
             "refused: {id} names no agent: agent_stop ends one of your children or a session of \

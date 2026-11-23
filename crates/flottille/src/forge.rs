@@ -487,12 +487,7 @@ impl Pull {
                 Some("REVIEW_REQUIRED") => Some("review required"),
                 _ => None,
             },
-            checks: value["statusCheckRollup"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(check_of)
-                .collect(),
+            checks: rollup(value).into_iter().map(check_of).collect(),
             not_started: None,
             comments: comments("comments"),
             reviews: comments("reviews"),
@@ -522,6 +517,53 @@ impl Pull {
 pub(crate) fn is_bot(author: &Value) -> bool {
     let login = author["login"].as_str().unwrap_or_default();
     author["is_bot"] == true || login.starts_with("app/") || login.ends_with("[bot]")
+}
+
+/// The checks of a head, each counted once: its latest run (`latest`). Every read of a pull
+/// request's checks goes through it, so `forge show`, `forge merge` and the items never disagree.
+fn rollup(value: &Value) -> Vec<&Value> {
+    let started = |check: &&Value| {
+        ["startedAt", "createdAt"]
+            .iter()
+            .find_map(|key| check[*key].as_str().filter(|at| !at.starts_with("0001-")))
+            .and_then(crate::session_read::form)
+    };
+    let all = value["statusCheckRollup"].as_array().into_iter().flatten();
+    // A job is a check of its workflow, a commit status one of its own: the same name in two
+    // workflows, or as a status and a run, is two checks (as `forge checks` groups by workflow).
+    let key = |check: &&Value| match check["__typename"].as_str() {
+        Some("StatusContext") => format!("status\0{}", check["context"].as_str().unwrap_or("")),
+        _ => format!(
+            "{}\0{}",
+            check["workflowName"].as_str().unwrap_or(""),
+            check["name"].as_str().unwrap_or("")
+        ),
+    };
+    latest(all.collect(), key, started)
+}
+
+/// The latest run of each check, in the order the checks first appear: by its start, and of two
+/// that started together the one listed last. A run with no start (queued, not begun) is placed
+/// by the listing alone: it is the latest when listed after the other, so a re-run queued after a
+/// pass blocks, and a stale entry listed before the run that replaced it does not count. A run superseded by a newer one of the same check (run again, replaced, cancelled and
+/// started again) counts no more, whatever it said; the forges list them all for a head.
+pub(crate) fn latest<T>(
+    runs: Vec<T>,
+    check: impl Fn(&T) -> String,
+    started: impl Fn(&T) -> Option<u64>,
+) -> Vec<T> {
+    let mut kept: Vec<(String, Option<u64>, T)> = Vec::new();
+    for run in runs {
+        let (name, at) = (check(&run), started(&run));
+        match kept.iter_mut().find(|(other, ..)| *other == name) {
+            Some(newest) if at.is_none() || newest.1.is_none() || at >= newest.1 => {
+                *newest = (name, at, run)
+            }
+            Some(_) => {}
+            None => kept.push((name, at, run)),
+        }
+    }
+    kept.into_iter().map(|(.., run)| run).collect()
 }
 
 /// A check of `statusCheckRollup`: a check run (`status`, `conclusion`) or a commit status
@@ -3486,7 +3528,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 "--limit",
                 "50",
                 "--json",
-                "databaseId,headSha,conclusion,workflowName",
+                "databaseId,headSha,conclusion,workflowName,createdAt",
             ])
             .await
             {
@@ -3494,11 +3536,23 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 Err(why) => return Outcome::Failed(why),
             };
             let runs = runs.as_array().cloned().unwrap_or_default();
-            // The runs of the branch's last commit, the newest listed first.
+            // The runs of the branch's last commit, the newest listed first; of each workflow, its
+            // latest run alone, as the pull request's checks count them.
             let head = runs.first().and_then(|run| run["headSha"].as_str());
-            let failed: Vec<&Value> = runs
+            let of_head: Vec<&Value> = runs
                 .iter()
-                .filter(|run| run["headSha"].as_str() == head && run["conclusion"] == "failure")
+                .filter(|run| run["headSha"].as_str() == head)
+                .rev()
+                .collect();
+            let workflow = |run: &&Value| run["workflowName"].as_str().unwrap_or("").to_owned();
+            let created = |run: &&Value| {
+                run["createdAt"]
+                    .as_str()
+                    .and_then(crate::session_read::form)
+            };
+            let failed: Vec<&Value> = latest(of_head, workflow, created)
+                .into_iter()
+                .filter(|run| run["conclusion"] == "failure")
                 .collect();
             if failed.is_empty() {
                 return Outcome::Refused(format!(
@@ -4142,10 +4196,8 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
             .filter(|at| !at.starts_with("0001-"))
             .map(masked)
     };
-    value["statusCheckRollup"]
-        .as_array()
+    rollup(value)
         .into_iter()
-        .flatten()
         .map(|check| {
             let (name, state) = check_of(check);
             flottille_core::item::Check {
