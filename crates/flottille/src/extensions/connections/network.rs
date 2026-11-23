@@ -124,6 +124,13 @@ fn out_of_reach(landlock: i64) -> Result<(), String> {
     ))
 }
 
+/// The network recorded in the vault folder `vault`, once this host is known to keep a run out
+/// of the browser's reach (`out_of_reach`): checked each time one is used, not once when it was
+/// made.
+pub fn present(vault: &Path, _landlock: i64) -> Result<Option<Network>, String> {
+    Ok(found(vault))
+}
+
 /// The namespace recorded in the vault folder `vault`, while its holder runs.
 pub fn found(vault: &Path) -> Option<Network> {
     let text = std::fs::read_to_string(vault.join(RECORD)).ok()?;
@@ -340,6 +347,11 @@ pub fn daemons(sockets: &Path) -> Vec<u32> {
         .collect()
 }
 
+/// A connection to the socket at `path` that never waits for the daemon to accept it.
+fn connect_at_once(path: &Path) -> io::Result<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(path)
+}
+
 /// The pid of the process at the other end of `stream`, as the kernel recorded it.
 fn peer(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
@@ -395,5 +407,72 @@ mod tests {
         }
         assert!(out_of_reach(2).is_ok());
         assert!(out_of_reach(6).is_ok());
+    }
+
+    #[test]
+    fn a_network_made_is_used_only_where_a_run_stays_out_of_reach() {
+        // Not only when it is made: a network found again, or one a close makes, is used on a
+        // host whose Landlock is below its second ABI all the same without this check.
+        let vault = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let inode = |kind: &str| {
+            std::fs::metadata(format!("/proc/self/ns/{kind}"))
+                .unwrap()
+                .ino()
+        };
+        let started = crate::agents::start_time(me).unwrap();
+        std::fs::write(
+            vault.path().join(RECORD),
+            format!("{me} {} {} {started}\n", inode("user"), inode("net")),
+        )
+        .unwrap();
+        assert!(present(vault.path(), 1).is_err());
+        assert!(present(vault.path(), 0).is_err());
+        assert!(present(vault.path(), 2).unwrap().is_some());
+    }
+
+    fn listening(path: &Path) -> std::os::unix::net::UnixListener {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::net::UnixListener::bind(path).unwrap()
+    }
+
+    #[test]
+    fn a_socket_in_a_subfolder_is_a_browser_too() {
+        // `--namespace` may put a session's socket in a subfolder of the socket folder.
+        let sockets = tempfile::tempdir().unwrap();
+        let _top = listening(&sockets.path().join("default.sock"));
+        let _deep = listening(&sockets.path().join("other/default.sock"));
+        let _deeper = listening(&sockets.path().join("other/inner/x.sock"));
+        assert_eq!(daemons(sockets.path()).len(), 3);
+    }
+
+    #[test]
+    fn a_link_to_a_folder_is_not_followed_to_find_sockets() {
+        let sockets = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _there = listening(&elsewhere.path().join("x.sock"));
+        std::os::unix::fs::symlink(elsewhere.path(), sockets.path().join("link")).unwrap();
+        assert!(daemons(sockets.path()).is_empty());
+    }
+
+    #[test]
+    fn a_daemon_that_stops_accepting_does_not_hold_the_check_and_counts_as_outside() {
+        // Its backlog full, a blocking connect waits for ever: the check ends at once and fails
+        // closed, as a browser whose holder is unknown (pid 0), which no network holds.
+        let sockets = tempfile::tempdir().unwrap();
+        let path = sockets.path().join("default.sock");
+        let _listener = listening(&path);
+        let mut kept = Vec::new();
+        while let Ok(stream) = connect_at_once(&path) {
+            kept.push(stream);
+            assert!(kept.len() < 10_000, "the backlog never fills");
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let folder = sockets.path().to_owned();
+        std::thread::spawn(move || sender.send(daemons(&folder)));
+        let found = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the check is held by a daemon that does not accept");
+        assert_eq!(found, vec![0]);
     }
 }

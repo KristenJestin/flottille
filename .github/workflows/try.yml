@@ -1,0 +1,47 @@
+name: try
+
+# A worker's cargo command, run on a GitHub runner instead of the maintainer's machine.
+# gh-slot.sh pushes a throwaway snapshot of a worktree to try/<task>-<stamp>, with this file and
+# the command in .try-command; the branch is deleted once the run is read.
+on:
+  push:
+    branches: ["try/**"]
+
+jobs:
+  # Reads the dependencies the default branch's CI cached, never writes: the key and the profile
+  # must be that CI's, or every run compiles them all again (14 minutes instead of seconds).
+  # Flottille: the `v2-rust` / `verify` cache of `build-tests` and `test-selected` (line tables,
+  # key without the environment hash, as `test-selected` reads it). The kit: its `verify` job's.
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add rustfmt clippy
+      # mold as the default ld: links several times faster, with no flag that would change the cache.
+      - uses: rui314/setup-mold@v1
+      - name: The profile of the cache this repository's CI writes
+        if: github.event.repository.name == 'flottille'
+        run: echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ github.event.repository.name == 'flottille' && 'v2-rust' || 'v0-rust' }}
+          shared-key: verify
+          add-rust-environment-hash-key: ${{ github.event.repository.name != 'flottille' }}
+          save-if: false
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      # Only the fake programs the tests spawn (AGENTS.md): the command builds what it needs itself.
+      - name: Build the fakes
+        run: |
+          fakes=()
+          for crate in crates/*-fake-*; do [ -d "$crate" ] && fakes+=(-p "${crate#crates/}"); done
+          if [ "${#fakes[@]}" -gt 0 ]; then cargo build --locked "${fakes[@]}"; fi
+      # As ci.yml: the confined runs' tests need user namespaces, which the runner's AppArmor refuses.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Run the command
+        run: bash .try-command

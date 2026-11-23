@@ -407,6 +407,7 @@ fn network_namespace() -> Option<u64> {
 fn chrome_folders() -> Value {
     let mut folders = serde_json::Map::new();
     for name in [
+        "AGENT_BROWSER_SOCKET_DIR",
         "TMPDIR",
         "XDG_CONFIG_HOME",
         "XDG_CACHE_HOME",

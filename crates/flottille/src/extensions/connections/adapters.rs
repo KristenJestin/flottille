@@ -820,6 +820,11 @@ fn emptied(folder: &Path) {
     }
 }
 
+/// `emptied` the temporary folder of the vault folder `vault`, once the browsers it holds ended.
+fn emptied_once_ended(vault: &Path) {
+    emptied(&vault.join(TEMPORARY));
+}
+
 /// The network of the browser of the vault folder `vault`, found or made, for a command of
 /// agent-browser's (`program`, run in `folder`) to start in: why not where none can be made. A
 /// browser that answers on the socket folder from outside it (started by a server that ran
@@ -1730,5 +1735,39 @@ mod tests {
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "ab"));
         assert!(!same("", "a"));
+    }
+
+    #[test]
+    fn a_temporary_folder_that_is_a_link_is_never_emptied() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("kept"), "x").unwrap();
+        let link = base.path().join("tmp");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        emptied(&link);
+        assert!(real.join("kept").exists(), "the link was followed");
+    }
+
+    #[test]
+    fn a_profile_is_kept_while_a_browser_still_answers() {
+        // A close that timed out or did not run leaves its browser, and the profile it uses; and
+        // a close of one session leaves the others'.
+        let vault = tempfile::tempdir().unwrap();
+        let profile = vault
+            .path()
+            .join(TEMPORARY)
+            .join("agent-browser-chrome-live");
+        std::fs::create_dir_all(&profile).unwrap();
+        let sockets = vault.path().join(format!("{SOCKETS}abc"));
+        std::fs::create_dir_all(&sockets).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(sockets.join("other.sock")).unwrap();
+        emptied_once_ended(vault.path());
+        assert!(profile.exists(), "a live browser's profile was removed");
+        // Its socket left and nobody answering: a browser that crashed.
+        drop(listener);
+        emptied_once_ended(vault.path());
+        assert!(!profile.exists(), "a crashed browser's profile was kept");
+        assert!(vault.path().join(TEMPORARY).is_dir());
     }
 }

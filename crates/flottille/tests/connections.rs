@@ -7309,8 +7309,25 @@ fn login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set() {
             "--provider",
         ),
         (command(&["-p", "a-cloud"]), None, false, "-p"),
+        // Its plugin registry replaces Flottille's plugin, which runs with the vault's access;
+        // its namespace may put the browser's socket in a folder the network check never lists.
+        (
+            command(&["--plugins", "/tmp/a-registry.json"]),
+            None,
+            false,
+            "--plugins",
+        ),
+        (
+            command(&["--namespace", "other"]),
+            None,
+            false,
+            "--namespace",
+        ),
+        (command(&["--namespace=other"]), None, false, "--namespace"),
     ];
     for variable in [
+        "AGENT_BROWSER_PLUGINS",
+        "AGENT_BROWSER_NAMESPACE",
         "AGENT_BROWSER_PROFILE",
         "AGENT_BROWSER_ARGS",
         "AGENT_BROWSER_CDP",
@@ -7351,6 +7368,109 @@ fn login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set() {
         if of_the_daemon {
             assert!(said.contains("daemon"), "{named}: {said}");
         }
+        assert!(!said.contains(SETTING), "{named}: {said}");
+        assert!(logged(&user, "browser", "login").is_empty(), "{named}");
+        assert!(form(&user).is_none(), "{named}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(named), "{named}: {review}");
+        assert!(!review.to_string().contains(SETTING), "{named}: {review}");
+    }
+}
+
+#[test]
+fn a_connections_env_cannot_move_the_browsers_socket_profile_or_crash_dumps() {
+    // The connection's env is applied to the server's start, and an agent can propose that edit:
+    // the variables that say where agent-browser puts its socket and Chrome its profile and crash
+    // dumps are Flottille's, set last, so none reaches a folder runs reach.
+    let user = user();
+    let moved = user.path("elsewhere");
+    user.call(
+        "vault.set",
+        json!({"name": "browser-setting", "secret": moved.to_str().unwrap()}),
+    )
+    .unwrap();
+    let env: serde_json::Map<String, Value> = MOVING
+        .iter()
+        .map(|name| (name.to_string(), json!({"vault": "browser-setting"})))
+        .collect();
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"env": env}),
+    );
+    let (_, _mcp) = signed_up(&user);
+    let vault = vault_folder(&user);
+    let starts = || -> Vec<Value> {
+        logged(&user, "browser", "start")
+            .into_iter()
+            .filter(|line| !line["config"].is_null())
+            .collect()
+    };
+    eventually("the server started", || !starts().is_empty());
+    for line in starts() {
+        for name in [
+            "AGENT_BROWSER_SOCKET_DIR",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+        ] {
+            let folder = line["folders"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("no {name}: {line}"));
+            assert!(
+                Path::new(folder).starts_with(&vault) && Path::new(folder) != vault,
+                "{name} is outside the vault folder: {line}"
+            );
+        }
+        for name in ["CHROME_CONFIG_HOME", "BREAKPAD_DUMP_LOCATION"] {
+            assert!(line["folders"][name].is_null(), "{name} given: {line}");
+        }
+    }
+}
+
+/// The variables that move where agent-browser puts its socket and Chrome its profile, caches and
+/// crash dumps.
+const MOVING: [&str; 7] = [
+    "AGENT_BROWSER_SOCKET_DIR",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "CHROME_CONFIG_HOME",
+    "BREAKPAD_DUMP_LOCATION",
+];
+
+#[test]
+fn login_is_refused_while_the_connections_env_moves_the_browsers_folders() {
+    for named in MOVING {
+        let user = user();
+        user.call(
+            "vault.set",
+            json!({"name": "browser-setting", "secret": SETTING}),
+        )
+        .unwrap();
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"env": {named: {"vault": "browser-setting"}}}),
+        );
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        // The variable by its name, and never its value.
+        assert!(said.contains(named), "{named}: {said}");
+        assert!(said.contains("password"), "{named}: {said}");
         assert!(!said.contains(SETTING), "{named}: {said}");
         assert!(logged(&user, "browser", "login").is_empty(), "{named}");
         assert!(form(&user).is_none(), "{named}");
