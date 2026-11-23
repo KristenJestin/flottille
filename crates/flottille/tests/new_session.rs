@@ -282,3 +282,151 @@ fn the_provider_command_reads_and_sets_what_a_new_session_starts_on() {
         "{output:?}"
     );
 }
+
+// ── The mode a new session starts in (#1325) ─────────────────────────────────────────────────
+
+fn set_mode(user: &User, mode: &str) {
+    user.call("provider.set_new_session_mode", json!({"mode": mode}))
+        .unwrap();
+}
+
+fn default_mode(user: &User) -> Value {
+    user.call("provider.list", Value::Null).unwrap()["new_session_mode"].clone()
+}
+
+#[test]
+fn a_new_session_starts_in_the_default_mode() {
+    let user = user();
+    // Until the user chooses, Auto, as before.
+    assert_eq!(default_mode(&user), "auto");
+    assert_eq!(started(&user, json!({}))["gate_mode"], "auto");
+
+    for mode in ["ask", "full", "auto"] {
+        set_mode(&user, mode);
+        assert_eq!(default_mode(&user), mode);
+        assert_eq!(started(&user, json!({}))["gate_mode"], mode, "{mode}");
+    }
+
+    // What the session asks for itself (`flottille agent start --mode`, the composer's control)
+    // wins over the default.
+    set_mode(&user, "full");
+    assert_eq!(
+        started(&user, json!({"gate_mode": "ask"}))["gate_mode"],
+        "ask"
+    );
+    // A mode that is none is refused, and the default stays.
+    let (code, _) = user
+        .call("provider.set_new_session_mode", json!({"mode": "yolo"}))
+        .unwrap_err();
+    assert_eq!(code, "invalid-params");
+    assert_eq!(default_mode(&user), "full");
+}
+
+#[test]
+fn the_default_mode_is_kept_per_machine() {
+    let here = user();
+    let there = user();
+    // The choices beside it in the file are kept as the user wrote them.
+    set(&here, "opencode", Some("open/medium"), None);
+    set_mode(&here, "full");
+
+    let text = std::fs::read_to_string(here.path("config/flottille/providers.toml")).unwrap();
+    assert!(text.contains("new_session_mode = \"full\""), "{text}");
+    assert!(
+        text.contains("[new_session]\nprovider = \"opencode\""),
+        "{text}"
+    );
+    assert_eq!(default_mode(&here), "full");
+    // Another machine has its own.
+    assert_eq!(default_mode(&there), "auto");
+    set_mode(&there, "ask");
+    assert_eq!(default_mode(&here), "full");
+    assert_eq!(default_mode(&there), "ask");
+    assert_eq!(started(&here, json!({}))["gate_mode"], "full");
+    assert_eq!(started(&there, json!({}))["gate_mode"], "ask");
+    // Choosing the provider again, or clearing it, leaves the mode alone.
+    user_clear(&here);
+    assert_eq!(default_mode(&here), "full");
+    // Auto is what none says: the file does not keep it.
+    set_mode(&here, "auto");
+    let text = std::fs::read_to_string(here.path("config/flottille/providers.toml")).unwrap();
+    assert!(!text.contains("new_session_mode"), "{text}");
+}
+
+fn user_clear(user: &User) {
+    user.call("provider.set_new_session", json!({"provider": null}))
+        .unwrap();
+}
+
+#[test]
+fn a_child_still_follows_its_tree_s_mode() {
+    let user = user();
+    user.provider_script(
+        "claude",
+        json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"], "turns": [
+            {"when": "LEAD", "do": [
+                {"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
+                    "title": "other", "brief": "CHILD work"}}}
+            ]}
+        ]}),
+    );
+    // The tree's root starts in Ask; the default is Full by the time its child is launched.
+    set_mode(&user, "ask");
+    let lead = started(&user, json!({"message": "LEAD go"}))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    set_mode(&user, "full");
+    let mut child = None;
+    eventually("the child", || {
+        child = user.call("agent.list", Value::Null).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["parent"] == lead.as_str())
+            .cloned();
+        child.is_some()
+    });
+
+    let child = agent(&user, child.unwrap()["id"].as_str().unwrap());
+    assert_eq!(child["gate_mode"], "ask", "{child}");
+    // And a session the user starts next is in the default.
+    assert_eq!(started(&user, json!({}))["gate_mode"], "full");
+}
+
+#[test]
+fn the_provider_command_sets_the_mode_a_new_session_starts_in() {
+    let user = user();
+    let said = |args: &[&str]| {
+        let output = user.run(args);
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    assert!(said(&["provider", "list"]).contains("New session mode: Auto.\n"));
+
+    assert_eq!(
+        said(&["provider", "new-session", "--mode", "full"]),
+        "New sessions start in Full.\n"
+    );
+    assert!(said(&["provider", "list"]).contains("New session mode: Full.\n"));
+    assert_eq!(default_mode(&user), "full");
+    // With a provider, both are set; without `--mode`, the mode stays.
+    assert_eq!(
+        said(&["provider", "new-session", "claude", "--mode", "ask"]),
+        "New sessions start on claude, the model and the effort it proposes.\n\
+         New sessions start in Ask.\n"
+    );
+    assert_eq!(
+        said(&["provider", "new-session", "opencode"]),
+        "New sessions start on opencode, the model and the effort it proposes.\n"
+    );
+    assert_eq!(default_mode(&user), "ask");
+    assert_eq!(
+        said(&["provider", "new-session", "--clear"]),
+        "New sessions start on what the provider proposes.\n"
+    );
+    assert_eq!(default_mode(&user), "ask");
+    let output = user.run(&["provider", "new-session", "--mode", "yolo"]);
+    assert!(!output.status.success());
+    assert_eq!(default_mode(&user), "ask");
+}
