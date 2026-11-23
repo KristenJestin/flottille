@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -168,6 +168,18 @@ pub enum Update {
 pub struct Updates {
     sender: UnboundedSender<Update>,
     machine: Option<String>,
+    /// Set once the one that made them no longer takes them ([`Updates::ending`]).
+    ended: Option<Arc<AtomicBool>>,
+}
+
+/// Dropped, the updates it was made with are taken no more: their link ends at its next word.
+#[derive(Debug)]
+pub struct End(Arc<AtomicBool>);
+
+impl Drop for End {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Updates {
@@ -176,11 +188,31 @@ impl Updates {
         Updates {
             sender: self.sender.clone(),
             machine: Some(machine.to_owned()),
+            ended: self.ended.clone(),
         }
+    }
+
+    /// The same updates, taken until the [`End`] given with them is dropped.
+    pub fn ending(&self) -> (Updates, End) {
+        let ended = Arc::new(AtomicBool::new(false));
+        let updates = Updates {
+            ended: Some(ended.clone()),
+            ..self.clone()
+        };
+        (updates, End(ended))
+    }
+
+    fn ended(&self) -> bool {
+        self.ended
+            .as_ref()
+            .is_some_and(|ended| ended.load(Ordering::SeqCst))
     }
 
     /// Fails once the window is gone: nothing takes the updates any more.
     pub fn unbounded_send(&self, update: Update) -> std::result::Result<(), Gone> {
+        if self.ended() {
+            return Err(Gone);
+        }
         let update = match &self.machine {
             Some(machine) => Update::Machine {
                 machine: machine.clone(),
@@ -192,7 +224,7 @@ impl Updates {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.sender.is_closed()
+        self.sender.is_closed() || self.ended()
     }
 }
 
@@ -205,6 +237,7 @@ impl From<UnboundedSender<Update>> for Updates {
         Updates {
             sender,
             machine: None,
+            ended: None,
         }
     }
 }

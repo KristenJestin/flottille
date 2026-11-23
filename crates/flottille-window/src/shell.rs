@@ -402,9 +402,8 @@ struct Pages {
 /// What was read of another machine for its projects' pages, by a link of its own.
 struct Copied {
     _seen: Arc<Seen>,
-    /// Carries its link's updates to the window's: dropped, the link sees nobody takes them
-    /// any more and ends.
-    _carry: Task<()>,
+    /// Dropped, its link sees nobody takes its updates any more, and ends.
+    _end: link::End,
     read: Option<Snapshot>,
 }
 
@@ -1418,26 +1417,19 @@ impl Shell {
 
     /// What was read of `machine` for its projects' pages, by a link of its own made the first
     /// time and kept open: its events keep it current.
-    fn copy_of(&mut self, machine: &str, cx: &mut Context<Self>) {
+    fn copy_of(&mut self, machine: &str) {
         if self.copies.contains_key(machine) {
             return;
         }
-        let (sender, mut carried) = unbounded();
-        let updates = link::Updates::from(sender).of(machine);
+        let (updates, end) = link::Updates::from(self.sender.clone())
+            .of(machine)
+            .ending();
         let seen = link::spawn_into(self.follow.connect.clone(), updates);
-        let to = self.sender.clone();
-        let carry = cx.background_spawn(async move {
-            while let Some(update) = carried.next().await {
-                if to.unbounded_send(update).is_err() {
-                    return;
-                }
-            }
-        });
         self.copies.insert(
             machine.to_owned(),
             Copied {
                 _seen: seen,
-                _carry: carry,
+                _end: end,
                 read: None,
             },
         );
@@ -5456,7 +5448,7 @@ impl Shell {
             Selection::Project(_) | Selection::ProjectSettings(_) | Selection::Spec { .. },
         ) = (self.front.clone(), &selection)
         {
-            self.copy_of(&front, cx);
+            self.copy_of(&front);
             self.read_pages(cx);
         }
         // A copy is read only while a project's page of its machine is shown: left, its link
