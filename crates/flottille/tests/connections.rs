@@ -5259,7 +5259,14 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
     // adapter applies, login runs agent-browser's command line in the run's sandbox, agent-browser's
     // daemon starts Flottille's plugin, which asks the daemon for the entry; the page is a local
     // one, headless, and the account an invented one in the in-memory keyring.
-    let user = user();
+    let user = User::with_fake_agent();
+    // The test's runtime folder is under `/tmp`, so the sandbox rules each entry of `/tmp` and
+    // not `/tmp` itself (`landlock.rs`): Chrome makes its profile in a temporary folder of the
+    // test's own, as it does in `/tmp` on a machine whose runtime folder is `/run/user/<uid>`.
+    let temporary = user.path("tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let program = match real_agent_browser(&user.path("home")) {
         Ok(program) => program,
         Err(why) => {
