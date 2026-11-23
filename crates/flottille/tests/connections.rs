@@ -4490,8 +4490,9 @@ const OWN_LOGINS: [&str; 6] = [
 /// Actions its adapter keeps off as well: plugins run commands and read agent-browser's config,
 /// `connect` and `state_load` bring a browser or a session someone else controls, and
 /// `with_login` is named should a 0.43 patch serve it.
-const LOCKED_TOO: [&str; 7] = [
+const LOCKED_TOO: [&str; 8] = [
     "agent_browser_connect",
+    "agent_browser_get_cdp_url",
     "agent_browser_state_load",
     "agent_browser_plugin_add",
     "agent_browser_plugin_list",
@@ -5577,16 +5578,19 @@ fn login_page() -> (String, std::sync::mpsc::Receiver<String>) {
 struct Closed {
     program: PathBuf,
     home: PathBuf,
-    folder: PathBuf,
+    vault: PathBuf,
 }
 
 impl Drop for Closed {
     fn drop(&mut self) {
+        let Some(folder) = socket_folder_in(&self.vault) else {
+            return;
+        };
         let _ = std::process::Command::new(&self.program)
             .arg("close")
             .env_clear()
             .env("HOME", &self.home)
-            .env("AGENT_BROWSER_SOCKET_DIR", &self.folder)
+            .env("AGENT_BROWSER_SOCKET_DIR", folder)
             .output();
     }
 }
@@ -5615,7 +5619,7 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
     let _closed = Closed {
         program: program.clone(),
         home: user.path("home"),
-        folder: vault_folder(&user),
+        vault: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
     turn_on(&user);
@@ -5718,6 +5722,33 @@ fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     let answer = refused(mcp.call(
         "conn_browser",
         json!({"action": "agent_browser_auth_save", "arguments": {"name": "x"}}),
+    ));
+    assert!(answer.contains("off"), "{answer}");
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn the_devtools_address_is_never_handed_to_the_agent() {
+    // Chrome's DevTools listens on this machine with no token: its address in the agent's hands
+    // is the browser driven with no gate, the filled password and the cookies read.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let refused_accept = user
+        .call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {"agent_browser_get_cdp_url": "passes"}}),
+        )
+        .unwrap_err();
+    assert!(
+        refused_accept.1.contains("agent_browser_get_cdp_url"),
+        "{refused_accept:?}"
+    );
+    assert!(refused_accept.1.contains("DevTools"), "{refused_accept:?}");
+    assert_eq!(setting(&user, "agent_browser_get_cdp_url"), "off");
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_get_cdp_url", "arguments": {}}),
     ));
     assert!(answer.contains("off"), "{answer}");
     assert!(logged(&user, "browser", "call").is_empty());
@@ -6764,7 +6795,7 @@ fn a_shown_browser_gets_the_display_variables() {
         json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": null,
             "XDG_RUNTIME_DIR": folder.to_str().unwrap(),
             "DBUS_SESSION_BUS_ADDRESS": null,
-            "AGENT_BROWSER_SOCKET_DIR": vault_folder(&user).to_str().unwrap(),
+            "AGENT_BROWSER_SOCKET_DIR": socket_folder(&user).unwrap().to_str().unwrap(),
             "runtime_files": ["wayland-test"]})
     );
     let started = logged(&user, "browser", "start");
@@ -6985,7 +7016,8 @@ fn the_server_and_its_login_share_one_browser_socket_folder() {
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    let shared = vault_folder(&user);
+    let shared = socket_folder(&user).unwrap();
+    assert_eq!(shared.parent(), Some(vault_folder(&user).as_path()));
     let server = display_of(&user, "browser");
     let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
     assert_eq!(
@@ -7088,9 +7120,36 @@ fn a_shown_server_cannot_link_the_socket_out_of_its_folder() {
 
 /// The browser on the connection's socket folder, as the fake keeps it: none once it is closed.
 fn browser_running(user: &User) -> Option<Value> {
-    std::fs::read_to_string(vault_folder(user).join("browser.json"))
+    std::fs::read_to_string(socket_folder(user)?.join("browser.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// The folder `AGENT_BROWSER_SOCKET_DIR` names for the connection `browser`: the one folder of its
+/// vault folder, of a name no one can guess.
+fn socket_folder(user: &User) -> Option<PathBuf> {
+    socket_folder_in(&vault_folder(user))
+}
+
+/// The one folder of the vault folder `vault`.
+fn socket_folder_in(vault: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(vault)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+}
+
+/// Kills the user's daemon as a crash would, and waits until it is gone: what it made stays.
+fn killed(user: &User) {
+    let daemon = user.status()["pid"].as_u64().unwrap() as i32;
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon, libc::SIGKILL) };
+    eventually("the daemon is gone", || {
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = unsafe { libc::kill(daemon, 0) } == 0;
+        !alive
+    });
 }
 
 #[test]
@@ -7308,6 +7367,217 @@ fn a_browser_left_by_a_daemon_that_stopped_is_closed_before_its_display_is_made_
         display_of(&user, "browser")["runtime_files"],
         json!(["wayland-test"])
     );
+}
+
+#[test]
+fn a_headless_browser_left_by_a_daemon_that_stopped_is_closed_at_start() {
+    // Hidden as well as shown: a browser a dead daemon left keeps running with the vault folder
+    // in reach, whatever its mode, until the next daemon closes it.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    assert_eq!(
+        browser_running(&user),
+        Some(json!({"headed": null, "XDG_RUNTIME_DIR": null}))
+    );
+    killed(&user);
+    assert!(browser_running(&user).is_some(), "the browser outlives it");
+    user.status();
+    assert_eq!(browser_running(&user), None);
+    assert_eq!(logged(&user, "browser", "close").len(), 1);
+}
+
+#[test]
+fn a_daemon_that_died_leaves_no_token_nor_socket_in_the_vault() {
+    // A daemon killed during a login leaves its token, its plugin's socket and the plugin's
+    // reason: the next one removes them before anything runs, and keeps the browser's socket
+    // folder, which a browser it left may still answer on.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let vault = vault_folder(&user);
+    let sockets = socket_folder(&user).expect("no socket folder");
+    std::fs::write(vault.join("vault.token"), "left").unwrap();
+    std::fs::write(vault.join("vault.why"), "left").unwrap();
+    drop(std::os::unix::net::UnixListener::bind(vault.join("vault.sock")).unwrap());
+    killed(&user);
+    user.status();
+    for name in ["vault.token", "vault.why", "vault.sock"] {
+        assert!(!vault.join(name).exists(), "{name} is left");
+    }
+    assert!(sockets.is_dir(), "the socket folder is gone");
+}
+
+#[test]
+fn the_old_files_of_the_state_folder_are_removed_at_start() {
+    // Before the vault folder, agent-browser's configuration and the plugin's socket were in the
+    // connection's state folder, which runs reach: the next daemon removes them, and nothing else.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let state = user.path("state/flottille/connections/browser");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("agent-browser.json"), "{}").unwrap();
+    drop(std::os::unix::net::UnixListener::bind(state.join("vault.sock")).unwrap());
+    std::fs::write(state.join("kept.txt"), "kept").unwrap();
+    killed(&user);
+    user.status();
+    assert!(!state.join("agent-browser.json").exists());
+    assert!(!state.join("vault.sock").exists());
+    assert!(state.join("kept.txt").exists());
+}
+
+#[test]
+fn removing_a_connection_removes_its_vault_folder() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(vault_folder(&user).is_dir());
+    user.call("connection.remove", json!({"name": "browser"}))
+        .unwrap();
+    assert!(!vault_folder(&user).exists(), "the vault folder is left");
+    // Declared again under the same name, it gets a vault folder afresh and signs in.
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    std::fs::remove_file(form_file(&user)).unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(form(&user).expect("not signed in")["password"], PASSWORD);
+}
+
+#[test]
+fn the_browsers_socket_folder_cannot_be_guessed() {
+    // agent-browser's socket is named after its session (`default`): in a folder named after the
+    // connection alone, a run that may connect by path (no namespace, an older Landlock) would
+    // guess it. Its folder has a random name, found again by the next daemon.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    let named = PathBuf::from(login["AGENT_BROWSER_SOCKET_DIR"].as_str().unwrap());
+    assert_eq!(named.parent(), Some(vault_folder(&user).as_path()));
+    let name = named.file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(name.len() >= 20, "{name}");
+    let other = user_named_socket_folder();
+    assert_ne!(other, name);
+    // The next daemon finds the same folder.
+    killed(&user);
+    done(mcp_after_restart(&user).call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    assert_eq!(login["AGENT_BROWSER_SOCKET_DIR"], named.to_str().unwrap());
+}
+
+/// The name of the socket folder another user's connection `browser` gets.
+fn user_named_socket_folder() -> String {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let folder = socket_folder(&user).expect("no socket folder");
+    folder.file_name().unwrap().to_str().unwrap().to_owned()
+}
+
+/// A new session of the project `app` in Full mode, once the daemon answers again.
+fn mcp_after_restart(user: &User) -> Mcp {
+    let (id, mcp) = session(user, "app");
+    set_mode(user, &id, "full");
+    mcp
+}
+
+#[test]
+fn a_spent_token_does_not_hide_why_the_login_failed() {
+    // The plugin is given the credential, then asked again (by anything that reached the socket)
+    // and refused, the token being spent; the page then refuses the account. The login says the
+    // page's refusal, never that Flottille refused the request.
+    let user = user();
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"replay": true, "fail": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let replayed = logged(&user, "browser", "login").last().unwrap()["replayed"].clone();
+    assert_eq!(replayed["success"], false, "{replayed}");
+    assert!(
+        !said.contains("Flottille refused agent-browser's request"),
+        "{said}"
+    );
+    assert!(said.contains("the page refused"), "{said}");
+    assert!(!said.contains(PASSWORD), "{said}");
+}
+
+#[test]
+fn a_silent_connection_does_not_block_the_plugins_request() {
+    // Three connections to the plugin's socket that say nothing, made before the plugin asks:
+    // each waits for its own words, and the plugin is answered at once.
+    let user = user();
+    let until = user.path("go");
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"hold": until.to_str().unwrap()}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let socket = vault_folder(&user).join("vault.sock");
+    let started = PathBuf::from(format!("{}.started", until.display()));
+    let opener = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !started.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let silent: Vec<_> = (0..3)
+            .map(|_| std::os::unix::net::UnixStream::connect(&socket).unwrap())
+            .collect();
+        // Accepted before the plugin connects.
+        std::thread::sleep(Duration::from_millis(300));
+        let released = Instant::now();
+        std::fs::write(&until, "").unwrap();
+        (silent, released)
+    });
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    let answered = Instant::now();
+    let (_silent, released) = opener.join().unwrap();
+    done(answer);
+    assert!(
+        answered - released < Duration::from_secs(4),
+        "the plugin waited {:?}",
+        answered - released
+    );
+    assert_eq!(form(&user).expect("not signed in")["password"], PASSWORD);
 }
 
 #[test]
