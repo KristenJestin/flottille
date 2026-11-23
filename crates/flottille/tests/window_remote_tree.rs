@@ -272,6 +272,59 @@ fn a_session_on_another_machine_shows_under_its_pilot_with_the_machine(cx: &mut 
     );
 }
 
+/// A hub, `pc` its first member with the project `app` on `feat/export`, `more` the more lines of
+/// its file, and `server` a runner paired with it that has no project: the launch makes it there.
+fn pc_and_bare_server(more: &str) -> (TestHub, Machine, Machine) {
+    let server = runner().with_judge(json!([
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    let (hub, pc, server) = pc_and_server_on(Machine::of(runner()), server);
+    let repo = pc.user.path("work/app");
+    pc.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    pc.user.git(&repo, &["add", "."]);
+    pc.user.git(&repo, &["commit", "--quiet", "-m", "first"]);
+    pc.user
+        .git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    let text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\nbranch_prefix = \"\"\n{more}\n\
+         [[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
+        pc.user.path("work/app").display(),
+        pc.user.path("work/app-work").display()
+    );
+    pc.user.write_project_file("app", &text);
+    pc.user.call("project.list", json!({})).unwrap();
+    eventually("server offers Claude", || {
+        pc.remote()["machines"].as_array().unwrap().iter().any(|m| {
+            m["name"] == "server"
+                && m["offers"]["agents"]
+                    .as_array()
+                    .is_some_and(|agents| agents.iter().any(|a| a == "claude"))
+        })
+    });
+    (hub, pc, server)
+}
+
+#[gpui_kit::test]
+fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
+    // A setup that takes its time: the project made there is being prepared.
+    let (_hub, pc, server) = pc_and_bare_server("[[setup]]\nrun = \"sleep 60\"\n");
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session made on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+
+    until(&shell, cx, "the row says the project is made", |cx| {
+        label(cx, session_machine_id(&row)).as_deref() == Some("server · preparing app")
+    });
+}
+
 #[gpui_kit::test]
 fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();

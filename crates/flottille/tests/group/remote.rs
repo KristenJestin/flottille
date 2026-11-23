@@ -37,6 +37,8 @@ mod remote_keys;
 mod remote_launch;
 #[path = "../remote_link.rs"]
 mod remote_link;
+#[path = "../remote_project_needs.rs"]
+mod remote_project_needs;
 #[path = "../remote_project_travels.rs"]
 mod remote_project_travels;
 #[path = "../remote_relay.rs"]
