@@ -195,6 +195,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let mut asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "writes to it")?;
+            refuse_remote_child(daemon, &agent)?;
             refuse_final(&agent)?;
             let upload = asked.upload.take();
             take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
@@ -536,6 +537,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();
             shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
+            shown["launched_from"] = crate::launches::launched_from_shown(daemon, &agent.id);
             shown["quota"] = crate::quota::shown(daemon, &agent);
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
@@ -568,6 +570,19 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
          stops its root, agent {root}",
         agent.id
     )))
+}
+
+/// A child an agent of another machine launched here belongs to that agent: only it writes to
+/// it. The user still answers its questions and stops it, the ways out while that machine is off
+/// (`docs/remote.md`, "Where a question goes when the parent is off").
+fn refuse_remote_child(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+    match crate::launches::launched_from(daemon, &agent.id) {
+        Some((caller, machine, kind)) if kind == "child" => Err(Failure::refused(format!(
+            "agent {} is a child of agent {caller} of {machine}: only its parent writes to it",
+            agent.id
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn refuse_final(agent: &Agent) -> Result<(), Failure> {
@@ -866,6 +881,7 @@ async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
             preparing: false,
             role,
             parent: None,
+            remote_parent_depth: None,
             title: None,
             brief: message.text.clone(),
             provider: asked.provider,
@@ -906,6 +922,9 @@ pub struct New {
     pub role: &'static Role,
     /// Its parent, with the parent's depth; `None` for a root.
     pub parent: Option<(String, u32)>,
+    /// For a child an agent of another machine launched, that agent's depth there: it has no
+    /// parent here, and is a child all the same (`docs/remote.md`, "A tree across machines").
+    pub remote_parent_depth: Option<u32>,
     pub title: Option<String>,
     pub brief: String,
     /// Its provider, model and effort as asked: each checked, and the defaults taken for those
@@ -1022,13 +1041,20 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
     )?;
     let now = now_ms();
-    let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
+    let depth = match (
+        new.parent.as_ref().map(|(_, depth)| *depth),
+        new.remote_parent_depth,
+    ) {
+        (Some(depth), _) | (None, Some(depth)) => depth + 1,
+        (None, None) => 0,
+    };
     let at_depth_limit = depth >= DEPTH_LIMIT;
     let tools = tools_of(
         daemon,
         provider,
         project,
-        new.parent.is_none(),
+        // Only a root is at depth 0: a child of another machine's agent has no parent here.
+        depth == 0,
         depth,
         crate::vault::listed_to(daemon, project),
         new.launched
@@ -1289,6 +1315,11 @@ fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64, failed: Opti
 
 /// Hands an order to the agent's task, starting the task when it has none.
 pub fn order(daemon: &Arc<Daemon>, id: &str, order: Order) {
+    // A caller of another machine stood in for here is no agent of this machine's: nothing is
+    // ever started for it.
+    if crate::across::is_stand_in(id) {
+        return;
+    }
     let mut tasks = daemon.agents.tasks.lock().unwrap();
     let sender = match tasks.get(id) {
         Some((sender, _)) if !sender.is_closed() => sender.clone(),
@@ -2802,6 +2833,16 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nothing_is_started_for_a_stand_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::tests::a_daemon(dir.path(), false);
+
+        order(&daemon, "c0@aa", Order::Ring);
+
+        assert!(!daemon.agents.tasks.lock().unwrap().contains_key("c0@aa"));
+    }
 
     #[test]
     fn a_poisoned_saying_lock_still_keeps_the_pieces_after_it_masked() {

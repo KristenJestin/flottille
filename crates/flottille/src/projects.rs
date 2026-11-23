@@ -1280,6 +1280,17 @@ pub fn rewrite(
     name: &str,
     edit: impl FnOnce(&Project, &mut toml_edit::DocumentMut) -> std::result::Result<(), Failure>,
 ) -> std::result::Result<Project, Failure> {
+    rewrite_checked(daemon, name, edit, |_| Ok(()))
+}
+
+/// As [`rewrite`], with `check` given the edited project before anything is written: a refusal
+/// from it leaves the file as it was.
+pub fn rewrite_checked(
+    daemon: &Daemon,
+    name: &str,
+    edit: impl FnOnce(&Project, &mut toml_edit::DocumentMut) -> std::result::Result<(), Failure>,
+    check: impl FnOnce(&Project) -> std::result::Result<(), Failure>,
+) -> std::result::Result<Project, Failure> {
     let mut projects = daemon.projects.lock().unwrap();
     let projects = &mut *projects;
     let project = load(projects, name)?;
@@ -1302,6 +1313,7 @@ pub fn rewrite(
         .registry
         .parse(name, &text)
         .map_err(|error| Failure::new("invalid-config", error.to_string()))?;
+    check(&edited)?;
     crate::providers::write_in_place(&file, &text).map_err(unavailable)?;
     announce_edits(daemon, projects)?;
     Ok(edited)
@@ -2006,7 +2018,7 @@ struct Plan {
 
 /// A folder typed as `~` or `~/…` is the home of the user the daemon runs for. `~other` is not
 /// expanded: it stays relative and is refused like any relative path.
-fn home_expanded(typed: &str) -> Option<PathBuf> {
+pub(crate) fn home_expanded(typed: &str) -> Option<PathBuf> {
     let rest = typed.strip_prefix('~')?;
     if !(rest.is_empty() || rest.starts_with('/')) {
         return None;

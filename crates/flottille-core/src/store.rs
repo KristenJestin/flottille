@@ -1036,6 +1036,17 @@ const EXTENSION_MIGRATIONS: &str = "
     ) STRICT;
 ";
 
+/// A child an agent of another machine launched here was stored with no parent at depth 0 before
+/// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
+/// tree across machines"). Made at every open rather than as a numbered migration: it changes
+/// nothing once done, as such a child is never stored so again, and every check of a root then
+/// reads the depth alone.
+const REMOTE_CHILDREN_DEPTH: &str = "
+    UPDATE agents SET depth = 1
+    WHERE parent IS NULL AND depth = 0
+      AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child');
+";
+
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place, digest";
 
@@ -1417,6 +1428,48 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    /// Replaces the setup steps of the workspace `workspace` that have not started, its worktrees
+    /// kept, by `steps` (none of them a worktree), numbered after the steps that stay, in one
+    /// transaction: a workspace made of another machine's code takes the setup its launch laid,
+    /// once allowed. Nothing is changed when a setup step has started.
+    pub fn replace_pending_steps(&mut self, workspace: i64, steps: &[Step]) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        let started: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM workspace_steps WHERE workspace = ?1 AND state != 'pending' \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        if started > 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "DELETE FROM workspace_steps WHERE workspace = ?1 \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
+            params![workspace],
+        )?;
+        let next: u32 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM workspace_steps WHERE workspace = ?1",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        for (at, step) in steps.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO workspace_steps (workspace, position, repository, action, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    workspace,
+                    next + at as u32,
+                    step.repository,
+                    serde_json::to_string(&step.action)?,
+                    StepState::Pending.as_str(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Puts these steps back to pending, forgetting their failure, with one event, in one
@@ -2873,8 +2926,15 @@ impl Store {
     /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
     /// machine whose key is none of `machines` (it left the members), or idle since before
     /// `idle_before`, with their leaves and requests; and the answers awaited from such a
-    /// machine, or since before `idle_before` (never sent). How many callers went.
-    pub fn forget_stand_ins(&mut self, machines: &[String], idle_before: u64) -> Result<usize> {
+    /// machine, or since before `idle_before` (never sent). No `machines` is a member list that
+    /// was never read: no machine left by it. How many callers went.
+    pub fn forget_stand_ins(
+        &mut self,
+        machines: Option<&[String]>,
+        idle_before: u64,
+    ) -> Result<usize> {
+        let left =
+            |machine: &str| machines.is_some_and(|kept| !kept.iter().any(|key| key == machine));
         let transaction = self.connection.transaction()?;
         let stand_ins: Vec<(String, u64)> = {
             let mut statement = transaction
@@ -2885,7 +2945,7 @@ impl Store {
         let mut forgotten = 0;
         for (id, at) in stand_ins {
             let machine = id.split_once('@').map_or("", |(_, machine)| machine);
-            if at < idle_before || !machines.iter().any(|kept| kept == machine) {
+            if at < idle_before || left(machine) {
                 forgotten +=
                     transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
             }
@@ -2898,7 +2958,7 @@ impl Store {
             rows.collect::<std::result::Result<_, _>>()?
         };
         for (machine, request, at) in awaited {
-            if at < idle_before || !machines.contains(&machine) {
+            if at < idle_before || left(&machine) {
                 transaction.execute(
                     "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2",
                     params![machine, request],
@@ -3502,6 +3562,20 @@ impl Store {
             "UPDATE launches SET state = 'ended' WHERE way = 'out' AND machine = ?1 \
              AND launch = ?2 AND state != 'refused'",
             params![machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Settles the launch `out` `launch` to `machine`, held for the user there, as their answer
+    /// came: `started` or `refused`. Only a launch not settled yet, still `accepted` when the
+    /// answer came before its place was recorded: an answer sent again changes nothing. A launch
+    /// started told it is refused ended there: it is `ended`.
+    pub fn decide_launch(&mut self, machine: &str, launch: &str, state: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = CASE WHEN state = 'started' THEN 'ended' ELSE ?3 END \
+             WHERE way = 'out' AND machine = ?1 AND launch = ?2 \
+             AND (state IN ('held', 'accepted') OR (state = 'started' AND ?3 = 'refused'))",
+            params![machine, launch, state],
         )?;
         Ok(())
     }
@@ -5106,13 +5180,18 @@ impl Space<'_> {
 
 /// Records a launch, in place of the one of the same name with the same machine: a launch `in`
 /// already recorded keeps its workspace, its name and its id, as `place_launch` alone writes them.
+/// A launch `out` the user's answer settled (`decide_launch`) is never made held again by the
+/// record of its place, which may come after that answer.
 fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
     connection.execute(
         "INSERT INTO launches (way, machine, launch, caller, kind, project, state, request, \
          agent, workspace, workspace_id, asked, at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT (way, machine, launch) DO UPDATE SET caller = excluded.caller, \
-         kind = excluded.kind, project = excluded.project, state = excluded.state, \
+         kind = excluded.kind, project = excluded.project, \
+         state = CASE WHEN launches.way = 'out' AND excluded.state IN ('held', 'accepted') \
+         AND launches.state IN ('started', 'refused', 'ended') THEN launches.state \
+         ELSE excluded.state END, \
          request = excluded.request, agent = excluded.agent, \
          workspace = CASE WHEN launches.way = 'in' THEN launches.workspace \
          ELSE excluded.workspace END, asked = excluded.asked, at = excluded.at",
@@ -5514,6 +5593,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch(migration)?;
     }
     transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    transaction.execute_batch(REMOTE_CHILDREN_DEPTH)?;
     if alpha {
         transaction.execute_batch(
             "INSERT INTO extension_migrations (name, applied) \
@@ -5971,6 +6051,65 @@ mod tests {
             .set_ticket(id, None, ("workspace.ticket", json!({"ticket": null})))
             .unwrap();
         assert_eq!(store.workspace_by_id(id).unwrap().ticket, None);
+    }
+
+    #[test]
+    fn a_step_naming_worktree_in_its_text_is_replaced_once_not_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let step = |position, action| Step {
+            position,
+            repository: None,
+            action,
+            state: StepState::Pending,
+            failure: None,
+            started_at: None,
+            ended_at: None,
+            duration_ms: None,
+        };
+        let mut workspace = a_workspace();
+        // Steps whose JSON holds "worktree" without being one.
+        workspace.steps.push(step(
+            2,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        ));
+        workspace.steps.push(step(
+            3,
+            Action::Run {
+                line: "git worktree prune".into(),
+                task: Some("worktree".into()),
+                time_limit: 60,
+            },
+        ));
+        let (id, _) = store
+            .create_workspace(&workspace, ("workspace.created", json!({})))
+            .unwrap();
+        let laid = [step(
+            0,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        )];
+
+        assert!(store.replace_pending_steps(id, &laid).unwrap());
+
+        let actions: Vec<Action> = store
+            .workspace_by_id(id)
+            .unwrap()
+            .steps
+            .into_iter()
+            .map(|step| step.action)
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::Worktree,
+                Action::Copy {
+                    globs: vec!["worktree".into()]
+                }
+            ]
+        );
     }
 
     #[test]
@@ -9271,6 +9410,54 @@ mod tests {
         );
     }
 
+    fn a_launch_out(state: &str) -> Launch {
+        Launch {
+            way: "out".into(),
+            state: state.into(),
+            ..a_launch_in()
+        }
+    }
+
+    fn state_out(store: &Store) -> String {
+        store.launches("out", None, LaunchFilter::All).unwrap()[0]
+            .state
+            .clone()
+    }
+
+    #[test]
+    fn a_held_launch_decided_before_its_second_record_keeps_the_decision() {
+        for (first, decided) in [("held", "started"), ("accepted", "refused")] {
+            let mut store = Store::open_in_memory().unwrap();
+            let launch = a_launch_out(first);
+            store.record_launch(&launch).unwrap();
+            // The user there answered before the caller recorded what the launch's place said.
+            store
+                .decide_launch(&launch.machine, &launch.launch, decided)
+                .unwrap();
+            assert_eq!(state_out(&store), decided);
+
+            store.record_launch(&a_launch_out("held")).unwrap();
+
+            assert_eq!(state_out(&store), decided, "first recorded {first}");
+        }
+    }
+
+    #[test]
+    fn an_end_told_as_an_answer_on_a_started_launch_ends_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let launch = a_launch_out("held");
+        store.record_launch(&launch).unwrap();
+        store
+            .decide_launch(&launch.machine, &launch.launch, "started")
+            .unwrap();
+
+        store
+            .decide_launch(&launch.machine, &launch.launch, "refused")
+            .unwrap();
+
+        assert_eq!(state_out(&store), "ended");
+    }
+
     #[test]
     fn a_machine_s_projects_stay_beside_the_sessions_it_lists_again() {
         let mut store = Store::open_in_memory().unwrap();
@@ -9375,7 +9562,10 @@ mod tests {
         store.await_answer("bb", 6, &local.id).unwrap();
 
         // `bb` left the members: its caller goes, with its leave and what is awaited of it.
-        assert_eq!(store.forget_stand_ins(&["aa".to_owned()], 0).unwrap(), 1);
+        assert_eq!(
+            store.forget_stand_ins(Some(&["aa".to_owned()]), 0).unwrap(),
+            1
+        );
         assert!(store.agent("c0@bb").unwrap().is_none());
         assert!(!store.has_leave("c0@bb", &local.id).unwrap());
         assert!(store.has_leave("c0@aa", &local.id).unwrap());
@@ -9384,12 +9574,34 @@ mod tests {
         // Idle for long: every caller goes, and what is awaited since as long.
         let later = now_ms() + 1;
         assert_eq!(
-            store.forget_stand_ins(&["aa".to_owned()], later).unwrap(),
+            store
+                .forget_stand_ins(Some(&["aa".to_owned()]), later)
+                .unwrap(),
             3
         );
         assert!(store.leaves_of(&local.id).unwrap().is_empty());
         assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
         assert!(store.agent(&local.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_member_list_never_read_forgets_no_machine_and_still_the_idle() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
+        let local = an_agent();
+        store
+            .create_agent(&local, ("agent.created", json!({})))
+            .unwrap();
+        store.await_answer("aa", 5, &local.id).unwrap();
+
+        // No list: nobody left the members.
+        assert_eq!(store.forget_stand_ins(None, 0).unwrap(), 0);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+
+        // Idle for long: gone all the same, with what is awaited since as long.
+        assert_eq!(store.forget_stand_ins(None, now_ms() + 1).unwrap(), 1);
+        assert!(store.agent("c0@aa").unwrap().is_none());
+        assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
     }
 
     #[test]

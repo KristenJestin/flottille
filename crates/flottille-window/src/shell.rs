@@ -4,7 +4,7 @@
 
 use crate::glyphs;
 use crate::state::AgentState;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,12 +30,14 @@ use lyon_tessellation::{LineCap, LineJoin};
 
 use crate::actions::{Actions, Command, Details, Outcome, Pick, Reading, RunFrom};
 use crate::add_project::AddProject;
+use crate::arrange::{Arrangement, Change, Listed};
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::end_led::LedEnd;
 use crate::extensions::Registry;
 use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
+use crate::group_name::GroupName;
 use crate::history::{History, Way};
 use crate::kept::{DraftKey, Folds, Written, machine_key};
 use crate::link::{self, Connect, Seen, Update};
@@ -53,6 +55,7 @@ use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
+use crate::tree::{Arranged, ArrangedGroup};
 use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
@@ -226,6 +229,19 @@ pub struct Shell {
     /// ends with the next try.
     kept_failures: u32,
     kept_retry: Option<Task<()>>,
+    /// The user's order and groups of projects: one key of the daemon's window state, apart from
+    /// the sidebar's folds, written only when the user arranges (`arranged`), so that a window
+    /// that only folds a project never writes over what another made. This is what the daemon
+    /// held when it last said so (as the window opened, then with each change it kept).
+    arrangement_kept: Arrangement,
+    /// What the user did that the daemon has not kept yet, and whether it was asked: the daemon
+    /// applies each to the arrangement it holds, which another window may have changed since this
+    /// one read it. They are asked at once, in order, and answered in order.
+    arrangement_queue: VecDeque<(Change, bool)>,
+    /// How many asks in a row the daemon did not take, and the wait that ends with the next try.
+    arrangement_failures: u32,
+    arrangement_retry: Option<Task<()>>,
+    arrangement_waiting: bool,
     /// The sessions the daemon kept a draft of when the window opened: their rows say it before
     /// their pages are opened.
     listed_drafts: HashSet<String>,
@@ -303,6 +319,10 @@ pub struct Shell {
     add_project: Entity<AddProject>,
     /// The dialog that renames a session.
     rename: Entity<RenameSession>,
+    /// The dialog that makes a group of projects.
+    group_form: Entity<GroupName>,
+    /// The user's order and groups of projects.
+    arrangement: Arrangement,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
     /// What the window knows of the parts of Flottille it draws in its places (Specs).
@@ -434,6 +454,7 @@ impl Shell {
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
+        let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(this.clone()));
         let modals = cx.new(|_| Modals::new());
         let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
@@ -468,6 +489,7 @@ impl Shell {
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
+                travelled.clone(),
                 vault.clone(),
                 connections.clone(),
                 machines.clone(),
@@ -590,6 +612,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| RenameSession::new(this, window, cx))
         };
+        let group_form = {
+            let this = this.clone();
+            cx.new(|cx| GroupName::new(this, window, cx))
+        };
         let focus = cx.focus_handle();
         modals.update(cx, |modals, _| modals.fallback(focus.clone()));
         let switcher = {
@@ -649,6 +675,11 @@ impl Shell {
             kept_asked: None,
             kept_failures: 0,
             kept_retry: None,
+            arrangement_kept: Arrangement::default(),
+            arrangement_queue: VecDeque::new(),
+            arrangement_failures: 0,
+            arrangement_retry: None,
+            arrangement_waiting: false,
             listed_drafts: HashSet::new(),
             closed: false,
             sessions: HashMap::new(),
@@ -688,6 +719,8 @@ impl Shell {
             project_settings: None,
             add_project,
             rename,
+            group_form,
+            arrangement: Arrangement::default(),
             switcher,
             extensions,
             spec_page: None,
@@ -1192,6 +1225,223 @@ impl Shell {
             .update(cx, |form, cx| form.open(session, &title, window, cx));
     }
 
+    /// The dialog that makes a group of projects.
+    pub fn group_form(&self) -> &Entity<GroupName> {
+        &self.group_form
+    }
+
+    /// Whether a group has this name already.
+    pub fn group_named(&self, name: &str) -> bool {
+        self.arrangement.names(name)
+    }
+
+    /// The projects' list as the user arranged it, for the projects the window holds.
+    pub fn listing(&self) -> Listed {
+        self.arrangement.listed(
+            &self
+                .snapshot
+                .projects
+                .iter()
+                .map(|project| project.name.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Whether the Projects header's menu offers Group by machine now (there is another machine).
+    pub fn offers_grouping(&self, cx: &App) -> bool {
+        self.sidebar.read(cx).offers_grouping()
+    }
+
+    /// "New group…" in the Projects header's menu: the dialog.
+    pub fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_form.update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The names of the projects the window holds, in the order the daemon lists them.
+    fn project_names(&self) -> Vec<String> {
+        self.snapshot
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect()
+    }
+
+    /// A group made, from the dialog: at the end of the groups, unfolded.
+    pub fn add_group(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.arrange(Change::add_group(name), cx);
+    }
+
+    /// A group removed: its projects go back to the list, at the end, none removed.
+    pub fn remove_group(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        self.arrange(Change::RemoveGroup(id.to_owned()), cx);
+    }
+
+    /// A project row dragged to `index` among the rows of `group` (`None`: outside any group).
+    pub fn project_moved(
+        &mut self,
+        project: &str,
+        group: Option<&str>,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let change = Change::MoveProject {
+            present: self.project_names(),
+            key: project.to_owned(),
+            group: group.map(str::to_owned),
+            index,
+        };
+        self.arrange(change, cx);
+    }
+
+    /// A group's heading dragged to `index` among the groups.
+    pub fn group_moved(
+        &mut self,
+        group: &str,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = group.to_owned();
+        self.arrange(Change::MoveGroup { id, index }, cx);
+    }
+
+    /// A group's heading clicked: its rows fold away or unfold.
+    pub fn group_opened(
+        &mut self,
+        group: &str,
+        open: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = group.to_owned();
+        self.arrange(Change::OpenGroup { id, open }, cx);
+    }
+
+    /// The rows of the projects as the user arranged them, from the nodes the tree holds.
+    fn arranged_rows(
+        &self,
+        present: &[String],
+        nodes: &HashMap<String, Entity<ProjectNode>>,
+    ) -> Arranged {
+        let layout = self.arrangement.listed(present);
+        let rows = |keys: &[String]| -> Vec<Entity<ProjectNode>> {
+            keys.iter()
+                .filter_map(|key| nodes.get(key).cloned())
+                .collect()
+        };
+        Arranged {
+            groups: layout
+                .groups
+                .iter()
+                .map(|group| ArrangedGroup {
+                    id: group.id.clone(),
+                    name: group.name.clone(),
+                    open: group.open,
+                    rows: rows(&group.projects),
+                })
+                .collect(),
+            loose: rows(&layout.loose),
+        }
+    }
+
+    /// The list draws the arrangement.
+    fn show_arrangement(&mut self, cx: &mut Context<Self>) {
+        let present = self.project_names();
+        let arranged = self.arranged_rows(&present, &self.projects);
+        if self.sidebar.read(cx).arranged() != &arranged {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
+        }
+    }
+
+    /// The user changed the arrangement: the list draws it, and the daemon keeps it, under its
+    /// own key, by applying the change to the arrangement it holds. This is the only place it is
+    /// written.
+    fn arrange(&mut self, change: Change, cx: &mut Context<Self>) {
+        self.arrangement.apply(&change);
+        self.arrangement_queue.push_back((change, false));
+        self.show_arrangement(cx);
+        self.keep_arrangement();
+    }
+
+    /// The changes not asked yet are asked of the daemon, unless it could not take one lately.
+    fn keep_arrangement(&mut self) {
+        if !self.kept_read || self.arrangement_waiting {
+            return;
+        }
+        let unasked: Vec<Change> = self
+            .arrangement_queue
+            .iter_mut()
+            .filter(|(_, sent)| !*sent)
+            .map(|(change, sent)| {
+                *sent = true;
+                change.clone()
+            })
+            .collect();
+        for change in unasked {
+            self.perform(Command::ArrangementChange { change });
+        }
+    }
+
+    /// What the daemon holds, with what the user did since and it has not kept yet.
+    fn arrangement_now(&self) -> Arrangement {
+        let mut now = self.arrangement_kept.clone();
+        for (change, _) in &self.arrangement_queue {
+            now.apply(change);
+        }
+        now
+    }
+
+    /// The daemon answered the ask of a change: the arrangement it holds now is the base of what
+    /// the list shows, so that what another window arranged shows here too. A change it could not
+    /// take is asked again, later.
+    fn arrangement_answered(
+        &mut self,
+        change: Change,
+        held: Option<Arrangement>,
+        result: Written,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(held) = held {
+            self.arrangement_kept = held;
+        }
+        let at = self
+            .arrangement_queue
+            .iter()
+            .position(|(asked, sent)| *sent && *asked == change);
+        match (result, at) {
+            (Written::Retry, Some(at)) => {
+                self.arrangement_queue[at].1 = false;
+                let wait = (crate::kept::DEBOUNCE * 2u32.pow(self.arrangement_failures.min(6)))
+                    .min(Duration::from_secs(30));
+                self.arrangement_failures += 1;
+                self.arrangement_waiting = true;
+                self.arrangement_retry = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |shell, _| {
+                        shell.arrangement_waiting = false;
+                        shell.keep_arrangement()
+                    })
+                    .ok();
+                }));
+            }
+            // Kept, or refused for good, or gone: asking again would be answered the same.
+            (Written::Retry, None) => {}
+            (_, at) => {
+                self.arrangement_failures = 0;
+                if let Some(at) = at {
+                    self.arrangement_queue.remove(at);
+                }
+            }
+        }
+        let now = self.arrangement_now();
+        if now != self.arrangement {
+            self.arrangement = now;
+            self.show_arrangement(cx);
+        }
+    }
+
     /// The quick switcher.
     pub fn switcher(&self) -> &Entity<Switcher> {
         &self.switcher
@@ -1450,10 +1700,11 @@ impl Shell {
             return Some(open);
         }
         let session = self.snapshot.session(id)?;
-        let (project, started_by, led_by) = (
+        let (project, started_by, led_by, child_of) = (
             session.project.clone(),
             session.started_by.clone(),
             session.led_by.clone(),
+            session.child_of.clone(),
         );
         let folder = match place {
             None => self
@@ -1477,6 +1728,7 @@ impl Shell {
             folder: folder.map(Into::into),
             started_by,
             led_by,
+            child_of,
         };
         let this = cx.entity().downgrade();
         let reply = match self.replies.get(id) {
@@ -1594,24 +1846,55 @@ impl Shell {
         cx.notify();
     }
 
-    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
-    /// from what the daemon last said.
+    /// A row folded or unfolded the led sessions under it: the level that holds it is drawn
+    /// again at once, from what the daemon last said, in the arrangement shown (`show`).
     pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+        let snapshot = &self.snapshot;
+        let Some(found) = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .find(|s| s.id == session)
+        else {
+            eprintln!("flottille: the fold of {session} has no session to draw it from");
             return;
         };
-        let live = self.snapshot.live_sessions_of(&project);
-        let rows: Vec<Entity<SessionRow>> = live
-            .iter()
-            .filter_map(|s| self.sessions.get(&s.id).cloned())
+        let project = found.project.clone();
+        // Grouped by machine, the level is the project's under the session's machine, and holds
+        // that machine's sessions only.
+        let machine = self.grouped.then(|| snapshot.machine_of(found).to_owned());
+        let live: Vec<&crate::model::Session> = snapshot
+            .live_sessions_of(&project)
+            .into_iter()
+            .filter(|s| {
+                machine
+                    .as_deref()
+                    .is_none_or(|m| snapshot.machine_of(s) == m)
+            })
             .collect();
-        if rows.len() != live.len() {
+        let node = match &machine {
+            Some(machine) => self
+                .machine_projects
+                .get(&(project.clone(), machine.clone())),
+            None => self.projects.get(&project),
+        };
+        let Some(node) = node.cloned() else {
+            eprintln!("flottille: the fold of {session} has no level of {project} to draw");
             return;
-        }
+        };
+        // A session with no row yet is left out, said, and the others are drawn.
+        let (live, rows): (Vec<_>, Vec<_>) = live
+            .into_iter()
+            .filter_map(|s| match self.sessions.get(&s.id) {
+                Some(row) => Some((s, row.clone())),
+                None => {
+                    eprintln!("flottille: no row for {} of {project} yet", s.id);
+                    None
+                }
+            })
+            .unzip();
         let rows = nested(&live, &rows, cx);
-        if let Some(node) = self.projects.get(&project).cloned() {
-            node.update(cx, |node, cx| node.set_rows(rows, cx));
-        }
+        node.update(cx, |node, cx| node.set_rows(rows, cx));
     }
 
     /// "Resume" in an ended session's row.
@@ -1914,14 +2197,22 @@ impl Shell {
                     self.read_texts(cx);
                 }
             }
-            Update::Kept(folds, drafts) => {
+            Update::Kept(folds, arrangement, drafts) => {
                 let by_machine = folds.by_machine;
                 self.kept = folds;
                 self.kept_read = true;
                 // What the daemon keeps of how the projects are shown comes after the first rows.
+                // It is read once, as the window opens: another window's later changes are seen by
+                // the windows opened after them.
+                self.arrangement_kept = arrangement;
+                let now = self.arrangement_now();
+                let moved = std::mem::replace(&mut self.arrangement, now) != self.arrangement;
                 if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
                     self.rearrange(window, cx);
+                } else if moved {
+                    self.show_arrangement(cx);
                 }
+                self.keep_arrangement();
                 self.listed_drafts = drafts;
                 self.say_drafts(cx);
             }
@@ -2699,7 +2990,12 @@ impl Shell {
                     }
                 }
             },
-            Outcome::WindowKept { value, result } => self.kept_written(value, result, cx),
+            Outcome::WindowKept { value, result, .. } => self.kept_written(value, result, cx),
+            Outcome::ArrangementKept {
+                change,
+                arrangement,
+                result,
+            } => self.arrangement_answered(change, arrangement, result, cx),
             Outcome::ToolResults { written, shown } => {
                 self.settings.update(cx, |page, cx| {
                     page.tool_results_answered(shown, written, cx)
@@ -2839,6 +3135,12 @@ impl Shell {
                         section.answered(shown, written, window, cx)
                     });
                 }
+            }
+            Outcome::TravelledFolder { written, shown } => {
+                let section = self.settings.read(cx).travelled_folder().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(shown, written, window, cx)
+                });
             }
             Outcome::Skills { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
@@ -3325,6 +3627,7 @@ impl Shell {
         self.actions.send(Command::SessionsRead);
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
+        self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
         self.actions.send(Command::SignIns);
         self.ask_appearance(None);
@@ -3757,23 +4060,42 @@ impl Shell {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
-        self.projects = projects;
+        match grouped {
+            true => {
+                // The user's list folds away as it was, and its rows come back when it does: the
+                // nodes stay, the projects that are gone from them.
+                self.projects
+                    .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
+            }
+            false => self.projects = projects,
+        }
         self.sessions = sessions;
+        let offered = snapshot.homes.len() > 1;
+        let sidebar = self.sidebar.read(cx);
+        // First, so that the rows below are taken (or kept, while shown by machine).
+        if sidebar.is_by_machine() != grouped
+            || sidebar.offers_grouping() != offered
+            || !sidebar.has_menu()
+        {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_arrangement(grouped, offered, cx)
+            });
+        }
+        let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
+        let arranged = self.arranged_rows(&names, &self.projects);
         self.sidebar_changed(cx);
-        if self.sidebar.read(cx).projects() != project_nodes {
+        // GPUI Fast takes any update for a change: touch the list only when it did.
+        if !grouped && self.sidebar.read(cx).projects() != project_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_projects(project_nodes, cx));
+        }
+        if !grouped && self.sidebar.read(cx).arranged() != &arranged {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
         }
         if self.sidebar.read(cx).sections() != section_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_sections(section_nodes, cx));
-        }
-        let offered = snapshot.homes.len() > 1;
-        let sidebar = self.sidebar.read(cx);
-        if sidebar.is_by_machine() != grouped || sidebar.offers_grouping() != offered {
-            self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_arrangement(grouped, offered, cx)
-            });
         }
 
         self.forms
@@ -4764,6 +5086,7 @@ impl Render for Shell {
             })
             .child(self.add_project.clone())
             .child(self.rename.clone())
+            .child(self.group_form.clone())
             .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()

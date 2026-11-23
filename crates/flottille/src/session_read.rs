@@ -77,6 +77,8 @@ pub fn session_of(daemon: &Daemon, id: &str) -> Result<Agent, Outcome> {
     let session = daemon
         .read(|store| store.agent(id))
         .map_err(failed)?
+        // A caller of another machine stood in for here runs nothing: it is no session.
+        .filter(|agent| !crate::across::is_stand_in(&agent.id))
         .ok_or_else(|| refused(format!("refused: there is no session {id}")))?;
     // A child an agent of another machine launched here has no parent here, and is one.
     if session.parent.is_some() || crate::across::remote_child(daemon, &session) {
@@ -107,6 +109,8 @@ pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
         Ok(session) => {
             session.project != caller.project
                 && session.launched_by.as_deref() != Some(caller.id.as_str())
+                // Nor one a caller of another machine started here.
+                && grant.reads.as_deref() != Some(session.id.as_str())
                 && !daemon
                     .read(|store| store.has_leave(&caller.id, &session.id))
                     .unwrap_or(false)

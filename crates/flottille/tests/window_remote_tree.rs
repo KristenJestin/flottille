@@ -276,6 +276,74 @@ fn a_session_on_another_machine_shows_under_its_pilot_with_the_machine(cx: &mut 
     );
 }
 
+/// A hub, `pc` its first member with the project `app` on `feat/export`, `more` the more lines of
+/// its file, and `server` a runner paired with it that has no project: the launch makes it there.
+fn pc_and_bare_server(more: &str) -> (TestHub, Machine, Machine) {
+    let server = runner().with_judge(json!([
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    let (hub, pc, server) = pc_and_server_on(Machine::of(runner()), server);
+    let repo = pc.user.path("work/app");
+    pc.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    pc.user.git(&repo, &["add", "."]);
+    pc.user.git(&repo, &["commit", "--quiet", "-m", "first"]);
+    pc.user
+        .git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    // No branch convention of its own: one would make the launch the user's to decide there.
+    let text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\n{more}\n\
+         [[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
+        pc.user.path("work/app").display(),
+        pc.user.path("work/app-work").display()
+    );
+    pc.user.write_project_file("app", &text);
+    pc.user.call("project.list", json!({})).unwrap();
+    eventually("server offers Claude", || {
+        pc.remote()["machines"].as_array().unwrap().iter().any(|m| {
+            m["name"] == "server"
+                && m["offers"]["agents"]
+                    .as_array()
+                    .is_some_and(|agents| agents.iter().any(|a| a == "claude"))
+        })
+    });
+    (hub, pc, server)
+}
+
+#[gpui_kit::test]
+fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
+    // The project is made there, and its session says nothing back for a while.
+    let (_hub, pc, server) = pc_and_bare_server("");
+    server.user.fake_script(json!({"turns": [
+        {"when": "Finish the export", "do": [{"wait": 60000}, {"say": "done"}]}
+    ]}));
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session made on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_machine_id(&row));
+        if said.as_deref() == Some("server · preparing app") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[gpui_kit::test]
 fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
@@ -847,4 +915,43 @@ fn a_child_on_another_machine_is_in_the_sub_agents_list_with_its_machine_icon(
         "it folds before it is gone: {drawn:?}"
     );
     assert!(!present(cx, row.clone().into()), "gone once the fold ended");
+}
+
+#[gpui_kit::test]
+fn a_child_launched_from_another_machine_is_not_a_root_in_the_window(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer
+        .text
+        .find("(agent ")
+        .unwrap_or_else(|| panic!("no agent in {}", answer.text));
+    let child = answer.text[at + 7..at + 19].to_owned();
+    eventually("the child runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": child}))
+            .is_ok()
+    });
+    let (shell, cx) = window(&server, cx);
+
+    open_page(&shell, &child, cx);
+
+    // Its parent writes to it: a bar naming that agent stands where the composer would, with
+    // nothing to go back to.
+    until(&shell, cx, "the bar in place of the composer", |cx| {
+        present(cx, "read-only".into())
+    });
+    let said = label(cx, "read-only".into()).unwrap_or_default();
+    assert!(
+        said.contains(&format!("a child of agent {pilot} of pc")),
+        "{said}"
+    );
+    assert!(!present(cx, "composer-field".into()), "no composer");
+    assert!(!present(cx, "back-to-root".into()));
 }

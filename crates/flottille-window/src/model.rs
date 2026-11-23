@@ -429,6 +429,9 @@ pub struct Session {
     pub elsewhere: Option<Elsewhere>,
     /// The machine it runs on, when it is not this one: its row carries the machine's name.
     pub tag: Option<String>,
+    /// Its root is a child an agent of another machine launched here, that agent by name
+    /// (`agent b1 of pc`): only that agent writes to it, never the user.
+    pub child_of: Option<String>,
 }
 
 /// A session on another machine, as its row under its pilot shows it.
@@ -553,10 +556,14 @@ fn last_known(
     if let Some(machine) = machine.filter(|machine| !machine.online()) {
         return (machine.state_words(), None);
     }
-    // Allowed there, a held launch is told nothing more here: what it sent since says it runs.
+    // A held launch is `held` until the user's answer there comes back: allowed, it is `started`.
     match launched.heard.as_deref() {
         None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
-        None => ("running".to_owned(), Some(AgentState::Running)),
+        // Nothing heard yet of a project made for it there: that machine is preparing it.
+        None => match &launched.making {
+            Some(project) => (format!("preparing {project}"), Some(AgentState::Running)),
+            None => ("running".to_owned(), Some(AgentState::Running)),
+        },
         Some("child-report") => ("reported".to_owned(), None),
         Some("child-failed") => ("failed".to_owned(), None),
         Some(_) => ("waiting".to_owned(), Some(AgentState::Waiting)),
@@ -745,6 +752,19 @@ pub fn runs_on(runs_on: &Value) -> String {
 
 fn text(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// The agent of another machine whose child the root `agent` is, by name, from its
+/// `launched_from`; `None` for any other root, a session another machine's agent leads included.
+/// Such a child has no parent here and is at depth 1 from the moment it is made, before its
+/// launch names it.
+fn child_of(agent: &Value) -> Option<String> {
+    let from = &agent["launched_from"];
+    let child = from["kind"] == "child" || number(agent, "depth") > 0;
+    child.then(|| match from["kind"] == "child" {
+        true => format!("agent {} of {}", text(from, "agent"), text(from, "machine")),
+        false => "an agent of another machine".to_owned(),
+    })
 }
 
 fn number(value: &Value, key: &str) -> u64 {
@@ -1122,6 +1142,7 @@ impl Snapshot {
                     }),
                     elsewhere: None,
                     tag: None,
+                    child_of: child_of(agent),
                     id,
                 }
             })
@@ -1308,6 +1329,7 @@ impl Snapshot {
                         .map(crate::machines::Member::look_words),
                 }),
                 tag: None,
+                child_of: None,
             });
         }
         self.elsewhere = added;
@@ -1415,6 +1437,7 @@ impl Snapshot {
                             .map(crate::machines::Member::look_words),
                     }),
                     tag: machine.map(str::to_owned),
+                    child_of: None,
                 });
                 if !self
                     .projects
@@ -2304,6 +2327,34 @@ mod tests {
     }
 
     #[test]
+    fn a_child_of_another_machine_s_agent_is_said_as_its_child() {
+        let mut child = agent("r1", None, "working", None);
+        child["depth"] = json!(1);
+        child["launched_from"] = json!({"machine": "pc", "agent": "b1", "kind": "child"});
+        let mut led = agent("r2", None, "idle", None);
+        led["launched_from"] = json!({"machine": "pc", "agent": "b1", "kind": "led"});
+        // Made, its launch not yet naming it: a child all the same, by its depth.
+        let mut new = agent("r3", None, "starting", None);
+        new["depth"] = json!(1);
+        let snapshot = build(
+            json!({"agents": [child, led, new]}),
+            json!({"requests": []}),
+            &[],
+        );
+        let child_of = |id: &str| snapshot.session(id).unwrap().child_of.clone();
+        assert_eq!(child_of("r1").as_deref(), Some("agent b1 of pc"));
+        assert_eq!(
+            child_of("r2"),
+            None,
+            "a led session is the user's to write to"
+        );
+        assert_eq!(
+            child_of("r3").as_deref(),
+            Some("an agent of another machine")
+        );
+    }
+
+    #[test]
     fn a_session_led_from_another_project_names_its_pilot_s_project() {
         let mut pilot = agent("r1", None, "idle", None);
         pilot["title"] = json!("Release the fonts");
@@ -2735,6 +2786,7 @@ mod tests {
             heard: heard.map(str::to_owned),
             heard_at: None,
             at: 1,
+            making: None,
         };
         let machine = |state: &str| crate::machines::Machine {
             name: "server".into(),
