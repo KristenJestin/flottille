@@ -3259,8 +3259,78 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A child an agent of another machine launched here, as the store keeps it: no parent, one
+    /// below that agent's depth.
+    pub(crate) fn a_child_of_another_machine() -> Agent {
+        Agent {
+            depth: 1,
+            role: "worker".into(),
+            ..crate::daemon::tests::an_agent("c1")
+        }
+    }
+
+    /// A daemon on temporary folders and a throwaway store holding `agent`.
+    pub(crate) fn a_daemon_with(dir: &std::path::Path, agent: &Agent) -> Arc<Daemon> {
+        let paths = flottille_core::paths::Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(agent, ("agent.created", json!({})))
+            .unwrap();
+        let projects = projects::Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    #[tokio::test]
+    async fn a_child_of_another_machine_s_agent_starts_no_session_even_given_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = a_child_of_another_machine();
+        let daemon = a_daemon_with(dir.path(), &child);
+
+        for kind in ["led", "handed"] {
+            let launched = launch(
+                &daemon,
+                &child,
+                json!({"kind": kind, "title": "Another", "brief": "Do more."}),
+            )
+            .await;
+            assert!(
+                matches!(&launched, Err(Outcome::Refused(why)) if why == crate::actions::CHILD_ROOTS),
+                "{kind}"
+            );
+        }
+        // Nor does it pilot an extension's agents: it is no session.
+        let piloted = launch_for_extension(
+            &daemon,
+            "review",
+            &child,
+            "pilot",
+            "Review",
+            "Read the change.",
+            String::new(),
+            providers::Asked {
+                provider: None,
+                model: None,
+                effort: None,
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            piloted.message.contains("cannot have children"),
+            "{}",
+            piloted.message
+        );
+        assert_eq!(daemon.read(Store::agents).unwrap().len(), 1);
+    }
 
     #[test]
     fn a_duration_is_said_in_its_unit() {

@@ -430,6 +430,14 @@ mod tests {
     }
 
     #[test]
+    fn a_child_of_another_machine_s_agent_is_no_session_to_subscribe() {
+        assert!(!is_session(
+            &crate::tree::tests::a_child_of_another_machine()
+        ));
+        assert!(is_session(&crate::daemon::tests::an_agent("a1")));
+    }
+
+    #[test]
     fn the_events_are_said_in_words_the_end_left_to_until() {
         assert_eq!(
             words(&crate::forge::EVENTS),
