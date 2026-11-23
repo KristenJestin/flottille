@@ -489,8 +489,10 @@ verification words.
    pins, and a secret of 128 bits. The device types nothing else and knows it reaches the right
    hub: one that answers with another key is refused before anything is proved.
 3. **The device proposes its card and confirms it**: its name (the host's name), its icon (a
-   laptop with a battery, a desktop with a screen, a server without either), its role (a computer
-   with agents signed in: `runner`; without: `controller`; a phone: `controller`), and a colour of
+   laptop with a battery, a desktop with a screen, a server without either), its role (a machine
+   with no screen, a server: `runner`, signed in or not, the agents being signed in later; a
+   desktop or a laptop with agents signed in: `runner`, without: `controller`; a phone:
+   `controller`), and a colour of
    its key's; the user changes any of them before confirming. In the window: one modal, **Connect
    to your hub** (paste the code or scan its QR, then the card, then confirm). On the command line:
    `flottille remote pair [--name] [--role] [--icon] [--colour]`, the code on its standard input.
@@ -587,7 +589,9 @@ device is, a select of the five icons, This device can, Run agents / Control onl
 a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
 join request: a device is added on the hub's host. Then the page shows the devices of the
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
-"⋯", Remove asking once); #1177 took this machine's addresses off the page.
+"⋯", Remove asking once; the row of a controller or a viewer, which runs nothing and so is not
+offered in Settings or the composer, says so and shows `flottille-hub role <name> runner`, which
+changes it on the hub's host, copyable, #1247); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
@@ -1566,6 +1570,17 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
+  no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
+  signed in or not. The machine has no other reliable signal of having no screen, so the icon is
+  the one already proposed and shown, and a headless machine that has a screen connected is a
+  desktop and stays a `controller` until its role is changed on the hub's host.
+- **A controller or a viewer is explained on its own row, not once for the page** (#1247): each
+  member that runs nothing says, under its row, its role, that it runs nothing and so is not offered
+  in Settings or the composer, and the command of the hub's host that changes it, copyable
+  (`flottille-hub role <name> runner`). One block per member, because the command holds the name and
+  each folds away by itself when the role changes; the window never offers a button that changes a
+  role.
 - **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
   project's choosers switch the whole window, as opening a session there does, rather than a page
   aimed at a machine of its own while the rest stays: one way to address a machine, and the
@@ -1716,7 +1731,8 @@ on a real phone, by hand, and reported.
   paired and last seen) is the hub's word, unsigned: nothing in it gives a right.
 - The proposed icon is the machine's: a battery (`/sys/class/power_supply`, type `Battery`) makes
   it a laptop, a screen connected (`/sys/class/drm`) a desktop, neither a server. The proposed role
-  is `runner` when an agent CLI is signed in on the machine, `controller` otherwise.
+  is `runner` for a server (#1247), and for any machine where an agent CLI is signed in,
+  `controller` otherwise. `flottille remote pair` says the role it takes before it asks the hub.
 - `flottille-hub pair`'s QR is drawn in half blocks, light modules as blocks and dark ones blank,
   as a dark console shows them, with a quiet zone of two modules; the code is printed above it,
   to copy.
