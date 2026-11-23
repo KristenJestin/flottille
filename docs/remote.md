@@ -1650,9 +1650,11 @@ on a real phone, by hand, and reported.
   30 days idle (as long as a message is kept) and when their machine leaves the members.
 - **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
   an answer the user gave before that (within the same second) is answered "send again later"
-  (#1263), and kept by its sender, which drops it after 30 days; an answer nothing ever awaits is
-  told the same, since "not yet" and "never" cannot be told apart. Answers never given are
-  forgotten after 30 days.
+  (#1263) while a call of that caller to that machine is still unanswered, and kept by its
+  sender. An answer that comes when no such call is out (the call was given up, or its answer
+  was lost with the link) is refused for good, as nothing will ever await it, so that it holds
+  back nothing its sender keeps for that machine behind it. Answers never given are forgotten
+  after 30 days.
 - **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
   no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
   signed in or not. The machine has no other reliable signal of having no screen, so the icon is

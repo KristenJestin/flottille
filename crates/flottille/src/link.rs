@@ -198,6 +198,9 @@ pub struct Remote {
     /// The machines this one is reading a bundle from or placing code of, one thing at a time
     /// each (`travel.rs`).
     pub(crate) receiving: crate::travel::Receiving,
+    /// The calls of this machine's agents sent to another machine and not answered yet
+    /// (`across::forward`).
+    pub(crate) calling: crate::across::Calling,
     /// The tunnels this machine carries and serves (`tunnel.rs`).
     pub(crate) tunnels: crate::tunnel::Tunnels,
     /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
@@ -363,6 +366,7 @@ impl Remote {
             halt: Arc::new(tokio::sync::watch::Sender::new(false)),
             transfers: Default::default(),
             receiving: Default::default(),
+            calling: Default::default(),
         }
     }
 

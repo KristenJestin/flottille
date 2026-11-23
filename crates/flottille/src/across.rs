@@ -110,6 +110,62 @@ fn serving(remote: &Remote) -> Result<Arc<Daemon>, Refused> {
         .ok_or_else(|| Refused::Now("the daemon is stopping".to_owned()))
 }
 
+/// Whether a test plays a machine slow to record what its agent waits for once another machine
+/// answered its call: in a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE` names exists.
+fn playing_slow_call() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_SLOW_CALL_FILE")
+            .is_some_and(|file| std::path::Path::new(&file).exists())
+}
+
+/// The calls of this machine's agents sent to another machine whose answer is not back yet, by
+/// that machine's key and the caller, each with how many: the answer of a request held there may
+/// come before the call's own answer, which says what is awaited.
+#[derive(Default)]
+pub(crate) struct Calling(Mutex<BTreeMap<(String, String), usize>>);
+
+impl Calling {
+    fn sent(remote: &Arc<Remote>, machine: &str, caller: &str) -> Sent {
+        let key = (machine.to_owned(), caller.to_owned());
+        *remote
+            .calling
+            .0
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default() += 1;
+        Sent {
+            remote: remote.clone(),
+            key,
+        }
+    }
+
+    fn any(&self, machine: &str, caller: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .contains_key(&(machine.to_owned(), caller.to_owned()))
+    }
+}
+
+/// A call of [`Calling`], until its answer was taken, or it was given up.
+struct Sent {
+    remote: Arc<Remote>,
+    key: (String, String),
+}
+
+impl Drop for Sent {
+    fn drop(&mut self) {
+        let mut calling = self.remote.calling.0.lock().unwrap();
+        if let Some(count) = calling.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                calling.remove(&self.key);
+            }
+        }
+    }
+}
+
 /// The machines whose kept messages are being sent now, each with whether more were kept since.
 static SENDING: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
 
@@ -855,7 +911,7 @@ fn delivered(
             .into());
     }
     if deliver.launch.starts_with("request-") {
-        return delivered_answer(daemon, &machine, &name, &deliver);
+        return delivered_answer(daemon, remote, &machine, &name, &deliver);
     }
     let launch = daemon
         .read(|store| store.launches("out", Some(&machine), LaunchFilter::Named(&deliver.launch)))
@@ -1747,8 +1803,8 @@ pub(crate) async fn forward(
     }
     let link = crate::link::remote_of(daemon)
         .map_err(|failure| failure.message)
-        .and_then(|remote| remote.link_to(name).map(|(link, _)| link));
-    let link = match link {
+        .and_then(|remote| remote.link_to(name).map(|(link, _)| (remote, link)));
+    let (remote, link) = match link {
         Ok(link) => link,
         Err(why) => {
             return Outcome::Refused(format!(
@@ -1782,6 +1838,9 @@ pub(crate) async fn forward(
         mode: mode.to_owned(),
         switch,
     };
+    // Until what it awaits is recorded, or the call is given up: an answer that comes before is
+    // sent again, one that comes after none is refused.
+    let _sent = Calling::sent(&remote, &away.machine, &caller.id);
     match link
         .send(&Message::Machine(MachineMessage::Call(Box::new(call))))
         .await
@@ -1793,6 +1852,9 @@ pub(crate) async fn forward(
         )),
         Ok(answer) => {
             let text = answer["text"].as_str().unwrap_or_default().to_owned();
+            while playing_slow_call() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             if let Some(number) = answer["request"].as_u64() {
                 let _ = daemon.write(|store| {
                     store
@@ -1851,9 +1913,11 @@ pub(crate) fn answer_back(daemon: &Arc<Daemon>, request: &Request, body: &str) -
 
 /// The answer of a request of another machine a caller of this one waited for (`forward`),
 /// `launch` naming it as `request-<n>`: stored for that agent as its `approval` delivery, once;
-/// refused when that agent waits for no such answer of that machine.
+/// refused when that agent waits for no such answer of that machine, for now while a call of it
+/// to that machine is not answered yet.
 fn delivered_answer(
     daemon: &Arc<Daemon>,
+    remote: &Remote,
     machine: &str,
     name: &str,
     deliver: &Deliver,
@@ -1886,6 +1950,8 @@ fn delivered_answer(
     {
         return Ok(json!({}));
     }
+    // Looked at before what is awaited: a call answered meanwhile has recorded its wait.
+    let calling = remote.calling.any(machine, &deliver.agent);
     let awaited = daemon
         .write(|store| {
             store
@@ -1894,12 +1960,18 @@ fn delivered_answer(
         })
         .map_err(|error| Refused::Now(error.to_string()))?;
     // The caller records what it awaits once the call's answer is back: an answer that came
-    // first is sent again, and dropped by its sender after 30 days when nothing ever awaits it.
+    // first is sent again. Any other is refused for good, so that it holds back nothing kept
+    // behind it on its machine.
     if !awaited {
-        return Err(Refused::Now(format!(
-            "agent {} of this machine waits for no answer of request #{number} of {name} yet",
-            deliver.agent.chars().take(64).collect::<String>()
-        )));
+        let agent = deliver.agent.chars().take(64).collect::<String>();
+        let why = format!(
+            "agent {agent} of this machine waits for no answer of request #{number} of {name}"
+        );
+        return Err(if calling {
+            Refused::Now(format!("{why} yet"))
+        } else {
+            Refused::Never(why)
+        });
     }
     deliveries::deliver(
         daemon,
