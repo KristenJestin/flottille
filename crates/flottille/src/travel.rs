@@ -748,9 +748,15 @@ fn folders_inside(root: &Path, path: &str) -> Result<(), String> {
         match std::fs::create_dir(&at) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let is_folder = std::fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_dir());
-                if !is_folder {
-                    return Err(format!("{path} leads outside the project folder"));
+                // A link is refused wherever it leads, inside the project too: following it is
+                // what a link planted since the check would use.
+                let meta = std::fs::symlink_metadata(&at).map_err(|error| cannot(&at, &error))?;
+                let shown = at.strip_prefix(root).unwrap_or(&at).display();
+                if meta.is_symlink() {
+                    return Err(format!("{shown} is a link: nothing is made through it"));
+                }
+                if !meta.is_dir() {
+                    return Err(format!("{shown} is not a folder: nothing is made in it"));
                 }
             }
             Err(error) => return Err(cannot(&at, &error)),
