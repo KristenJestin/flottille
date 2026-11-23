@@ -1610,14 +1610,21 @@ way in:
   `AGENT_BROWSER_EXECUTABLE_PATH`) and a script run in every page (`--init-script`,
   `AGENT_BROWSER_INIT_SCRIPTS`): through them the password would reach more than the entry's site.
   While one is set, `login` is refused, naming the option or the variable alone and saying to take
-  it out, and the review says it; the server starts as the user wrote it. The options agent-browser
-  refuses beside a domain list (`--cdp`, `--auto-connect`, `--profile`, `--state`, `--restore`,
-  `-p`/`--provider`, `--args`, `--session-name`, `--allowed-domains`, and their variables) no
-  longer refuse `login`: with no list of Flottille's they are the user's, and `login` types into
-  the browser the user's command chose. **Its other
-  options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
-  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
-  variables of the daemon's own environment, which a run inherits.
+  it out, and the review says it; the server starts as the user wrote it. **The options
+  agent-browser itself calls unsafe** (those its `--allowed-domains` rejects) refuse `login` the
+  same way: another profile (`--profile`, `AGENT_BROWSER_PROFILE`), a saved or restored session
+  (`--state`, `--restore`, `--session-name`, and their variables), a browser reached over CDP or
+  found running (`--cdp`, `--auto-connect`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`), a
+  browser of a provider's (`-p`/`--provider`, `AGENT_BROWSER_PROVIDER`), and launch arguments of
+  the command's (`--args`, `AGENT_BROWSER_ARGS`, which could carry a `--proxy-server` or another
+  profile folder): `login` would type into a browser, a profile or a network that is not the one
+  Flottille made. These are looked for in the server's command, the connection's `env`, and the
+  environment the daemon itself started with, which agent-browser inherits; no configuration file
+  of the user's is read (agent-browser reads the one `--config` Flottille names, and only it).
+  **Its other options and variables are not judged** (`AGENT_BROWSER_SESSION`,
+  `AGENT_BROWSER_NAMESPACE`, `--headers`, `--engine`…): they are the user's, passed as written.
+  What is not covered: the variables of the daemon's own environment that send the session
+  elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
   give them.** An agent drives a browser for the user, who works in another window: a window that
   comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused

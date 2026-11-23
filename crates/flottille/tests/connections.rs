@@ -6185,7 +6185,6 @@ fn the_login_fills_and_no_run_reads_it() {
         vault: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
-    let before = written_by_others(&user);
     real_connection(&user, &program);
     project(&user, "app");
     user.call(
@@ -6268,6 +6267,7 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
         vault: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
+    let before = written_by_others(&user);
     real_connection(&user, &program);
     project(&user, "app");
     user.call(

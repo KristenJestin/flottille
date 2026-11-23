@@ -697,6 +697,17 @@ The gaps, where the platform does not allow more:
   have no private mount namespace (above), a run is in the same user namespace as the daemon and
   can enter the browser's (`setns`): the browser's network keeps it out only where runs have
   theirs;
+- **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
+  can write what is the user's under the home: agent-browser itself where the user installed it
+  there (npm's global folder under the home, `~/.local`), the Chrome it downloaded under
+  `~/.agent-browser/browsers/`, and Chrome's certificate database `~/.pki/nssdb`. A run that
+  replaced that Chrome, or agent-browser, has its own program run as the browser the login fills,
+  and one that wrote `nssdb` has the browser trust its certificate authority. Flottille does not
+  check them: the owner is the user either way, and a hash recorded at first use could be taken
+  of a program a run had already replaced, and would refuse every update the user or agent-browser
+  makes (agent-browser downloads a new Chrome on its own). Installing agent-browser and its Chrome
+  where root alone writes closes the programs' part; the rest needs a sandbox that keeps the
+  home's programs read-only, a change of its own;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then
@@ -833,17 +844,36 @@ temporary folder, `/tmp/agent-browser-chrome-…`, and Chrome keeps its password
 (`--password-store=basic`): in `/tmp`, which runs reach, a run would read them or plant a
 `Preferences` before Chrome reads it. Every command of agent-browser's (the server, `open`, `auth
 login`, `close`) is given `TMPDIR`, the folder `tmp` of the connection's vault folder (`0700`,
-denied to every run), so the profile and Chrome's own temporary files are there. The vault folder
-is in the runtime folder, in memory on most systems: Chrome's disk cache is capped at 32 MiB
-(`--disk-cache-size`, in the `args` of the configuration Flottille writes), so that a browser
-cannot fill it. A folder on disk denied to runs would have needed a rule of its own in every run's
-sandbox; the vault folder already is one.
+denied to every run), so the profile and Chrome's own temporary files are there.
+
+Chrome also writes outside its profile, whatever profile it is given: its crash database
+(`Crash Reports`, whose dumps hold the page's memory, a password typed included) under its default
+configuration folder (`$XDG_CONFIG_HOME/google-chrome-for-testing`, else `~/.config/…`), and its
+caches under `$XDG_CACHE_HOME`; agent-browser and Chrome read `$XDG_DATA_HOME`. The same commands
+are given `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`, the folders `config`, `cache`
+and `data` of the vault folder, and never `CHROME_CONFIG_HOME` nor `BREAKPAD_DUMP_LOCATION`,
+which would move the configuration folder or the dumps elsewhere. `HOME` stays the user's:
+agent-browser finds the Chrome it downloaded under `~/.agent-browser` ("The gaps" says what a run
+can do there).
+
+The vault folder is in the runtime folder, in memory on most systems: Chrome's HTTP disk cache is
+capped at 32 MiB (`--disk-cache-size`, in the `args` of the configuration Flottille writes). The
+cap is the HTTP cache's alone: what pages keep themselves (IndexedDB, Cache Storage, Local
+Storage) is not capped, so a site that stores much takes memory until the browser is closed. A
+folder on disk denied to runs would have needed a rule of its own in every run's sandbox; the
+vault folder already is one. A Chrome that crashed leaves its profile behind, which agent-browser
+never removes: closing the connection's browser (`close`, the daemon's stop, the connection's
+removal) empties the folder `tmp`, and so does the daemon's start where no browser was left
+running.
 
 **Nothing reads the browser's memory.** A run with the user's identity may attach to Chrome
-(`ptrace`) and read the page and the password filled, unless Landlock confines the run (its second
-ABI or later: a confined process cannot attach to one outside its domain) or Yama's
-`ptrace_scope` is 1 or more (a process attaches to its own descendants alone). Where neither holds,
-the browser's isolation is unavailable and the login refuses, saying so.
+(`ptrace`) and read the page and the password filled, or open `/proc/<pid>/root` of a process of
+the user's outside its namespace, which leads to the vault folder, the browser's socket and its
+profile. Landlock from its second ABI (Linux 5.19) keeps a confined process from both: it attaches
+to none outside its domain and cannot open their `/proc/<pid>/root`. Yama's `ptrace_scope` keeps
+the attach alone, not `/proc/<pid>/root`, which needs only the right to read: it is no substitute.
+Where Landlock is missing or below its second ABI, the browser's isolation is unavailable and the
+login refuses, saying so and what lets it sign in.
 
 **Full mode.** The namespace keeps the browser from the runs Flottille confines, Ask's and
 Auto's. A run that reaches the vault folder or the user's other processes as the user does, as a
@@ -854,11 +884,12 @@ browser's isolation is no defence against it.
 namespace's holder, which is its own program by its path, and the login refuses until the daemon
 is restarted.
 
-Without pasta on the `PATH`, or where the kernel refuses user namespaces, the server still runs,
-its browser in the runs' network, and the **login refuses to fill**: "install passt (pasta) to let
-the agent's browser sign in". Every other action of the connection works. `flottille doctor` says
-whether the browser's isolation is available (`sandbox.browser_network`), with the gap as a
-warning. passt is packaged by the main distributions, as `passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces through AppArmor, which
+Without pasta on the `PATH`, where the kernel refuses user namespaces, or where Landlock is below
+its second ABI, the server still runs, its browser in the runs' network, and the **login refuses
+to fill**, saying why and its remedy: "install passt (pasta) to let the agent's browser sign in",
+the user namespaces to allow, or the kernel to update. Every other action of the connection works.
+`flottille doctor` says whether the browser's isolation is available (`sandbox.browser_network`),
+with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as `passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces through AppArmor, which
 refuses Flottille's own namespaces, the browser's included, until the user lifts the restriction
 or allows Flottille.
 
