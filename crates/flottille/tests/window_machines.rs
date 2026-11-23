@@ -1841,6 +1841,7 @@ fn a_member_with_no_look_gets_the_defaults_of_its_key() {
         machine: None,
         icon: None,
         colour: None,
+        kind: None,
     };
     let (icon, colour) = member.look();
     assert_eq!(icon, "desktop");
