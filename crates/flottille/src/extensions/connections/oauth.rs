@@ -34,7 +34,6 @@ const ACCEPT_FAILURES: usize = 10;
 const LONGEST: usize = 64 * 1024;
 /// Flottille's client id: the address of its Client ID Metadata Document, published from
 /// `site/oauth/client.json`. A change makes every authorization server see a new client.
-#[allow(dead_code)]
 const CLIENT_ID_URL: &str = "https://kristenjestin.github.io/flottille/oauth/client.json";
 
 /// What a sign-in keeps, as the secret of the vault entry `<name>.oauth`.
@@ -615,7 +614,8 @@ async fn authorization_metadata(issuer: &str) -> Result<Value, String> {
     ))
 }
 
-/// The client id (and secret) the sign-in uses: the one the user declared, or one registered.
+/// The client id (and secret) the sign-in uses, in the specification's order: the one the user
+/// declared, Flottille's metadata document, or one registered.
 async fn client(
     declaration: &Declaration,
     metadata: &Value,
@@ -623,6 +623,11 @@ async fn client(
 ) -> Result<(String, Option<String>), String> {
     if let Some(id) = &declaration.client_id {
         return Ok((id.clone(), None));
+    }
+    // The authorization server fetches the document itself: nothing is registered, and a public
+    // client has no secret.
+    if metadata["client_id_metadata_document_supported"] == true {
+        return Ok((CLIENT_ID_URL.to_owned(), None));
     }
     let Some(endpoint) = metadata["registration_endpoint"].as_str() else {
         return Err(format!(
