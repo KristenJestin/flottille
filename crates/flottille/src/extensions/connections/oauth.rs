@@ -1151,6 +1151,8 @@ mod tests {
                     && named.host_str() == sent.host_str()
                     && named.path() == sent.path()
                     && named.query().is_none()
+                    // A port in the document would hold the server to that one port only.
+                    && named.port().is_none()
             });
         assert!(covered, "no redirect_uris covers {sent}: {document}");
     }
