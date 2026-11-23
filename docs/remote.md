@@ -1140,9 +1140,10 @@ and removes its workspace as today, through `call`.
 
 **Built (#819), in the window.** While the window shows this machine, each led session and each
 child an agent of this machine started on another (`remote.launches`, `protocol.md`) has a row
-under its pilot's session, or the session whose tree holds its parent: its title, then the
-machine's name and its state as last known, `server · running` (no delivery came yet),
-`waiting` (held for the user there, or its last delivery a turn's end, a question or a request),
+under its pilot's session, or the session whose tree holds its parent: its title (the launch's),
+then the machine's name and its state: the one that machine's list says (`server · running`,
+`needs you`, `idle`, #1280), else as last known, `running` (no delivery came yet), `needs you`
+(held for the user there), `waiting` (its last delivery a turn's end, a question or a request),
 `reported`, `failed`, or the machine's own state while it is off (`offline since 22:14`, `needs an
 update`), greyed then. Clicking it brings that machine in front (with a bounded wait for its first
 read) and opens that session there, its header and its composer entering staggered. A report whose
@@ -1766,9 +1767,9 @@ on a real phone, by hand, and reported.
 - A machine's list holds 500 sessions at most (those of the latest exchange), a title 200
   characters at most; it is told again on any event of a session but what an agent streams during
   a turn, and every 30 seconds while a link is up when it changed.
-- A session's state in a list is `needs you` while its root waits for an answer, `running` while
-  a turn runs in its tree, `idle` otherwise: a request held for the user shows as the machine in
-  front reads it, not in another machine's list.
+- A session's state in a list is `needs you` while its root waits for an answer or a request of
+  its tree is held for the user (a launch held there among them), `running` while a turn runs in
+  its tree, `idle` otherwise.
 - Opening a session of another machine brings that machine in front: the project pages, the
   "Ended" group, the bell and a new session are that machine's while it is; opening a session of
   this machine brings this one back. A project of another machine only is a group of the list
@@ -2303,15 +2304,18 @@ on a real phone, by hand, and reported.
   stops it (the `out` launch is then `ended`); in the receiving machine's cap from its launch
   until it ends.
 
-- A row of a session on another machine says its state as last known from what that machine
-  delivered here, not a live read: `running` once launched until its first delivery, `waiting`
+- A row of a session on another machine says the state that machine's list says of it
+  (`running`, `needs you`, `idle`), the launch keeping its row under its pilot (#1280). A session
+  its machine does not list (a child, or before the list came) says its state as last known from
+  what that machine delivered here: `running` once launched until its first delivery, `waiting`
   after a turn's end, a question or a request, until the next delivery says otherwise (a message
   the pilot sends does not make it `running` again here). An ended launch leaves its pilot's
   rows unless its last delivery was a report: a reported child stays, `reported`, under its pilot
   while the pilot lives. A session handed to the user is not shown under the agent that started it.
   The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
   whose caller ended: an old launch is never read again. A launch held for the user there is
-  `waiting` until something of it is heard here (its approval there sends nothing back).
+  `needs you` from the moment it is held, drawn with the request's mark, until its machine lists
+  it otherwise or something of it is heard here (its approval there sends nothing back).
 - Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
   those sessions, so a project's page, search, a session's page and the inbox do not list them,
   and nothing offers to end them from here.

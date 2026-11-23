@@ -3782,7 +3782,18 @@ impl ConversationView {
         let Some(Segment::Group(group)) = self.segments.get(segment) else {
             return div().into_any_element();
         };
-        let (open, pieces) = (group.open, group_line(&group.summary, group.cut));
+        // A request that waits for the user before any step ran (a launch held for them): the
+        // line says what the session waits for, not `0 steps · 0.0s`.
+        let deciding = group.summary.steps == 0
+            && group
+                .needs
+                .iter()
+                .any(|&at| matches!(self.model.blocks()[at], Block::Approval { .. }));
+        let pieces = match deciding {
+            true => vec!["Waits for your decision".to_owned()],
+            false => group_line(&group.summary, group.cut),
+        };
+        let open = group.open;
         let failed = (group.summary.failed > 0).then(|| format!("{} failed", group.summary.failed));
         let retried =
             (group.summary.retried > 0).then(|| format!("{} retried", group.summary.retried));
