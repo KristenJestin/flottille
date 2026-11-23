@@ -716,20 +716,103 @@ pub(crate) fn bitbucket_lists_host(listed: &Value, host: &str) -> bool {
     bitbucket::lists_host(listed, host)
 }
 
-/// Whether `gh` is there and signed in: its exit code, nothing it prints.
+/// What a command line's own status check says (#1315): signed in, not signed in (it says so
+/// itself), or could not be checked (any other failure: the network, a service that is down, a
+/// timeout, a locked keyring), which says nothing of who is signed in and is never answered with a
+/// sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Auth {
+    SignedIn,
+    NotSignedIn,
+    /// Why it could not be checked: the command line's first error line, masked, or `no answer in
+    /// N s`.
+    Unchecked(String),
+}
+
+/// The words with which `gh`, `glab` and `acli` say they hold no login (`gh auth status`: `You
+/// are not logged into any GitHub hosts`; a token the service refuses: `The token in … is
+/// invalid`, a 401). Anything else a failed status says is not a clear "not signed in": when
+/// unsure, it is "could not check".
+fn says_not_signed_in(said: &str) -> bool {
+    let said = said.to_ascii_lowercase();
+    [
+        "not logged in",
+        "not signed in",
+        "not authenticated",
+        "unauthenticated",
+        "no token found",
+        "unauthorized",
+        "bad credentials",
+    ]
+    .iter()
+    .any(|phrase| said.contains(phrase))
+        || (said.contains("token") && said.contains("is invalid"))
+}
+
+/// The line that says why a command line failed: the first that starts with a failure mark or
+/// says `error`, else the first that is not empty (`gh auth status` starts with the host's name),
+/// masked and cut.
+pub(crate) fn error_line(stderr: &str, stdout: &str) -> Option<String> {
+    let said: Vec<&str> = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let marked = |line: &str| {
+        line.starts_with("X ")
+            || line.starts_with("✗")
+            || line.to_ascii_lowercase().contains("error")
+    };
+    let line = said.iter().find(|line| marked(line)).or(said.first())?;
+    Some(masked(&line.chars().take(200).collect::<String>()))
+}
+
+/// How a time is said: whole seconds, at least one.
+pub(crate) fn no_answer(time: Duration) -> String {
+    format!(
+        "no answer in {} s",
+        time.as_secs_f64().ceil().max(1.) as u64
+    )
+}
+
+/// What a command line's status check says (`program`'s `auth status`, as run). A command line
+/// that is not there is the caller's to say.
+pub(crate) fn auth_of(program: &str, ran: Result<(bool, String, String), Gh>) -> Auth {
+    match ran {
+        Ok((true, _, _)) => Auth::SignedIn,
+        Ok((false, stdout, stderr)) => match says_not_signed_in(&format!("{stderr}\n{stdout}")) {
+            true => Auth::NotSignedIn,
+            false => Auth::Unchecked(
+                error_line(&stderr, &stdout)
+                    .unwrap_or_else(|| format!("{program} failed without saying why")),
+            ),
+        },
+        Err(Gh::Missing) => Auth::Unchecked(format!("{program} went missing")),
+        Err(Gh::Failed(why)) => Auth::Unchecked(masked(&why)),
+    }
+}
+
+/// The sentence of a check that could not be made, for what reads through that command line.
+pub(crate) fn unchecked(program: &str, why: &str) -> String {
+    format!("{program} could not be checked: {why}; what is shown could not be refreshed")
+}
+
+/// Whether `gh` is there and signed in: its exit code, and its first error line when it fails
+/// without saying it holds no login.
 pub(crate) async fn signed_in() -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {
         Err(Gh::Missing) => Err("Flottille cannot find gh, GitHub's command line: install \
              it (https://cli.github.com) and sign in with `gh auth login` to see the pull \
              requests; the rest of Flottille works without it"
             .into()),
-        Err(Gh::Failed(why)) => Err(format!("gh cannot run: {why}")),
-        Ok((false, _, _)) => Err(
-            "gh is not signed in to github.com: run `gh auth login` to see \
-             the pull requests; the rest of Flottille works without it"
-                .into(),
-        ),
-        Ok((true, _, _)) => Ok(()),
+        ran => match auth_of("gh", ran) {
+            Auth::SignedIn => Ok(()),
+            Auth::NotSignedIn => Err("gh is not signed in to github.com: run `gh auth login` \
+                 to see the pull requests; the rest of Flottille works without it"
+                .into()),
+            Auth::Unchecked(why) => Err(unchecked("gh", &why)),
+        },
     }
 }
 
@@ -785,7 +868,7 @@ async fn run(
 }
 
 /// How long a call of `gh` or `bkt` may take before it is cut.
-fn gh_time() -> Duration {
+pub(crate) fn gh_time() -> Duration {
     // Tests shorten it, so that a call that hangs is seen cut without waiting half a minute.
     std::env::var("FLOTTILLE_FORGE_TIMEOUT_MS")
         .ok()
@@ -803,11 +886,7 @@ async fn run_for(
 ) -> Result<(bool, String, String), Gh> {
     match run_within(program, time, set, remove, args).await? {
         Some(output) => Ok(output),
-        None => Err(Gh::Failed(format!(
-            "{program} {} took more than {} s",
-            args[..2].join(" "),
-            time.as_secs()
-        ))),
+        None => Err(Gh::Failed(no_answer(time))),
     }
 }
 

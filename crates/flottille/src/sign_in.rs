@@ -25,13 +25,15 @@ use tokio::process::ChildStdin;
 use tokio::sync::Notify;
 
 use crate::daemon::Daemon;
-use crate::forge::masked;
+use crate::forge::{Gh, masked};
 use crate::projects::Failure;
 
 type Answer = Result<Value, Failure>;
 
-/// A status or a sign-out is given this long.
-const STATUS_TIME: Duration = Duration::from_secs(30);
+/// A status or a sign-out is given this long (`FLOTTILLE_FORGE_TIMEOUT_MS` shortens it in tests).
+fn status_time() -> Duration {
+    crate::forge::gh_time()
+}
 /// A sign-in is given this long: a device code lasts 15 minutes.
 const FLOW_TIME: Duration = Duration::from_secs(15 * 60);
 /// `signin.start` waits this long for the address and the code before it answers.
@@ -48,15 +50,16 @@ pub enum Program {
     Bkt,
 }
 
-/// The agents first, in the providers' order, then the forges and trackers.
+/// The agents first, in the providers' order, then the forges and trackers, always in this order:
+/// a row keeps its place whatever the projects use and whenever its check ends (#1315).
 const ALL: [Program; 7] = [
     Program::Claude,
     Program::Opencode,
     Program::Codex,
     Program::Gh,
-    Program::Glab,
     Program::Acli,
     Program::Bkt,
+    Program::Glab,
 ];
 
 /// How a program signs in or out.
@@ -213,26 +216,37 @@ fn command(path: &PathBuf, args: &[String]) -> tokio::process::Command {
     command
 }
 
-/// `program <args>`, cut after `time`: whether it ended with 0 and what it printed on its output
-/// and errors, which the caller reads for a word and drops. `None` when it could not run or took
-/// too long.
-async fn ran(path: &PathBuf, args: &[String], time: Duration) -> Option<(bool, String)> {
+/// `program <args>`, cut after `time`: whether it ended with 0, what it printed on its output and
+/// on its errors, which the caller reads for a word and drops; why it could not run or took too
+/// long otherwise.
+async fn ran_apart(
+    path: &PathBuf,
+    args: &[String],
+    time: Duration,
+) -> Result<(bool, String, String), String> {
     let mut command = command(path, args);
     command.stdin(Stdio::null());
-    let child = crate::children::spawn(&mut command).ok()?;
+    let child = crate::children::spawn(&mut command).map_err(|error| error.to_string())?;
     let pid = child.id();
     let Ok(output) = tokio::time::timeout(time, child.wait_with_output()).await else {
         // What it started itself is in its group, and outlives the child the timeout dropped.
         if let Some(pid) = pid {
             crate::agents::signal_group(pid, libc::SIGKILL);
         }
-        return None;
+        return Err(crate::forge::no_answer(time));
     };
-    let output = output.ok()?;
-    let mut said = String::from_utf8_lossy(&output.stdout).into_owned();
-    said.push('\n');
-    said.push_str(&String::from_utf8_lossy(&output.stderr));
-    Some((output.status.success(), said))
+    let output = output.map_err(|error| error.to_string())?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// `ran_apart`, its output and its errors together: `None` when it could not run or took too long.
+async fn ran(path: &PathBuf, args: &[String], time: Duration) -> Option<(bool, String)> {
+    let (ok, stdout, stderr) = ran_apart(path, args, time).await.ok()?;
+    Some((ok, format!("{stdout}\n{stderr}")))
 }
 
 /// What a program says of its sign-in: signed in or not (`None` when it could not say), and the
@@ -240,6 +254,9 @@ async fn ran(path: &PathBuf, args: &[String], time: Duration) -> Option<(bool, S
 struct Status {
     signed_in: Option<bool>,
     account: Option<String>,
+    /// Why it could not be checked (#1315): the command line's first error line, masked, or `no
+    /// answer in N s`. Only a forge's or a tracker's program says one.
+    problem: Option<String>,
 }
 
 /// The account `gh auth status` names for `host`: the word after `account` on its line.
@@ -252,13 +269,27 @@ fn gh_account(said: &str, host: &str) -> Option<String> {
 }
 
 /// `program`'s own status for `host` (`docs/agents.md`, "Signing in"): its exit code, and of what
-/// it prints the account's name alone, masked; the rest is dropped here.
+/// it prints the account's name alone, masked; the rest is dropped here. A forge's or a tracker's
+/// is one of three (#1315): signed in, not signed in (its own words say so), or could not be
+/// checked, with the first line it said about it.
 async fn status(program: Program, path: &PathBuf, host: Option<&str>) -> Status {
     let args = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
     let host_or = host.unwrap_or_default();
-    let unknown = Status {
-        signed_in: None,
-        account: None,
+    let time = status_time();
+    let checked = |auth: crate::forge::Auth, account: Option<String>| match auth {
+        crate::forge::Auth::SignedIn => Status {
+            signed_in: Some(true),
+            account: account.as_deref().and_then(account_masked),
+            problem: None,
+        },
+        crate::forge::Auth::NotSignedIn => Status {
+            signed_in: Some(false),
+            ..unknown_status()
+        },
+        crate::forge::Auth::Unchecked(why) => Status {
+            problem: Some(why),
+            ..unknown_status()
+        },
     };
     let said = match program {
         // OpenCode's status is a list asked in a terminal: its login file is checked for its
@@ -266,50 +297,58 @@ async fn status(program: Program, path: &PathBuf, host: Option<&str>) -> Status 
         Program::Opencode => {
             return Status {
                 signed_in: Some(crate::opencode::login_file().is_some_and(|file| file.exists())),
-                account: None,
+                ..unknown_status()
             };
         }
-        Program::Claude => ran(path, &args(&["auth", "status"]), STATUS_TIME).await,
-        Program::Codex => ran(path, &args(&["login", "status"]), STATUS_TIME).await,
-        Program::Gh => {
-            ran(
-                path,
-                &args(&["auth", "status", "--hostname", host_or]),
-                STATUS_TIME,
-            )
-            .await
+        Program::Claude => ran(path, &args(&["auth", "status"]), time).await,
+        Program::Codex => ran(path, &args(&["login", "status"]), time).await,
+        Program::Gh | Program::Glab | Program::Acli => {
+            let words = match program {
+                Program::Acli => args(&["jira", "auth", "status"]),
+                _ => args(&["auth", "status", "--hostname", host_or]),
+            };
+            let ran = ran_apart(path, &words, time).await.map_err(Gh::Failed);
+            let account = match (&ran, program) {
+                (Ok((true, stdout, stderr)), Program::Gh) => {
+                    gh_account(&format!("{stdout}\n{stderr}"), host_or)
+                }
+                _ => None,
+            };
+            return checked(crate::forge::auth_of(program.name(), ran), account);
         }
-        Program::Glab => {
-            ran(
-                path,
-                &args(&["auth", "status", "--hostname", host_or]),
-                STATUS_TIME,
-            )
-            .await
-        }
-        Program::Acli => ran(path, &args(&["jira", "auth", "status"]), STATUS_TIME).await,
-        // Signed in is a context for the host (`docs/forges.md`, "Bitbucket"), never `bkt auth`.
+        // Signed in is a context for the host (`docs/forges.md`, "Bitbucket"), never `bkt auth`;
+        // a listing that fails says nothing of who is signed in.
         Program::Bkt => {
-            let Some((true, said)) =
-                ran(path, &args(&["context", "list", "--json"]), STATUS_TIME).await
-            else {
-                return unknown;
-            };
-            let listed = said
-                .lines()
-                .find_map(|line| serde_json::from_str::<Value>(line).ok())
-                .unwrap_or_default();
-            return Status {
-                signed_in: Some(crate::forge::bitbucket_lists_host(&listed, host_or)),
-                account: None,
+            let words = args(&["context", "list", "--json"]);
+            return match ran_apart(path, &words, time).await {
+                Ok((true, stdout, _)) => {
+                    let listed = stdout
+                        .lines()
+                        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .unwrap_or_default();
+                    Status {
+                        signed_in: Some(crate::forge::bitbucket_lists_host(&listed, host_or)),
+                        ..unknown_status()
+                    }
+                }
+                Ok((false, stdout, stderr)) => Status {
+                    problem: Some(
+                        crate::forge::error_line(&stderr, &stdout)
+                            .unwrap_or_else(|| "bkt failed without saying why".to_owned()),
+                    ),
+                    ..unknown_status()
+                },
+                Err(why) => Status {
+                    problem: Some(masked(&why)),
+                    ..unknown_status()
+                },
             };
         }
     };
     let Some((ok, said)) = said else {
-        return unknown;
+        return unknown_status();
     };
     let account = match (program, ok) {
-        (Program::Gh, true) => gh_account(&said, host_or),
         (Program::Claude, true) => said
             .lines()
             .find_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -319,6 +358,15 @@ async fn status(program: Program, path: &PathBuf, host: Option<&str>) -> Status 
     Status {
         signed_in: Some(ok),
         account: account.as_deref().and_then(account_masked),
+        problem: None,
+    }
+}
+
+fn unknown_status() -> Status {
+    Status {
+        signed_in: None,
+        account: None,
+        problem: None,
     }
 }
 
@@ -361,25 +409,20 @@ fn used_hosts(daemon: &Daemon) -> Vec<(Program, String)> {
     used
 }
 
-/// The programs, in the order the window shows them, each with the host it is checked for.
+/// The programs, in the order the window shows them (`ALL`, whatever the projects use), each with
+/// the host it is checked for: the first a project names, else its default.
 fn programs(daemon: &Daemon) -> Vec<(Program, Option<String>)> {
     let used = used_hosts(daemon);
-    let mut listed: Vec<(Program, Option<String>)> = ALL
-        .into_iter()
-        .filter(|program| program.is_agent())
-        .map(|program| (program, None))
-        .collect();
-    listed.extend(
-        used.iter()
-            .map(|(program, host)| (*program, Some(host.clone()))),
-    );
-    listed.extend(
-        ALL.into_iter()
-            .filter(|program| !program.is_agent())
-            .filter(|program| !used.iter().any(|(known, _)| known == program))
-            .map(|program| (program, program.default_host().map(str::to_owned))),
-    );
-    listed
+    ALL.into_iter()
+        .map(|program| {
+            let host = used
+                .iter()
+                .find(|(known, _)| *known == program)
+                .map(|(_, host)| host.clone())
+                .or_else(|| program.default_host().map(str::to_owned));
+            (program, host)
+        })
+        .collect()
 }
 
 /// A sign-in that runs: what the user needs of it, held here only while it runs.
@@ -623,6 +666,40 @@ async fn list(daemon: &Daemon) -> Value {
     listed
 }
 
+/// What `signin.list` asks (#1315): `checked: false` lists the rows without running a check (each
+/// says `checking: true`, to be checked one by one), and `program` checks that one alone.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Listed {
+    checked: Option<bool>,
+    program: Option<String>,
+}
+
+async fn listed(daemon: &Daemon, asked: Listed) -> Answer {
+    if let Some(name) = asked.program {
+        let program = program_of(&name)?;
+        let host = host_of(daemon, program);
+        return Ok(json!({"programs": [row(program, host).await]}));
+    }
+    if asked.checked == Some(false) {
+        let rows: Vec<Value> = programs(daemon)
+            .into_iter()
+            .map(|(program, host)| unchecked_row(program, host))
+            .collect();
+        return Ok(json!({"programs": rows}));
+    }
+    Ok(list(daemon).await)
+}
+
+/// The row of a program whose check has not run: what is known without running anything, `checking`
+/// until it is.
+fn unchecked_row(program: Program, host: Option<String>) -> Value {
+    let found = locate(program);
+    let mut state = shown_row(program, host, found.as_ref(), None, unknown_status());
+    state["checking"] = json!(true);
+    state
+}
+
 async fn row(program: Program, host: Option<String>) -> Value {
     let found = locate(program);
     let (version, status) = match &found {
@@ -633,14 +710,18 @@ async fn row(program: Program, host: Option<String>) -> Value {
             );
             (version, status)
         }
-        None => (
-            None,
-            Status {
-                signed_in: None,
-                account: None,
-            },
-        ),
+        None => (None, unknown_status()),
     };
+    shown_row(program, host, found.as_ref(), version, status)
+}
+
+fn shown_row(
+    program: Program,
+    host: Option<String>,
+    found: Option<&PathBuf>,
+    version: Option<String>,
+    status: Status,
+) -> Value {
     let line = |way: Way| match way {
         Way::Terminal(line) => Some(line),
         Way::Run { .. } => None,
@@ -658,11 +739,13 @@ async fn row(program: Program, host: Option<String>) -> Value {
         "title": program.title(),
         "kind": if program.is_agent() { "agent" } else { "forge" },
         "host": host,
-        "found": found.is_some(),
+        "found": installed,
         "path": found.map(|path| path.display().to_string()),
         "version": version,
         "signed_in": status.signed_in,
         "account": status.account,
+        "problem": status.problem,
+        "checking": false,
         "can_sign_in": installed && sign_in.is_none(),
         "line": sign_in,
         "sign_out_line": sign_out,
@@ -935,7 +1018,7 @@ async fn sign_out(daemon: &Daemon, program: Program) -> Answer {
             ));
         }
     };
-    let ended = ran(&path, &args, STATUS_TIME).await;
+    let ended = ran(&path, &args, status_time()).await;
     let signed_in = status(program, &path, host.as_deref()).await.signed_in;
     if signed_in == Some(true) {
         let why = match ended {
@@ -955,7 +1038,7 @@ async fn sign_out(daemon: &Daemon, program: Program) -> Answer {
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     let params = if params.is_null() { json!({}) } else { params };
     match method {
-        "signin.list" => Ok(list(&daemon).await),
+        "signin.list" => listed(&daemon, serde_json::from_value(params)?).await,
         "signin.start" => {
             let Named { program } = serde_json::from_value(params)?;
             start(daemon, program_of(&program)?).await
