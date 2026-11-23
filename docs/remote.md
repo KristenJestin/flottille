@@ -1025,16 +1025,20 @@ local child's work; nothing moves your branch.*
   "Finish the export"`), the brief whole. The receiving machine judges because its quota, its
   machine and its secrets are used, and because a machine alone must not be able to start anything
   unjudged. The caller is answered at once with the session's id, or the request's number on that
-  machine (`request #4 on server is waiting for the user`). The held answer says what follows once
-  the user allows it there (a led session's questions, reports and end wake its pilot, and
-  `session_send` reaches it; a child's report, questions and failure come as a local child's), and
-  that the caller is told of the user's answer. **That answer comes to the caller as a held call's
-  result does** (#1273), an `approval` delivery from that machine: allowed, the session runs now,
-  and what follows is said again; refused (by the user, by its session ended there while it was
-  held, or allowed but unable to start, saying why), nothing of it runs there. The caller's
-  machine marks its record of the launch `started` or `refused`: a refused launch leaves no row
-  under its pilot and counts in no cap. A handed session's caller is told too: it waited for that
-  answer, and hears nothing of the session after it.
+  machine. A held launch is answered as a call held here is (`Waiting for the user's approval,
+  request #4 on server. …`), then where it will run once allowed. **The user's answer comes to
+  the caller as a held call's result does** (#1273), an `approval` delivery from that machine
+  worded as the local one, the machine named after the request: allowed, `Request #4 on server
+  (agent_launch) was approved by the user, and Flottille has now done it. Its result:` and the
+  answer of a session started there, which says what follows; refused, `… was refused by the
+  user. Nothing was done.`; allowed but unable to start, `… was approved by the user, but nothing
+  was done:` and why; its session ended there while it was held, refused, saying so. The allowed
+  answer is sent before the session's setup goes on, so that a setup that fails at once is never
+  heard of first. The caller's machine marks its record of the launch `started` or `refused`
+  (`ended` when a started one is told refused); an answer that comes before the record of the
+  launch's place is never undone by it, and one sent again is taken once. A refused launch leaves
+  no row under its pilot and counts in no cap. A handed session's caller is told too: it waited
+  for that answer, and hears nothing of the session after it.
 - **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
