@@ -13,9 +13,9 @@ use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
     BulkBar, Button, CheckState, Checkbox, ChoiceRow, Confirm, DiffLine, DiffLines, EmptyLine,
     Field, FilterChip, FilterChips, Group, Grouped, Icon, Item, ListCard, ListRow, Listing, Menu,
-    Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Tag, Toast,
-    Tone, Type as _, Unfolding, awaiting, changing, enter, fade, fuzzy, icon, palette, presence,
-    presence_of, space, tipped_when_cut, toast,
+    Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Switch,
+    Tag, Toast, Tone, Type as _, Unfolding, awaiting, changing, enter, fade, fuzzy, icon, palette,
+    presence, presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
