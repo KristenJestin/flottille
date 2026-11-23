@@ -9,6 +9,7 @@ use crate::common;
 
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -895,32 +896,45 @@ fn the_window_draws_no_frame_at_rest_with_groups_and_a_finished_drag(cx: &mut Te
     );
 }
 
-/// The connections the window's keeper opened, so that a test can cut them: the connection the
-/// keeper holds is lost, and its next request is answered "retry".
+/// The connections the window's keeper opens, so that a test can cut them and keep it from
+/// reaching the daemon for a while: what it asks then is answered "retry".
 #[derive(Clone, Default)]
-struct Cuttable(Arc<Mutex<Vec<UnixStream>>>);
+struct Cuttable {
+    streams: Arc<Mutex<Vec<UnixStream>>>,
+    down: Arc<AtomicBool>,
+}
 
 impl Cuttable {
     fn connector(&self, user: &User) -> Connect {
         let open = user.connector();
-        let seen = self.0.clone();
+        let (streams, down) = (self.streams.clone(), self.down.clone());
         Arc::new(move || {
+            let keeper = std::thread::current().name() == Some("flottille-keeper");
+            if keeper && down.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("the connection is lost"));
+            }
             let stream = open()?;
-            if std::thread::current().name() == Some("flottille-keeper") {
-                seen.lock().unwrap().push(stream.try_clone()?);
+            if keeper {
+                streams.lock().unwrap().push(stream.try_clone()?);
             }
             Ok(stream)
         })
     }
 
-    /// Cuts every connection the keeper holds, and says how many there were.
-    fn cut(&self) -> usize {
-        let mut seen = self.0.lock().unwrap();
-        let cut = seen.len();
-        for stream in seen.drain(..) {
+    /// The keeper loses its connection and cannot make another until `restore`. Says how many
+    /// connections it held.
+    fn lose(&self) -> usize {
+        self.down.store(true, Ordering::SeqCst);
+        let mut streams = self.streams.lock().unwrap();
+        let cut = streams.len();
+        for stream in streams.drain(..) {
             let _ = stream.shutdown(Shutdown::Both);
         }
         cut
+    }
+
+    fn restore(&self) {
+        self.down.store(false, Ordering::SeqCst);
     }
 }
 
@@ -936,31 +950,29 @@ fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut Test
     });
     settle(&shell, cx);
 
-    // The connection to the daemon drops, then the user makes the group "Work" and at once drags
-    // alpha into it: the first request is lost and asked again later.
-    assert!(wire.cut() > 0, "the keeper held a connection to cut");
-    ask_new_group("Work", &shell, cx);
-    for _ in 0..4 {
-        step(&shell, FRAME, cx);
-    }
-    drag(
-        project_id("alpha"),
-        group_header_id(&group_id(&shell, "Work", cx)),
-        0.,
-        &shell,
-        cx,
-    );
+    // The user makes the group "Work" while the connection to the daemon is lost: that request
+    // is answered "retry" and asked again later.
+    assert!(wire.lose() > 0, "the keeper held a connection to cut");
+    new_group("Work", &shell, cx);
+    // They drag alpha into it and the connection is back as they let go: the move is asked while
+    // the group's creation is still to be asked again.
+    let id = group_id(&shell, "Work", cx);
+    let (_, end) = lift(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+    wire.restore();
+    release(end, &shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["alpha"]));
 
-    until(&shell, cx, "the daemon to keep the group", |_| {
-        kept(&user)["groups"][0]["name"] == "Work"
-    });
+    // A second by step, so that the wait before the asking again, which grows, is over.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while strings(&kept(&user)["groups"][0]["projects"]) != ["alpha"] {
+        assert!(
+            Instant::now() < deadline,
+            "the move reaches the daemon after the group it names"
+        );
+        step(&shell, Duration::from_secs(1), cx);
+        std::thread::sleep(Duration::from_millis(25));
+    }
     settle(&shell, cx);
-    assert_eq!(
-        strings(&kept(&user)["groups"][0]["projects"]),
-        ["alpha"],
-        "the move reaches the daemon after the group it names"
-    );
     assert_eq!(
         held(&shell, "Work", cx),
         names(&["alpha"]),
