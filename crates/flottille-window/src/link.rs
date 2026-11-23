@@ -62,7 +62,11 @@ pub enum Update {
     /// What the daemon keeps of the window (the sidebar's folds, and the sessions that have a
     /// draft), read once, before the first snapshot: the tree is made as it was left, not
     /// animated from its default.
-    Kept(crate::kept::Folds, std::collections::HashSet<String>),
+    Kept(
+        crate::kept::Folds,
+        crate::arrange::Arrangement,
+        std::collections::HashSet<String>,
+    ),
     /// The connection broke, with why, and the generation of the machine shown it was made for;
     /// the link is connecting again.
     Disconnected(String, u64),
@@ -363,7 +367,11 @@ fn follow(
                 })
             })
             .unwrap_or_default();
-        let kept = Update::Kept(crate::kept::Folds::of(&state["state"]), drafts);
+        let kept = Update::Kept(
+            crate::kept::Folds::of(&state["state"]),
+            crate::arrange::Arrangement::of(&state["state"]["arrangement"]),
+            drafts,
+        );
         if updates.unbounded_send(kept).is_err() {
             return Ok(());
         }

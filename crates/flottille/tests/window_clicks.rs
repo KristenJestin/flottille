@@ -264,8 +264,10 @@ const LEFT: [&str; 16] = [
 
 /// Elements that are not navigation, by the start of their id.
 // A program's sign-in row (#1185) is clicked by its buttons alone, as a provider's row is.
-const LEFT_PREFIXES: [&str; 4] = [
+// The place a project's row has in the user's list wraps the row: its click is the row's.
+const LEFT_PREFIXES: [&str; 5] = [
     "tree-row-",
+    "projects-list-row-",
     "project-items-state-",
     "provider-",
     "sign-in-row-",
