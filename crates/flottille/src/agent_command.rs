@@ -232,6 +232,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     message,
                     images: Vec::new(),
                     texts: Vec::new(),
+                    upload: None,
                 })?,
             )?;
             if json {
@@ -266,6 +267,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     message,
                     images: Vec::new(),
                     texts: Vec::new(),
+                    upload: None,
                     compact: (compact || no_compact).then_some(compact),
                 })?,
             )?;
@@ -582,6 +584,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 message,
                 images: Vec::new(),
                 texts: Vec::new(),
+                upload: None,
             },
             json,
         ),
@@ -650,6 +653,36 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             .push(warning.into());
     }
     report["forges_and_trackers"] = programs.into();
+    // The sandbox as the daemon has it: what confines its commands is its own state, not this
+    // process's. Never a daemon started for it: one that will not start is what doctor may be run
+    // to find out about. With none running, this process probes what one would find.
+    let sandbox = match crate::client::Client::connect(paths) {
+        Ok(Some(mut client)) => client
+            .request("daemon.status", Value::Null)
+            .map(|status| status["sandbox"].clone()),
+        Ok(None) => {
+            crate::ssh_agent::find();
+            crate::pushed::find(false);
+            let mut sandbox = crate::mounts::sandbox();
+            sandbox["probed"] = "no daemon running: probed by doctor".into();
+            Ok(sandbox)
+        }
+        Err(error) => Err(error),
+    };
+    let warnings = report["warnings"]
+        .as_array_mut()
+        .expect("a list of warnings");
+    match &sandbox {
+        Ok(sandbox) => warnings.extend(
+            sandbox["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        ),
+        Err(error) => warnings.push(format!("the daemon did not say its sandbox: {error}").into()),
+    }
+    report["sandbox"] = sandbox.unwrap_or(Value::Null);
     if json {
         println!("{report}");
     } else {
@@ -842,6 +875,9 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
     if let Some(model) = agent["model"].as_str() {
         line.push_str(&format!(" ({model})"));
     }
+    if let Some(parent) = parent_afar(agent) {
+        line.push_str(&format!(", {parent}"));
+    }
     match entry {
         Some(entry) => {
             line.push_str(&format!(": {}", text(entry, "doing")));
@@ -865,6 +901,19 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
         None => line.push_str(&format!(": {}", text(agent, "state"))),
     }
     line
+}
+
+/// What is said of a child an agent of another machine launched here (`launched_from`): it is
+/// that agent's, whose parent it reports to, never a session of the user's.
+fn parent_afar(agent: &Value) -> Option<String> {
+    let from = &agent["launched_from"];
+    (from["kind"] == "child").then(|| {
+        format!(
+            "child of agent {} of {}",
+            text(from, "agent"),
+            text(from, "machine")
+        )
+    })
 }
 
 /// What is said of a session that did not take the tools its role gained.
@@ -916,6 +965,9 @@ fn show_text(shown: &Value) -> String {
             "  pending: {} (set before its next prompt)\n",
             pending_text(agent)
         ));
+    }
+    if let Some(parent) = parent_afar(agent) {
+        out.push_str(&format!("  {parent}: only its parent writes to it\n"));
     }
     if agent["tools_outdated"] == true {
         out.push_str(&format!("  {OUTDATED}\n"));
@@ -980,6 +1032,7 @@ fn show_text(shown: &Value) -> String {
                 data["effort"].as_str().unwrap_or("the model's default")
             ),
             "agent.options_refused" => format!("[change refused: {}]", text(data, "reason")),
+            "agent.options_replaced" => format!("[{}]", text(data, "reason")),
             _ => continue,
         };
         speaking = None;
@@ -992,6 +1045,26 @@ fn show_text(shown: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_launched_from_another_machine_is_said_as_a_child_by_the_cli() {
+        let agent = serde_json::json!({"id": "a2", "title": "Write the tests", "role": "worker",
+            "project": "app", "provider": "claude", "state": "working", "depth": 1,
+            "parent": null, "taken": {}, "chosen": {}, "pending": {},
+            "launched_from": {"machine": "pc", "agent": "b1", "kind": "child"}});
+        let listed = list_text(&serde_json::json!({"agents": [agent.clone()]}));
+        assert!(listed.contains("child of agent b1 of pc"), "{listed}");
+        let shown = show_text(&serde_json::json!({"agent": agent, "events": []}));
+        assert!(
+            shown.contains("child of agent b1 of pc: only its parent writes to it"),
+            "{shown}"
+        );
+        // A session another machine's agent leads is a session: nothing is said.
+        let led = serde_json::json!({"id": "a3", "role": "lead", "project": "app",
+            "provider": "claude", "state": "idle", "depth": 0,
+            "launched_from": {"machine": "pc", "agent": "b1", "kind": "led"}});
+        assert!(!list_text(&serde_json::json!({"agents": [led]})).contains("child of"));
+    }
 
     #[test]
     fn agent_answer_takes_an_answer_per_question_and_a_single_one_alone() {

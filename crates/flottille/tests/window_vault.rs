@@ -3,7 +3,7 @@
 //! secret typed in a masked field, cleared once sent and never shown again. No window opens on a
 //! screen, and the user's own keyring is never reached.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -388,7 +388,7 @@ fn a_prefilled_form_says_why_it_was_asked(cx: &mut TestAppContext) {
         ..Default::default()
     };
     section.update_in(cx, |section, window, cx| {
-        section.add_prefilled(&asked, Some("to read the tickets".into()), None, window, cx)
+        section.add_prefilled(&asked, Some("to read the tickets".into()), window, cx)
     });
     settle(cx);
     assert_eq!(

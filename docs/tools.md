@@ -543,9 +543,9 @@ pending requests.
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
     refused anyway), and no display (`WAYLAND_DISPLAY`, `DISPLAY`, X11's key `XAUTHORITY`),
     unless the project lets its runs open windows (below); Landlock keeps X11's abstract
-    sockets out of reach too from its sixth ABI, but not its sockets by their path, which a run
-    that names them itself may still reach until #976 (`docs/vault.md`, "The runtime folder" and
-    "The gaps");
+    sockets out of reach too from its sixth ABI, and the run's private mount namespace empties
+    X11's socket folder, so its sockets by their path are not there either (`docs/vault.md`,
+    "The runtime folder" and "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
   - no `SSH_AUTH_SOCK`, and from Landlock's ninth ABI no connecting to the user's SSH agent's
@@ -604,10 +604,22 @@ pending requests.
   cannot push from a script the gate never read. A run that is itself a `git push` (its own
   line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
-  environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
-  had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
+  environment and `core.hooksPath=/dev/null`, the user's own `ssh` command (never a
+  repository's `core.sshCommand`) and git's own transports alone (never an `ext::` URL), and
+  none of the place's variables, as if the user had typed it (`docs/commands.md`, "The
+  environment"; `docs/vault.md`, "The runtime folder"). Its task's `ready` and `url` commands
   still run in the sandbox. A push goes where the repository's remote leads now: the remote is
   the user's to change (`docs/commands.md`, "Where the remote leads").
+- **The daemon's own git is walled like a run's**: what it runs for itself on a repository (its
+  reads, its worktrees, the `ls-remote` and `fetch` that find a workspace's base) runs under the
+  same Landlock rules, with no `SSH_AUTH_SOCK`, no hook, no file system monitor, no submodule
+  fetched, no lazy fetch, no proxy or askpass of the repository's, only the user's own credential
+  helpers, the `ssh` found at the daemon's start over `core.sshCommand`, and, for a call that
+  reaches a remote, only the protocol of its URL when it is one of git's own (`GIT_ALLOW_PROTOCOL`;
+  an `ext::` or other helper's URL is not fetched), git's own upload command (`--upload-pack`)
+  and no maintenance after it. A fetch or a listing of an SSH remote alone is lent the user's SSH
+  agent, its socket and nothing else of the runtime folder (`docs/vault.md`, "The runtime
+  folder"). The agent command lines start without `SSH_AUTH_SOCK` too.
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
   (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
   and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and
@@ -665,6 +677,29 @@ pending requests.
   stops its runs, interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
+
+### `acli` in a run
+
+`acli` is Atlassian's command line, signed in as the user to Jira in their own home: the gate
+judges its lines as it judges `gh`'s, by what they do, and lists its reads in the code
+(`acli_reads`, as `forge_reads` lists `gh`'s) from the commands of its reference
+(<https://developer.atlassian.com/cloud/acli/reference/commands/>), each on its own page.
+
+- **A read passes**, in every mode, as a `gh` read does: `jira workitem view` and `search`,
+  `jira workitem comment list` and `visibility`, `jira workitem attachment list`, `jira workitem
+  link list` and `type`, `jira project list` and `view`, `jira board search` and `list-sprints`,
+  `jira sprint list-workitems`, `jira dashboard search`, `jira filter list` and `search`, `<jira |
+  admin | rovodev> auth status`, `--version`, and the help of any command (its words, then `-h` or
+  `--help`: a `--help` after another option may be that option's value). `--web` (`-w`) opens a
+  browser on the desktop, which is no read.
+- **A write is judged**: everything else, the writes of the reference (`create`, `edit`,
+  `transition`, `assign`, `comment create`, `delete`, `link create`…) and what it does not list.
+  The card says the line writes to the tracker signed in as the user.
+- **The sign-in is base**: every `auth` command but `status` (`login`, `logout`, `switch`), `auth
+  status` given an option, and an option that shows a token (`--show-token`); a call to judge
+  would let the sign-in change under the user's other programs.
+- **Only the system's `acli` counts**: a line whose program is a path, or found in a folder the
+  agent writes or in the user's own `~/.local/bin` and `~/bin`, is judged as for every program.
 
 ## The forge
 
@@ -980,6 +1015,35 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 pull request's subscription: its description says `For a time the user asked: never poll CI, forge
 run follows its run and forge subscribe a pull request's checks.`
 
+## Findings
+
+While the developer mode is on (`docs/developer.md`, "The findings"), the tool of the machine's
+services, `services`, lists two more actions, for every agent, a root and a child alike:
+
+| Action | |
+|---|---|
+| `report {title, expected, called, happened}` | Files a finding about Flottille itself: what the agent called, what it expected, what happened. Answers `Filed as finding #3.` |
+| `report {finding, called, happened, differs?}` | Adds an occurrence to an open finding (`finding` its number): when it came, the agent's session, what it called, what happened this time, and what differs from the others. Refused for a finding that is filed (the bug is a new finding) or that holds 200 occurrences, and when `title` or `expected` come with it. |
+| `find_reports {query}` | The open findings whose title or text hold every word of `query`, at most 10, each with its number, expected, count. The agent judges whether its bug is there; Flottille matches nothing else. |
+
+**Where they live.** `services` is the tool of the machine, which Flottille itself runs, that every
+agent has in every project and whose reads the gate already lets through; a family of its own would
+be one more tool in every prompt and every frozen list, for the two actions of a mode meant for the
+few. The actions are added to the tool's schema and description when it is listed while the mode is
+on, so a client that listed it before the mode was switched calls it again after its next listing
+(`list_changed` is not sent for a mode); a call while the mode is off is refused naming it. The
+gate lets both through in every mode: they change nothing of the project or the machine.
+
+**The guide.** The description tells when to report: what Flottille did wrong (a tool that answered
+wrong, a refusal that makes no sense, a step that hangs), never the agent's own mistake, the user's
+request or a bug of the project's code; to search first and add an occurrence when the bug is
+there; and never to put a secret in a finding. (It rides on the tool, not on `guide.md`, which is
+the same short text for every agent whether the mode is on or not.)
+
+Every text is masked as any result of a tool is (`[masked]` for a secret of the daemon or of the
+agent's place) before it is stored, at most 200 characters for a title and 2,000 for any other
+text.
+
 ## The vault
 
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
@@ -1115,10 +1179,18 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   in acme/app: the members of the workspace acme, its default reviewers and the people on its pull
   requests`), and nothing is written.
 - **A mention is no field.** No field of Flottille's tools names a person for a mention: one is
-  free text in a comment's or a description's `body`, which Flottille does not read, resolve or
-  rewrite (a Jira mention Jira rewrites on its own). An agent finds the identifier with `people`
-  and writes the mention as the forge or the tracker wants it. If a tool gets such a field, it is
-  resolved here like the others.
+  free text in a comment's or a description's `body`. An agent finds the identifier with `people`
+  and writes the mention as the forge or the tracker wants it. On GitHub an `@login` in the text
+  notifies, and is left as written. **On Jira an `@Name` in the text stays text and notifies no
+  one** (Jira rewrites nothing): only a mention node with the account id does, so in a Jira
+  `comment`, `comment_edit`, `reply`, `log_time` comment, `create` or `edit` description the agent
+  writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids, and `show` each
+  comment author's; the `body` field's description says so), which becomes the node. Each account is looked up on the site with the project's tracker entry: an id the site
+  does not know, or one that holds no account id, is refused before the user is asked, and the
+  card says who is notified by the name Jira returns and the id, whatever the text says. Every
+  such text goes through Jira's API with the entry (never `acli`), so it is refused without one
+  (`docs/tickets.md`, "Replies"). If a tool gets such a
+  field, it is resolved here like the others.
 - **The answer says who was added**, by display name and identifier (`Reviewers: added Jane Doe
   (jdoe); removed Bob Roe (broe).`, `Assigned to Anne Example (anne@example.org).`), so a wrong
   guess shows at once.
@@ -1157,7 +1229,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
 - **`people {query?}`** (a read): who can be named as an assignee, each as `- Anne Example
   (anne@example.org)`: GitHub the tracker repository's assignable users and collaborators, as
   `forge people`; Jira the assignees of the project's newest work items, `acli` having no way to
-  list the site's users ("People" under "The forge"). `query` narrows them.
+  list the site's users ("People" under "The forge"). `query` narrows them. On Jira a `query` is
+  searched on the site too, with the tracker's entry (`ticket`: only who can see it, and then the
+  site's answer alone); each person's account id is said, a person found only on the site is named
+  by account id for `assignee`, and a full page of 50 says there may be more.
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
   `closed` or `all`; up to 200, the newest, and the answer says when there may be more.
@@ -1242,7 +1317,7 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
   (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit, `assignee`
-  for create and edit, `parent` and `sprint` for create) or of the other tracker (on Jira,
+  for create and edit, `sprint` for create, `parent` for create and, on Jira, edit) or of the other tracker (on Jira,
   `assignees` or a reason; on GitHub, `assignee`, `parent` or `sprint`: GitHub's is `assignees`),
   is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
@@ -1260,14 +1335,22 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   account unless `author` names another (an account id, or a name `people` finds). It uses the
   same vault entry as `log_time`, toward the tracker's site alone, and says whose time it is
   (`your account (Jane Doe)`) and in which time zone the days are (`docs/tickets.md`, "Reading
-  worklogs").
+  worklogs"). **`worklog_edit {ticket, worklog, duration?, started?, comment?}`** and
+  **`worklog_delete {ticket, worklog}`** change or delete a worklog already logged, `worklog` being
+  the id `worklogs` gives, **only one of the token's own account** (another author's, one not on
+  that work item and a missing one are refused before anything is asked); writes held like
+  `log_time`, the card saying the worklog as it is and what it becomes (compared again when the
+  user allows it), with the same vault entry, refused on GitHub; **`worklog_delete`** is held for
+  the user in every mode, Full included, and never judged (`docs/tickets.md`, "Correcting a
+  worklog").
 - **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
   comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
-  the id of those, `[comment 10100]`); `show` gives the id of every comment, and `reply {ticket,
-  comment, body}` answers any of them, quoting it, judged like `comment` ([`tickets.md`](tickets.md),
-  "Replies"). A
+  the id of those, `[comment 10100]`); `show` gives the id of every comment (with `detail full` on
+  Jira, each reply drawn under its comment), and `reply {ticket, comment, body}` answers any of
+  them, judged like `comment`: on Jira a real reply, under the comment in its thread, on GitHub a
+  comment that quotes it ([`tickets.md`](tickets.md), "Replies"). A
   link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
   blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
   own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
@@ -1311,11 +1394,21 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   --from-json`, as for a sprint or a version) whose `additionalAttributes` are the fields, so it
   needs `type` (`refused: tickets create with fields needs type: …`, before anything is asked);
   `fixVersions` in `fields` and `milestone` together are refused (both set the fix version). An
-  **edit** sets them first, by `acli jira workitem edit --from-json` (`{"issues": [<key>],
-  "additionalAttributes": {…}}`, **assumed** like the creation's shape, as `acli` was not
-  available to measure it), then the title, the description, the labels and the assignee by the
-  flags above; a refusal of the fields leaves the rest unwritten, and a refusal of the rest says
-  the fields were set. A creation `acli` refuses with a field *required* in Jira's words (`Severity
+  **edit** sets them first, through Jira's REST API (`PUT /rest/api/3/issue/<key>` with `{"fields":
+  {…}}`, #1067: `acli`'s `workitem edit --from-json` reads no `additionalAttributes`), with the
+  project's tracker entry, the one `log_time`, `worklogs` and `fields` use; without one set the
+  edit is refused before anything is asked, saying it needs the entry (and offering `vault ask`
+  when the entry is named and missing), then the title, the description, the labels and the
+  assignee by the flags above; a refusal of the fields leaves the rest unwritten, and a refusal of
+  the rest says what was set (its fields, its parent, its fix version). A `parent` and a
+  `milestone` (or `remove_milestone`) on an edit go the same way, as `fields.parent` and
+  `fields.fixVersions`; they win over the same key in `fields`. **`fixVersions` replaces every
+  fix version the work item has** (`[{"name": "1.1"}]` leaves it in 1.1 alone, as `milestone`
+  does), and `remove_milestone` with `fields.fixVersions` is refused as `milestone` with it is.
+  The other refusals of an edit (`assignees`, `reason` on Jira; `assignee` on GitHub) hold beside
+  these. A failure of the PUT after it was sent (a time-out, a broken connection) says the change
+  is not confirmed and to check the work item, never that nothing was written: that is said of a
+  refusal before the request and of a status that is no success. A creation `acli` refuses with a field *required* in Jira's words (`Severity
   is required (allowed values: Minor, Major)`) answers those words, `nothing was created`, and how
   to give each required field in `fields`, never trying it again by itself. When the project has
   the vault entry `fields` reads with, it also names each field the type requires and `fields`
@@ -1369,10 +1462,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   do, before the user is asked, and a `create` is read back: it says so when Jira did not set the
   version. Once allowed, a `create` in a milestone has its card made again and compared with
   the one the user read: a version renamed or replaced meanwhile is not written. **Refused, saying what to do instead** (the user's, in Jira, on the
-  project's Releases page; nothing run): `milestone_create`, `milestone_edit`, and `edit` with
-  `milestone` or `remove_milestone`, since `acli` has no command that makes or releases a version
-  and its `workitem edit` takes no fix version; Flottille calls no Jira REST API for it (as for a
-  sprint).
+  project's Releases page; nothing run): `milestone_create` and `milestone_edit`, since `acli` has
+  no command that makes or releases a version. An `edit` with `milestone` or `remove_milestone`
+  sets the fix version of an existing work item through Jira's REST API (#1067, "`fields` on
+  Jira").
 - **Parents and sprints on Jira**: `create` takes `parent` (a key of the tracker, the epic or the
   sub-task's parent: `--parent`) and `sprint` (an open sprint, by its name or its id, with a
   `type`); `sprints {project?, board?}` (a read, never held) lists the active and future sprints
@@ -1384,8 +1477,9 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   Sprint field is not known, is refused then, and the card names the sprint and its board as the
   site does. A creation that loses its assignee, or that `acli` answers without its key, says
   what may not be set. A label holding a comma is refused, a blank one left out; `board` is
-  `sprints`' alone. The parent and the
-  sprint of an existing work item are refused, saying why: `acli`'s `edit` sets neither. The
+  `sprints`' alone. The parent of an existing work
+  item is set by `edit` through Jira's REST API (#1067); its sprint is refused, saying why:
+  `acli`'s `edit` sets none. The
   request says them (`It puts it in sprint "Sprint 42" (board "ABC board")`, `It puts it under
   ABC-10`, `It adds the labels bug, p1`), and `show`
   says a work item's assignee, parent and sprint ([`tickets.md`](tickets.md), "Parents and
@@ -1518,8 +1612,15 @@ With Review active in a project (`docs/extensions.md`, "Review"), each root of t
 `review` tool with the action `start` **while the project lets agents start a review** (the
 setting `agents_start`, on by default since #1061; `/review` and `flottille review`, the user's,
 no switch touches). The tool's description says to start a review only when the user asks for one,
-or when the project's instructions say to, never on its own: the decision of #783 rests on that
-sentence, not on withholding the tool. The pilot of a review has it with `run_pass` and
+or when the project's instructions say to, never on its own initiative: an agent may offer one, but
+never starts one without the user's yes. The decision of #783 rests on that sentence, not on
+withholding the tool. **The order** (#1139) only picks the form once a review is asked for without
+saying which, and the description says it after that sentence, the user's words and the project's
+instructions still coming before it: (1) a lead whose led session is still alive reviews that
+session (`agent`), its findings going to the session that can fix them and the lead told;
+(2) otherwise a session with a change of its own reviews it (`{"action": "start"}`);
+(3) otherwise (a session in the project folder, or the change's session ended) the pull request
+(`pull_request`), the findings coming to the caller. The pilot of a review has it with `run_pass` and
 `report`; a pass, the verifier and any other child have none of it. Turning the switch on or off,
 in Settings or in the project's file, adds or removes `review` from the lists of the roots through
 "When the tools change"; a call of it made after it left is refused as a call of any tool the agent
@@ -1530,9 +1631,29 @@ what the user asked for when they asked for a review, within the children cap.
 
 | Tool | |
 |---|---|
-| `review {action: start, agent?}` (a root, while `agents_start` is on) | Does what the user's `/review` does: reviews the caller's own change: its workspace's diff from its base, read by a pilot launched as the caller's child. Its description says so. With `agent`, a session the caller leads (`agent_launch` `led`, "Sessions an agent starts"): that session's change, its pilot that session's child, its findings delivered to it, and the lead told of them (`The review of "Login" (agent …), the session you lead, round 1 of 2, is done: 1 finding, delivered to it…`) or of a review that ended without them. Naming any other agent is refused (`agent … is not a session you lead`), and so is an agent that does not exist. Refused, before any agent starts, for a session in the project folder, while a review of it runs, when the diff is empty (`nothing to review: workspace w has no change from its base (main)`), after two rounds, and at the children cap. The findings come later as a delivery, `[flottille:review]`: the call waits for no one. The session's `agent_*` tools do not reach the review's agents, and it is told nothing of them as of its children. |
+| `review {action: start, agent?, pull_request?, repository?, from?}` (a root, while `agents_start` is on) | Does what the user's `/review` does: reviews the caller's own change: its workspace's diff from its base, read by a pilot launched as the caller's child. Its description says so. With `agent`, a session the caller leads (`agent_launch` `led`, "Sessions an agent starts"): that session's change, its pilot that session's child, its findings delivered to it, and the lead told of them (`The review of "Login" (agent …), the session you lead, round 1 of 2, is done: 1 finding, delivered to it…`) or of a review that ended without them. Naming any other agent is refused (`agent … is not a session you lead`), and so is an agent that does not exist. Refused, before any agent starts, for a session in the project folder, while a review of it runs, when the diff is empty (`nothing to review: workspace w has no change from its base (main)`), after two rounds, and at the children cap. The findings come later as a delivery, `[flottille:review]`: the call waits for no one. The session's `agent_*` tools do not reach the review's agents, and it is told nothing of them as of its children. **With `pull_request`** (#1091), the number of a pull request of the project's forge (GitHub or Bitbucket), a colleague's or one already pushed: the review of that pull request, its pilot the caller's child and its findings delivered to the caller (`The review of pull request #7 of acme/app is done: 2 findings.`), never posted on the forge, posting being the caller's choice through `forge review` and its card; `agent` and `pull_request` are exclusive, and `repository` (its path in the project, needed when the project has several) and `from` (a commit of the pull request: only the commits after it are reviewed, as "the 3 latest commits") go with `pull_request` alone. The daemon reads the pull request on its forge ([`forges.md`](forges.md), "A pull request for a review"), fetches its head and its base branch with its own git into **a place of its own**, a detached worktree of the repository under Flottille's data folder (`reviews/`, never a workspace's folder, never listed as one), and the diff is from the merge base with the base branch, or from `from`; the pilot and its passes work in that place, read only by their instructions, and the review compares its `HEAD` and `git status` before and after as it does a workspace's. The place is removed when the review ends (reported, failed, or refused at the cap), and at the daemon's start every place no running review holds is removed. A pull request has no round and no spec: it may be reviewed again at once, and a review of it already running refuses a second. Refused, before any agent starts and with nothing left behind: a pull request the forge does not have (`acme/app has no pull request #99`), a repository with no forge declared, a head that cannot be fetched (Bitbucket Cloud: a fork's), a `from` that is not a commit of the pull request (`… is not a commit of pull request #7`), an empty diff (`nothing to review: …`) and the children cap. The tool's description holds a call of each form (`{"action": "start"}`, `{"action": "start", "agent": "<session>"}`, `{"action": "start", "pull_request": 7}` and with `"from": "<commit>"`), and says not to read a diff by hand to review it. |
 | `review {action: run_pass, pass, brief?}` (the pilot) | Runs one pass of its review as the pilot's own child (depth 2): `spec` (only for a session that develops a spec), `bugs`, `standards`, `security`, among those Review's settings enable for the project, or the `verifier`; each once. Its instructions are Review's fixed text for that pass and the user's guidance; the standards pass's add the project's `CLAUDE.md` else `AGENTS.md` read from the base branch, never from the workspace. Its first message is the diff (each repository's `git diff <from>` and the files it changes), the spec's `C` and `D` when there is one, and `brief`. Its report comes to the pilot as `[flottille:child-report]`. Refused above the project's children cap (`the project app runs its cap of 2 children: wait for one of them to end`), never queued. |
 | `review {action: report, summary?, findings, previous?}` (the pilot) | The findings, once: each `{severity, confidence, file?, lines?, concerns, quote?, text, case?}`, `severity` `high`, `medium`, `low` or `info`, `confidence` the verifier's (`confirmed`, `plausible`, or `rejected`, which is left out), `concerns` `code` or a `C` or `D` of the spec, `file` a file of the diff. A `high` or `medium` finding without its place (`file`, `lines`) and its failing case (`case`) is refused, and so is one naming a `C` or `D` the spec does not have, or a file the diff does not change: nothing is kept then. In a second round, `previous` gives each open finding of the first by its identifier, `fixed` or `open`. Kept, each finding takes the session's next identifier (`F1`, `F2`…); the confirmed and plausible ones, `info` left out, are delivered to the session, with what changed in the workspace during the review when something did; the pilot's session ends with its turn, its passes still running stop. |
+
+**A review of a pull request runs none of its code without the user** (#1091; a decision of the
+lead, reversible, to be confirmed by the maintainer). A pull request is someone else's code, often
+a stranger's: its review reads it, it does not run it on the user's machine. The pilot's and the
+passes' instructions, and the pilot's first message, say to run none of it (no test, no build, no
+script). The gate holds for the user, in every mode, Full and Auto included, a `run` (or a task)
+whose folder is in the copy of a pull request and that does more than read: base, its card saying
+`it runs the code of pull request #7, in the copy its review reads: only the user lets a review
+run it, in every mode, Full included`, as `worklog_delete` is held whatever the mode. A line the
+rules know to only read (`git diff`, `git log`, `git show`, `cat`) passes as it does elsewhere:
+the review reads the pull request with them. A piped read (`git diff | head`) or one with a
+configuration of its own (`git -c … diff`) is not known to only read: it is held for the user, by
+design. The hold covers the review's copy only: a pilot that clones the pull request elsewhere is
+stopped by its instructions, not by the gate. The copy itself is checked out with none of the
+user's filters (Large File Storage included, whose `.lfsconfig` the pull request would choose):
+its files are written as its commits hold them, and no git the daemon runs in the copy runs a
+filter of the user's either (the files are listed commit to commit, the status is read with the
+filters off). The agents of the review see the copy as their place's one repository, `.`, at its
+top: the files it changes are said from there, and naming a repository of the project's reaches
+nothing of the user's checkout.
 
 ## The tree's tools
 
@@ -1545,9 +1666,9 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it when it asks, reports or ends; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` what the user chose for new sessions when left out and that choice is for this provider (the project's model first), else the provider's defaults (`docs/agents.md`, "Providers"; a child, a led and a handed session alike): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`, or one branch for every repository taken) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). The one exception is an extension's: the pilot of a review launches its passes through `review`, never through this tool (`docs/design.md` §5.1). |
-| `session_send {session, text}` (a root) | A message to a session, named by its id or its title ("Sessions that read each other"), the caller started (`agent_launch` with `led` or `handed`), to the agent that started the caller's session ("Sessions an agent starts", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
-| `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode. `session` is an id or a title ("Sessions that read each other", below). |
+| `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?, project?, machine?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`machine`** starts it on another of the user's machines, a runner, judged by that machine's gate (`docs/remote.md`, "Starting a session on another machine"); left out, this machine, and nothing changes. Its description says it: the agent works on a copy of the caller's place there (its branch and its uncommitted changes are sent with it), and its commits come back on a branch of their own, `refs/flottille/machines/<machine>/<launch>/<branch>`, which the caller reviews and merges as a local child's work; nothing moves its branch. The daemons send the code, never the agent, which gets no tool or network for it; `workspace`, `new_workspace`, `repositories`, `branch`, `base` and `project` are refused with `machine`. The caller is answered with the agent started there, or the request waiting for the user there (`request #4 on server is waiting for the user`). **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it when it asks, reports or ends; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). **`project`**, for `led` and `handed`, is another registered project to start the session in, held for the user every time ("Sessions an agent starts", "In another project"); a child naming another project is refused before anything is asked. A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` what the user chose for new sessions when left out and that choice is for this provider (the project's model first), else the provider's defaults (`docs/agents.md`, "Providers"; a child, a led and a handed session alike): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`, or one branch for every repository taken) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). The one exception is an extension's: the pilot of a review launches its passes through `review`, never through this tool (`docs/design.md` §5.1). |
+| `session_send {session, project?, text}` (a root) | A message to a session, named by its id or its title ("Sessions that read each other"), the caller started (`agent_launch` with `led` or `handed`), to the agent that started the caller's session ("Sessions an agent starts", below), or to any other session, of its project or another, with the user's leave, asked once per pair, and across projects even for a session the caller started ("Sessions that talk to each other"). |
+| `session_read {session?, project?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session, of the caller's project or of another (`project`, "Sessions that read each other"), framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode. `session` is an id or a title ("Sessions that read each other", below). |
 | `session_title {title}` (a root) | Names the caller's session for the user: 3 to 8 words on one line, at most 60 characters ("The session's title", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
@@ -1555,10 +1676,17 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
 | `ask {question}` or `ask {questions: [{question, options?, multiple?}]}` | One question, or up to 4 at once (more is refused, asking for the rest once these are answered); `question` and `questions` are exclusive. A question's `options` are 2 to 4 short choices, each `{label, description?}` (a label of one line of 60 characters at most, distinct, a description of one line); `multiple` lets the user pick several (refused without options). Every question can also be answered in words. Its description says, in its few sentences, one question per point to decide, with options when the answers are known, and holds a call of each form. Answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). A parent and a pilot read the ask as one text, each question numbered with its options under it, and answer in words; the user answers each question apart, on the ask's card in the window or with `flottille agent answer` (`agent.answer`), and the agent gets one message that quotes each question with its answer under it ("Answering an ask", below). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
 | `ask_user {question}`, `ask_parent {question}` | The two names `ask` replaced, kept for one release: no agent is given them, and a call of either is answered, routed as `ask` is, whoever makes it. |
-| `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
+| `approval_answer {request_id, decision, why, machine?}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). `machine` names the machine of a child of the caller's on another machine, as its `child-asks` says it: answered there, and forwarded, it goes to the user of that machine (`docs/remote.md`, "Where a question goes when the parent is off"). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
 
 They go through the gate like every call (it allows them). Their texts are masked of the
 daemon's secrets before anyone else reads them.
+
+**A session on another machine of the user's is the same as one on this machine**, for every one
+of these tools: found by its id or its title among every machine's sessions, judged by the machine
+it runs on by the same rules (the tree's mode, the judge, the leave per pair, what is held for the
+user in every mode), answered the same. Only a machine that cannot be reached (refused at once,
+saying since when) and a device that may only view (it reads, nothing more) differ
+(`docs/remote.md`, "Sessions of another machine").
 
 ### What an agent runs on
 
@@ -1641,14 +1769,68 @@ Both are the same kind of session otherwise:
   `led_by` (its pilot's id, `null` for a handed session).
 - **The user talks to a led session directly**: what they write reaches it as from the window to
   any session, and its pilot is neither asked nor woken by it.
-- **The pilot ends**: a led session goes on. It becomes a handed session (`led_by` `null`,
-  `agent.handed`), its questions go to the user from then on, and it is told so once by a
-  delivery (`handed`): `<pilot>, which led this session, ended. The session goes on, handed to the
-  user: …`.
+- **The pilot ends**: a led session is part of its pilot's job, so **it ends with it**. Ending a
+  session for good (the window's End session, `agent.stop`, `flottille agent stop`, `agent_stop`)
+  also ends the sessions it leads, in its project and in other projects, and those they lead in
+  turn, each as any session ends (its tree, its runs and what was queued for it stop; its
+  workspace stays; `agent.ended`, its reason `its pilot ended`). A led session the user wants to
+  keep is detached first ("Detach", below): it is then the user's alone and does not end. Only a
+  real end does it: the end of a pilot's turn, a crash (its process starts again, or the pilot
+  fails and may be resumed, its sessions staying led by it), a compaction and a restart of the
+  daemon end nothing. The window's confirmation lists the sessions that end with it, by title and
+  project, each with the work its workspace holds that is not saved, read by `agent.ending`
+  (`docs/protocol.md`): one confirmation for the whole end. The card of an `agent_stop` the user
+  is asked about says the same, by the same read: one line for each led session that ends with
+  the session named (its title, its project, and what it holds that is not saved), so that the
+  user never allows an end without seeing everything that ends. The lead's role text tells a
+  pilot that its end ends its sessions and that one to keep is detached first
+  (`crates/flottille/roles/lead.md`, "When you end").
 
 A session launched before `kind` keeps its relation: one whose starter still followed it is led,
 the others are handed (a migration of the store sets it, and turns the following into the
 pilot's subscription).
+
+#### In another project
+
+A lead whose task needs work in another registered project (a shared library its project depends
+on, a project the user just created) starts and leads a **real session of that project**:
+`agent_launch {"kind": "led" | "handed", "project": "kit", "title", "brief", workspace? |
+new_workspace?}`. The other project's wall holds: the caller never acts in that project's places
+itself (`fs_*`, `run`, `workspace`, git stay its own project's); the session does.
+
+- **Held for the user, every time**, in Ask, Auto and Full alike, never judged: the call is
+  answered at once that it is held, the result comes later as a delivery. Its request is an
+  `action` of class `base` whose words name both projects, the caller, the kind, the place and
+  the first message whole (`app's session "Release the fonts" asks to start a session in kit:
+  "Make the fonts settable", led by it, …, in main, its project folder, …`; `Its first message:
+  …`; with `new_workspace`, the workspace it makes in that project, as `workspace create` says
+  it). A project that is not registered, a workspace that project does not have, and a child
+  (`refused: a child works in your project, never in another: …`) are refused before anything is
+  asked. With `new_workspace`, the other project's setup steps are checked as within a project: a
+  step the gate refuses refuses the launch, and the services its tasks start are said as that
+  project's place reaches them. Refused by the user, nothing starts and the caller is told so.
+- **A real session of that project**: a root of it (`launched_by`, `led_by` as for any session an
+  agent starts), in that project's `workspace`, `new_workspace` or `main` (its folder, when
+  neither is named), shown in that project in the sidebar, where its row says which session of
+  which project leads it (`led by Release the fonts in app`). It is a full lead there: that
+  project's tools, settings, skills, commands, vault entries and grants, the review, and it starts
+  its own sessions, each step of a chain the user's as ever. A `led` one wakes its pilot as a led
+  session within a project does ("Following a session"); a `handed` one is the user's.
+- **Its mode** is the mode that project gives a new session, Auto, never above the caller's
+  tree's: started from Ask it is in Ask, and Full is never carried to another project.
+- **Writing to it asks the user once**, though the caller started it: the caller's first
+  `session_send` to it is held for the user's leave as a first message to a session it did not
+  start is ("Sessions that talk to each other"); allowed, the caller writes to it from then on
+  without asking, until the leave is withdrawn; a leave withdrawn while a call is judged stops
+  that call, a read as a message. One leave covers reading and writing: a read and a message for
+  the same pair wait on one card, not two. It reads it freely, as within a project, and ends it
+  as its own (`agent_stop`) while it leads it.
+- **A session the user opened there**, which the caller did not start and knows no id of, is found
+  by its project and title: `session_send` and `session_read` with `project` ("Sessions that read
+  each other"); the leave asked is the same.
+- The answer says where it went (`… in main, the project folder of project kit.`) and that the
+  first message asks the user once; the window's step names the project when it is another one
+  than the caller's (`started the session "Make the fonts settable" in kit`).
 
 #### Following a session
 
@@ -1681,7 +1863,11 @@ remove`: a branch held by another local branch is *not lost*, which is no claim 
 integrated, "The workspace").
 When a led session has reported, is idle, and its work is integrated, the pilot is reminded once
 per session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login"
-(agent …) reported and its branch is in main: stop it and remove its workspace?`. Integrated means
+(agent …) reported and its branch is in main: stop it and remove its workspace?`. For a session
+led in another project the reminder only says to stop it, and that its workspace is in that
+project, which the pilot's `workspace` tool does not reach: it is that session's, or that
+project's, to remove, never one of the pilot's own (a workspace of the same name in the pilot's
+project is none of it). Integrated means
 in **every** repository that holds commits of its own: its pull request is merged and the branch
 is no further than the commit it merged (the base is the branch the pull request aimed at), or it
 has none and the branch is contained in the base the workspace started from. Another branch
@@ -1709,7 +1895,10 @@ session's questions go to the user. When the pilot stops reading the session (`f
 the user's Cancel, its end, or the user's detach), the questions still open to it go to the user's
 inbox at once, the session no longer waits on its pilot, and it is told once (an `unfollowed`
 delivery, or the `handed` or `detached` one, saying how many went). A question left in a report or in a last message is a
-follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` say so, under the
+follow-up, not a wait. A child or a led session an agent of another machine started asks that
+agent while the link to its machine is up, and the user of the machine it runs on while it is
+not; its questions open to a pilot go to the user when the pilot's machine goes off, and `ask`'s
+description says both (`docs/remote.md`, "Where a question goes when the parent is off"). The descriptions of `ask`, `report` and `session_send` say so, under the
 2,048 characters their limit asks.
 
 #### Answering an ask
@@ -1761,6 +1950,7 @@ why. What it does, at once:
 - the session leaves its pilot's rows and goes back under its workspace;
 - `ask` now reaches the user;
 - the two need the user's leave to write to each other, as any two sessions do;
+- the session no longer ends with its former pilot ("The pilot ends", above);
 - the session becomes a plain session of the user: it may start sessions as its mode allows, and
   "No chain without the user" no longer applies, since the user took it;
 - its first message stays in the conversation, still marked as the agent's words (and the judge
@@ -1774,15 +1964,14 @@ the window shows `started by`, until the user detaches it.
 
 #### Sessions that talk to each other
 
-`session_send {session, text}` (a root's tool) writes to another live root of the caller's
-project, named by its id or its title ("Sessions that read each other"): a session the caller
-started (led or handed), the agent that started the caller's
-session (its pilot, for a led session), or any other
-session of the project with the user's leave. A child is refused before anything is asked (`refused:
-<id> is a child of another session: it is written to by its parent, …`; the caller's own are written
-to with `agent_send`), and so are a session of another project (`refused: <id> is a session of
-another project, <p>, not of <q>: …`), the caller's own session, a name that is the id or the
-title of no session of the project, a session that ended and an empty text.
+`session_send {session, text}` (a root's tool) writes to another live root, named by its id or
+its title ("Sessions that read each other"): a session the caller started (led or handed), the
+agent that started the caller's session (its pilot, for a led session), or any other session,
+of the caller's project or of another, with the user's leave. A child is refused before anything
+is asked (`refused: <id> is a child of another session: it is written to by its parent, …`; the
+caller's own are written to with `agent_send`), and so are the caller's own session, a name that
+is the id or the title of no session (a title only within the caller's project, or within the
+project `project` names), a session that ended and an empty text.
 
 - **The user's leave, once per pair.** Between a session and one it started, or the one that
   started it, nothing is asked beyond the judging below. To any other session, the first message
@@ -1794,7 +1983,14 @@ title of no session of the project, a session that ended and an empty text.
   user's leave (`leave.granted`, kept only if both sessions still run); refused, nothing is sent
   and A is told so. While it waits, and while its message is being sent once allowed, another
   message from A to X is refused, naming the request, so that two first messages ask the user
-  once. The leave is one way (A to X, not X to A) and lasts until either session ends (one
+  once. **Across projects**, the leave is asked even of a session the caller started in the
+  other project (`agent_launch` with `project`), and its words name both projects (`Let the
+  session "A" (agent …) of project app read and write to the session "X" (agent …) of project kit
+  (started by this agent), from now on without asking you`); a session of another project the
+  caller did not start asks it the same way, whether the call names it by its id or by its
+  `project` and title: how it is found never changes what is asked. Within a project nothing
+  changes. The leave is one
+  way (A to X, not X to A) and lasts until either session ends (one
   resumed asks again) or the user withdraws it, in the window's Write access section of either
   session or with `leave.withdraw` (`leave.withdrawn`). A message the judge allows after the
   user withdrew the leave, or after X ended, is refused, saying which, and is not sent.
@@ -1826,12 +2022,13 @@ title of no session of the project, a session that ended and an empty text.
 
 ##### Ending another session
 
-`agent_stop {agent_id}` takes, in the same field, a live session of the caller's project, named by
-its id or its title ("Sessions that read each other"), that is not one of its children: one it
-started (`led` or `handed`) or any other, whoever started it. The
+`agent_stop {agent_id}` takes, in the same field, a live session, named by its id or its title
+("Sessions that read each other"), that is not one of its children: one it started (`led` or
+`handed`) or any other, whoever started it, of the caller's project or of another (the card names
+that project). The
 caller itself (`refused: <id> is your own session: …`), a child of another session (`refused: <id>
-is a child of another session: it is stopped by its parent, …`), a session of another project, an
-name that is the id or the title of no session of the project and a session that ended are
+is a child of another session: it is stopped by its parent, …`), a
+name that is the id or the title of no session and a session that ended are
 refused before anything is asked.
 
 - **A session it leads is its own.** One the caller itself started as `led`, and still leads, is
@@ -1855,8 +2052,8 @@ refused before anything is asked.
 #### Sessions that read each other
 
 `session_read {session?, last?, since?, until?, cursor?}` (a root's tool, as `session_send` is)
-reads the conversation of another session of the caller's project, a page at a time, never all of
-it at once.
+reads the conversation of another session, of the caller's project or, with the leave, of another,
+a page at a time, never all of it at once.
 
 - **Named by its id or its title**, in `session` here, `session` of `session_send`, `agent_id`
   of `agent_stop` when it names a session and `session` of `forge unsubscribe`: the user speaks of a session by the title the window
@@ -1865,19 +2062,36 @@ it at once.
   the spaces around it (a session with no title yet is matched by none; the live one when an ended session and a live
   one share it, for `session_send` and `agent_stop`, which an ended session cannot take). One match is used as its
   id would be, resolved before the gate decides: the request names the session, the leave of
-  `session_send` is asked once for the pair whichever name each message carries, and a session of
-  another project or a child, reached by its id, is refused as ever (a title is never matched
-  outside the caller's project, nor among children). Several sessions with that title are refused, each listed (an untitled one as `(untitled)`: what
+  `session_send` is asked once for the pair whichever name each message carries, and a child,
+  reached by its id, is refused as ever (a title is never matched outside the caller's project,
+  unless the call names another with `project`, below, so that the same title in two projects
+  is never ambiguous, nor among children).
+- **A session of another project, by its title.** `session_send` and `session_read` take an
+  optional `project`, the name of a registered project: `session` is then matched, as a title or
+  an id, among **that project's roots**, by the same matching as within the caller's project
+  (`{"project": "kit", "session": "Release the fonts", "text": "…"}`): the whole title, ignoring
+  case, the live one when an ended session shares it, and the refusals as above, naming the
+  project (`refused: 2 sessions of project kit are titled "Fonts": name the one you mean by its
+  agent id:`, then each with its id; `refused: no session of project kit has the id or the title
+  "…"`, listing that project's roots). A child is never reached. Without `project`, nothing
+  changes: a title is matched in the caller's project only. A project that is not registered is
+  refused before anything is asked, naming the registered ones (`refused: project ghost is not
+  registered: the registered projects are app, kit`). Naming the project changes how the session
+  is found, never what is asked: the leave, the held first message and first read, the masking
+  and the framing are those of "Sessions that talk to each other". Several sessions with that title are refused, each listed (an untitled one as `(untitled)`: what
   a session was started with is its own), `<title> · <id>
   · <place> · <state>, active <when> ago`, so that the agent picks the id; no session with that
   id or title is refused too, listing the project's roots the same way, the most recently active
   first, as many whole lines as fit under the limit of a refusal, 20 at most (`(and n more)` for
   the rest). The lines are masked and on one line each, as
   every result is.
-- **Which session**: a root of the caller's project, whoever started it, running or ended. A
-  session of another project is refused before anything is asked (`refused: <id> is a session of
-  another project, <p>, not of <q>: an agent reads only the sessions of its own project`), and so
-  are a child (its parent reads it with `agent_status`, action `conversation`) and a name that
+- **Which session**: a root of the caller's project, whoever started it, running or ended, or a
+  root of another project, by its id or, with `project`, by its title: one the caller started reads as within a project; for any
+  other, the first read is held for the user's leave for the pair, in every mode, Full included,
+  never judged (`Let the session "A" … of project app read and write to the session "X" … of
+  project kit …`), and allowed once for every later read and message. A child is refused before
+  anything is asked (its parent reads it with `agent_status`, action `conversation`), and so is a
+  name that
   is the id or the title of no session of the project. **The caller's own session** is read with no `session` (an agent is never told
   its own id, and the mode changes while it runs, so the opening instructions could not carry it):
   `session` left out, or the caller's own id, is answered without a request in any mode with its
@@ -1956,7 +2170,7 @@ turn it runs anyway, and costs no quota.
 
 | Tool | |
 |---|---|
-| `web {action, url?, query?, why?, path?, title?}` | A page read or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2); `show_link`, a link put in front of the user ("Showing a link", below). Every agent has it, in `main` as in a workspace. |
+| `web {action, url?, query?, why?, entry?, method?, body?, headers?, auth?, path?, title?}` | A page read, a call of an API or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2); `show_link`, a link put in front of the user ("Showing a link", below). Every agent has it, in `main` as in a workspace. |
 
 - **`read {url}`**: fetches the page and answers its main content: HTML as Markdown (the `dom_smoothie`
   crate, Readability ported to Rust, its navigation, banners and footers left out), a PDF as its
@@ -1991,6 +2205,49 @@ turn it runs anyway, and costs no quota.
   kernel lets an unprivileged user have them; when it does not (AppArmor on Ubuntu may refuse
   them), the daemon says so once in its log and the filter alone keeps the reader off the
   network.
+- **`read {url, entry?, method?, body?, headers?, auth?}`: a call of an API.** A read that names
+  any of them calls the URL as an API: `method` is `GET` (by default), `HEAD`, `POST`, `PUT`,
+  `PATCH` or `DELETE`; `body` is text (JSON as a string), sent by `POST`, `PUT`, `PATCH` and
+  `DELETE` only, as `application/json` when it parses as JSON and `text/plain` otherwise unless
+  the agent's headers say its type, and refused past 8,000 characters (the judge is given it
+  whole); `headers` are the agent's own, never `Authorization`, `Cookie` nor
+  `Proxy-Authorization` (`refused: web sends no Authorization header of yours: a sign-in goes
+  with entry, …`), nor `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `TE` or
+  `Upgrade`, which web sets itself; with an entry, nor `Range` and `If-Range` (a part of an answer
+  that echoes the request could hold a part of the secret). Their names and values are 8,000
+  characters at most in all, as the body. The answer is the final URL, the status, the content type and
+  the body as it came (JSON is not turned into Markdown), any status included, inside the web's
+  block, cut at 30,000 characters as a page's text is; a body that is not text is named, not
+  shown. A write's redirect is answered as it came, never followed.
+- **Signed in with a vault entry**: `entry` names an entry of the vault (`docs/vault.md`, "How a
+  secret is used"), and the daemon adds the sign-in itself: HTTP Basic with the entry's
+  `username` and its secret when the entry has a username, else `Authorization: Bearer
+  <secret>`; `auth` (`basic` or `bearer`) overrides the guess. The secret goes **only to the
+  entry's origin**, the scheme, host and port of its `url` (`https`, or `http` on this machine): a
+  URL on another host is refused before anything is sent, naming both hosts (`refused: the vault
+  entry tracker-key is for api.example.test, and this URL is on other.example.test: …; nothing was
+  sent`), and so are plain `http` to another machine and another port of the host; a redirect is
+  followed with the credential only on that origin, and one that leads elsewhere is refused,
+  saying where it led. An entry
+  without a `url`, one the agent's project does not see, or one bound to another use (`for`) is
+  refused with the vault's sentences; a name the vault does not hold offers `vault ask` with the
+  URL's origin, when the agent has the vault tool. The secret is read from the keyring at the
+  moment the call is sent, never waited for. Every form of it (raw, the Basic credentials, the
+  header's value, and their encoded forms, `docs/vault.md`) is masked in the answer, as every vault
+  value is in what is stored and shown: the whole body is masked before it is cut, and a cut body
+  never ends in the start of one of those forms (that end is masked too), so that no padding of an
+  echo shows a secret in part; the links the agent is shown are those of the masked text. Nothing
+  logs the request's headers. The address rules below hold for an API as for a page.
+- **The gate on a call of an API**: `GET` and `HEAD` are reads, passed or judged as a page's URL
+  is; a method that writes (`POST`, `PUT`, `PATCH`, `DELETE`), with or without an entry, is **to
+  judge**, and so is a `GET` or `HEAD` that sends headers of the agent's, which carry out what
+  they hold as a URL does. The card says the method, the URL, the host and, with an entry, who it
+  signs in as and with which entry, then the agent's headers and the body: `it sends POST
+  https://api.example.test/rest/api/3/issue to api.example.test as robin@example.test with the
+  vault entry tracker-key, its body: {…}` (a bearer token: `with the vault entry tracker-key as
+  a bearer token`), masked. A signed `GET` held as a URL the agent built, or a link of a site read
+  often, says the same after its reason: `…; it signs in as robin@example.test with the vault
+  entry tracker-key`. An entry that cannot sign the call in is refused before any card.
 - **`search {query}`**: DuckDuckGo's HTML page (`https://html.duckduckgo.com/html/?q=…`, no key,
   no account): at most 10 results, each its title, its URL (out of DuckDuckGo's redirect) and its
   excerpt, ads left out. A page that asks to prove a human is there, or any answer with no
@@ -2001,10 +2258,11 @@ turn it runs anyway, and costs no quota.
   text, the page's title included, sits in an `<untrusted_web_content>` block nothing in it can
   close. It is masked of the
   daemon's and the place's secrets, and escaped, like every result.
-- **How it fetches**: `http` and `https` only, GET only, with a fixed user agent that names
+- **How it fetches**: `http` and `https` only, a page by GET, with a fixed user agent that names
   the app and no one (`Mozilla/5.0 (compatible; Flottille)`: the same for every user and version,
   no link nor version that would tell a site who browses), no cookies, no
-  credentials, no header of the agent's, no proxy, and the URL's fragment never sent. At most
+  credentials but a vault entry's on a call of an API, no header of the agent's but on a call of
+  an API, no proxy, and the URL's fragment never sent. At most
   5 MiB downloaded (a longer page stops there and says so; a PDF cut is not read), 30 seconds in
   all, 5 redirects, none from `https` to `http`.
 - **Never this machine nor a private network**, in every mode, the user's answer and Full
@@ -2078,6 +2336,14 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   history rebuild or a page left and come back; a text of the agent's own, a report, a message
   or any other call ends the row, and the next link starts a new card. A link added to a card
   unfolds into it as a line.
+- **On another machine** (the window shows it, `docs/remote.md`, "Tunnels"): a `localhost` link
+  opens through a tunnel to the run that serves its port, then the system's handler is given the
+  local address; a link of the web opens as it is; a picture or a video is sent by the agent's machine
+  (`docs/remote.md`, "A file an agent showed"): a picture's line draws a placeholder that fades
+  into it, with **Open**, a video's has **Play**, each opening a copy written on this machine, and
+  the toast says `The agent shares a picture of server: shot.png` with the same button; any other
+  file is the agent's machine's, so its line says `server: <path>` with no **Open** and no
+  thumbnail, and the toast says `The agent shares a file of server: <path>` with no button.
 - **One toast, only when it is needed**: a row of links gives one toast, `The agent shares a
   link: <title or host>` with an **Open** button when it holds one, `The agent shares 3 links`
   with **Show** (it goes to the conversation) when it holds more, and only while the

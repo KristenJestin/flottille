@@ -44,6 +44,60 @@ pub(crate) fn from_markdown(text: &str) -> Value {
     json!({"type": "doc", "version": 1, "content": content})
 }
 
+/// The scheme of the link that is a mention: `[@Display Name](mention:<accountId>)`.
+const MENTION: &str = "mention:";
+
+/// The mention node of `[@Display Name](mention:<accountId>)`: the name is written once with its
+/// `@`, whether the text gave it or not.
+fn mention_node(id: &str, children: &[Node]) -> Value {
+    let name = plain(children);
+    let name = name.trim().trim_start_matches('@');
+    json!({"type": "mention", "attrs": {"id": id, "text": format!("@{name}")}})
+}
+
+/// The words of inline nodes, marks left out.
+fn plain(nodes: &[Node]) -> String {
+    nodes
+        .iter()
+        .map(|node| match node {
+            Node::Text(text) => text.value.clone(),
+            Node::InlineCode(code) => code.value.clone(),
+            other => plain(other.children().map_or(&[][..], Vec::as_slice)),
+        })
+        .collect()
+}
+
+/// The people a document mentions, as `(account id, "@Display Name")`, in the order of the text.
+pub(crate) fn mentions(node: &Value) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    if node["type"] == "mention" {
+        let text = |name: &str| node["attrs"][name].as_str().unwrap_or_default().to_owned();
+        found.push((text("id"), text("text")));
+    }
+    for child in node["content"].as_array().into_iter().flatten() {
+        found.extend(mentions(child));
+    }
+    found
+}
+
+/// Writes into each mention node the display name the site gave its account, `(id, name)`: the
+/// text of a mention is the agent's own, and it must read as who is notified.
+pub(crate) fn name_mentions(node: &mut Value, names: &[(String, String)]) {
+    if node["type"] == "mention"
+        && let Some((_, name)) = names
+            .iter()
+            .find(|(id, _)| node["attrs"]["id"].as_str() == Some(id))
+    {
+        node["attrs"]["text"] = Value::from(format!("@{name}"));
+    }
+    // `get_mut`: indexing a `&mut Value` by a missing key would insert a `null` there.
+    if let Some(children) = node.get_mut("content").and_then(Value::as_array_mut) {
+        for child in children {
+            name_mentions(child, names);
+        }
+    }
+}
+
 /// The link definitions (`[id]: url`) of a document, by their identifier.
 fn definitions_of(node: &Node, found: &mut HashMap<String, (String, Option<String>)>) {
     if let Node::Definition(definition) = node {
@@ -247,12 +301,21 @@ impl Converter<'_> {
                         &[kept, vec![json!({"type": "code"})]].concat(),
                     );
                 }
+                // `[@Display Name](mention:<accountId>)`: the only way a person is notified, an
+                // `@Name` written as text stays text.
+                Node::Link(link) if link.url.starts_with(MENTION) => {
+                    out.push(mention_node(&link.url[MENTION.len()..], &link.children));
+                }
                 Node::Link(link) => {
                     let mark = link_mark(&link.url, link.title.as_deref());
                     self.inline_into(&link.children, &with(mark), out);
                 }
                 Node::LinkReference(reference) => match self.definitions.get(&reference.identifier)
                 {
+                    // `[@Ana][x]` with `[x]: mention:<accountId>` is the same mention.
+                    Some((url, _)) if url.starts_with(MENTION) => {
+                        out.push(mention_node(&url[MENTION.len()..], &reference.children));
+                    }
                     Some((url, title)) => {
                         let mark = link_mark(url, title.as_deref());
                         self.inline_into(&reference.children, &with(mark), out);
@@ -531,6 +594,20 @@ fn inline(nodes: &[Value], hard: &str) -> String {
                 runs.push((hard.to_owned(), vec![&Value::Null]));
                 continue;
             }
+            // The form an agent writes back, so a mention read can be repeated: a name alone
+            // would notify no one. An id that is no account id is not put into a link, where its
+            // characters could break the text around it.
+            "mention"
+                if crate::tickets::is_account(node["attrs"]["id"].as_str().unwrap_or_default()) =>
+            {
+                let name = node["attrs"]["text"].as_str().unwrap_or("@");
+                let id = node["attrs"]["id"].as_str().unwrap_or_default();
+                runs.push((
+                    format!("[{}]({MENTION}{id})", escaped(name)),
+                    vec![&Value::Null],
+                ));
+                continue;
+            }
             "mention" | "emoji" => node["attrs"]["text"]
                 .as_str()
                 .or(node["attrs"]["shortName"].as_str())
@@ -740,6 +817,76 @@ mod tests {
             round_trip("First line\nsecond line\n\nThird block"),
             "First line\nsecond line\n\nThird block"
         );
+    }
+
+    #[test]
+    fn a_mention_read_in_a_comment_keeps_its_account_id() {
+        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+            "content": [{"type": "text", "text": "Hi "},
+                {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5",
+                    "text": "@Ana Example"}}]}]});
+        assert_eq!(
+            to_markdown(&adf),
+            "Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"
+        );
+        // What was read is what is written back: the same node.
+        assert_eq!(from_markdown(&to_markdown(&adf)), adf);
+    }
+
+    #[test]
+    fn a_mention_whose_id_is_no_account_id_reads_as_its_text() {
+        // An id that holds `)` or a space would break the link it is written into, and is no
+        // account a mention could be written back with.
+        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+            "content": [{"type": "mention", "attrs": {"id": "ana) x", "text": "@Ana Example"}}]}]});
+        assert_eq!(to_markdown(&adf), "@Ana Example");
+    }
+
+    #[test]
+    fn a_mention_link_is_a_mention_node_and_an_at_name_stays_text() {
+        let adf = from_markdown("Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5), and @Ben");
+        assert_eq!(
+            adf,
+            doc(json!([{"type": "paragraph", "content": [
+                {"type": "text", "text": "Hi "},
+                {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5",
+                    "text": "@Ana Example"}},
+                {"type": "text", "text": ", and @Ben"},
+            ]}]))
+        );
+        assert_eq!(
+            mentions(&adf),
+            [(
+                "5b10ac8d82e05b22cc7d4ef5".to_owned(),
+                "@Ana Example".to_owned()
+            )]
+        );
+        // The name is written once with its `@`, whether the text gave it or not; an id with a
+        // colon is the whole of what follows the scheme.
+        let adf = from_markdown("[Ben](mention:712020:9f8e7d6c-1111-4222-8333-444455556666)");
+        assert_eq!(
+            mentions(&adf),
+            [(
+                "712020:9f8e7d6c-1111-4222-8333-444455556666".to_owned(),
+                "@Ben".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_reference_style_mention_link_is_a_mention_node_too() {
+        // `[@Ana][x]` with `[x]: mention:<id>` is the same link as the inline form: it must not
+        // end as a link mark whose href is a `mention:` URL, which notifies no one.
+        let adf =
+            from_markdown("Hi [@Ana Example][ana]\n\n[ana]: mention:5b10ac8d82e05b22cc7d4ef5");
+        assert_eq!(
+            mentions(&adf),
+            [(
+                "5b10ac8d82e05b22cc7d4ef5".to_owned(),
+                "@Ana Example".to_owned()
+            )]
+        );
+        assert!(!adf.to_string().contains("\"href\":\"mention:"), "{adf}");
     }
 
     #[test]

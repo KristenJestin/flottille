@@ -1,0 +1,57 @@
+# The betas of a version keep the last ten; the older are deleted, with their tags
+# (docs/releases.md, "What CI publishes").
+#
+# A workflow of its own, never a job of `ci.yml`: a failure here (a deletion the settings refuse) or a
+# cancellation must not fail or cancel the run of a push to `dev`, which `verified-on-dev` reads
+# when `main` is released. It holds the token that deletes releases and nothing else: no checkout,
+# no action, no code of a branch. Only the betas: a release, a release candidate, a next build and
+# an alpha (alpha-cleanup.yml's) are never named here.
+name: beta-cleanup
+
+on:
+  # A release made with the workflow's token starts no `release` run, so the pile is looked at
+  # on a schedule, and by hand.
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    # Two at once would delete the same release twice.
+    concurrency:
+      group: beta-cleanup
+      cancel-in-progress: false
+    steps:
+      - name: Delete the old betas
+        id: prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The betas of each version that stay, the newest.
+          KEEP: 10
+          # A run deletes so many and stops: each deletion is two writes (the release, then its tag)
+          # and GitHub's secondary rate limit refuses a burst. A pile older than this drains over
+          # the next runs.
+          MAX_DELETIONS: 30
+          # Seconds between two deletions.
+          PAUSE: 2
+        run: |
+          # A listing that fails fails the job, not a deletion that finds nothing.
+          set -o pipefail
+          # `v<version>-beta.<n>` only, of the pre-releases, split into the version and the number;
+          # each version's numbers in order, all but the last KEEP go, the oldest first, and no
+          # more than MAX_DELETIONS are named.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' |
+            { grep -E -x 'v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+' || true; } |
+            sed -E 's/-beta\./ /' |
+            sort -k1,1 -k2,2n |
+            awk -v keep="$KEEP" -v max="$MAX_DELETIONS" '{ n[$1]++; tag[$1, n[$1]] = $1 "-beta." $2 }
+              END { for (v in n) for (i = 1; i <= n[v] - keep && sent < max; i++) { print tag[v, i]; sent++ } }' |
+            while read -r tag; do
+              gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"
+              sleep "$PAUSE"
+            done

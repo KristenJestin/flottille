@@ -2,7 +2,7 @@
 //! moving, the window draws no frame and asks for none, on GPUI's test platform in front of a
 //! real daemon whose agents are the fake ACP agent. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", with the project `app` over a throwaway repository and
@@ -132,7 +132,6 @@ fn frames_at_rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (u64, us
     while gone < Duration::from_secs(10) {
         asked += step(shell, Duration::from_millis(16), cx);
         gone += Duration::from_millis(16);
-        std::thread::sleep(Duration::from_millis(5));
     }
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     (drawn, asked)
@@ -687,6 +686,64 @@ fn the_window_draws_no_frame_at_rest_on_a_project_feature_s_page_with_a_value_se
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_with_the_notification_centre_open_and_closed(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    // The agent asks a question and ends its turn: one notification that needs the user.
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [
+        {"mcp": {"tool": "ask_user", "arguments": {"question": "Which database?"}}},
+        {"say": "Waiting."}]}]}));
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    let unread = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| s.top().read(cx).count())
+    };
+    until(&shell, cx, "the bell counts the question", |cx| {
+        unread(&shell, cx) == 1
+    });
+    settle(&shell, cx);
+    past_the_pulse(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed: (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("bell", cx));
+    until(&shell, cx, "the panel lists the notification", |cx| {
+        cx.update(|window, _| window.try_find("bell-list").is_some())
+    });
+    settle(&shell, cx);
+    past_the_pulse(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open, one unread: (frames drawn, frames asked)"
+    );
+
+    // Read, the row's fade ends and the panel stays still.
+    cx.update(|window, cx| window.click("bell-mark-all", cx));
+    until(&shell, cx, "nothing is unread", |cx| {
+        unread(&shell, cx) == 0
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open, all read: (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("bell", cx));
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed again: (frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);
@@ -730,11 +787,14 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "agents");
 
-    // The five tabs, each shown by one of its parts.
+    // The other tabs, each shown by one of its parts.
     for (tab, shown) in [
         ("approvals", "judge-model"),
         ("features", "features-review"),
         ("vault", "vault-title"),
+        // Remote has a tab of its own: off, its notice and its button are all it shows.
+        ("machines", "remote-notice"),
+        ("general", "about-title"),
         ("general", "appearance-title"),
     ] {
         cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
@@ -830,6 +890,37 @@ fn the_window_draws_no_frame_at_rest_on_the_vault(cx: &mut TestAppContext) {
         (0, 0),
         "(frames drawn, frames asked)"
     );
+}
+
+/// #1185: the forges' section of Settings, Agents, and a program's sign-in dialog open on its
+/// address and its code.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_sign_in_dialog(cx: &mut TestAppContext) {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    user.sign_in_script("gh", json!({"signed_in": false}));
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "gh's row offers to sign in", |cx| {
+        cx.update(|window, _| window.try_find("sign-in-gh").is_some_and(|f| f.visible()))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked) on the section"
+    );
+    cx.update(|window, cx| window.click("sign-in-gh", cx));
+    until(&shell, cx, "the dialog shows the code", |cx| {
+        cx.update(|window, _| window.try_find("sign-in-code").is_some_and(|f| f.visible()))
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked) on the dialog"
+    );
+    cx.update(|window, cx| window.click("sign-in-modal-cancel", cx));
 }
 
 #[gpui_kit::test]
@@ -981,6 +1072,78 @@ fn the_services_page_is_still_at_rest(cx: &mut TestAppContext) {
         })
     });
     settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_service_dialog_with_chips(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    let folder = user.path("home/tools");
+    std::fs::create_dir_all(&folder).unwrap();
+    let service = |name: &str| {
+        format!(
+            "[services.{name}]\nfolder = \"{}\"\nline = \"{} --listen 0\"\n",
+            folder.display(),
+            server.display()
+        )
+    };
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        ["mongo", "redis", "relay"].map(service).concat(),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(&shell, cx, "the services are listed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .services_page()
+                .is_some_and(|page| page.read(cx).services().is_some_and(|l| l.len() == 3))
+        })
+    });
+    settle(&shell, cx);
+
+    // The dialog opened and two needs chosen with the picker.
+    cx.update(|window, cx| window.click("add-service", cx));
+    settle(&shell, cx);
+    let search = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).services_page().unwrap().clone();
+        let form = page.read(cx).form().clone();
+        form.read(cx).needs_field().unwrap().clone()
+    });
+    for name in ["mongo", "redis"] {
+        cx.update(|window, cx| window.blur(cx));
+        settle(&shell, cx);
+        cx.update(|window, cx| {
+            let focus = search.focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        settle(&shell, cx);
+        cx.update(|window, cx| window.click(format!("service-needs-item-{name}"), cx));
+        settle(&shell, cx);
+    }
+    // A click outside the menu closes it; no field keeps the caret, which would blink.
+    cx.update(|window, cx| window.click("service-modal-title", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    cx.update(|window, _| {
+        assert!(window.find("service-needs-chip-mongo").visible());
+        assert!(window.find("service-needs-chip-redis").visible());
+    });
 
     assert_eq!(
         frames_at_rest(&shell, cx),
@@ -1409,8 +1572,11 @@ fn the_window_draws_no_frame_at_rest_on_a_spec_page_with_amendments(cx: &mut Tes
     let user = User::with_fake_agent()
         .with_fetcher()
         .with_env("FLOTTILLE_TEST_CLOCK", "1")
-        // The development's workspace fetches from `origin`: it reaches no server.
-        .with_env("GIT_SSH_COMMAND", "false");
+        // The development's workspace fetches from `origin`: it reaches no server. The daemon's
+        // git runs the `ssh` it found, never the test's `GIT_SSH_COMMAND`, so that was the real
+        // one, which waited for example.com for the 30 s of a read; the fake one fails at once
+        // (no repository of that name in the user's `remotes`).
+        .with_fake_ssh(&[]);
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -2341,4 +2507,232 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_the_card_of_a_connection_
     });
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the card, folded away");
+}
+
+/// #1018: a dialog opens over the session it is asked from: the vault's form, from an agent's
+/// request for an entry, at rest with the session behind it.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_vault_form_over_a_session(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let id = idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the conversation", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .is_some_and(|page| !page.read(cx).conversation().read(cx).rows().is_empty())
+        })
+    });
+    let entry = flottille_window::vault::VaultEntry {
+        name: "notes-key".to_owned(),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_asked_vault_entry(
+            entry,
+            "to read the notes".to_owned(),
+            None,
+            None,
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the form is drawn", |cx| {
+        cx.update(|window, _| window.try_find("vault-modal").is_some_and(|f| f.visible()))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(id)),
+        "the form is over the session"
+    );
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+/// #1018: the connection's form, from Edit on an agent's request, over the session, at rest.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_connection_form_over_a_session(
+    cx: &mut TestAppContext,
+) {
+    let (user, lead, mcp) = lead_for_connections();
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "The user's notes.",
+            "url": "http://127.0.0.1:7468/mcp"}),
+    );
+    let number = held_number(&answer);
+    let (shell, cx) = window(&user, cx);
+    open_with_request_card(&shell, &lead, number, cx);
+    cx.update(|window, cx| window.click(format!("open-request-{number}"), cx));
+    until(&shell, cx, "the request's dialog", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("connection-request-edit")
+                .is_some_and(|f| f.visible())
+        })
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("connection-request-edit", cx));
+    until(&shell, cx, "the form is drawn", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("connection-modal")
+                .is_some_and(|f| f.visible())
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(lead)),
+        "the form is over the session"
+    );
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_session_whose_rail_holds_a_vault_ask(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent().with_fake_acli();
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "do": [{"say": "ok"}]},
+        {"when": "log my time", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "ask", "name": "hippocampe-key", "why": "to read the notes"}}},
+            {"say": "Asked."}]}
+    ]}));
+    let id = idle_session(&user);
+    // The tracker names an entry the vault lacks: the agent may ask for it.
+    user.git(
+        &user.path("work/app"),
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"],
+                "worklog_token": "hippocampe-key"}}),
+    )
+    .unwrap();
+    user.call("agent.send", json!({"agent": id, "message": "log my time"}))
+        .unwrap();
+    eventually("the ask is open", || {
+        !user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    let number = user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    // The card of "Waiting for you", and the line that records it in the conversation.
+    until(&shell, cx, "the card is in the rail", |cx| {
+        cx.update(|window, _| window.try_find(format!("vault-ask-{number}-add")).is_some())
+    });
+    past_the_pulse(&shell, cx);
+    let (frames, asked) = frames_at_rest(&shell, cx);
+    assert_eq!(asked, 0, "no animation frame asked");
+    assert_eq!(frames, 0, "the card and the line draw no frame at rest");
+}
+
+#[gpui_kit::test]
+fn what_is_new_and_its_mark_are_still_at_rest(cx: &mut TestAppContext) {
+    let user = User::new();
+    let this = std::process::Command::new(env!("CARGO_BIN_EXE_flottille"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let this = String::from_utf8_lossy(&this.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned();
+    let folder = user.path("state/flottille");
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(&folder)
+        .unwrap();
+    std::fs::write(
+        folder.join("whats-new.json"),
+        json!({"version": this, "since": "0.4.0-beta.103", "seen": false, "notes": [{
+            "version": this, "published_at": "2026-11-10T10:00:00Z",
+            "body": "### Features\n\n- **gui**: a mark (#1)\n\n### Fixes\n\n- **cli**: a fix (#2)"
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    let found = |cx: &mut VisualTestContext, id: &'static str| {
+        cx.update(|window, _| window.try_find(id.to_owned()).is_some_and(|f| f.visible()))
+    };
+    until(&shell, cx, "the mark appears", |cx| {
+        found(cx, "sidebar-whats-new")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "the mark, (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("sidebar-whats-new", cx));
+    until(&shell, cx, "the page lists the changes", |cx| {
+        found(cx, "whats-new-change-1")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "the page, (frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_version_section_with_a_download_s_bar_at_a_share(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the update is read", |cx| {
+        shell.read_with(cx, |s, cx| s.version().read(cx).shown().is_some())
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_settings_at(flottille_window::settings::Reveal::Version, window, cx)
+    });
+    settle(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        let downloading = flottille_window::version::Shown::of(&json!({
+            "latest": "99.0.0",
+            "downloading": {"done": 69_700_000, "total": 93_100_000},
+        }));
+        shell
+            .version()
+            .update(cx, |section, cx| section.set_shown(downloading, cx))
+    });
+    until(&shell, cx, "the bar is shown", |cx| {
+        cx.update(|window, _| window.try_find("version-bar-1").is_some())
+    });
+    settle(&shell, cx);
+
+    // A bar at a share draws nothing more: its fill reached it and stays.
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
 }

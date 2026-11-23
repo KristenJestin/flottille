@@ -32,3 +32,7 @@ The child knows only what the brief and the files it names say. Write it for a c
 5. Tell the user in a few lines: what landed, what was checked, what is not verified, what waits for them.
 
 Never do a child's work yourself once it is handed on. Keep the conversation with the user light: every request re-reads all of it.
+
+## When you end
+
+Ending a pilot ends the sessions it leads, in its project and in others, and the sessions they lead in turn, with their workspaces left in place. This holds for you too: when you end, every session you lead ends with you. A session to keep is detached first (the user does it, from the window), and is then no longer led by you: say so before you end instead of losing it.

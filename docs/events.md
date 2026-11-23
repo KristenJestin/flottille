@@ -18,6 +18,10 @@ emits it.
 | `name` | `<subject>.<what happened>`. |
 | `data` | An object, its fields given per event below. A client ignores fields it does not know. |
 
+An event emitted while the daemon serves a request of another machine's client has one more
+field in `data`, `device`: the name of the member whose device signed the request
+(`docs/remote.md`, "Requests from another machine's clients").
+
 ## The events
 
 ### `daemon.started`
@@ -84,8 +88,9 @@ An edit of `providers.toml` by hand is not announced: it is read again at the ne
 
 The daemon read a provider's models with no prompt (`docs/agents.md`, "The models"): at its
 start, when the provider was enabled, or when its program (path or modification time), the names
-of its API keys set or the presence of its sign-in file changed. The window reads the providers
-again.
+of its API keys set or the presence of its sign-in file changed; and when a session's start finds
+the list changed (#1076), so that the window's pickers never keep a model the agent dropped. The
+window reads the providers again.
 
 | Field | |
 |---|---|
@@ -94,7 +99,7 @@ again.
 ### `provider.models_learning`
 
 The daemon started listing a provider's models (`"learning": true`), or the listing ended,
-whatever its outcome (`"learning": false`). The window shows the effort picker's skeleton for a
+whatever its outcome (`"learning": false`). The window's agent picker has no effort to say for a
 model whose efforts are not known while it lists, and reads the providers again.
 
 | Field | |
@@ -121,6 +126,20 @@ one for a user who never chose (`"picked": true`), or the user saw the notice of
 |---|---|
 | `judge` | `{"provider", "model", "picked"?}`, `model` `null` for the provider's default; `null` when none is chosen. |
 
+### `signin.changed`
+
+A program's own sign-in or sign-out, started from the window, moved (`signin.start`,
+`signin.cancel`, `signin.sign_out`; `docs/agents.md`, "Signing in"). It says the program and its
+state only: never the address, the code nor anything the program printed, since every event is
+stored. `signin.list` says the rest.
+
+| Field | |
+|---|---|
+| `program` | `claude`, `codex`, `gh`, `glab`, `acli` or `bkt`. |
+| `host` | The host it signs in to, `null` for an agent. |
+| `state` | `started`, `signed_in`, `failed`, `cancelled` or `signed_out`. |
+| `why` | Only for `failed`: Flottille's own sentence (the exit code, a time passed), never the program's words. |
+
 ### `judge.changed`
 
 The user edited the Auto judge's guidance, or reset it to the default (`judge.set`,
@@ -133,6 +152,29 @@ The user switched the developer mode (`developer.set`, `docs/developer.md`).
 | Field | |
 |---|---|
 | `log` | Whether the log is written now. |
+
+### `developer.reported`
+
+An agent filed a finding about Flottille itself or added an occurrence to one, or a finding was
+marked filed (`docs/developer.md`, "The findings").
+
+| Field | |
+|---|---|
+| `finding` | The finding's number. |
+| `new` | Whether the report made the finding (`true`), added an occurrence, or the finding was marked filed (`false`). |
+
+### `update.changed`
+
+What the daemon knows of an update of Flottille changed: a check began or ended, a download
+progressed, ended or failed, the check was switched, or a restart was asked once no agent runs
+(`docs/releases.md`, "Updating"). Its fields are what `update.show` answers (`docs/protocol.md`,
+"The update methods").
+
+### `whatsnew.changed`
+
+What is new since the version last run changed: the notes were read (or could not be), or the
+user opened the page (`docs/releases.md`, "What's new"). Its fields are what `whatsnew.show`
+answers (`docs/protocol.md`, "The what's new methods").
 
 ### `appearance.changed`
 
@@ -355,6 +397,69 @@ goes, the daemon's reading of `url` as a connection's login reads it, in ASCII; 
 agent's ask while it is open: `agent`, `ask` (the request's number), `project`, `name`, `why`.
 `vault.ask_answered`, an event of the agent that opened it, closes it: `ask`, `project`, `name`,
 `outcome` (`set` or `dismissed`). Never a secret.
+
+### `notifications.changed`
+
+The notification centre changed (`docs/protocol.md`, `notifications.list`): a notification was
+added, resolved or marked read, or the old ones were forgotten. A client reads the list again, or
+reads on after the last number it saw.
+
+| Field | |
+|---|---|
+| `ids` | The numbers of the notifications added, resolved or marked read, sorted; empty when only the old ones went. |
+| `pruned` | `true` when notifications older than 30 days, or beyond the newest 1,000, were forgotten. |
+| `how` | `read` when a client marked them read (`notifications.read`), `kept` when the daemon added or resolved them from the events, or forgot the old. |
+
+### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`, `remote.member_role`
+
+The member list this machine checked changed (`docs/remote.md`, "Pairing"), whoever changed it and
+whenever this machine heard it: a machine off when it happened says it when it connects to the hub
+again. `name`, `fingerprint` and `at` (when this machine heard it, in milliseconds since the Unix
+epoch), then: `role` (`runner`, `controller` or `viewer`) and `added_by` (`the hub` for a device
+it paired, the name of the member whose signature added it before pair mode) for an addition, which
+a client announces as `New device: pixel (control only), added at 18:42 by the hub`; `removed_by`
+for a removal (`the hub` for one made on its host); `from` (the name before) and `renamed_by` for a
+renaming; `role`, the new one, for a role the hub's host changed. The machine that paired says its
+own addition.
+
+### `remote.connected`, `remote.disconnected`
+
+A link to another machine of the user's was made, or ended (`docs/remote.md`, "The transport"):
+`name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
+member list`, for a machine whose member was removed: its link is cut at once).
+
+### `remote.hub`
+
+The state of this machine's session to the hub, or the reason it gives, changed (`docs/remote.md`,
+"The hub"): `state`, as `remote.machines`' `hub` says it (`connected`, `unreachable`, …). The
+reason and the time are read there; the event only says that they changed.
+
+### `remote.delivery_dropped`
+
+A message this machine kept for another was dropped (`docs/remote.md`, "Deliveries across
+machines"): that machine did not link for 30 days, or it refused the message, or this machine did
+not keep it. `machine` (its name), `launch`, `kind` (the delivery's kind, or the tool of a call),
+`agent` (the agent there it was for), `kept_at`, `refused` (that machine's reason, or `null`) and
+`unkept` (why this machine did not keep it: as many messages wait for that machine as may, or the
+delivery is too long; `null` otherwise). The inbox lists it, of kind `dropped`.
+
+### `tunnel.opened`, `tunnel.closed`
+
+A tunnel to a run's port of another machine opened, or ended (`docs/remote.md`, "Tunnels"). Said by
+both machines: the one that carries it (where the local port is) with `machine`, the one that
+serves it with `device`, the name of the member whose client asked.
+
+| Field | |
+|---|---|
+| `tunnel` | The tunnel's id. |
+| `run` | The run whose port it carries. |
+| `port` | That port, on the machine of the run. |
+| `machine` | The carrying machine's side: the machine of the run. |
+| `local_port` | The carrying machine's side: the port it listens on, on `127.0.0.1`. |
+| `device` | The serving machine's side: the member that opened it. |
+| `sign_in` | The carrying machine's side: the connection whose sign-in's redirect it carries, instead of a run's port (`run` is empty then). |
+| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`, `the sign-in of notes ended: signed in`). |
+| `signed_in` | `tunnel.closed` of a sign-in's tunnel only, on the carrying machine: whether the sign-in it carried signed in. |
 
 ### `workspace.created`
 
@@ -715,7 +820,7 @@ activity.
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `pictures` | Only when a result carried images the agent was given (a connection's, an image file `fs_read` opened, an image page `web` read): their names, in order, which `agent.image` gives back (`docs/extensions.md`, "Connections"). The bytes are in the agent's folder of images, never in the event. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
-| `setup` | Only on a `tickets` `log_time` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
+| `setup` | Only on a `tickets` `log_time`, `worklog_edit`, `worklog_delete` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging` (the value keeps its name though the entry serves more than worklogs: the window calls it Jira API access). The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 
@@ -733,6 +838,7 @@ nothing to tell a row apart: the window makes the rows from the events in order.
 | `title` | The few words the agent gave, masked; `null` when it gave none. |
 | `host` | The URL's host; `null` for a file. |
 | `shown` | Only for a file: its path as the place shows it, relative to the place. |
+| `dev`, `ino` | Only for a file: the device and inode it had when shown, which `agent.file` compares at each chunk (`null` when they could not be read: nothing is then served). |
 
 #### `agent.tools_changed`
 
@@ -931,6 +1037,19 @@ refusal is none: the change stays pending.
 | `agent` | |
 | `reason` | A sentence naming what the agent offers. |
 
+#### `agent.options_replaced`
+
+At a session's start, the model or the effort it was stored on is not one the agent offers (#1076):
+it runs on the newest offered model of the same family, else on the provider's default, and its
+effort is let go (it leaves the agent's `chosen`). The session is not failed and its message is sent; the agent's `chosen` and
+`taken` follow (`agent.options_taken`), so that it is said once. Its conversation shows the
+sentence (`docs/agents.md`, "The options").
+
+| Field | |
+|---|---|
+| `agent` | |
+| `reason` | `the model fable is no longer offered by the agent: running claude-fable-5-2`, or `the agent does not offer the model fable: running opus, its default`. |
+
 #### `agent.resumed`
 
 The user resumed an ended root (`agent.resume`, `docs/protocol.md`): it is idle again, on its own
@@ -968,6 +1087,20 @@ closed by it.
 | `to` | `user`, `parent` or `pilot`. |
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
 | `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
+| `offline` | Present on a question that went to the user because the machine of the agent of another machine that started the session (its parent or its pilot) was not linked: that machine's name (`docs/remote.md`, "Where a question goes when the parent is off"). |
+
+#### `agent.pilot_told`
+
+A led session an agent of another machine leads told that pilot, once its machine linked again,
+what it asked the user while that machine was off and what the user answered
+(`session-meanwhile`, `docs/remote.md`, "Where a question goes when the parent is off"): the
+questions up to `upto` are not told again.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `pilot` | The pilot's id, on its machine. |
+| `upto` | The number of the last `agent.asked` event told. |
 
 #### `agent.titled`
 
@@ -990,16 +1123,6 @@ The user detached a session from the agent that started it (`agent.detach`): `la
 |---|---|
 | `agent` | The session. |
 | `from` | The agent it was detached from. |
-
-#### `agent.handed`
-
-A led session's pilot ended: the session goes on, handed to the user (`led_by` is `null` from then
-on), and it is told so once by a `handed` delivery.
-
-| Field | |
-|---|---|
-| `agent` | The session. |
-| `from` | Its pilot, which ended. |
 
 #### `agent.answered`
 

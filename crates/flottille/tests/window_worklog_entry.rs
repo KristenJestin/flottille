@@ -1,11 +1,11 @@
 //! The vault entry a Jira project logs time with (#638): the Tracker dialog of the project's
-//! Settings shows `Log time with`, a select of the entries the project sees, saved as
-//! `worklog_token`, and a link that adds one in Settings, Vault and comes back; a `log_time`
+//! Settings shows `Jira API access with`, a select of the entries the project sees, saved as
+//! `worklog_token`, and a link that adds one in the vault's own form, over the Tracker; a `log_time`
 //! refused for want of an entry says so in the conversation, with a button to the Tracker. On
 //! GPUI's test platform in front of a real daemon, with the fake ACP agent, the in-memory keyring,
 //! throwaway repositories and temporary XDG folders. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -179,11 +179,14 @@ fn the_jira_tracker_shows_the_worklog_entry_and_saves_it(cx: &mut TestAppContext
     // A visible label, and under it what the entry is: no secret is anywhere.
     assert_eq!(
         label("tracker-worklog-field-label", cx).as_deref(),
-        Some("Log time with")
+        Some("Jira API access with")
     );
     assert_eq!(
         label("tracker-worklog-field-hint", cx).as_deref(),
-        Some("A Jira API token in the vault, its username your Jira e-mail.")
+        Some(
+            "A Jira API token in the vault, its username your Jira e-mail: it logs time, \
+             replies, mentions and finds people."
+        )
     );
     assert_eq!(
         label("tracker-worklog-add", cx).as_deref(),
@@ -240,7 +243,7 @@ fn the_jira_tracker_shows_the_worklog_entry_and_saves_it(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
-fn the_link_adds_an_entry_in_the_vault_and_comes_back(cx: &mut TestAppContext) {
+fn the_link_adds_an_entry_in_the_vault_over_the_tracker(cx: &mut TestAppContext) {
     let user = user();
     jira(&user, None);
     entry(&user, "jira-time", Some(ACCOUNT), Some("app"));
@@ -249,19 +252,12 @@ fn the_link_adds_an_entry_in_the_vault_and_comes_back(cx: &mut TestAppContext) {
 
     cx.update(|window, cx| window.click("tracker-worklog-add", cx));
     settle(cx);
+    // Over the project's page, which is not left.
     assert_eq!(
         shell.read_with(cx, |s, _| s.selected().cloned()),
-        Some(Selection::Settings)
+        Some(Selection::ProjectSettings("app".into()))
     );
-    let vault = shell.read_with(cx, |s, cx| {
-        s.main()
-            .read(cx)
-            .settings_page()
-            .expect("Settings is shown")
-            .read(cx)
-            .vault()
-            .clone()
-    });
+    let vault = shell.read_with(cx, |s, cx| s.vault(cx));
     assert!(
         vault.read_with(cx, |vault, _| vault.is_open()),
         "a new entry is being made"
@@ -271,7 +267,7 @@ fn the_link_adds_an_entry_in_the_vault_and_comes_back(cx: &mut TestAppContext) {
         "its form"
     );
 
-    // Closed, it goes back to the project's Tracker.
+    // Closed, the user is on the project's Tracker, where they were.
     vault.update_in(cx, |vault, window, cx| vault.close(window, cx));
     settle(cx);
     assert_eq!(
@@ -298,15 +294,7 @@ fn an_entry_added_from_the_tracker_is_bound_to_its_worklog(cx: &mut TestAppConte
     let _ = tracker_dialog(&shell, cx);
     cx.update(|window, cx| window.click("tracker-worklog-add", cx));
     settle(cx);
-    let vault = shell.read_with(cx, |s, cx| {
-        s.main()
-            .read(cx)
-            .settings_page()
-            .expect("Settings is shown")
-            .read(cx)
-            .vault()
-            .clone()
-    });
+    let vault = shell.read_with(cx, |s, cx| s.vault(cx));
     let fields = vault.read_with(cx, |v, _| {
         [
             v.name_field().unwrap().clone(),
@@ -430,7 +418,7 @@ fn a_log_time_refused_for_want_of_a_token_offers_set_up_time_logging(cx: &mut Te
     );
     assert_eq!(
         label(format!("row-{at}-time-logging-setup"), cx).as_deref(),
-        Some("Set up time logging")
+        Some("Set up Jira API access")
     );
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),

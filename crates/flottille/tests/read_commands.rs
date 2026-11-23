@@ -3,7 +3,7 @@
 //! are the fake agent's sessions, driven through their MCP server as their client would, on
 //! throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 
@@ -236,7 +236,14 @@ fn a_sed_command_that_edits_is_handled_as_today() {
         "cat notes.md other.md",
         "cat",
     ] {
-        let answer = mcp.call("run", json!({ "line": line }));
+        // `tail -f` never ends: it is left running after a second, not thirty. A timeout makes
+        // any line a run, never a read, so no other line is given one; that `tail -f` is no read
+        // is also the unit test `anything_else_is_not_a_read`'s.
+        let call = match line {
+            "tail -f notes.md" => json!({ "line": line, "timeout": 1 }),
+            _ => json!({ "line": line }),
+        };
+        let answer = mcp.call("run", call);
         assert!(
             !answer.text.starts_with("read with fs_read"),
             "{line}: {}",

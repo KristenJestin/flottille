@@ -90,6 +90,7 @@ fn send_and_follow(
             message,
             images: Vec::new(),
             texts: Vec::new(),
+            upload: None,
             compact: None,
         })?,
     )?;
@@ -134,6 +135,7 @@ fn refuse(client: &mut Client, agent: &str) -> Result<()> {
             message: String::new(),
             images: Vec::new(),
             texts: Vec::new(),
+            upload: None,
             compact: None,
         })?,
     ) {

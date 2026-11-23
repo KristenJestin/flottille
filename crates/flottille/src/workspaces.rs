@@ -662,8 +662,8 @@ async fn pushed_to(folder: &Path, branch: &str) -> Option<String> {
             return Some(remote.to_owned());
         }
         let head = format!("refs/heads/{branch}");
-        let listed = ["ls-remote", "--heads", "--end-of-options", remote, &head];
-        if git::output(folder, &listed, Class::Read)
+        let listed = ["--heads", "--end-of-options", remote, &head];
+        if git::output_remote(folder, remote, "ls-remote", &listed, Class::Read)
             .await
             .is_ok_and(|listed| !listed.trim().is_empty())
         {
@@ -709,6 +709,28 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
 // Creation.
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
+    create_from(daemon, asked, None).await
+}
+
+/// What another machine sent a new workspace is made of (`docs/remote.md`, "What travels"): for
+/// each repository, by its path, the commit the sender's branch was on, its base here, and the
+/// sender's uncommitted work, laid on it.
+pub struct Travelled {
+    /// The machine it came from, as the base's note says it.
+    pub from: String,
+    pub repositories: BTreeMap<String, (String, String)>,
+    /// Whether its setup comes with it: only for a launch this machine's gate judged, which runs
+    /// it only once the launch is allowed (`launches::holds`).
+    pub setup: bool,
+}
+
+/// `workspace.create`, or the workspace made of what another machine sent: on the branch asked,
+/// which its caller found free, started at the sender's commits, and never fetched.
+pub async fn create_from(
+    daemon: Arc<Daemon>,
+    asked: WorkspaceCreate,
+    travelled: Option<Travelled>,
+) -> Answer {
     // The request's own time: the fetches below are part of what the workspace took to be ready.
     let requested_at = now_ms();
     let project = projects::load_project(&daemon, &asked.project)?;
@@ -751,7 +773,11 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     }
     // A branch named that no repository has, nor its remote, would be started everywhere: refused
     // before anything is fetched.
-    if named && let Some(refusal) = outside_format() {
+    // A branch that came from another machine is the sender's name for it, whatever the format.
+    if named
+        && travelled.is_none()
+        && let Some(refusal) = outside_format()
+    {
         let mut anywhere = false;
         for path in &taken {
             let remote = project
@@ -794,6 +820,28 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             .find(|r| &r.path == path)
             .expect("a repository taken is one of the project's");
         let main = main_checkout(&project.folder, path);
+        if let Some(travelled) = &travelled {
+            let (tip, snapshot) = travelled.repositories.get(path).ok_or_else(|| {
+                Failure::refused(format!("nothing of {path} came from {}", travelled.from))
+            })?;
+            repositories.push(Worktree {
+                path: path.clone(),
+                base: Base {
+                    branch: branch.clone(),
+                    remote: repository.remote.clone(),
+                    reference: tip.clone(),
+                    commit: tip.clone(),
+                    fetched_now: false,
+                    fetched_at: None,
+                    note: Some(format!("started from what {} sent", travelled.from)),
+                    fetch: None,
+                },
+                resumed: false,
+                resumed_branch: None,
+                laid: Some(snapshot.clone()),
+            });
+            continue;
+        }
         let rule = match asked.bases.get(path) {
             Some(chosen) => {
                 check_branch(&main, chosen).await?;
@@ -840,15 +888,23 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             base,
             resumed,
             resumed_branch: resumed.then(|| branch.clone()),
+            laid: None,
         });
     }
     // A branch resumed everywhere was named before the format: it is taken as it is.
-    if repositories.iter().any(|worktree| !worktree.resumed)
+    if travelled.is_none()
+        && repositories.iter().any(|worktree| !worktree.resumed)
         && let Some(refusal) = outside_format()
     {
         return Err(refusal);
     }
 
+    // Another machine's code runs nothing here but as part of a launch this machine's gate
+    // judged, which brings its setup: its worktrees alone otherwise.
+    let mut steps = snapshot(&project, &taken);
+    if travelled.as_ref().is_some_and(|travelled| !travelled.setup) {
+        steps.retain(|step| matches!(step.action, Action::Worktree));
+    }
     let workspace = Workspace {
         id: 0,
         project: project.name.clone(),
@@ -858,7 +914,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         project_folder: project.folder.clone(),
         created_at: requested_at,
         variables: project.variables.clone(),
-        steps: snapshot(&project, &taken),
+        steps,
         repositories,
         ticket,
     };
@@ -878,7 +934,34 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     daemon.preparing.lock().unwrap().insert(id);
     tokio::spawn(prepare(daemon.clone(), id, Some(made)));
     let _ = worktrees.await;
-    Ok(daemon.read(|store| store.workspace_by_id(id))?.to_json())
+    let made = daemon.read(|store| store.workspace_by_id(id))?;
+    // Another machine's code is placed only whole: a worktree that failed fails the place, which
+    // its sender may then send again.
+    if travelled.is_some()
+        && let Some(step) = made
+            .steps
+            .iter()
+            .find(|step| step.action == Action::Worktree && step.state == StepState::Failed)
+    {
+        let why = step
+            .failure
+            .as_ref()
+            .map(|failure| format!("{}: {}", failure.doing, failure.output))
+            .unwrap_or_else(|| step.doing());
+        return Err(Failure::new(
+            "failed",
+            format!("the workspace {} could not be made: {why}", made.name),
+        ));
+    }
+    Ok(made.to_json())
+}
+
+/// Goes on preparing the workspace `id` from its first pending step: a launch of another
+/// machine's agent the user allowed, whose setup was held until then.
+pub fn go_on_preparing(daemon: &Arc<Daemon>, id: i64) {
+    if daemon.preparing.lock().unwrap().insert(id) {
+        tokio::spawn(prepare(daemon.clone(), id, None));
+    }
 }
 
 /// What a workspace made says of the repositories that started from their local branch, one
@@ -1036,9 +1119,11 @@ async fn on_remote(
         true => Err(String::new()),
         false => {
             let head = format!("refs/heads/{branch}");
-            git::output(
+            git::output_remote(
                 main,
-                &["ls-remote", "--heads", "--end-of-options", remote, &head],
+                remote,
+                "ls-remote",
+                &["--heads", "--end-of-options", remote, &head],
                 Class::Read,
             )
             .await
@@ -1048,15 +1133,8 @@ async fn on_remote(
         Ok(listed) if listed.trim().is_empty() => Ok(false),
         Ok(_) => {
             let refspec = format!("+refs/heads/{branch}:{tracking}");
-            let fetch = [
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--end-of-options",
-                remote,
-                &refspec,
-            ];
-            git::output(main, &fetch, Class::Read)
+            let fetch = ["--quiet", "--no-tags", "--end-of-options", remote, &refspec];
+            git::output_remote(main, remote, "fetch", &fetch, Class::Read)
                 .await
                 .map_err(|reason| {
                     Failure::refused(format!(
@@ -1084,9 +1162,11 @@ async fn exists_somewhere(main: &Path, remote: &str, branch: &str, offline: bool
     }
     let head = format!("refs/heads/{branch}");
     !offline
-        && git::output(
+        && git::output_remote(
             main,
-            &["ls-remote", "--heads", "--end-of-options", remote, &head],
+            remote,
+            "ls-remote",
+            &["--heads", "--end-of-options", remote, &head],
             Class::Read,
         )
         .await
@@ -1204,9 +1284,11 @@ async fn reaching_base(
         )
     };
     reach.start();
-    let heads = match git::output(
+    let heads = match git::output_remote(
         main,
-        &["ls-remote", "--heads", "--end-of-options", remote],
+        remote,
+        "ls-remote",
+        &["--heads", "--end-of-options", remote],
         Class::Read,
     )
     .await
@@ -1231,7 +1313,7 @@ async fn reaching_base(
         return local_base(main, path, remote, rule, why).await;
     };
     // Every candidate there is, so that the tracking refs are fresh for a later offline creation.
-    let mut fetch: Vec<String> = ["fetch", "--quiet", "--no-tags", "--end-of-options", remote]
+    let mut fetch: Vec<String> = ["--quiet", "--no-tags", "--end-of-options", remote]
         .map(String::from)
         .into();
     fetch.extend(
@@ -1239,7 +1321,8 @@ async fn reaching_base(
             .iter()
             .map(|branch| format!("+refs/heads/{branch}:{}", tracking(branch))),
     );
-    let fetched = git::output(main, &fetch, Class::Read).await;
+    let fetch: Vec<&str> = fetch.iter().map(String::as_str).collect();
+    let fetched = git::output_remote(main, remote, "fetch", &fetch, Class::Read).await;
     reach.stop();
     if let Err(reason) = fetched {
         return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
@@ -1351,6 +1434,31 @@ async fn local_base(
         "{path} has none of its base branches ({}) itself, and {why}; nothing was created",
         rule.join(", ")
     )))
+}
+
+/// The setup of the workspace `id`, made of another machine's code while its launch was held,
+/// taken again from its project as the launch laid it, once allowed, before any of it ran.
+pub(crate) fn resnapshot(daemon: &Daemon, id: i64) -> Result<(), String> {
+    let workspace = daemon
+        .read(|store| store.workspace_by_id(id))
+        .map_err(|error| error.to_string())?;
+    let project =
+        crate::projects::load_project(daemon, &workspace.project).map_err(|f| f.message)?;
+    let taken: Vec<String> = workspace
+        .repositories
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    let mut steps = snapshot(&project, &taken);
+    steps.retain(|step| !matches!(step.action, Action::Worktree));
+    daemon
+        .write(|store| {
+            store
+                .replace_pending_steps(id, &steps)
+                .map(|replaced| (replaced, None))
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// The steps of a new workspace: a worktree per repository, then the setup as it is now, a step
@@ -1472,6 +1580,11 @@ async fn prepare_steps(
             })?;
             return Ok(());
         };
+        // Code another machine sent runs its setup only once its launch is allowed, a start of
+        // the daemon included: held otherwise, whatever became of the launch.
+        if step.action != Action::Worktree && crate::launches::holds(daemon, &workspace) {
+            return Ok(());
+        }
         if step.action != Action::Worktree
             && let Some(made) = made.take()
         {
@@ -1782,6 +1895,12 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
     .await?
     .success;
     let target = target.to_string_lossy().into_owned();
+    // Another machine's code goes on a branch of its own, never on one made meanwhile.
+    if exists && worktree.laid.is_some() {
+        return Err(format!(
+            "the branch {branch} was made meanwhile: another machine's code is not put on it"
+        ));
+    }
     if exists {
         // Made by an earlier attempt: taken again, never made twice.
         git::output(
@@ -1834,11 +1953,14 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
         )
         .await?;
     }
+    if let Some(snapshot) = &worktree.laid {
+        git::bundle::lay_snapshot(Path::new(&target), snapshot).await?;
+    }
     Ok(())
 }
 
 /// What the globs match in `source`, file by file, relative to it.
-fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
     let cannot =
         |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
     let mut found = Vec::new();

@@ -6,7 +6,7 @@
 //! on throwaway repositories and temporary XDG folders; a fake of each escalating program stands
 //! first on the runs' `PATH`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

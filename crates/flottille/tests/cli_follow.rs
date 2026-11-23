@@ -3,7 +3,7 @@
 //! the numbers the command read and the turn of its own message. The real daemon cannot be made
 //! to interleave two clients at a chosen instant.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::DirBuilderExt;

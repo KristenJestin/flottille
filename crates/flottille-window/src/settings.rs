@@ -1,8 +1,9 @@
-//! The settings page, in five tabs by subject (`docs/reference/gpui.md`, rule 13): Agents (the
+//! The settings page, in six tabs by subject (`docs/reference/gpui.md`, rule 13): Agents (the
 //! providers, the rules for every project, the long tool results, the sessions), Approvals (the
 //! Auto judge and what it is told), Features (a list of rows, each opening its page: the compaction
-//! here, the others drawn from their declaration, `crate::extensions`), Vault and General (the
-//! appearance, the workspaces folder, the developer mode). Every provider Flottille knows is
+//! here, the others drawn from their declaration, `crate::extensions`), Vault, Machines (Remote:
+//! whether it is on, where this machine is reached, the hub, the devices, the addresses) and
+//! General (the appearance, the workspaces folder, the developer mode). Every provider Flottille knows is
 //! enabled or not with a switch, as the daemon says it (`provider.list`). The window never writes
 //! `providers.toml` itself: a switch asks the daemon (`provider.enable`, `provider.disable`), and
 //! the page follows what the daemon lists next. The Auto judge is chosen here too
@@ -15,9 +16,10 @@ use std::collections::HashMap;
 use gpui_design_system::appearance::{self, Appearance, Source};
 use gpui_design_system::theme::Shade;
 use gpui_design_system::{
-    Button, Chosen, Field, Fold, Icon, ModelChoice, PageHeader, Section, Segmented, Select,
-    SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _, awaiting, enter, hoverable,
-    icon, palette, presence, presence_of, space, tipped, toast, turning,
+    Button, Chosen, EmptyLine, Field, Fold, Icon, ListCard, Listing, Menu, ModelChoice, PageHeader,
+    Section, Segmented, Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _,
+    awaiting, enter, hoverable, icon, palette, presence, presence_of, space, tipped, toast,
+    turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -28,6 +30,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
+use crate::about::AboutEditor;
 use crate::actions::{Command, SessionsSetting};
 use crate::commands::{spaced, stack};
 use crate::extensions::Registry;
@@ -38,24 +41,38 @@ use crate::shell::Shell;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
-/// The tabs of the page, in order: each one's key and label. A new part of Flottille adds none
-/// (rule 13): it is a row of Features.
-pub const SECTIONS: [(&str, &str); 5] = [
+/// The tabs of the page, in order: each one's key and label. A part of Flottille gets a tab of its
+/// own when it fits (rule 13): a subject the user goes to on its own, with several sections of its
+/// own, as Machines; a smaller part is a row of Features or a section of its subject's tab.
+pub const SECTIONS: [(&str, &str); 6] = [
     ("agents", "Agents"),
     ("approvals", "Approvals"),
     ("features", "Features"),
     ("vault", "Vault"),
+    ("machines", "Machines"),
     ("general", "General"),
 ];
 
 /// The blocks of the Agents tab, top to bottom: each one is a section of the page, entering on its
 /// own.
-const AGENTS_BLOCKS: [&str; 5] = [
+const AGENTS_BLOCKS: [&str; 6] = [
     "providers",
+    "forges",
     "new-sessions",
     "rules",
     "tool-results",
     "sessions",
+];
+
+/// The blocks of the General tab, top to bottom.
+const GENERAL_BLOCKS: [&str; 7] = [
+    "about",
+    "appearance",
+    "workspaces",
+    "travelled",
+    "developer",
+    "check",
+    "version",
 ];
 
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
@@ -190,9 +207,22 @@ pub enum Reveal {
     Vault,
     /// The page of a feature, by its name: its row of Features opened.
     Feature(String),
+    /// This build's version and its update (the sidebar's foot): General, scrolled to it.
+    Version,
+    /// The user's machines: their tab.
+    Machines,
 }
 
 impl Reveal {
+    /// The setting an old link names: Machines were a section of General, and a link to it opens
+    /// their tab (`general#machines`, `settings:general#machines`).
+    pub fn from_link(link: &str) -> Option<Reveal> {
+        match link.strip_prefix("settings:").unwrap_or(link) {
+            "general#machines" | "machines" => Some(Reveal::Machines),
+            _ => None,
+        }
+    }
+
     /// The index of its tab in [`SECTIONS`].
     fn tab(&self) -> usize {
         let key = match self {
@@ -200,6 +230,8 @@ impl Reveal {
             Reveal::Judge | Reveal::Guidance => "approvals",
             Reveal::Compaction | Reveal::Feature(_) => "features",
             Reveal::Vault => "vault",
+            Reveal::Version => "general",
+            Reveal::Machines => "machines",
         };
         SECTIONS
             .iter()
@@ -249,16 +281,26 @@ pub const RESUME_HINT: &str = "A session stopped by its quota goes on at the res
 pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, one JSON line each, \
      secrets masked. For working on Flottille.";
 
+/// What the findings say under their title.
+const FINDINGS_HINT: &str = "What agents reported about Flottille itself, one finding per bug. \
+     Export them for the agent that files the issues.";
+
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
+    /// The user's machines: the hub, its devices, this machine's addresses.
+    machines: Entity<crate::machines_page::MachinesSection>,
     providers: Providers,
     /// A switch flipped, until the daemon lists the provider so: what it was asked to become.
     pending: HashMap<String, bool>,
     /// The daemon's refusal of the last switch, by provider.
     refused: HashMap<String, String>,
     narrow: bool,
+    /// The list of the machine chooser at the top is open.
+    machine_menu: bool,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
+    /// What the user says of themselves, edited on this page.
+    about: Entity<AboutEditor>,
     /// The Auto judge's guidance, edited on this page.
     judge_guidance: Entity<RulesEditor>,
     /// The compactor's guidance, edited on this page.
@@ -269,9 +311,15 @@ pub struct SettingsPage {
     compaction_pending: bool,
     /// Where the workspaces of every project go, chosen on this page.
     workspaces: Entity<WorkspacesFolder>,
+    /// Where this machine makes the projects of other machines' launches, chosen on this page.
+    travelled: Entity<crate::travelled_folder::TravelledFolder>,
     /// The vault's entries, set and removed on this page.
     vault: Entity<VaultSection>,
     connections: Entity<ConnectionsSection>,
+    /// This build's version and its update.
+    version: Entity<crate::version::VersionSection>,
+    /// What `flottille doctor` checks.
+    check: Entity<crate::check::CheckSection>,
     /// A judge chosen, until the daemon lists it.
     judge_pending: bool,
     /// The judge's switch flipped, until the daemon answers: what it was asked to become.
@@ -284,6 +332,14 @@ pub struct SettingsPage {
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
     developer_pending: Option<bool>,
+    /// The findings agents filed about Flottille itself, once the daemon said them.
+    findings: Option<Vec<crate::findings::Finding>>,
+    finding_rows: Listing<crate::findings::Finding>,
+    /// The dialog that marks a finding filed, and the "⋯" of each open finding.
+    filing: Entity<crate::findings::Filing>,
+    finding_menus: HashMap<u64, Entity<Menu>>,
+    /// The export asked, until the daemon answers.
+    exporting: bool,
     /// The limit above which a tool result is cut, once the daemon said it (`Some(None)` is Off).
     tool_results: Option<Option<usize>>,
     /// A limit chosen, until the daemon answers: what it was asked to become.
@@ -306,6 +362,8 @@ pub struct SettingsPage {
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
     /// a choice writes it again.
     appearance_unread: Option<String>,
+    /// The programs' sign-ins: the forges' section, and what each provider's row offers.
+    sign_in: Entity<crate::sign_in::SignInSection>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
     /// The row of Features whose page is open, by its key: kept while another tab is shown.
@@ -359,22 +417,36 @@ pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each sess
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
+        about: Entity<AboutEditor>,
         judge_guidance: Entity<RulesEditor>,
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
+        travelled: Entity<crate::travelled_folder::TravelledFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
+        machines: Entity<crate::machines_page::MachinesSection>,
+        version: Entity<crate::version::VersionSection>,
+        sign_in: Entity<crate::sign_in::SignInSection>,
+        filing: Entity<crate::findings::Filing>,
+        check: Entity<crate::check::CheckSection>,
     ) -> Self {
         Self {
+            sign_in,
+            check,
+            machines,
+            version,
             rules,
+            about,
             judge_guidance,
             compaction_guidance,
             compaction: None,
             compaction_pending: false,
             workspaces,
+            travelled,
             vault,
             connections,
             shell,
@@ -382,12 +454,18 @@ impl SettingsPage {
             pending: HashMap::new(),
             refused: HashMap::new(),
             narrow: false,
+            machine_menu: false,
             judge_pending: false,
             judge_turning: None,
             judge_refused: None,
             new_session_pending: false,
             developer: None,
             developer_pending: None,
+            findings: None,
+            finding_rows: Listing::default(),
+            filing,
+            finding_menus: HashMap::new(),
+            exporting: false,
             tool_results: None,
             tool_results_pending: None,
             unchanged: None,
@@ -456,7 +534,8 @@ impl SettingsPage {
                 self.scroll.set_offset(Point::default());
             }
             Reveal::Judge | Reveal::Providers => self.scroll.set_offset(Point::default()),
-            Reveal::Vault => {}
+            Reveal::Vault | Reveal::Machines => {}
+            Reveal::Version => self.scroll_to(&GENERAL_BLOCKS, "version"),
         }
         cx.notify();
     }
@@ -471,6 +550,10 @@ impl SettingsPage {
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
         &self.rules
+    }
+
+    pub fn about(&self) -> &Entity<AboutEditor> {
+        &self.about
     }
 
     pub fn judge_guidance(&self) -> &Entity<RulesEditor> {
@@ -918,12 +1001,24 @@ impl SettingsPage {
         &self.workspaces
     }
 
+    pub fn travelled_folder(&self) -> &Entity<crate::travelled_folder::TravelledFolder> {
+        &self.travelled
+    }
+
+    pub fn sign_in(&self) -> &Entity<crate::sign_in::SignInSection> {
+        &self.sign_in
+    }
+
     pub fn vault(&self) -> &Entity<VaultSection> {
         &self.vault
     }
 
     pub fn connections(&self) -> &Entity<ConnectionsSection> {
         &self.connections
+    }
+
+    pub fn machines(&self) -> &Entity<crate::machines_page::MachinesSection> {
+        &self.machines
     }
 
     pub fn providers(&self) -> &Providers {
@@ -1225,7 +1320,155 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn developer_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The daemon's list of the findings: the rows that came unfold, those that left fold away.
+    pub fn findings_answered(
+        &mut self,
+        listed: Result<Vec<crate::findings::Finding>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(listed) = listed else { return };
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.finding_rows.sync(
+            listed
+                .iter()
+                .map(|finding| (finding.id.to_string(), finding.clone())),
+            now,
+            reduce,
+        );
+        self.findings = Some(listed);
+        cx.notify();
+    }
+
+    /// The Check Flottille section.
+    pub fn check(&self) -> &Entity<crate::check::CheckSection> {
+        &self.check
+    }
+
+    /// The dialog that marks a finding filed.
+    pub fn filing(&self) -> &Entity<crate::findings::Filing> {
+        &self.filing
+    }
+
+    /// The findings as they are listed.
+    pub fn findings(&self) -> &[crate::findings::Finding] {
+        self.findings.as_deref().unwrap_or_default()
+    }
+
+    /// Whether an export was asked and the daemon has not answered.
+    pub fn exporting(&self) -> bool {
+        self.exporting
+    }
+
+    fn export_findings(&mut self, cx: &mut Context<Self>) {
+        if self.exporting {
+            return;
+        }
+        self.exporting = true;
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::FindingsExport))
+            .ok();
+        cx.notify();
+    }
+
+    /// Where the findings were written, or why they were not: a toast says it.
+    pub fn findings_exported(&mut self, done: Result<String, String>, cx: &mut Context<Self>) {
+        self.exporting = false;
+        match done {
+            Ok(file) => toast(Toast::success("Findings exported").detail(file), cx),
+            Err(why) => toast(Toast::failure("Findings were not exported").detail(why), cx),
+        }
+        cx.notify();
+    }
+
+    /// What the findings add under the developer mode's switch: the list, and the export that
+    /// writes it for the lead agent. It comes with the switch and folds away with it.
+    fn findings_block(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let mut list = ListCard::new("findings-list");
+        let drawn: Vec<_> = self
+            .finding_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let open: Vec<u64> = drawn
+            .iter()
+            .filter(|(_, _, finding)| finding.filed.is_none())
+            .map(|(_, _, finding)| finding.id)
+            .collect();
+        self.finding_menus.retain(|id, _| open.contains(id));
+        for id in open {
+            if !self.finding_menus.contains_key(&id) {
+                let menu = crate::findings::menu(id, self.filing.downgrade(), cx);
+                self.finding_menus.insert(id, menu);
+            }
+        }
+        for (key, placement, finding) in drawn {
+            let menu = self.finding_menus.get(&finding.id).cloned();
+            let row = crate::findings::row(&finding, menu, cx);
+            list = list.item(
+                ElementId::Name(format!("findings-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let count = self.finding_rows.len();
+        let empty = self.findings.as_ref().is_some_and(Vec::is_empty);
+        div()
+            .id("findings")
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(space::MD)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .child(format!("Findings · {count}")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(p.mute)
+                                    .child(FINDINGS_HINT),
+                            ),
+                    )
+                    .child(
+                        div().flex_none().child(
+                            Button::secondary("findings-export", "Export findings")
+                                .leading(Icon::File)
+                                .disabled(count == 0 || self.exporting)
+                                .on_click(cx.listener(|this, _, _, cx| this.export_findings(cx))),
+                        ),
+                    ),
+            )
+            .child(presence("findings-list-block", count > 0, list).space(space::MD))
+            .child(self.filing.clone())
+            .child(
+                presence(
+                    "no-findings-block",
+                    empty,
+                    EmptyLine::new(
+                        "no-findings",
+                        Icon::Warning,
+                        "No finding yet. An agent files one when Flottille itself got \
+                         something wrong.",
+                    ),
+                )
+                .space(space::MD),
+            )
+    }
+
+    fn developer_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let switch = Switch::new(
             "developer-switch",
@@ -1270,6 +1513,14 @@ impl SettingsPage {
                         .test_support()
                         .into_any_element()
                 })
+                .space(space::MD),
+            )
+            .child(
+                presence(
+                    "developer-findings-block",
+                    self.developer_on(),
+                    self.findings_block(cx),
+                )
                 .space(space::MD),
             )
             .test_support();
@@ -1605,6 +1856,7 @@ impl SettingsPage {
         }
         self.appearance = Some(appearance.clone());
         appearance::appear(appearance.clone(), cx);
+        crate::look::remember(&appearance, cx);
         self.shell
             .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
             .ok();
@@ -1991,6 +2243,12 @@ impl SettingsPage {
                 None => tag.into_any_element(),
             }
         });
+        // Its own sign-in, as the daemon of the machine read it: its state, Sign in or Sign out,
+        // and the line to type when it signs in only in a terminal and the row does not say it.
+        let says_line = !provider.needs_sign_in();
+        let controls = div().child(self.sign_in.update(cx, |section, cx| {
+            section.controls(&provider.name, says_line, cx)
+        }));
         // What to do about it unfolds under the line: the command that signs it in, in a block to
         // copy, or the page that says how to install it.
         let sign_in = presence_of(
@@ -2054,6 +2312,7 @@ impl SettingsPage {
             .child(state.mt(space::SM))
             .child(sign_in)
             .child(install)
+            .child(controls.mt(space::SM))
             .into_any_element()
     }
 
@@ -2287,12 +2546,18 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
-        let header = PageHeader::new("settings-header", "Settings");
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
+        let header = PageHeader::new("settings-header", "Settings").crumb(
+            crate::machines::where_line("settings-where", &["Settings", SECTIONS[tab].1], cx),
+        );
+        if SECTIONS[tab].0 == "general" {
+            self.check.update(cx, |check, cx| check.ensure(cx));
+        }
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
+                ("forges", self.sign_in.clone().into_any_element()),
                 (
                     "new-sessions",
                     self.new_sessions_section(cx).into_any_element(),
@@ -2310,10 +2575,16 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
+            // Remote (#814, #1144): whether it is on, the hub, the devices.
+            "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
+                ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
+                ("travelled", self.travelled.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
+                ("check", self.check.clone().into_any_element()),
+                ("version", self.version.clone().into_any_element()),
             ],
         };
         let vault = self.vault.read(cx).entries().map(<[_]>::len);
@@ -2332,6 +2603,16 @@ impl Render for SettingsPage {
             .on_choose(move |at, _, cx| {
                 this.update(cx, |this, cx| this.choose(at, cx)).ok();
             });
+        // The machine's picker sits on the title's line, at the header's right: the title is its
+        // label. The kit's header has no place right after the title; beside it, the picker
+        // stays level with the title whether or not the path line is above it.
+        let header = div()
+            .id("settings-header-line")
+            .flex()
+            .items_end()
+            .child(div().flex_1().min_w_0().child(header))
+            .children(self.machine_chooser(window, cx))
+            .test_support();
         let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
         let column = |element: AnyElement| {
             div()
@@ -2352,7 +2633,8 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
+            .child(column(self.own_line(cx).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
         // plays again), after the tabs.
         let page = div()
@@ -2372,6 +2654,8 @@ impl Render for SettingsPage {
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
+        // Held after its blocks: what it adds comes after them, and a block's place stays its own.
+        let page = crate::machines::hold(page, window, cx).test_support();
         div()
             .size_full()
             .flex()
@@ -2379,6 +2663,106 @@ impl Render for SettingsPage {
             .text_color(p.text)
             .child(top)
             .child(page)
+    }
+}
+
+impl SettingsPage {
+    /// Whose settings these are, on the title's line: this machine, then the other machines
+    /// that run agents, each with its state; choosing one shows it (`Shell::choose_machine`), as
+    /// opening one of its sessions does. None while this machine is in no member list or knows no
+    /// other runner.
+    fn machine_chooser(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (choices, present) = crate::machines::kept(
+            "settings-machine-kept",
+            self.machines
+                .read(cx)
+                .machines()
+                .map(crate::machines::choices)
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
+        let toggle = page.clone();
+        let picker = (!choices.is_empty()).then(|| {
+            crate::machines::picker(
+                "settings-machine",
+                "settings-machine",
+                &choices,
+                chosen,
+                self.machine_menu,
+                move |_, cx| {
+                    toggle
+                        .update(cx, |page, cx| {
+                            page.machine_menu = !page.machine_menu;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+                move |name, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.machine_menu = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    shell
+                        .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                        .ok();
+                },
+            )
+        });
+        // The title is its visible label; a reader hears whose settings these are. Its gap is
+        // inside it, so that it narrows away with it.
+        let picker = div()
+            .id("settings-machine-field")
+            .aria_label("Settings of")
+            .flex_none()
+            .pl(space::LG)
+            .children(picker)
+            .test_support();
+        // It narrows and fades away on the title's line once there is no other machine to choose,
+        // and widens in when one comes: built on every frame, also while there is none.
+        crate::machines::narrowing(
+            "settings-machine-fold",
+            present,
+            picker.into_any_element(),
+            window,
+            cx,
+        )
+    }
+
+    /// One line under the tabs while another machine is shown, whichever tab: the appearance and
+    /// the version are this window's, and stay this machine's.
+    fn own_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let this = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.this.clone())
+            .unwrap_or_else(|| "this machine".to_owned());
+        let said = crate::machines::shown_machine(cx).map(|_| {
+            SharedString::from(format!(
+                "This window (appearance, version) stays this machine's, {this}, whichever \
+                 machine is chosen above."
+            ))
+        });
+        presence_of("settings-own-block", said, move |said| {
+            div()
+                .id("settings-own")
+                .aria_label(said.clone())
+                .text_size(px(12.5))
+                .text_color(p.mute)
+                .child(said)
+                .test_support()
+                .into_any_element()
+        })
+        .space(space::MD)
     }
 }
 

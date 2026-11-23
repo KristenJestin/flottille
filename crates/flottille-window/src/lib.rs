@@ -2,10 +2,13 @@
 //! reads the store, never runs an agent and never decides anything on its own: it shows what the
 //! daemon gives, as the daemon gives it.
 
+pub mod about;
 pub mod actions;
 pub mod add_project;
+pub mod arrange;
 pub mod ask_dock;
 pub mod attachments;
+pub mod check;
 pub mod claude;
 pub mod commands;
 pub mod commit_checks;
@@ -13,15 +16,25 @@ pub mod composer;
 pub mod connection_review;
 pub mod conventions;
 pub mod conversation;
+pub mod device;
+pub mod end_led;
 pub mod extensions;
+pub mod findings;
 pub mod glyphs;
+pub mod group_name;
 pub mod history;
 pub mod instance;
 pub mod items;
+pub mod kept;
 pub mod leaves;
 pub mod link;
 pub mod links_card;
+pub mod loading;
+pub mod look;
+pub mod machines;
+pub mod machines_page;
 pub mod message_checks;
+pub mod modals;
 pub mod mode;
 pub mod model;
 pub mod open;
@@ -46,6 +59,8 @@ pub mod session_options;
 pub mod settings;
 pub mod setup;
 pub mod shell;
+pub mod shown_files;
+pub mod sign_in;
 pub mod skills;
 pub mod state;
 pub mod steps;
@@ -54,10 +69,14 @@ pub mod tasks;
 pub mod text_viewer;
 pub mod to_end;
 pub mod tokens;
+pub mod travelled_folder;
 pub mod tree;
+pub mod tunnels;
 pub mod vault;
 pub mod vault_ask;
+pub mod version;
 pub mod waiting;
+pub mod whats_new;
 pub mod workspaces_folder;
 
 use futures::StreamExt as _;
@@ -91,6 +110,18 @@ pub fn init_with(env: gpui_design_system::omarchy::Environment, cx: &mut gpui_ki
     gpui_design_system::init(identity(env), cx);
 }
 
+/// [`init_with`] for a window that draws its first frame in the theme `memory` holds.
+pub fn start(
+    env: gpui_design_system::omarchy::Environment,
+    memory: Option<look::Memory>,
+    cx: &mut gpui_kit::App,
+) {
+    init_with(env, cx);
+    if let Some(memory) = memory {
+        look::begin(memory, cx);
+    }
+}
+
 pub use instance::Instance;
 pub use link::Connect;
 pub use shell::Shell;
@@ -98,11 +129,34 @@ pub use shell::Shell;
 /// Opens the window and runs until it is closed. `connect` opens a connection to the daemon,
 /// starting it when nobody listens. The window comes to the front when `instance` is asked to
 /// raise it (`instance.rs`).
-pub fn run(connect: Connect, instance: Option<Instance>) {
+/// What the binary tells the window of itself: its `--version`, how it starts again from the
+/// binary that replaced it, and the page to open first.
+pub struct Build {
+    pub full: String,
+    pub reexec: shell::Reexec,
+    pub open: Option<String>,
+}
+
+/// The window, its requests on `connect`, signed with `device` for the user's other machines.
+pub fn run(
+    connect: Connect,
+    device: Option<device::Device>,
+    instance: Option<Instance>,
+    build: Build,
+) {
     gpui_kit::application()
         .with_assets(glyphs::Assets)
         .run(move |cx| {
-            init(cx);
+            // The copy of the user's theme, which the first frame is drawn in: the daemon, which
+            // keeps the choice, has not answered yet.
+            let memory = flottille_core::paths::Paths::from_env()
+                .ok()
+                .map(|paths| look::Memory::in_folder(&paths.state));
+            start(
+                gpui_design_system::omarchy::Environment::from_system(),
+                memory,
+                cx,
+            );
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -111,9 +165,19 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
                 ..Default::default()
             };
             let window = gpui_kit::open_window(options, cx, |window, cx| {
+                let shell = cx.new(|cx| {
+                    let mut shell = Shell::new(connect, device, window, cx);
+                    shell.set_build(build.full, build.reexec);
+                    if let Some(page) = &build.open {
+                        shell.reopen(page);
+                    }
+                    shell
+                });
                 // Closing the window ends the program (GPUI Fast differs from GPUI on
-                // `on_window_closed`).
-                window.on_window_should_close(cx, |_, cx| {
+                // `on_window_closed`), once what its composers hold is with the daemon.
+                let closing = shell.clone();
+                window.on_window_should_close(cx, move |_, cx| {
+                    closing.update(cx, |shell, cx| shell.closing(cx));
                     cx.quit();
                     true
                 });
@@ -121,7 +185,7 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
                 if let Some(instance) = instance {
                     raise_on_request(instance, window, cx);
                 }
-                cx.new(|cx| Shell::new(connect, window, cx))
+                shell
             });
             if let Err(error) = window {
                 eprintln!("flottille: the window cannot open: {error}");

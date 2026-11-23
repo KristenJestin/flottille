@@ -22,6 +22,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("project.list", Read),
     ("project.show", Read),
     // It looks through any folder the client names, and serves only `project.add`.
+    ("project.folders", Drive),
     ("project.detect", Drive),
     ("project.add", Drive),
     ("project.removal", Read),
@@ -39,6 +40,9 @@ pub const METHODS: &[(&str, Class)] = &[
     ("project.set_commit_checks", Drive),
     ("project.ticket", Read),
     ("project.progress", Read),
+    ("about.show", Read),
+    ("about.set", Drive),
+    ("about.reset", Drive),
     ("rules.show", Read),
     ("rules.set", Drive),
     ("rules.reset", Drive),
@@ -52,6 +56,19 @@ pub const METHODS: &[(&str, Class)] = &[
     ("compaction.noticed", Drive),
     ("developer.show", Read),
     ("developer.set", Drive),
+    ("developer.reports", Read),
+    ("developer.report_filed", Drive),
+    ("developer.reports_export", Drive),
+    ("update.show", Read),
+    ("update.set", Drive),
+    ("update.check", Drive),
+    // They replace this machine's binary and restart its daemon: asked on the machine only.
+    ("update.download", Local),
+    ("update.cancel", Local),
+    ("update.restart", Local),
+    ("whatsnew.show", Read),
+    ("whatsnew.seen", Drive),
+    ("whatsnew.fetch", Drive),
     ("extension.list", Read),
     ("extension.set", Drive),
     ("extension.act", Drive),
@@ -67,6 +84,7 @@ pub const METHODS: &[(&str, Class)] = &[
     // The user's Share and Bind of a vault entry an agent's request names.
     ("connection.share_entry", Drive),
     ("connection.bind_entry", Drive),
+    ("connection.share", Drive),
     ("spec.new", Drive),
     ("spec.from_ticket", Drive),
     ("spec.answer", Drive),
@@ -98,18 +116,44 @@ pub const METHODS: &[(&str, Class)] = &[
     ("tool_results.set", Drive),
     ("sessions.show", Read),
     ("sessions.set", Drive),
+    ("travelled_folder.show", Read),
+    ("travelled_folder.set", Drive),
     ("workspaces_folder.show", Read),
     ("workspaces_folder.set", Drive),
+    // What the user left in the window is of the machine: a device that follows over a link reads
+    // none of it.
+    ("draft.get", Local),
+    ("draft.set", Local),
+    ("draft.clear", Local),
+    ("draft.list", Local),
+    ("window.get", Local),
+    ("window.set", Local),
     ("vault.list", Read),
     ("vault.set", Drive),
     ("vault.remove", Drive),
+    ("vault.share", Drive),
+    ("vault.from_file", Drive),
     ("vault.asks", Read),
     ("vault.ask_dismiss", Drive),
     ("remote.machines", Read),
-    ("remote.address.add", Drive),
-    ("remote.address.remove", Drive),
-    // It points this machine at a hub and a root of its own: the machine's user only.
-    ("remote.setup", Local),
+    ("remote.members", Read),
+    ("remote.launches", Read),
+    ("remote.sessions", Read),
+    ("remote.change", Drive),
+    // It points this machine at a hub, with the code its host printed: the machine's user only.
+    ("remote.pair", Local),
+    // As `remote.pair`: the declaration of this machine by the device that paired.
+    ("remote.declare", Local),
+    ("remote.close", Local),
+    // Whether remote is on, and its change: the machine's own user, never another machine's
+    // device (a link could turn the machine off from afar).
+    ("remote.settings", Local),
+    ("remote.configure", Local),
+    // It opens a port on the client's machine for a run's port on this one: a user's act.
+    ("tunnel.open", Drive),
+    // What a machine's daemon carries is its own: the listeners are here, never over a link.
+    ("tunnel.list", Local),
+    ("tunnel.close", Local),
     ("skill.list", Read),
     ("skill.show", Read),
     ("skill.add", Drive),
@@ -173,10 +217,12 @@ pub const METHODS: &[(&str, Class)] = &[
     // `agent.start`'s name before it.
     ("agent.run", Drive),
     ("agent.send", Drive),
+    ("agent.upload", Drive),
     ("agent.send_now", Drive),
     ("agent.unqueue", Drive),
     ("agent.answer", Drive),
     ("agent.image", Read),
+    ("agent.file", Read),
     ("agent.cancel", Drive),
     ("agent.stop", Drive),
     ("agent.resume", Drive),
@@ -184,6 +230,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("agent.reload_tools", Drive),
     ("agent.compact", Drive),
     ("agent.rename", Drive),
+    ("agent.ending", Read),
     ("agent.detach", Drive),
     ("agent.mode", Drive),
     ("agent.options", Drive),
@@ -202,17 +249,46 @@ pub const METHODS: &[(&str, Class)] = &[
     ("leave.list", Read),
     ("leave.withdraw", Drive),
     ("inbox.list", Read),
+    ("notifications.list", Read),
+    ("notifications.read", Drive),
     ("provider.list", Read),
     ("provider.enable", Drive),
     ("provider.disable", Drive),
     ("provider.set_judge", Drive),
     ("provider.set_new_session", Drive),
     ("provider.judge_noticed", Drive),
+    // A program's own sign-in (#1185): the list is a read, every step of a sign-in the user's.
+    ("signin.list", Read),
+    ("signin.start", Drive),
+    ("signin.code", Drive),
+    ("signin.cancel", Drive),
+    ("signin.sign_out", Drive),
     // The tests' own, answered only when the daemon runs with their variable.
     ("test.hold", Drive),
     ("test.wait", Drive),
     ("test.advance", Drive),
+    ("test.travel", Drive),
+    ("test.travel_back", Drive),
 ];
+
+/// The methods that start an agent's process (`docs/remote.md`, "Roles"): a machine whose member
+/// is no runner runs no agent, so it refuses them. Each may start one: `spec.new` when it is
+/// given an idea, `agent.quota_resume` when the reset comes.
+pub const LAUNCHES: &[&str] = &[
+    "agent.start",
+    "agent.run",
+    "agent.resume",
+    "agent.quota_resume",
+    "spec.new",
+    "spec.from_ticket",
+    "spec.develop",
+    "review.start",
+];
+
+/// Whether `method` starts an agent's process.
+pub fn launches(method: &str) -> bool {
+    LAUNCHES.contains(&method)
+}
 
 /// The class of `method`; none for a method the daemon does not answer.
 pub fn class(method: &str) -> Option<Class> {
@@ -244,6 +320,74 @@ mod tests {
         assert_eq!(class("agent.send"), Some(Drive));
         assert_eq!(class("approval.approve"), Some(Drive));
         assert_eq!(class("daemon.stop"), Some(Drive));
+    }
+
+    #[test]
+    fn what_a_session_page_writes_is_drive_and_what_it_reads_is_read() {
+        // A viewer's device may read a conversation, its tree, its pictures and its requests, and
+        // writes none of it: the machine refuses each write by this class (`docs/remote.md`, "Roles").
+        for method in [
+            "agent.send",
+            "agent.upload",
+            "agent.send_now",
+            "agent.answer",
+            "agent.cancel",
+            "agent.mode",
+            "approval.approve",
+            "approval.deny",
+        ] {
+            assert_eq!(class(method), Some(Drive), "{method}");
+        }
+        for method in [
+            "agent.show",
+            "agent.tree",
+            "agent.image",
+            "agent.file",
+            "agent.list",
+            "approval.list",
+            "events.watch",
+        ] {
+            assert_eq!(class(method), Some(Read), "{method}");
+        }
+    }
+
+    #[test]
+    fn the_drafts_and_the_window_s_state_are_of_the_machine_alone() {
+        // What the user left in the window is not read by a device that follows over a link.
+        for method in [
+            "draft.get",
+            "draft.set",
+            "draft.clear",
+            "draft.list",
+            "window.get",
+            "window.set",
+        ] {
+            assert_eq!(class(method), Some(Local), "{method}");
+        }
+    }
+
+    #[test]
+    fn every_method_that_starts_an_agent_is_a_launch() {
+        for method in [
+            "agent.start",
+            "agent.run",
+            "agent.resume",
+            "agent.quota_resume",
+            "spec.new",
+            "spec.from_ticket",
+            "spec.develop",
+            "review.start",
+        ] {
+            assert!(launches(method), "{method}");
+        }
+        // A command, a message to a session that runs, a read: no agent starts.
+        for method in ["task.run", "agent.send", "agent.list", "spec.list"] {
+            assert!(!launches(method), "{method}");
+        }
+        // Each launch is a method of the catalogue, and changes something.
+        for method in LAUNCHES {
+            assert_eq!(class(method), Some(Drive), "{method}");
+        }
     }
 
     #[test]

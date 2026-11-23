@@ -1,7 +1,7 @@
 //! The scenarios of workspaces, asked of the daemon over its socket, with throwaway repositories,
 //! local bare remotes and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1223,7 +1223,11 @@ fn a_setup_line_cannot_read_the_user_s_runtime_folder() {
 
     assert_eq!(fixture.settled("login")["state"], "ready");
     let read = std::fs::read_to_string(&out).unwrap();
-    assert!(read.contains("Permission denied"), "{read}");
+    // Denied by Landlock, or not there at all where the setup's namespace empties the folder.
+    assert!(
+        read.contains("Permission denied") || read.contains("No such file or directory"),
+        "{read}"
+    );
     assert!(!read.contains("kept from setups"), "{read}");
     assert!(read.contains("open to setups"), "{read}");
 }
@@ -3810,12 +3814,12 @@ fn holding_removals() -> (User, PathBuf, PathBuf) {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    (user.with_env("PATH", &path), held, release)
+    // The daemon's own git is the one found at its start, not the `PATH`'s first.
+    (
+        user.with_env("FLOTTILLE_TEST_GIT", script.to_str().unwrap()),
+        held,
+        release,
+    )
 }
 
 /// Runs `during` while the user's removal of `login` is held mid-way, then lets it end: it must
@@ -4150,5 +4154,47 @@ fn the_ready_event_names_the_slowest_steps() {
     assert!(
         slowest[0]["doing"].as_str().unwrap().contains("long.sh"),
         "{data}"
+    );
+}
+
+#[test]
+fn the_daemon_runs_no_git_a_run_planted_in_its_path() {
+    let user = User::new();
+    // A folder of the user's first in the daemon's `PATH`, as `~/.local/bin` often is.
+    let bin = user.path("home/.local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let fixture = Fixture::of(user.with_env("PATH", &path), false);
+    fixture.configure("");
+    fixture.user.call("daemon.status", json!({})).unwrap();
+    // Written by a run once the daemon runs.
+    let real = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+    let planted = bin.join("git");
+    std::fs::write(
+        &planted,
+        format!(
+            "#!/bin/sh\necho ran >> '{}'\nexec '{real}' \"$@\"\n",
+            fixture.user.path("planted-git-ran").display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    fixture.create(json!({})).unwrap();
+    let workspace = fixture.settled("login");
+
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    assert!(
+        !fixture.user.path("planted-git-ran").exists(),
+        "the planted git ran"
     );
 }

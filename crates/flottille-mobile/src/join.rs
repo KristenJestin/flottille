@@ -1,0 +1,120 @@
+//! Joining the user's hub: its pair mode (#1146, `docs/remote.md`, "Pairing").
+//!
+//! The QR is the code `flottille-hub pair` prints: the hub's address, its key and a one-time
+//! secret. The phone pins the hub's key from it (a hub that answers with another is refused before
+//! anything is proved), proposes its own card (its name and role, as the user confirmed them; the
+//! phone's icon; the colour of its key), and proves it holds the secret, which never crosses the
+//! network. The hub signs its entry; the phone checks the list back to the hub's key and its root,
+//! declares its endpoint as its machine, and keeps its device key, pending (sealed) until then.
+
+use std::path::Path;
+
+use flottille_link::{
+    Action, Change, Colour, Device, DeviceKey, Icon, MachineKey, PairCode, Proposed, Role, Tls,
+};
+
+use crate::MobileError;
+use crate::keys::{Sealed, pending_endpoint_key, promote_endpoint_key};
+
+fn failed_to_keep(error: std::io::Error) -> MobileError {
+    MobileError::new(format!(
+        "the device key kept before cannot be removed: {error}"
+    ))
+}
+
+/// The hub a pair code names, as the card the app shows before anything is sent: its address and
+/// its key's fingerprint, which the phone will pin.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HubCard {
+    pub url: String,
+    pub fingerprint: String,
+}
+
+/// Reads the QR's `code`, or the one pasted: the hub's card, with no network. A code that is not
+/// one says why.
+#[uniffi::export]
+pub fn hub_card(code: String) -> Result<HubCard, MobileError> {
+    let code =
+        PairCode::from_code(code.trim()).map_err(|error| MobileError::new(error.to_string()))?;
+    Ok(HubCard {
+        url: code.hub_url,
+        fingerprint: code.hub_key.fingerprint(),
+    })
+}
+
+/// Pairs with the hub of the QR's `code` as `name` with `role` (`controller` or `viewer`): the
+/// hub as pinned, with the list checked, and the device key kept.
+pub(crate) async fn pair(
+    folder: &Path,
+    sealed: &Sealed,
+    code: &str,
+    name: &str,
+    role: &str,
+) -> Result<(Device, DeviceKey, MachineKey), MobileError> {
+    let code =
+        PairCode::from_code(code.trim()).map_err(|error| MobileError::new(error.to_string()))?;
+    let role = match Role::from_word(role) {
+        Some(role @ (Role::Controller | Role::Viewer)) => role,
+        _ => {
+            return Err(MobileError::new(format!(
+                "a phone is a controller or a viewer, not {}",
+                role.escape_debug()
+            )));
+        }
+    };
+    let failed = |error: flottille_link::KeyError| MobileError::new(error.to_string());
+    // A pending key the app cannot open is no member's: a new one is made.
+    let pending = match DeviceKey::load_pending(sealed, folder) {
+        Ok(pending) => pending,
+        Err(_) => {
+            DeviceKey::discard_pending(sealed, folder).map_err(failed)?;
+            None
+        }
+    };
+    let key = match pending {
+        Some(key) => key,
+        None => DeviceKey::make()
+            .and_then(|key| key.keep_pending(sealed, folder))
+            .map_err(failed)?,
+    };
+    let endpoint = &pending_endpoint_key(folder)?;
+    let proposed = Proposed {
+        key: key.public(),
+        name: name.trim().to_owned(),
+        role,
+        icon: Icon::Phone,
+        colour: Colour::of(&key.public()),
+    };
+    let said = |error: flottille_link::ControlError| MobileError::new(error.to_string());
+    let mut paired = Device::pair(&code, proposed, endpoint, &crate::hello(), &Tls::System)
+        .await
+        .map_err(said)?;
+    let (mut device, _) = paired.listed().await.map_err(said)?;
+    let declared = Change::sign(
+        device.list.head(),
+        Action::Machine {
+            key: key.public(),
+            machine: endpoint.public(),
+        },
+        &key,
+    )
+    .claimed_by(endpoint);
+    device
+        .submit(&mut paired.session, declared)
+        .await
+        .map_err(said)?;
+    // Joined again (after its removal, its hub's reset, a key the Keystore lost): the key the hub
+    // just admitted replaces the one kept, which signs for no member any more.
+    let admitted = key.public();
+    promote_endpoint_key(folder)
+        .map_err(|error| MobileError::new(format!("the endpoint's key cannot be kept: {error}")))?;
+    sealed.forget_kept().map_err(failed_to_keep)?;
+    let key = key.promote(sealed, folder).map_err(failed)?;
+    if key.public() != admitted {
+        return Err(MobileError::new(
+            "another device key was kept while this one joined: join again",
+        ));
+    }
+    let endpoint = crate::keys::endpoint_key(folder)?;
+    Ok((device, key, endpoint))
+}

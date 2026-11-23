@@ -4,7 +4,7 @@
 //! fake MCP server (`crates/flottille-fake-mcp`) with scripted behaviour: no real server, the
 //! in-memory keyring, temporary folders.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1836,6 +1836,40 @@ fn a_connection_server_gets_no_session_bus_address() {
 }
 
 #[test]
+fn a_connection_server_cannot_connect_to_the_session_bus_by_its_path() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let user = user();
+    project(&user, "app");
+    let bus = user.path("runtime/bus");
+    std::fs::create_dir_all(user.path("runtime")).unwrap();
+    let _listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"connect": bus});
+    turn_on(&user);
+    declare(&user, "almanac", &script, json!({}));
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+
+    // Not there at all in its namespace, whatever Landlock's ABI.
+    let calls = logged(&user, "almanac", "call");
+    assert_eq!(calls[0]["answered"], "NotFound", "{calls:?}");
+}
+
+#[test]
 fn an_ordinary_connection_server_gets_no_display() {
     let user = User::with_fake_agent()
         .with_env("WAYLAND_DISPLAY", "wayland-test")
@@ -2748,12 +2782,15 @@ fn a_call_running_when_the_connection_is_turned_off_answers_that_it_failed() {
 /// The limit of one answer of a server, in bytes (`docs/extensions.md`, "A result").
 const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
 
+/// The pieces the fake writes a big answer in.
+const PIECE: u64 = 1 << 20;
+
 /// The `almanac` whose action `write` answers `bytes` bytes of text, a megabyte at a time with
 /// `pause_ms` between.
 fn answering(bytes: u64, pause_ms: u64) -> Value {
     let mut script = almanac();
     script["answers"]["write"] =
-        json!({"big": {"bytes": bytes, "chunk": 1 << 20, "pause_ms": pause_ms}});
+        json!({"big": {"bytes": bytes, "chunk": PIECE, "pause_ms": pause_ms}});
     script
 }
 
@@ -2800,10 +2837,20 @@ fn a_response_past_the_limit_is_cut(
         });
     }
     let (taken, _) = written(user, "almanac");
-    assert!(
-        taken < total && (taken >= ANSWER_LIMIT) == read_to_the_limit,
-        "{taken} of {total} bytes were written before the cut"
-    );
+    if waits_for_the_reader {
+        assert!(
+            taken < total && (taken >= ANSWER_LIMIT) == read_to_the_limit,
+            "{taken} of {total} bytes were written before the cut"
+        );
+    } else {
+        // On stdio the server is stopped at the cut, which falls in the last bytes of the piece
+        // that passes the limit: those may sit in the pipe, the piece written but not yet logged,
+        // or not. Every piece before it was read, and none after it could be written.
+        assert!(
+            (ANSWER_LIMIT - PIECE..=ANSWER_LIMIT).contains(&taken),
+            "{taken} of {total} bytes were written before the cut"
+        );
+    }
     let text = done(mcp.call(
         "conn_almanac",
         json!({"action": "search", "arguments": {"query": "a"}}),

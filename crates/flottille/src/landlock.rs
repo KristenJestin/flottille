@@ -8,8 +8,9 @@
 //! X11's display is kept out by its abstract name, unless the program is given it (a
 //! [`crate::display::Folder`] made for X11): an X11 client reads the keys typed in other windows.
 //! The sixth ABI's scope keeps out every abstract socket made outside the program. Its sockets by
-//! their path under `/tmp/.X11-unix` stay open: a rule on `/tmp` would take from a program what
-//! it makes there, and #976 masks the folder instead (`docs/vault.md`, "The gaps").
+//! their path under `/tmp/.X11-unix` stay open to Landlock: a rule on `/tmp` would take from a
+//! program what it makes there, and the private mount namespace empties the folder instead
+//! (`mounts.rs`).
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -86,11 +87,12 @@ fn runtime_folders() -> Vec<PathBuf> {
     folders
 }
 
-/// X11's socket folder: `/tmp/.X11-unix`, or the tests' own (`FLOTTILLE_X11_SOCKETS`). The one
-/// place it is named, for the private mount namespace (#976) to mask.
-#[allow(dead_code)]
+/// X11's socket folder: `/tmp/.X11-unix`, or in a test build the tests' own
+/// (`FLOTTILLE_X11_SOCKETS`). The one place it is named, for the private mount namespace to empty
+/// (`mounts.rs`).
 fn x11_folder() -> Option<PathBuf> {
     std::env::var_os("FLOTTILLE_X11_SOCKETS")
+        .filter(|_| cfg!(debug_assertions))
         .map_or_else(|| PathBuf::from("/tmp/.X11-unix"), PathBuf::from)
         .canonicalize()
         .ok()
@@ -133,9 +135,65 @@ pub fn confined_but<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
+    confine(command, open, false)
+}
+
+/// [`confined`], lent the user's SSH agent: the right to connect to the socket found at the
+/// daemon's start, and nothing else of the folder it is in. Never a path a variable or a
+/// request names. For the daemon's own fetch of an SSH remote (`git::remote`).
+pub fn confined_lent(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    confine(command, None, true)
+}
+
+fn confine<'a>(
+    command: &'a mut tokio::process::Command,
+    open: Option<&crate::display::Folder>,
+    lent: bool,
+) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
+    // The private mount namespace first: the runtime folders and, unless it is given X11,
+    // X11's socket folder emptied, with what the daemon gives the command put back.
+    let given_x11 = open.is_some_and(crate::display::Folder::x11);
+    let namespace = crate::mounts::available()
+        .then(|| {
+            let emptied: Vec<PathBuf> = denied
+                .iter()
+                .cloned()
+                .chain(x11_folder().filter(|_| !given_x11))
+                .collect();
+            let kept: Vec<PathBuf> = open
+                .and_then(|folder| folder.path().canonicalize().ok())
+                .into_iter()
+                .chain(
+                    crate::ssh_agent::socket()
+                        .filter(|_| lent)
+                        .map(Path::to_owned),
+                )
+                .collect();
+            // The session bus's socket outside the emptied folders, hidden where it is.
+            let masked: Vec<PathBuf> = crate::mounts::bus()
+                .filter(|bus| !emptied.iter().any(|folder| bus.starts_with(folder)))
+                .map(Path::to_owned)
+                .into_iter()
+                .collect();
+            // The daemon's own folder where the command names none: one it held from before a
+            // folder on its way was kept in place would still reach below it.
+            let cwd = command
+                .as_std()
+                .get_current_dir()
+                .map(Path::to_owned)
+                .or_else(|| std::env::current_dir().ok());
+            crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())?
+                .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())
+        })
+        .flatten();
+    if let Some(mut plan) = namespace {
+        // SAFETY: `Plan::enter` makes system calls alone on what the plan allocated before.
+        unsafe { command.pre_exec(move || plan.enter()) };
+    }
     let rights = rights(abi);
+    let connecting = rights & RESOLVE_UNIX != 0;
     // The user's SSH agent's socket outside the runtime folders: denied by its own path, and each
     // folder on the way to it ruled without the right to connect, so that the command still makes
     // its own files there. One inside them is denied with them. Below the ninth ABI connecting is
@@ -143,7 +201,7 @@ pub fn confined_but<'a>(
     // (`runs::defend`).
     let mut ways = Vec::new();
     let kept = crate::ssh_agent::socket()
-        .filter(|_| rights & RESOLVE_UNIX != 0)
+        .filter(|_| connecting && !lent)
         .filter(|socket| !denied.iter().any(|folder| socket.starts_with(folder)));
     if let Some(socket) = kept {
         ways = socket
@@ -155,7 +213,6 @@ pub fn confined_but<'a>(
         denied.push(socket.to_owned());
     }
     // X11's abstract sockets too, unless given, where the kernel has the scope.
-    let given_x11 = open.is_some_and(crate::display::Folder::x11);
     let scoped = match !given_x11 && abi >= 6 {
         true => SCOPE_ABSTRACT_UNIX_SOCKET,
         false => 0,
@@ -166,20 +223,37 @@ pub fn confined_but<'a>(
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
     let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
+    // A rule on the lent socket itself: Landlock checks connecting from the socket's own path up,
+    // so the folder it is in stays denied. One outside the runtime folders is not denied at all.
+    let lent = crate::ssh_agent::socket()
+        .filter(|_| connecting && lent)
+        .and_then(|socket| CString::new(socket.as_os_str().as_bytes()).ok());
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), scoped, &ways)) }
+    unsafe {
+        command.pre_exec(move || {
+            restrict(
+                rights,
+                &paths,
+                open.as_deref(),
+                scoped,
+                &ways,
+                lent.as_deref(),
+            )
+        })
+    }
 }
 
 /// In the child: every path a rule with every right, `open` one without `REFER`, the `ways` to
-/// the SSH agent's socket without the right to connect, then the child bound to them and to the
-/// `scoped` scopes.
+/// the SSH agent's socket without the right to connect, the `lent` socket with that right alone,
+/// then the child bound to them and to the `scoped` scopes.
 fn restrict(
     rights: u64,
     paths: &[CString],
     open: Option<&CStr>,
     scoped: u64,
     ways: &[CString],
+    lent: Option<&CStr>,
 ) -> io::Result<()> {
     // The attribute's fields: the handled rights of files, of the network (none), the scopes.
     let handled = [rights, 0, scoped];
@@ -203,7 +277,8 @@ fn restrict(
         .chain(
             ways.iter()
                 .map(|way| (way.as_c_str(), rights & !RESOLVE_UNIX)),
-        );
+        )
+        .chain(lent.map(|socket| (socket, RESOLVE_UNIX)));
     for (path, granted) in ruled {
         // SAFETY: a valid C string; O_PATH opens nothing but a handle.
         let fd = unsafe {
@@ -313,7 +388,7 @@ mod tests {
         ]);
         command.arg(path).stderr(std::process::Stdio::null());
         // SAFETY: as in `confined_but`.
-        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[])) };
+        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[], None)) };
         command.status().unwrap().success()
     }
 
@@ -380,7 +455,7 @@ mod tests {
             .arg(&go)
             .stderr(std::process::Stdio::null());
         // SAFETY: as in `confined_but`.
-        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[])) };
+        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[], None)) };
         let mut child = command.spawn().unwrap();
         // The folder made again, as `display::share` does at the next start.
         std::fs::remove_dir_all(&folder).unwrap();

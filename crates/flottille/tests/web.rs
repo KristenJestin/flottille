@@ -4,7 +4,7 @@
 //! to the judge or the user, and no local or private address is ever reached. The agents and the
 //! judge are fake ACP agents, in throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -786,7 +786,9 @@ fn a_child_and_its_parent_share_one_budget_of_link_reads() {
 #[test]
 fn a_page_that_blows_up_its_reader_is_refused_and_the_daemon_lives() {
     let web = Web::start();
-    let user = user_of(&web, says("ask"));
+    // The reader is given six seconds, not twenty-five: a page that exhausts it is refused all
+    // the same.
+    let user = user_of(&web, says("ask")).with_env("FLOTTILLE_TEST_READER_MS", "6000");
     let (id, mcp) = session(
         &user,
         &format!(

@@ -25,9 +25,11 @@ is English only.
 ```
 cargo build
 cargo test
-# before one test binary alone (cargo test -p flottille --test <name>), build the fakes it spawns:
+# before one test binary alone (cargo test -p flottille --test <group> [<file>::]), build the fakes it spawns:
 cargo build -p flottille-fake-acli -p flottille-fake-agent -p flottille-fake-bkt -p flottille-fake-claude \
   -p flottille-fake-codex -p flottille-fake-gh -p flottille-fake-mcp -p flottille-fake-pnpm -p flottille-fake-server
+cargo test -p flottille --test group_window_session window_conversation::   # one test file
+cargo nextest run -p flottille -E 'binary(group_window_session) & test(/^window_conversation::/)'
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 tools/commit-message.sh --range origin/dev..HEAD
@@ -115,6 +117,16 @@ tags. A component that is missing or must change is added there first: a pull re
 then the bump of that tag here, in the pull request that needs it (`docs/reference/gpui.md`, "The
 stack"). Nothing of Flottille goes into the kit, and no component is drawn here instead.
 
+## A command comes with its place in the window (non-negotiable)
+
+**Everything the command line does has its place in the window**, unless it is a script's
+business alone. A pull request that adds a `flottille <command>` (a heading of `docs/cli.md`)
+adds, in the same pull request, its place in the window: the screen, dialog or menu entry that
+calls the same daemon method, or a line of `crates/flottille/tests/window_parity.rs` saying why it is
+for scripts only (what starts the daemon or the window, what a process pipes: a short list, each
+with its reason). The test `every_cli_command_has_its_place_in_the_window` refuses a command that
+has neither. A place needs its animations and its test as any window change does.
+
 ## Agents and safety (non-negotiable)
 
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,
@@ -146,6 +158,32 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
 - **Never open a window on the user's screens.** The window is tested with GPUI's test platform;
   a real window only in a headless nested compositor (`docs/reference/gpui.md`).
 - A test that fails only under load is rerun alone before the failure is called real.
+
+### Adding a test file
+
+The integration tests of `crates/flottille/tests/` link as **nine binaries**, not one per file
+(each link of the crate is tens of seconds and gigabytes). A test file stays a file of `tests/`,
+and is a module of one **group**: the `main` of the group in `tests/group/<group>.rs`. To add
+`tests/<file>.rs`:
+
+1. Write it with `use crate::common;` (and `use crate::guard;`, `use crate::kit_common;` when it
+   needs them), never `mod common;`: the group declares them once.
+2. Add two lines to the group that fits, in the alphabetical order of its files:
+   `#[path = "../<file>.rs"]` and `mod <file>;`. A test file no group declares is never built
+   (`autotests = false`), and the fast check selects nothing for it.
+
+The groups: `group_agents` (the agents and their providers), `group_sessions` (sessions and their
+tree), `group_forges` (forges, workspaces, services), `group_tickets` (tickets, specs, projects),
+`group_remote` (connections, vault, MCP, remote), `group_daemon` (the daemon, its protocol, the
+CLI, the release and CI files), and the window's `group_window_session` (a conversation),
+`group_window_shell` (the shell, settings, composer) and `group_window_work` (items, specs,
+reviews). Pick by what the file tests; a group that grows far beyond the others' build time is
+split in a pull request of its own. A test is named `<file>::<test>`: to run one file,
+`cargo test -p flottille --test group_<name> <file>::`.
+
+Under `cargo test` the tests of a group share a process: a test never sets an environment
+variable, changes the working folder or leaves a `static` that another test reads. (Nextest runs
+each test in a process of its own, which hides such a test: CI is not what finds it.)
 
 ## How the work is organised
 
@@ -187,6 +225,15 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
   `android`, `site`.
 - **Pull requests into `dev` are merged by squash only.** The title is a plain Angular subject.
   The description is written in the first person as the maintainer and ends with `Closes #<n>`.
+- **A pull request the user can see carries a `Note:` line** in its description, at the start of its
+  line: `Note: <one sentence, capitalised, what the user can do now>` (`Note: Drive another machine
+  from the window, each action signed.`). A fix says what no longer goes wrong (`Note: A device can
+  be removed while the hub is slow.`). It is written in the user's words: short, concrete, no crate,
+  scope or protocol name, no pull request number. `tools/changelog.sh` builds the release's body from
+  these lines and the "What's new" page says them (`docs/releases.md`, "What's new"). A pull request
+  with no `Note:` line (ci, refactor, test, docs, chore, or invisible) is not on the page. The
+  `shape` check warns, without failing, when a `feat` or `fix` touching the product has none; the
+  pull request template has the place.
 - **`main` gets no squash and no merge commit**: the release pull request `dev → main` is opened
   for review, and the `Release` workflow, not the merge button, closes it by moving `main`
   forward to a commit of `dev` (`docs/releases.md`, "Releasing").
@@ -221,3 +268,8 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, plus the
 manual checks the issue asks for, and report the real output. If something fails, say so;
 don't claim green.
+
+A pull request's CI runs a fast check: the test binaries whose files it changes and those listed
+on a line `Tests: <binary or file> …` of its description (`docs/releases.md`, "What CI checks").
+List there each binary you ran that CI would not pick up by itself; the whole suite runs on `dev`
+after the merge.

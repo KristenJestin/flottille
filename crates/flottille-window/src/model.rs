@@ -13,15 +13,27 @@ pub struct Snapshot {
     /// By name.
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
+    /// The sessions this machine's agents started on other machines, each under its pilot: rows
+    /// of the tree only. This machine's daemon does not know them, so nothing else reads them (a
+    /// project's page, search, a session's page).
+    pub elsewhere: Vec<Session>,
     /// By project, then name.
     pub workspaces: Vec<Workspace>,
-    /// Oldest first.
+    /// The notification centre, oldest first, read and unread.
     pub bell: Vec<BellItem>,
+    /// How many are unread: those that need the user, and the others.
+    pub unread: (usize, usize),
     /// How many `project.changed` events the link has seen: a project's file was edited when it
     /// grows.
     pub project_changes: u64,
     /// The root of each agent's tree, by the agent's id: the session it belongs to.
     pub roots: HashMap<String, String>,
+    /// The user's machines, this one first, as the sidebar marks them; empty while this machine
+    /// is alone, when no row is marked.
+    pub homes: Vec<Home>,
+    /// The name of the machine this was read from, once there is another machine: this one, or the
+    /// one in front.
+    pub this_machine: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +53,132 @@ pub struct Project {
     pub commands: usize,
     /// It declares a tracker: its page has a Progress tab.
     pub tracked: bool,
+    /// The machines that have it, this one first: empty while this machine is alone.
+    pub homes: Vec<Home>,
+    /// The machine that tells it from a project of the same name it does not match (another
+    /// repository): the row says its name in small after the project's.
+    pub apart: Option<String>,
+}
+
+impl Project {
+    /// What the row says: the name, without what tells it apart from another of the same name.
+    pub fn title(&self) -> &str {
+        match &self.apart {
+            Some(machine) => self
+                .name
+                .strip_suffix(&format!("@{machine}"))
+                .unwrap_or(&self.name),
+            None => &self.name,
+        }
+    }
+
+    /// Whether every machine that has it is off: its row is greyed.
+    pub fn offline(&self) -> bool {
+        !self.homes.is_empty() && self.homes.iter().all(|home| home.offline)
+    }
+}
+
+/// A machine as the sidebar marks it (`docs/design.md` §10): its icon in its colour, its name and
+/// its state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Home {
+    pub machine: String,
+    /// The machine whose window this is.
+    pub here: bool,
+    /// The icon and the colour its member signs, as words (`server`, `teal`).
+    pub icon: String,
+    pub colour: String,
+    /// `online`, `offline since 14:02`, `needs an update`.
+    pub state: String,
+    /// Not online: its projects are greyed.
+    pub offline: bool,
+}
+
+impl Home {
+    /// What hovering its mark says: `server · offline since 14:02`.
+    pub fn said(&self) -> String {
+        match self.here {
+            true => format!("{} · this machine", self.machine),
+            false => format!("{} · {}", self.machine, self.state),
+        }
+    }
+
+    fn of(machines: &crate::machines::Machines, name: &str, here: bool) -> Home {
+        let (icon, colour) = machines
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .map_or_else(
+                || ("desktop".to_owned(), "grey".to_owned()),
+                crate::machines::Member::look,
+            );
+        let seen = machines.machine(name).filter(|_| !here);
+        Home {
+            machine: name.to_owned(),
+            here,
+            icon,
+            colour,
+            state: seen.map_or_else(|| "online".to_owned(), |machine| machine.state_words()),
+            offline: seen.is_some_and(|machine| !machine.online()),
+        }
+    }
+}
+
+/// The projects `machine` says it has: this machine's own, or the ones it last listed.
+fn held_by<'a>(
+    machines: &'a crate::machines::Machines,
+    this: &str,
+    machine: &str,
+) -> &'a [crate::machines::MachineProject] {
+    match machine == this {
+        true => machines.lists.this_projects.as_slice(),
+        false => machines
+            .lists
+            .projects
+            .iter()
+            .find(|(name, _)| name == machine)
+            .map_or(&[][..], |(_, held)| held.as_slice()),
+    }
+}
+
+/// The project of each session `machine` lists.
+fn listed_by<'a>(
+    machines: &'a crate::machines::Machines,
+    this: &str,
+    machine: &str,
+) -> Vec<&'a str> {
+    let sessions = match machine == this {
+        true => machines.lists.this.as_slice(),
+        false => machines
+            .lists
+            .machines
+            .iter()
+            .find(|(name, _)| name == machine)
+            .map_or(&[][..], |(_, listed)| listed.as_slice()),
+    };
+    sessions.iter().map(|s| s.project.as_str()).collect()
+}
+
+/// How a project of a machine is told from another's.
+enum Identity {
+    /// The remotes of its repositories: the same project as any other with the same.
+    Remotes(Vec<String>),
+    /// A repository of it has no remote: it is the same as no other.
+    Alone,
+    /// Its machine does not say (a list from before projects were listed): the same name is the
+    /// same project.
+    Unknown,
+}
+
+/// One row of the projects' list: a project and the machines that have it.
+struct Group {
+    key: String,
+    identity: Identity,
+    machines: Vec<String>,
+    /// The name this machine's own project goes by in it, when this machine has it.
+    own: Option<String>,
+    /// The machine that has a project of this name which this is not.
+    apart: Option<String>,
 }
 
 /// A workspace as its place on the project page shows it.
@@ -283,18 +421,199 @@ pub struct Session {
     pub runs: String,
     /// The session of the agent that leads it, whose row it sits under.
     pub pilot: Option<String>,
+    /// Whether the agent that leads it works in another project: its row sits among its own
+    /// project's and names it.
+    pub led_from_elsewhere: bool,
+    /// It runs on another machine, started by an agent of this one: its row sits under its
+    /// pilot's, and opening it shows that machine.
+    pub elsewhere: Option<Elsewhere>,
+    /// The machine it runs on, when it is not this one: its row carries the machine's name.
+    pub tag: Option<String>,
+    /// Its root is a child an agent of another machine launched here, that agent by name
+    /// (`agent b1 of pc`): only that agent writes to it, never the user.
+    pub child_of: Option<String>,
 }
 
-/// One thing that waits for the user. Choosing it opens its session.
+/// A session on another machine, as its row under its pilot shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Elsewhere {
+    /// The machine it runs on, by name.
+    pub machine: String,
+    /// Its id on that machine.
+    pub agent: String,
+    /// Its state as last known: `running`, `waiting`, `reported`, `failed`, `offline since 22:14`.
+    pub state: String,
+    /// A row of the one list (`docs/remote.md`, "One list of every machine"): the session as its
+    /// machine lists it, closed through this machine's daemon; otherwise a session an agent of
+    /// this machine started there, under its pilot.
+    pub listed: bool,
+    /// Its machine is off: the row is greyed and does not open.
+    pub offline: bool,
+    /// How its machine is drawn, `server in teal`: its icon and its colour, as the member list
+    /// signs them; `None` while the list is not read.
+    pub look: Option<String>,
+    /// A session of this machine, listed while another machine's session is open: opening it
+    /// brings this machine back in front.
+    pub here: bool,
+}
+
+/// The id of the row of the session `agent` of `machine` in this machine's tree: never an id of
+/// this machine's.
+pub fn elsewhere_id(machine: &str, agent: &str) -> String {
+    format!("{agent}@{machine}")
+}
+
+/// Whether a session started on another machine is shown under its pilot: a child or a led session
+/// while it lives or once it reported. A session handed to the user is theirs, on its machine only.
+fn under_its_pilot(launched: &crate::machines::Launched) -> bool {
+    launched.kind != "handed"
+        && !(launched.state == "ended" && launched.heard.as_deref() != Some("child-report"))
+}
+
+/// A session or a child an agent of this machine started on another, as the lists of its pilot's
+/// session say it: a row with its machine's icon in the rail's Agents and, for a child, in the
+/// sub-agents list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteAgent {
+    /// The id of its row among the agents of this machine's tree: never an id of this machine's.
+    pub key: String,
+    pub machine: String,
+    /// Its id on its machine.
+    pub agent: String,
+    /// The agent of this machine that started it.
+    pub caller: String,
+    /// `child` or `led`.
+    pub kind: String,
+    pub title: String,
+    /// As last known: `running`, `waiting`, `reported`, `failed`, `offline since 22:14`.
+    pub state: String,
+    pub mark: crate::state::AgentState,
+    /// Its machine's icon and colour, as the member list signs them.
+    pub icon: String,
+    pub colour: String,
+    pub offline: bool,
+}
+
+/// What [`remote_agents`] says now, kept where a page reads it with no read of the shell, which
+/// may be updating it.
+#[derive(Default)]
+pub struct RemoteAgents(pub Vec<RemoteAgent>);
+
+impl gpui_kit::Global for RemoteAgents {}
+
+/// The sessions and the children the agents of this machine started on others, which a session
+/// page lists beside its own agents when the agent that started them is one of its tree.
+pub fn remote_agents(machines: &crate::machines::Machines) -> Vec<RemoteAgent> {
+    use crate::state::AgentState;
+    machines
+        .launches
+        .iter()
+        .filter(|launched| under_its_pilot(launched))
+        .map(|launched| {
+            let machine = machines.machine(&launched.machine);
+            let (state, mark) = last_known(launched, machine);
+            let offline = machine.is_some_and(|machine| !machine.online());
+            let mark = match (mark, state.as_str()) {
+                (Some(mark), _) => mark,
+                (None, "reported") => AgentState::Completed,
+                (None, "failed") => AgentState::Failed,
+                (None, _) => AgentState::Idle,
+            };
+            let (icon, colour) = machines
+                .members
+                .iter()
+                .find(|member| member.name == launched.machine)
+                .map_or_else(
+                    || ("desktop".to_owned(), "grey".to_owned()),
+                    crate::machines::Member::look,
+                );
+            RemoteAgent {
+                key: elsewhere_id(&launched.machine, &launched.agent),
+                machine: launched.machine.clone(),
+                agent: launched.agent.clone(),
+                caller: launched.caller.clone(),
+                kind: launched.kind.clone(),
+                title: match launched.title.is_empty() {
+                    true => format!("agent {}", launched.agent),
+                    false => launched.title.clone(),
+                },
+                state,
+                mark,
+                icon,
+                colour,
+                offline,
+            }
+        })
+        .collect()
+}
+
+/// The state of a session started on another machine as last known here, in words, and its mark:
+/// what its machine last told, unless that machine is off now.
+fn last_known(
+    launched: &crate::machines::Launched,
+    machine: Option<&crate::machines::Machine>,
+) -> (String, Option<AgentState>) {
+    if let Some(machine) = machine.filter(|machine| !machine.online()) {
+        return (machine.state_words(), None);
+    }
+    // Allowed there, a held launch is told nothing more here: what it sent since says it runs.
+    match launched.heard.as_deref() {
+        None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
+        // Nothing heard yet of a project made for it there: that machine is preparing it.
+        None => match &launched.making {
+            Some(project) => (format!("preparing {project}"), Some(AgentState::Running)),
+            None => ("running".to_owned(), Some(AgentState::Running)),
+        },
+        Some("child-report") => ("reported".to_owned(), None),
+        Some("child-failed") => ("failed".to_owned(), None),
+        Some(_) => ("waiting".to_owned(), Some(AgentState::Waiting)),
+    }
+}
+
+/// One notification of the centre the daemon keeps (`notifications.list`, `docs/protocol.md`).
+/// Choosing it opens its session and marks it read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BellItem {
-    /// `request-<n>`.
+    /// The daemon's number for it.
+    pub id: u64,
+    /// `n-<id>`: what its elements are named by.
     pub key: String,
-    /// The root agent of the session it belongs to.
-    pub session: String,
+    pub kind: String,
+    /// The root agent of the session it belongs to; none for what is no session's.
+    pub session: Option<String>,
+    /// Why it is there: `Request #3 waits for you`.
     pub label: String,
+    /// What about, one line, masked by the daemon.
     pub detail: String,
     pub at: u64,
+    pub read: bool,
+    /// What it waited for was answered.
+    pub resolved: bool,
+    /// It waits for the user's answer, rather than tells them of something.
+    pub needs_you: bool,
+}
+
+impl BellItem {
+    pub fn of(row: &Value) -> Option<BellItem> {
+        let id = row["id"].as_u64()?;
+        Some(BellItem {
+            id,
+            key: format!("n-{id}"),
+            kind: text(row, "kind"),
+            session: row["session"].as_str().map(str::to_owned),
+            label: text(row, "title"),
+            detail: text(row, "excerpt"),
+            at: number(row, "at"),
+            read: !row["read_at"].is_null(),
+            resolved: row["resolved"] == true,
+            needs_you: row["needs_you"] == true,
+        })
+    }
+
+    /// It waits for the user and has not been read.
+    pub fn waits(&self) -> bool {
+        self.needs_you && !self.read
+    }
 }
 
 /// A ticket or a pull request an agent created or changed: what `agent.tool_served` says of a
@@ -314,86 +633,17 @@ pub struct Forged {
     pub at: u64,
 }
 
-/// The longest an excerpt of a ticket's or a pull request's text is kept, on one line.
-const EXCERPT: usize = 120;
-
 impl Forged {
-    /// What an event says was done to a ticket or a pull request, when it says it: a read, a
-    /// call refused, failed or held, and the re-run of a pull request's checks are none.
+    /// What an event says was done to a ticket or a pull request, when it says it: the daemon's
+    /// reading of it, which is also what its notification says (`flottille_core::notification`).
     pub fn of(event: &flottille_protocol::Event) -> Option<Forged> {
-        let data = &event.data;
-        if event.name != "agent.tool_served" || data["outcome"] != "ok" {
-            return None;
-        }
-        let arguments = &data["arguments"];
-        let field = |name: &str| arguments[name].as_str().unwrap_or_default();
-        let number = arguments["number"]
-            .as_u64()
-            .map(|n| format!("#{n}"))
-            .unwrap_or_default();
-        let run = arguments["run"]
-            .as_u64()
-            .map(|n| format!("run {n}"))
-            .unwrap_or_default();
-        let ticket = match field("ticket") {
-            "" => "its ticket",
-            key => key,
-        };
-        // What it acted on, then the words it posted when it did.
-        let on = |what: &str, words: &[&str]| {
-            std::iter::once(what)
-                .chain(words.iter().copied().find(|w| !w.trim().is_empty()))
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(": ")
-        };
-        let tool = data["tool"].as_str()?;
-        let (said, excerpt) = match (tool, field("action")) {
-            ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
-            ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
-            ("forge", "run") => ("Ran a pipeline", field("pipeline").to_owned()),
-            ("forge", "stop") => ("Stopped a pipeline", on(&run, &[field("repository")])),
-            ("forge", "step") if field("do") == "rerun" => {
-                ("Ran a job again", on(&run, &[field("step")]))
-            }
-            ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
-            ("forge", "reply") => ("Replied in a review thread", on(&number, &[field("body")])),
-            ("forge", "resolve") => match arguments["resolved"].as_bool() {
-                Some(false) => ("Opened a review thread again", number.clone()),
-                _ => ("Resolved a review thread", number.clone()),
-            },
-            ("forge", "edit") => (
-                "Edited a pull request",
-                on(&number, &[field("title"), field("body")]),
-            ),
-            ("tickets", "create") => ("Created a ticket", field("title").to_owned()),
-            ("tickets", "comment") => ("Commented on a ticket", on(ticket, &[field("body")])),
-            ("tickets", "edit") => (
-                "Edited a ticket",
-                on(ticket, &[field("title"), field("body")]),
-            ),
-            ("tickets", "close") => ("Closed a ticket", ticket.to_owned()),
-            ("tickets", "reopen") => ("Reopened a ticket", ticket.to_owned()),
-            ("tickets", "status") => ("Moved a ticket", on(ticket, &[field("status")])),
-            _ => return None,
-        };
-        let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
-        let excerpt = match excerpt.char_indices().nth(EXCERPT) {
-            Some((cut, _)) => format!("{}…", &excerpt[..cut]),
-            None => excerpt,
-        };
-        // A pipeline's run is told with its link, which the daemon puts in the event when the
-        // forge gave it; it is added after the cut, which would lose its end.
-        let excerpt = match data["link"].as_str().filter(|_| said == "Ran a pipeline") {
-            Some(link) => format!("{excerpt} {link}"),
-            None => excerpt,
-        };
+        let forged = flottille_core::notification::forged(event)?;
         Some(Forged {
             seq: event.seq,
-            agent: data["agent"].as_str()?.to_owned(),
-            ticket: tool == "tickets",
-            said: said.to_owned(),
-            excerpt,
+            agent: forged.agent,
+            ticket: forged.ticket,
+            said: forged.said.to_owned(),
+            excerpt: forged.excerpt,
             at: event.at,
         })
     }
@@ -440,6 +690,8 @@ pub struct LinkShown {
     pub title: Option<String>,
     /// The address's host, or the file's path in the place.
     pub whence: String,
+    /// The number of the event: what names a file to the machine that serves it.
+    pub seq: u64,
 }
 
 impl LinkShown {
@@ -454,6 +706,7 @@ impl LinkShown {
             target: text("target")?.to_owned(),
             title: text("title").map(str::to_owned),
             whence: text("host").or_else(|| text("shown"))?.to_owned(),
+            seq: event.seq,
         })
     }
 
@@ -473,6 +726,8 @@ pub struct Answers<'a> {
     pub agents: &'a Value,
     /// `approval.list`
     pub approvals: &'a Value,
+    /// `vault.asks`: the requests for a vault entry that wait for the user.
+    pub vault_asks: &'a Value,
     /// The roots whose `needs_user` the daemon says is true (`agent.trees`).
     pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
@@ -497,6 +752,19 @@ pub fn runs_on(runs_on: &Value) -> String {
 
 fn text(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// The agent of another machine whose child the root `agent` is, by name, from its
+/// `launched_from`; `None` for any other root, a session another machine's agent leads included.
+/// Such a child has no parent here and is at depth 1 from the moment it is made, before its
+/// launch names it.
+fn child_of(agent: &Value) -> Option<String> {
+    let from = &agent["launched_from"];
+    let child = from["kind"] == "child" || number(agent, "depth") > 0;
+    child.then(|| match from["kind"] == "child" {
+        true => format!("agent {} of {}", text(from, "agent"), text(from, "machine")),
+        false => "an agent of another machine".to_owned(),
+    })
 }
 
 fn number(value: &Value, key: &str) -> u64 {
@@ -632,9 +900,8 @@ impl Snapshot {
     /// What waits for the user is the daemon's to say, as `flottille status` shows it:
     ///
     /// - a session is a root agent and its tree, in its root's place;
-    /// - the bell lists every request the user holds (`approval.list`), which opens the session of
-    ///   the root of the agent that asked, and every root's question waiting for the user's answer
-    ///   (`waiting_on_answer`), which opens its session;
+    /// - the bell is the daemon's notification centre (`set_notifications`), never made of the
+    ///   requests and questions here: what the rows of a session say it waits on is read from them;
     /// - a session needs the user (`NEEDS YOU`) when the daemon says its root `needs_user`;
     ///   otherwise it is running when an agent of its tree starts or works; otherwise it shows no
     ///   mark.
@@ -650,37 +917,24 @@ impl Snapshot {
             })
             .collect();
 
-        let mut bell = Vec::new();
+        // What each session waits on, for its row's words: the bell is the daemon's.
+        let mut asks: Vec<(String, &'static str)> = Vec::new();
         for request in list(answers.approvals, "requests") {
             let asker = request["agent"].as_str().unwrap_or_default();
-            let n = number(request, "number");
-            bell.push(BellItem {
-                key: format!("request-{n}"),
-                session: root_of(&parents, asker).to_owned(),
-                label: format!("Request #{n} waits for you"),
-                detail: crate::session_link::Request::of(request).asked(),
-                at: number(request, "created_at"),
-            });
+            asks.push((root_of(&parents, asker).to_owned(), "a permission"));
+        }
+        // An agent's request for a vault entry waits for the user as a held request does: its
+        // session's row says it, the card being in the rail's "Waiting for you".
+        let mut needs_user = answers.needs_user.clone();
+        for ask in list(answers.vault_asks, "asks") {
+            let asker = ask["agent"].as_str().unwrap_or_default();
+            let session = root_of(&parents, asker).to_owned();
+            needs_user.insert(session.clone());
+            asks.push((session, "a vault entry"));
         }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
-            let id = text(root, "id");
-            let open = answers.questions.get(&id).map_or(&[][..], Vec::as_slice);
-            // Its open questions each, or one item while the tree has not been read yet.
-            let open = match open {
-                [] => &[OpenQuestion::default()][..],
-                open => open,
-            };
-            for question in open {
-                bell.push(BellItem {
-                    key: format!("question-{id}-{}", question.seq),
-                    label: "Asks you a question".into(),
-                    detail: question.text.clone(),
-                    at: question.at,
-                    session: id.clone(),
-                });
-            }
+            asks.push((text(root, "id"), "a question"));
         }
-        bell.sort_by_key(|item| item.at);
 
         let ended = |agent: &Value| matches!(agent["state"].as_str(), Some("ended" | "failed"));
         let final_ids: HashSet<&str> = agents
@@ -792,6 +1046,20 @@ impl Snapshot {
                 .entry(root_of(&parents, agent))
                 .or_insert((said, line));
         }
+        // An agent of another project than the session it started or leads is named with its
+        // project: the session is that project's, its pilot is not.
+        let across = |session: &Value, id: &str| {
+            let name = name_of(id);
+            let theirs = agents
+                .iter()
+                .find(|a| a["id"].as_str() == Some(id))
+                .and_then(|a| a["project"].as_str())
+                .filter(|theirs| Some(*theirs) != session["project"].as_str());
+            match theirs {
+                Some(project) => format!("{name} in {project}"),
+                None => name,
+            }
+        };
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
@@ -805,7 +1073,7 @@ impl Snapshot {
                     .flatten();
                 let mark = if ended(agent) {
                     None
-                } else if answers.needs_user.contains(&id) {
+                } else if needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
@@ -837,11 +1105,8 @@ impl Snapshot {
                         .get(id.as_str())
                         .map(|(said, _)| said.clone())
                         .unwrap_or_else(|| "Waiting".to_owned()),
-                    Some(_) => match bell.iter().find(|item| item.session == id) {
-                        Some(item) if item.key.starts_with("request-") => {
-                            "Needs you: a permission".to_owned()
-                        }
-                        Some(_) => "Needs you: a question".to_owned(),
+                    Some(_) => match asks.iter().find(|(session, _)| *session == id) {
+                        Some((_, what)) => format!("Needs you: {what}"),
                         None => "Needs you".to_owned(),
                     },
                 };
@@ -863,12 +1128,21 @@ impl Snapshot {
                     ended_at: agent["ended_at"].as_u64().unwrap_or(active_at),
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
-                    started_by: agent["launched_by"].as_str().map(name_of),
-                    led_by: agent["led_by"].as_str().map(name_of),
+                    started_by: agent["launched_by"].as_str().map(|by| across(agent, by)),
+                    led_by: agent["led_by"].as_str().map(|by| across(agent, by)),
                     runs: runs_on(&agent["runs_on"]),
                     pilot: agent["led_by"]
                         .as_str()
                         .map(|pilot| root_of(&parents, pilot).to_owned()),
+                    led_from_elsewhere: agent["led_by"].as_str().is_some_and(|pilot| {
+                        agents
+                            .iter()
+                            .find(|a| a["id"].as_str() == Some(pilot))
+                            .is_some_and(|a| a["project"] != agent["project"])
+                    }),
+                    elsewhere: None,
+                    tag: None,
+                    child_of: child_of(agent),
                     id,
                 }
             })
@@ -905,6 +1179,8 @@ impl Snapshot {
                     model: project["model"].as_str().map(str::to_owned),
                     commands,
                     tracked: !project["tracker"].is_null(),
+                    homes: Vec::new(),
+                    apart: None,
                 }
             })
             .collect();
@@ -918,14 +1194,28 @@ impl Snapshot {
         Snapshot {
             projects,
             sessions,
+            elsewhere: Vec::new(),
             workspaces,
-            bell,
+            bell: Vec::new(),
+            unread: (0, 0),
             project_changes: 0,
             roots: parents
                 .keys()
                 .map(|id| ((*id).to_owned(), root_of(&parents, id).to_owned()))
                 .collect(),
+            homes: Vec::new(),
+            this_machine: None,
         }
+    }
+
+    /// Takes the notification centre as `notifications.list` answered it.
+    pub fn set_notifications(&mut self, answer: &Value) {
+        self.bell = list(answer, "notifications")
+            .iter()
+            .filter_map(BellItem::of)
+            .collect();
+        let unread = |key: &str| number(&answer["unread"], key) as usize;
+        self.unread = (unread("needs_you"), unread("new"));
     }
 
     /// The session an agent belongs to: its tree's root, itself when it is not known.
@@ -947,12 +1237,14 @@ impl Snapshot {
             .filter(move |s| s.project == project && &s.place == place)
     }
 
-    /// The sessions of a project that have not ended, whatever their place: the one whose last
-    /// exchange is the latest first, then the newest.
+    /// The sessions of a project that have not ended, whatever their place, as the tree lists
+    /// them (those on other machines included): the one whose last exchange is the latest first,
+    /// then the newest.
     pub fn live_sessions_of(&self, project: &str) -> Vec<&Session> {
         let mut live: Vec<&Session> = self
             .sessions
             .iter()
+            .chain(&self.elsewhere)
             .filter(|s| s.project == project && !s.ended)
             .collect();
         live.sort_by(|a, b| {
@@ -972,6 +1264,358 @@ impl Snapshot {
 
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// This snapshot with the sessions this machine's agents started on other machines, each
+    /// under the live session whose tree started it: a child or a led session, while it lives or
+    /// once it reported. A session handed to the user is theirs, on its machine only.
+    pub fn with_elsewhere(mut self, machines: &crate::machines::Machines) -> Snapshot {
+        let mut added = Vec::new();
+        for launched in &machines.launches {
+            if !under_its_pilot(launched) {
+                continue;
+            }
+            let root = self.root_of(&launched.caller);
+            let Some(pilot) = self.session(&root).filter(|pilot| !pilot.ended) else {
+                continue;
+            };
+            let (state, mark) = last_known(launched, machines.machine(&launched.machine));
+            let said = |words: &str| {
+                format!(
+                    "{}{} on {}",
+                    words[..1].to_uppercase(),
+                    &words[1..],
+                    launched.machine
+                )
+            };
+            added.push(Session {
+                id: elsewhere_id(&launched.machine, &launched.agent),
+                project: pilot.project.clone(),
+                place: None,
+                title: match launched.title.is_empty() {
+                    true => format!("agent {}", launched.agent),
+                    false => launched.title.clone(),
+                },
+                mark,
+                mark_said: mark.map(|_| said(&state)).unwrap_or_default(),
+                waits: String::new(),
+                agents: 1,
+                live: 1,
+                resumable: false,
+                ended: false,
+                active_at: launched.heard_at.unwrap_or(launched.at),
+                exchanged_at: launched.at,
+                ended_at: launched.heard_at.unwrap_or(launched.at),
+                created_at: launched.at,
+                commands: 0,
+                started_by: None,
+                led_by: Some(pilot.title.clone()),
+                runs: String::new(),
+                pilot: Some(root),
+                led_from_elsewhere: false,
+                elsewhere: Some(Elsewhere {
+                    machine: launched.machine.clone(),
+                    agent: launched.agent.clone(),
+                    offline: machines
+                        .machine(&launched.machine)
+                        .is_some_and(|machine| !machine.online()),
+                    state,
+                    listed: false,
+                    here: false,
+                    look: machines
+                        .members
+                        .iter()
+                        .find(|member| member.name == launched.machine)
+                        .map(crate::machines::Member::look_words),
+                }),
+                tag: None,
+                child_of: None,
+            });
+        }
+        self.elsewhere = added;
+        self
+    }
+
+    /// This snapshot, of the machine in front (`front`, `None` for this one), with the sessions
+    /// of every other machine as their lists say them (`docs/remote.md`, "One list of every
+    /// machine"), each carrying its machine's name, greyed while that machine is off; this
+    /// machine's own, carrying none, while another is in front. A project of another machine
+    /// only is a group of its own; one of the same name on several is one group. A session an
+    /// agent of this machine started there keeps its row under its pilot instead.
+    pub fn with_lists(
+        mut self,
+        machines: &crate::machines::Machines,
+        front: Option<&str>,
+    ) -> Snapshot {
+        let launched: HashSet<(&str, &str)> = self
+            .elsewhere
+            .iter()
+            .filter_map(|session| session.elsewhere.as_ref())
+            .map(|there| (there.machine.as_str(), there.agent.as_str()))
+            .collect();
+        if let Some(front) = front {
+            for session in &mut self.sessions {
+                session.tag = Some(front.to_owned());
+            }
+        }
+        let this = std::iter::once((None, &machines.lists.this)).filter(|_| front.is_some());
+        let others = machines
+            .lists
+            .machines
+            .iter()
+            .filter(|(name, _)| Some(name.as_str()) != front)
+            .map(|(name, listed)| (Some(name.as_str()), listed));
+        let mut added = Vec::new();
+        for (machine, listed) in this.chain(others) {
+            let name =
+                machine.unwrap_or_else(|| machines.this.as_deref().unwrap_or("this-machine"));
+            let off = machine
+                .and_then(|machine| machines.machine(machine))
+                .filter(|machine| !machine.online());
+            let ids: HashSet<&str> = listed.iter().map(|session| session.id.as_str()).collect();
+            for session in listed {
+                if launched.contains(&(name, session.id.as_str())) {
+                    continue;
+                }
+                let mark = match (off, session.state.as_str()) {
+                    (Some(_), _) => None,
+                    (None, "running") => Some(AgentState::Running),
+                    (None, "needs you") => Some(AgentState::NeedsYou),
+                    (None, "waiting") => Some(AgentState::Waiting),
+                    _ => None,
+                };
+                let state = match off {
+                    Some(machine) => machine.state_words(),
+                    None => session.state.clone(),
+                };
+                added.push(Session {
+                    id: elsewhere_id(name, &session.id),
+                    project: session.project.clone(),
+                    place: None,
+                    title: match session.title.is_empty() {
+                        true => format!("agent {}", session.id),
+                        false => session.title.clone(),
+                    },
+                    mark,
+                    mark_said: mark
+                        .map(|_| {
+                            let mut said = session.state.clone();
+                            said[..1].make_ascii_uppercase();
+                            said
+                        })
+                        .unwrap_or_default(),
+                    waits: String::new(),
+                    agents: 1,
+                    live: 1,
+                    resumable: false,
+                    ended: false,
+                    active_at: session.exchanged_at,
+                    exchanged_at: session.exchanged_at,
+                    ended_at: session.exchanged_at,
+                    created_at: session.created_at,
+                    commands: 0,
+                    started_by: None,
+                    led_by: None,
+                    runs: String::new(),
+                    pilot: session
+                        .pilot
+                        .as_deref()
+                        .filter(|pilot| ids.contains(pilot))
+                        .map(|pilot| elsewhere_id(name, pilot)),
+                    led_from_elsewhere: false,
+                    elsewhere: Some(Elsewhere {
+                        machine: name.to_owned(),
+                        agent: session.id.clone(),
+                        state,
+                        listed: true,
+                        offline: off.is_some(),
+                        here: machine.is_none(),
+                        look: machines
+                            .members
+                            .iter()
+                            .find(|member| member.name == name)
+                            .map(crate::machines::Member::look_words),
+                    }),
+                    tag: machine.map(str::to_owned),
+                    child_of: None,
+                });
+                if !self
+                    .projects
+                    .iter()
+                    .any(|project| project.name == session.project)
+                {
+                    self.projects.push(Project {
+                        name: session.project.clone(),
+                        folder: String::new(),
+                        repositories: Vec::new(),
+                        default_repositories: None,
+                        workspaces: Vec::new(),
+                        provider: None,
+                        model: None,
+                        commands: 0,
+                        tracked: false,
+                        homes: Vec::new(),
+                        apart: None,
+                    });
+                }
+            }
+        }
+        self.elsewhere.extend(added);
+        self.arrange(machines, front);
+        self.projects.sort_by(|a, b| a.name.cmp(&b.name));
+        self
+    }
+
+    /// Makes one row of a project that several machines have (`docs/remote.md`, "One list of
+    /// every machine"): the same repositories, whatever the name, are the same project; the same
+    /// name with other repositories is another row, told apart by its machine. Each row says the
+    /// machines that have it, and each session of another machine moves to its row. With no
+    /// other machine, nothing is marked and the rows are the names.
+    fn arrange(&mut self, machines: &crate::machines::Machines, front: Option<&str>) {
+        let Some(this) = machines.this.as_deref() else {
+            return;
+        };
+        if machines.machines.is_empty() {
+            return;
+        }
+        let own = front.unwrap_or(this);
+        let mut order = vec![own];
+        order.extend([this].into_iter().filter(|name| *name != own));
+        let rest: Vec<&str> = machines
+            .machines
+            .iter()
+            .map(|machine| machine.name.as_str())
+            .filter(|name| !order.contains(name))
+            .collect();
+        order.extend(rest);
+        let held = |machine: &str| held_by(machines, this, machine);
+        let listed = |machine: &str| listed_by(machines, this, machine);
+        let real: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|project| !project.folder.is_empty())
+            .map(|project| project.name.clone())
+            .collect();
+        let mut groups: Vec<Group> = Vec::new();
+        let mut at: HashMap<(String, String), usize> = HashMap::new();
+        for &machine in &order {
+            let mut names: Vec<&str> = match machine == own {
+                true => real.iter().map(String::as_str).collect(),
+                false => held(machine).iter().map(|h| h.name.as_str()).collect(),
+            };
+            if machine != own {
+                names.extend(listed(machine));
+            }
+            let mut seen = HashSet::new();
+            names.retain(|name| seen.insert(*name));
+            for name in names {
+                let identity = match held(machine).iter().find(|h| h.name == name) {
+                    Some(h) if h.remotes.is_empty() => Identity::Alone,
+                    Some(h) => Identity::Remotes(h.remotes.clone()),
+                    None => Identity::Unknown,
+                };
+                // A machine has a project once in a row: two of its own with the same
+                // repositories stay two rows.
+                let found = groups.iter().position(|group| {
+                    !group.machines.iter().any(|m| m == machine)
+                        && match (&group.identity, &identity) {
+                            (Identity::Remotes(a), Identity::Remotes(b)) => a == b,
+                            (Identity::Unknown, _) | (_, Identity::Unknown) => group.key == name,
+                            _ => false,
+                        }
+                });
+                let index = match found {
+                    Some(index) => {
+                        groups[index].machines.push(machine.to_owned());
+                        if machine == own {
+                            groups[index].own = Some(name.to_owned());
+                        }
+                        index
+                    }
+                    None => {
+                        let taken = groups.iter().any(|group| group.key == name);
+                        groups.push(Group {
+                            key: match taken {
+                                true => format!("{name}@{machine}"),
+                                false => name.to_owned(),
+                            },
+                            identity,
+                            machines: vec![machine.to_owned()],
+                            own: (machine == own).then(|| name.to_owned()),
+                            apart: taken.then(|| machine.to_owned()),
+                        });
+                        groups.len() - 1
+                    }
+                };
+                at.insert((machine.to_owned(), name.to_owned()), index);
+            }
+        }
+        let homes: Vec<Home> = std::iter::once(this)
+            .chain(machines.machines.iter().map(|m| m.name.as_str()))
+            .map(|name| Home::of(machines, name, name == this))
+            .collect();
+        let mut records: HashMap<String, Project> = std::mem::take(&mut self.projects)
+            .into_iter()
+            .filter(|project| !project.folder.is_empty())
+            .map(|project| (project.name.clone(), project))
+            .collect();
+        self.projects = groups
+            .iter()
+            .map(|group| {
+                let mut project = group
+                    .own
+                    .as_ref()
+                    .and_then(|name| records.remove(name))
+                    .unwrap_or_else(|| Project {
+                        name: group.key.clone(),
+                        folder: String::new(),
+                        repositories: Vec::new(),
+                        default_repositories: None,
+                        workspaces: Vec::new(),
+                        provider: None,
+                        model: None,
+                        commands: 0,
+                        tracked: false,
+                        homes: Vec::new(),
+                        apart: None,
+                    });
+                project.name = group.key.clone();
+                project.apart = group.apart.clone();
+                project.homes = group
+                    .machines
+                    .iter()
+                    .filter_map(|machine| homes.iter().find(|home| &home.machine == machine))
+                    .cloned()
+                    .collect();
+                project
+            })
+            .collect();
+        for session in &mut self.elsewhere {
+            let Some(there) = session.elsewhere.as_ref().filter(|there| there.listed) else {
+                continue;
+            };
+            if let Some(index) = at.get(&(there.machine.clone(), session.project.clone())) {
+                session.project = groups[*index].key.clone();
+            }
+        }
+        self.homes = homes;
+        self.this_machine = Some(own.to_owned());
+    }
+
+    /// The machine a session runs on, by name.
+    pub fn machine_of<'a>(&'a self, session: &'a Session) -> &'a str {
+        session
+            .elsewhere
+            .as_ref()
+            .map(|there| there.machine.as_str())
+            .or(session.tag.as_deref())
+            .or(self.this_machine.as_deref())
+            .unwrap_or_default()
+    }
+
+    /// A row of another machine's session, by its id in the tree.
+    pub fn elsewhere(&self, id: &str) -> Option<&Session> {
+        self.elsewhere.iter().find(|session| session.id == id)
     }
 
     pub fn workspace(&self, project: &str, name: &str) -> Option<&Workspace> {
@@ -1009,12 +1653,303 @@ mod tests {
             workspaces: &json!({"workspaces": [{"project": "app", "name": "login"}]}),
             agents: &agents,
             approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
             needs_user: &needs_user.iter().map(|id| id.to_string()).collect(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
             commands: &json!({"commands": []}),
             subscriptions: &json!({"subscriptions": []}),
         })
+    }
+
+    fn listed(id: &str, project: &str, exchanged_at: u64) -> crate::machines::Listed {
+        crate::machines::Listed {
+            id: id.to_owned(),
+            title: format!("Work {id}"),
+            project: project.to_owned(),
+            state: "idle".to_owned(),
+            exchanged_at,
+            created_at: 1,
+            pilot: None,
+        }
+    }
+
+    /// `server`, in `state`, listing a session in `app` and one in `site`; this machine's own
+    /// list holding `r1`.
+    fn two_machines(state: &str) -> crate::machines::Machines {
+        crate::machines::Machines {
+            this: Some("pc".to_owned()),
+            machines: vec![crate::machines::Machine {
+                name: "server".to_owned(),
+                fingerprint: String::new(),
+                state: state.to_owned(),
+                since: Some(0),
+                reason: None,
+                role: Some("runner".to_owned()),
+                linked: false,
+                projects: None,
+            }],
+            lists: crate::machines::Lists {
+                this: vec![listed("r1", "app", 5)],
+                machines: vec![(
+                    "server".to_owned(),
+                    vec![listed("s1", "app", 9_000_000), listed("s2", "site", 3)],
+                )],
+                ..crate::machines::Lists::default()
+            },
+            ..crate::machines::Machines::default()
+        }
+    }
+
+    #[test]
+    fn the_sessions_of_every_machine_are_one_list_by_project() {
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_lists(&two_machines("online"), None);
+
+        let names: Vec<&str> = snapshot.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["app", "site"],
+            "a project of the server only is a group"
+        );
+        let app: Vec<&str> = snapshot
+            .live_sessions_of("app")
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(app, ["s1@server", "r1"], "by last exchange");
+        let there = snapshot.elsewhere("s1@server").unwrap();
+        assert_eq!(there.tag.as_deref(), Some("server"));
+        assert!(!there.elsewhere.as_ref().unwrap().offline);
+        assert_eq!(snapshot.session("r1").unwrap().tag, None);
+    }
+
+    #[test]
+    fn a_session_of_a_machine_that_is_off_is_greyed_with_since_when() {
+        let snapshot =
+            build(json!({"agents": []}), json!({}), &[]).with_lists(&two_machines("offline"), None);
+
+        let there = snapshot.elsewhere("s1@server").unwrap();
+        let said = there.elsewhere.as_ref().unwrap();
+        assert!(said.offline);
+        assert!(said.state.starts_with("offline since "), "{}", said.state);
+        assert_eq!(there.mark, None);
+    }
+
+    #[test]
+    fn with_another_machine_in_front_its_rows_carry_its_name_and_this_one_s_are_listed() {
+        let snapshot = build(
+            json!({"agents": [agent("s1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_lists(&two_machines("online"), Some("server"));
+
+        assert_eq!(
+            snapshot.session("s1").unwrap().tag.as_deref(),
+            Some("server")
+        );
+        let here = snapshot.elsewhere("r1@pc").unwrap();
+        assert_eq!(here.tag, None);
+        assert!(here.elsewhere.as_ref().unwrap().here);
+        // The machine in front is read whole: its list is not added again.
+        assert!(snapshot.elsewhere("s1@server").is_none());
+    }
+
+    fn held(name: &str, remotes: &[&str]) -> crate::machines::MachineProject {
+        crate::machines::MachineProject {
+            name: name.to_owned(),
+            remotes: remotes.iter().map(|r| (*r).to_owned()).collect(),
+        }
+    }
+
+    /// `pc` holding `app` and `server` holding `held_there`, each one session of its project.
+    fn with_projects(
+        state: &str,
+        this: Vec<crate::machines::MachineProject>,
+        there: Vec<crate::machines::MachineProject>,
+    ) -> Snapshot {
+        let mut machines = two_machines(state);
+        machines.lists.this_projects = this;
+        machines.lists.projects = vec![("server".to_owned(), there)];
+        build(
+            json!({"agents": [agent("r1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_lists(&machines, None)
+    }
+
+    fn homes_of(snapshot: &Snapshot, row: &str) -> Vec<String> {
+        snapshot
+            .projects
+            .iter()
+            .find(|project| project.name == row)
+            .map(|project| project.homes.iter().map(|h| h.machine.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn one_project_on_two_machines_is_one_row_with_both_machines() {
+        // Another name there, the same repositories: one project.
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![
+                held("app", &["git.example/acme/app"]),
+                held("site", &["git.example/acme/site"]),
+            ],
+        );
+        let names: Vec<&str> = snapshot.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["app", "site"]);
+        assert_eq!(
+            homes_of(&snapshot, "app"),
+            ["pc", "server"],
+            "this one first"
+        );
+        assert_eq!(homes_of(&snapshot, "site"), ["server"]);
+        let app = &snapshot.projects[0];
+        assert!(
+            !app.folder.is_empty(),
+            "the row is this machine's own project"
+        );
+        assert!(!app.offline());
+        // The server's session sits in the one row.
+        let rows: Vec<&str> = snapshot
+            .live_sessions_of("app")
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(rows, ["s1@server", "r1"]);
+        assert_eq!(snapshot.machine_of(snapshot.session("r1").unwrap()), "pc");
+        assert_eq!(
+            snapshot.machine_of(snapshot.elsewhere("s1@server").unwrap()),
+            "server"
+        );
+    }
+
+    #[test]
+    fn the_same_repositories_under_another_name_are_one_project() {
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![held("ledgerly", &["git.example/acme/app"])],
+        );
+        // The server's list names its project `ledgerly`; its session says `app`, which that list
+        // does not hold, so it is a row of its own, not the project's.
+        assert_eq!(homes_of(&snapshot, "app"), ["pc", "server"]);
+    }
+
+    #[test]
+    fn two_projects_of_one_name_but_other_repositories_are_told_apart() {
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![held("app", &["git.example/other/app"])],
+        );
+        let rows: Vec<(&str, &str)> = snapshot
+            .projects
+            .iter()
+            .map(|p| (p.name.as_str(), p.title()))
+            .collect();
+        // `site` is the server's second session's project, which its list does not hold.
+        assert_eq!(
+            rows,
+            [("app", "app"), ("app@server", "app"), ("site", "site")]
+        );
+        assert_eq!(homes_of(&snapshot, "app"), ["pc"]);
+        assert_eq!(homes_of(&snapshot, "app@server"), ["server"]);
+        assert_eq!(snapshot.projects[1].apart.as_deref(), Some("server"));
+        // The server's session goes to the server's row.
+        let there: Vec<&str> = snapshot
+            .live_sessions_of("app@server")
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(there, ["s1@server"]);
+    }
+
+    #[test]
+    fn a_project_with_no_remote_is_the_same_as_none_other() {
+        let snapshot = with_projects("online", vec![held("app", &[])], vec![held("app", &[])]);
+        assert_eq!(homes_of(&snapshot, "app"), ["pc"]);
+        assert_eq!(homes_of(&snapshot, "app@server"), ["server"]);
+    }
+
+    #[test]
+    fn a_machine_that_lists_no_projects_is_matched_by_name() {
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![],
+        );
+        assert_eq!(homes_of(&snapshot, "app"), ["pc", "server"]);
+    }
+
+    #[test]
+    fn a_project_of_an_offline_machine_is_greyed_with_since_when() {
+        let snapshot = with_projects(
+            "offline",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![
+                held("app", &["git.example/acme/app"]),
+                held("site", &["git.example/acme/site"]),
+            ],
+        );
+        let find = |name: &str| snapshot.projects.iter().find(|p| p.name == name).unwrap();
+        // `site` is the server's alone: greyed. `app` is this machine's too: not.
+        assert!(find("site").offline());
+        assert!(!find("app").offline());
+        let server = snapshot
+            .homes
+            .iter()
+            .find(|h| h.machine == "server")
+            .unwrap();
+        assert!(server.offline);
+        assert!(
+            server.said().starts_with("server · offline since "),
+            "{}",
+            server.said()
+        );
+    }
+
+    #[test]
+    fn with_no_other_machine_no_row_is_marked() {
+        let machines = crate::machines::Machines {
+            this: Some("pc".to_owned()),
+            ..crate::machines::Machines::default()
+        };
+        let snapshot = build(json!({"agents": []}), json!({}), &[]).with_lists(&machines, None);
+        assert!(snapshot.homes.is_empty());
+        assert!(snapshot.projects.iter().all(|p| p.homes.is_empty()));
+    }
+
+    #[test]
+    fn the_bell_is_the_notifications_the_daemon_kept_with_their_counts() {
+        let mut snapshot = Snapshot::default();
+        snapshot.set_notifications(&json!({"unread": {"needs_you": 2, "new": 5},
+            "notifications": [
+            {"id": 7, "at": 30, "kind": "request", "session": "r1", "project": "app",
+                "workspace": null, "title": "Request #3 waits for you",
+                "excerpt": "Read .env", "read_at": null, "resolved": false,
+                "needs_you": true},
+            {"id": 8, "at": 40, "kind": "report", "session": null, "project": null,
+                "workspace": null, "title": "Reported", "excerpt": "", "read_at": 41,
+                "resolved": false, "needs_you": false}]}));
+        assert_eq!(snapshot.unread, (2, 5));
+        assert_eq!(snapshot.bell.len(), 2);
+        let first = &snapshot.bell[0];
+        assert_eq!(first.key, "n-7");
+        assert_eq!(first.session.as_deref(), Some("r1"));
+        assert_eq!(first.label, "Request #3 waits for you");
+        assert_eq!(first.detail, "Read .env");
+        assert!(first.waits() && !first.read && !first.resolved);
+        let second = &snapshot.bell[1];
+        assert!(second.read && second.session.is_none() && !second.waits());
     }
 
     #[test]
@@ -1035,7 +1970,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_of_a_child_marks_its_root_and_rings_the_bell() {
+    fn a_request_of_a_child_marks_its_root_and_says_what_it_waits_on() {
         let snapshot = build(
             json!({"agents": [agent("r1", None, "idle", Some("login")),
                 agent("c1", Some("r1"), "idle", Some("login"))]}),
@@ -1047,10 +1982,7 @@ mod tests {
         assert_eq!(snapshot.sessions.len(), 1, "a child is not a session");
         assert_eq!(snapshot.sessions[0].mark, Some(AgentState::NeedsYou));
         assert_eq!(snapshot.sessions[0].title, "Fix the login");
-        assert_eq!(snapshot.bell.len(), 1);
-        assert_eq!(snapshot.bell[0].session, "r1");
-        assert_eq!(snapshot.bell[0].label, "Request #3 waits for you");
-        assert_eq!(snapshot.bell[0].detail, "Read .env");
+        assert_eq!(snapshot.sessions[0].mark_said, "Needs you: a permission");
         assert_eq!(snapshot.root_of("c1"), "r1");
     }
 
@@ -1286,7 +2218,7 @@ mod tests {
         let agents = json!({"agents": [agent("r1", None, "idle", None)]});
         let said = build(agents.clone(), json!({"requests": []}), &["r1"]);
         assert_eq!(said.sessions[0].mark, Some(AgentState::NeedsYou));
-        assert!(said.bell.is_empty(), "the bell lists the requests only");
+        assert!(said.bell.is_empty(), "the bell is the centre's, set apart");
         let not_said = build(agents, json!({"requests": []}), &[]);
         assert_eq!(not_said.sessions[0].mark, None);
     }
@@ -1320,6 +2252,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &json!({"agents": [agent("r2", None, "idle", None)]}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r2".into(), "Hello".into())]),
@@ -1376,6 +2309,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &json!({"agents": [agent("r1", None, "idle", None), started, child, by_child]}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([
@@ -1390,6 +2324,60 @@ mod tests {
         assert_eq!(by("r2").as_deref(), Some("Lead the work"));
         assert_eq!(by("r3").as_deref(), Some("planner"));
         assert_eq!(by("r1"), None, "a session the user started names nobody");
+    }
+
+    #[test]
+    fn a_child_of_another_machine_s_agent_is_said_as_its_child() {
+        let mut child = agent("r1", None, "working", None);
+        child["depth"] = json!(1);
+        child["launched_from"] = json!({"machine": "pc", "agent": "b1", "kind": "child"});
+        let mut led = agent("r2", None, "idle", None);
+        led["launched_from"] = json!({"machine": "pc", "agent": "b1", "kind": "led"});
+        // Made, its launch not yet naming it: a child all the same, by its depth.
+        let mut new = agent("r3", None, "starting", None);
+        new["depth"] = json!(1);
+        let snapshot = build(
+            json!({"agents": [child, led, new]}),
+            json!({"requests": []}),
+            &[],
+        );
+        let child_of = |id: &str| snapshot.session(id).unwrap().child_of.clone();
+        assert_eq!(child_of("r1").as_deref(), Some("agent b1 of pc"));
+        assert_eq!(
+            child_of("r2"),
+            None,
+            "a led session is the user's to write to"
+        );
+        assert_eq!(
+            child_of("r3").as_deref(),
+            Some("an agent of another machine")
+        );
+    }
+
+    #[test]
+    fn a_session_led_from_another_project_names_its_pilot_s_project() {
+        let mut pilot = agent("r1", None, "idle", None);
+        pilot["title"] = json!("Release the fonts");
+        let mut led = agent("r2", None, "idle", None);
+        led["project"] = json!("kit");
+        led["launched_by"] = json!("r1");
+        led["led_by"] = json!("r1");
+        let mut near = agent("r3", None, "idle", None);
+        near["launched_by"] = json!("r1");
+        near["led_by"] = json!("r1");
+        let snapshot = build(
+            json!({"agents": [pilot, led, near]}),
+            json!({"requests": []}),
+            &[],
+        );
+        let led = snapshot.session("r2").unwrap();
+        assert_eq!(led.project, "kit");
+        assert_eq!(led.led_by.as_deref(), Some("Release the fonts in app"));
+        assert_eq!(led.started_by.as_deref(), Some("Release the fonts in app"));
+        assert!(led.led_from_elsewhere);
+        let near = snapshot.session("r3").unwrap();
+        assert_eq!(near.led_by.as_deref(), Some("Release the fonts"));
+        assert!(!near.led_from_elsewhere);
     }
 
     fn workspace_json(steps: Value) -> Value {
@@ -1412,6 +2400,7 @@ mod tests {
             workspaces: &json!({"workspaces": [workspace_json(steps)]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1500,6 +2489,7 @@ mod tests {
             workspaces: &json!({"workspaces": [shown]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1543,6 +2533,7 @@ mod tests {
             workspaces: &json!({"workspaces": [shown]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1589,6 +2580,7 @@ mod tests {
                 workspaces: &json!({"workspaces": []}),
                 agents: &agents,
                 approvals: &json!({"requests": []}),
+                vault_asks: &json!({"asks": []}),
                 needs_user,
                 questions: &HashMap::new(),
                 briefs: &HashMap::new(),
@@ -1636,6 +2628,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
             needs_user: &asking,
             questions: &HashMap::from([(
                 "r2".to_owned(),
@@ -1692,6 +2685,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1718,6 +2712,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1744,6 +2739,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1776,5 +2772,48 @@ mod tests {
         assert_eq!(ago(now, now - 3_600_000), "1h");
         assert_eq!(ago(now, now - 2 * 86_400_000), "2d");
         assert_eq!(ago(now, now - 21 * 86_400_000), "3w");
+    }
+
+    #[test]
+    fn a_session_on_another_machine_says_its_state_as_last_known() {
+        let launched = |state: &str, heard: Option<&str>| crate::machines::Launched {
+            machine: "server".into(),
+            caller: "r1".into(),
+            kind: "led".into(),
+            title: "Finish the export".into(),
+            agent: "a1".into(),
+            state: state.into(),
+            heard: heard.map(str::to_owned),
+            heard_at: None,
+            at: 1,
+            making: None,
+        };
+        let machine = |state: &str| crate::machines::Machine {
+            name: "server".into(),
+            fingerprint: "f".into(),
+            state: state.into(),
+            since: Some(0),
+            reason: None,
+            role: Some("runner".into()),
+            linked: false,
+            projects: None,
+        };
+        let online = machine("online");
+        let words = |l, m| last_known(&l, m).0;
+        assert_eq!(words(launched("started", None), Some(&online)), "running");
+        assert_eq!(words(launched("held", None), Some(&online)), "waiting");
+        // Allowed there, it sends nothing back but what it does: what is heard wins over the hold.
+        let report = Some("child-report");
+        assert_eq!(words(launched("held", report), Some(&online)), "reported");
+        assert_eq!(
+            words(launched("held", Some("child-failed")), Some(&online)),
+            "failed"
+        );
+        let turn = Some("session-turn-ended");
+        assert_eq!(words(launched("started", turn), Some(&online)), "waiting");
+        assert_eq!(words(launched("ended", report), Some(&online)), "reported");
+        let off = machine("offline");
+        assert!(words(launched("started", None), Some(&off)).starts_with("offline since "));
+        assert_eq!(last_known(&launched("started", None), Some(&off)).1, None);
     }
 }

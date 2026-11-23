@@ -1,7 +1,7 @@
 //! Codex agents end to end: the daemon starts Flottille's Codex bridge, which drives the fake
 //! `codex` (`crates/flottille-fake-codex`). No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

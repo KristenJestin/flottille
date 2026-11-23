@@ -10,15 +10,21 @@ repository.workspace = true
 # Prints the frames drawn each second on the standard error, to measure the window at rest: a
 # development build only (`--features frames`), never the shipped one.
 frames = ["gpui-kit/profiler"]
+# What only the window's scenarios may reach: the waits of the link a test shortens for the window
+# it opens. Switched on by the dev-dependency of `flottille`, never by a shipped build.
+test-support = []
 
 [dependencies]
 base64 = "0.22.1"
 flottille-client = { version = "0.1.0", path = "../flottille-client" }
 flottille-core = { version = "0.1.0", path = "../flottille-core" }
+# The device key that signs what the user does to the hub's list and each request to another
+# machine (`docs/remote.md`), as `flottille remote` signs it: already built for the binary.
+flottille-link = { version = "0.1.0", path = "../flottille-link" }
 flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
 # The components, tokens and motion of the window, shared with other GPUI applications; on GPUI
 # Fast, with Omarchy as a desktop theme source (its default `omarchy` feature).
-gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.18" }
+gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.3.0-beta.12" }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 # Already built for GPUI, which takes the window icon as one of its images; only the PNG decoder.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
@@ -27,8 +33,12 @@ libc = "0.2.191"
 # Already built for GPUI's paths; only its `LineJoin` and `LineCap`, which the mark's strokes round.
 lyon_tessellation = "1.0.23"
 serde_json = "1.0.154"
+# The setup code, wiped when dropped; already built under flottille-link.
+zeroize = "1.9.1"
 
 [dev-dependencies]
 # Already built for the derive macros; the scan of `presence` gaps reads the window's sources
 # as a syntax tree (`tests/a_block_has_its_own_space.rs`).
 syn = { version = "2", features = ["full", "visit"] }
+# The throwaway folders of the unit tests of `shown_files`; already built for the daemon.
+tempfile = "3.27.0"

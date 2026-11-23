@@ -1,7 +1,7 @@
 //! The scenarios of agents run over ACP, against the fake agent (`crates/flottille-fake-agent`),
 //! with throwaway repositories and temporary XDG folders. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -765,16 +765,16 @@ fn a_daemon_stopping_does_not_leave_the_group_of_an_agent_that_would_not_stop() 
 }
 
 #[test]
-fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
+fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_runs_on_the_default() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
     project(&user);
 
     // Before any session of the provider its models are not known: a model it does not offer
-    // fails the agent once its session says so (once known, it is refused at start:
-    // `tests/providers.rs`).
+    // is replaced by its default once its session says so, and said (#1076; once known, it is
+    // refused at start: `tests/providers.rs`).
     let (missing, missing_after) = run(&user, json!({"message": "hello", "model": "fake-huge"}));
-    let failed = events_until(&user, &missing, missing_after, "agent.failed");
+    let replaced = events_until(&user, &missing, missing_after, "agent.turn_ended");
     let (id, after) = run(
         &user,
         json!({"message": "hello", "model": "fake-large", "effort": "high"}),
@@ -795,19 +795,26 @@ fn a_model_and_an_effort_are_set_and_checked_and_a_model_not_offered_fails() {
             )
         })
         .collect();
-    assert_eq!(
-        set[..2],
-        [
-            ("model".into(), "fake-large".into()),
-            ("effort".into(), "high".into())
-        ]
-    );
-    let reason = failed.last().unwrap()["data"]["reason"].as_str().unwrap();
     assert!(
-        reason.contains("fake-huge") && reason.contains("fake-small, fake-large"),
-        "{reason}"
+        set.windows(2).any(|w| w
+            == [
+                ("model".into(), "fake-large".into()),
+                ("effort".into(), "high".into())
+            ]),
+        "{set:?}"
     );
-    assert_eq!(show(&user, &missing)["agent"]["state"], "failed");
+    let reasons: Vec<&str> = replaced
+        .iter()
+        .filter(|e| e["name"] == "agent.options_replaced")
+        .filter_map(|e| e["data"]["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        ["the agent does not offer the model fake-huge: running fake-small, its default"]
+    );
+    let missing = &show(&user, &missing)["agent"];
+    assert_eq!(missing["state"], "idle");
+    assert_eq!(missing["chosen"]["model"], "fake-small");
 }
 
 #[test]

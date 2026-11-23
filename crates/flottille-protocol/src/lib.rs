@@ -1,19 +1,21 @@
 //! The socket protocol: one JSON object per line (`docs/protocol.md`). Serde only, so that a
 //! client speaks it without the store or the daemon.
 
+pub mod address;
 mod catalogue;
+pub mod words;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use catalogue::{Class, METHODS, class};
+pub use catalogue::{Class, LAUNCHES, METHODS, class, launches};
 
 /// The protocol's version, `protocol` in `daemon.status`. Raised by any change of a method, an
 /// answer or an event that an older client would misread (`docs/remote.md`, "The version"); one
 /// it reads right, such as a new method, leaves it.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// A client's request. The id is the client's, opaque to the daemon, and comes back on the answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +86,11 @@ pub struct WatchParams {
     /// its connection is open (`docs/items.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// A workspace to watch for its forge, `[project, name]`, as `workspace.forge {watch: true}`
+    /// does for the connection: the subscription carries it, so that it lasts as long as the
+    /// subscription does, on another machine too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge: Option<[String; 2]>,
 }
 
 /// The parameters of `project.detect` and `project.add`.
@@ -289,6 +296,9 @@ pub struct AgentRun {
     /// Large pasted texts, sent as files with the first message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub texts: Vec<TextUpload>,
+    /// The upload whose files are its pictures and texts, sent in chunks before it (`agent.upload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<String>,
 }
 
 /// The parameters of `agent.send`.
@@ -303,6 +313,9 @@ pub struct AgentSend {
     /// Large pasted texts, written as files the message names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub texts: Vec<TextUpload>,
+    /// The upload whose files are its pictures and texts, sent in chunks before it (`agent.upload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<String>,
     /// When the agent's cache expired: compact it first (true) or send to its session as it is
     /// (false), whatever the setting; the setting decides when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -326,12 +339,55 @@ pub struct TextUpload {
     pub text: String,
 }
 
+/// The parameters of `agent.upload`: one chunk of a picture or a pasted text of a message to come,
+/// which names the upload (`docs/remote.md`, "Pictures sent to another machine").
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUpload {
+    /// The sender's name of the upload: 1 to 64 letters, digits, `_` or `-`.
+    pub upload: String,
+    /// The picture's number among the message's pictures, or the text's among its texts, from 1.
+    pub file: u32,
+    pub kind: UploadKind,
+    /// A picture's type, as `agent.send` takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// The whole file's size, in bytes.
+    pub size: u64,
+    /// Where this chunk starts in the file: where the chunks before it ended.
+    pub offset: u64,
+    /// The chunk's bytes, in base64.
+    pub data: String,
+}
+
+/// What a file of an upload is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UploadKind {
+    Image,
+    Text,
+}
+
 /// The parameters of `agent.image`: an image of the agent's folder, by the name an event gave.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentImage {
     pub agent: String,
     pub name: String,
+}
+
+/// The parameters of `agent.file`: a chunk of a picture or a video the agent showed
+/// (`web` `show_link`), named by the event that showed it, never by a path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentFile {
+    pub agent: String,
+    /// The number of the `agent.link_shown` event.
+    pub shown: u64,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
 }
 
 /// The parameters of `agent.trees`: a page of root agents with their trees, newest first.

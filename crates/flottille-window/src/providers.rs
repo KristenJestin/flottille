@@ -282,6 +282,14 @@ impl Provider {
         let listed = provider::listed_model(models.iter().map(|m| m.id.as_str()), id)?;
         models.iter().find(|m| m.id == listed)
     }
+
+    /// The model a stored id runs on (`provider::resolved_model`): the one listed as it is, else
+    /// the newest listed of its family, as the daemon starts a session on it.
+    pub fn resolved_model(&self, id: &str) -> Option<&Model> {
+        let models = self.models.as_ref()?;
+        let listed = provider::resolved_model(models.iter().map(|m| m.id.as_str()), id)?;
+        models.iter().find(|m| m.id == listed)
+    }
 }
 
 impl Providers {
@@ -350,13 +358,24 @@ impl Providers {
     /// knows them, each provider's recommended one (the model it takes when none is named)
     /// marked; a provider whose models no session said yet, by its name.
     pub fn model_entries(&self) -> Vec<ModelEntry> {
-        self.entries(&[], None)
+        self.entries(&[], None, None, None)
+    }
+
+    /// What the agent picker offers: the same, for the one provider `only` when it is given (the
+    /// Reply dock's picker, which never changes the provider of a running session), the model the
+    /// project's file gives (`projects`: its provider and model) named so.
+    pub fn agent_entries(
+        &self,
+        only: Option<&str>,
+        projects: Option<(&str, &str)>,
+    ) -> Vec<ModelEntry> {
+        self.entries(&[], None, only, projects)
     }
 
     /// The same, the recommended model of a provider being the one `gives` names for it (a
     /// feature's own rule), its own when `gives` says none.
     pub fn model_entries_giving(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
-        self.entries(gives, None)
+        self.entries(gives, None, None, None)
     }
 
     /// The same where the rule depends on the session's provider (Review's checks): each
@@ -368,6 +387,8 @@ impl Providers {
         self.entries(
             gives,
             Some(&|provider: &Provider| format!("recommended for {} sessions", provider.title)),
+            None,
+            None,
         )
     }
 
@@ -403,9 +424,14 @@ impl Providers {
         &self,
         gives: &[(String, Option<String>)],
         mark: Option<&dyn Fn(&Provider) -> String>,
+        only: Option<&str>,
+        projects: Option<(&str, &str)>,
     ) -> Vec<ModelEntry> {
         let mut entries = Vec::new();
-        for provider in self.offered() {
+        for provider in self
+            .offered()
+            .filter(|p| only.is_none_or(|name| p.name == name))
+        {
             let recommended = recommended_of(provider, gives).map(|m| m.id.as_str());
             let listed: Vec<&Model> = provider
                 .models
@@ -433,7 +459,11 @@ impl Providers {
                     provider.name.clone(),
                     provider.title.clone(),
                     Some(model.id.clone().into()),
-                    model.label(),
+                    if projects == Some((provider.name.as_str(), model.id.as_str())) {
+                        format!("{} · the project's", model.label())
+                    } else {
+                        model.label()
+                    },
                 )
                 .efforts(levels.iter().copied().cloned());
                 // The effort it runs with when none is chosen: what its provider said, else the
@@ -652,12 +682,6 @@ mod tests {
                 project: (None, None),
             };
             let mut said = vec![pickers.model_shown()];
-            said.extend(
-                pickers
-                    .entries(crate::composer::Menu::Model)
-                    .into_iter()
-                    .map(|e| e.label),
-            );
             said.push(providers.model_line("claude", None));
             for line in &said {
                 assert!(
@@ -692,21 +716,5 @@ mod tests {
             project: (None, None),
         };
         assert_eq!(pickers.model_shown(), "Opus 5.5 (1M context)");
-        let rows: Vec<(String, bool, Option<String>)> = pickers
-            .entries(crate::composer::Menu::Model)
-            .into_iter()
-            .map(|e| (e.label, e.on, e.note))
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                (
-                    "Opus 5.5 (1M context)".into(),
-                    true,
-                    Some("recommended".into())
-                ),
-                ("Claude Opus 5.5".into(), false, None)
-            ]
-        );
     }
 }

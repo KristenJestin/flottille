@@ -33,6 +33,24 @@ const CHOICE: &str = "keyring.toml";
 const APPLICATION: (&str, &str) = ("application", "flottille");
 const ENTRY: &str = "flottille-entry";
 
+/// The writes in progress, one lock per entry name: a Save, a removal and a share each check
+/// what the vault holds, await the keyring, then write the store, and two of them on one name
+/// would interleave (a share that saw no entry overwriting the one the user just saved).
+static WRITES: std::sync::LazyLock<Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Waits until no other write of the entry `name` is in progress; it is this one's until the
+/// guard is dropped.
+async fn writing(name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut writes = WRITES.lock().unwrap();
+        // A lock no write holds nor waits for is forgotten: the map keeps the names in use only.
+        writes.retain(|_, lock| std::sync::Arc::strong_count(lock) > 1);
+        writes.entry(name.to_owned()).or_default().clone()
+    };
+    lock.lock_owned().await
+}
+
 /// Where the secrets are.
 pub enum Keyring {
     /// The Secret Service of the session (`oo7`).
@@ -103,6 +121,9 @@ impl Keyring {
     async fn store(&self, name: &str, secret: &str) -> Result<(), String> {
         match self {
             Keyring::Memory { kept, file } => {
+                // An await, as the system's keyring's call over D-Bus is: two writes that
+                // overlap there overlap here too.
+                tokio::task::yield_now().await;
                 if refuses_a_store(file) {
                     return Err("the keyring refused to store it".to_owned());
                 }
@@ -128,10 +149,14 @@ impl Keyring {
     /// the user to unlock it and wait.
     async fn read(&self, name: &str) -> Result<Option<String>, String> {
         match self {
-            Keyring::Memory { kept, file } => Ok(Self::memory(kept, file)?
-                .get(name)
-                .cloned()
-                .or_else(|| held_before(file, name))),
+            Keyring::Memory { kept, file } => {
+                // An await, as the system's keyring's search over D-Bus is.
+                tokio::task::yield_now().await;
+                Ok(Self::memory(kept, file)?
+                    .get(name)
+                    .cloned()
+                    .or_else(|| held_before(file, name)))
+            }
             Keyring::Os => {
                 let keyring = os().await?;
                 let items = keyring
@@ -169,7 +194,7 @@ impl Keyring {
 
 /// Whether the configuration chooses the memory keyring, and this build is a test's: then a
 /// client that keeps a key of its own has no keyring (the daemon's memory is not its), and keeps
-/// it in a file as on a machine without one (`flottille remote setup`).
+/// it in a file as on a machine without one (`flottille remote pair`).
 pub fn memory_chosen(paths: &Paths) -> bool {
     cfg!(debug_assertions)
         && setting(&paths.config.join(CHOICE), "backend").as_deref() == Some("memory")
@@ -219,8 +244,16 @@ async fn os() -> Result<oo7::Keyring, String> {
     oo7::Keyring::new().await.map_err(said)
 }
 
+/// What a machine with no keyring says: the vault keeps no secret anywhere else.
+pub const NO_KEYRING: &str = "this machine has no keyring: no Secret Service runs in its \
+                              session (a headless server), and a vault entry is kept in a \
+                              keyring alone, never in a file";
+
 /// A keyring's error, which names what failed and never a secret.
 fn said(error: oo7::Error) -> String {
+    if crate::remote_command::no_service(&error) {
+        return NO_KEYRING.to_owned();
+    }
     format!("the keyring: {error}")
 }
 
@@ -252,6 +285,30 @@ struct Set {
 struct AskDismiss {
     ask: u64,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareWith {
+    name: String,
+    /// The user's machine it goes to.
+    machine: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FromFile {
+    project: String,
+    /// The file, by its path in the project.
+    path: String,
+    /// Left out, the name a launch that needs the file asks for (`travelled::entry_for`).
+    name: Option<String>,
+    /// Whether it takes the file again into the entry made of it before.
+    #[serde(default)]
+    replace: bool,
+}
+
+/// What a client that does not sign is answered for `vault.share`.
+pub const NOT_SIGNED: &str = "sharing a vault entry is signed by the user's device: ask it with `flottille vault share`, or from the window's Settings, Vault";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -294,6 +351,19 @@ pub async fn call(
                 ..failure
             })
         }
+        "vault.share" => {
+            let ShareWith { name, machine } = serde_json::from_value(params)?;
+            share(&daemon, &name, &machine).await
+        }
+        "vault.from_file" => {
+            let FromFile {
+                project,
+                path,
+                name,
+                replace,
+            } = serde_json::from_value(params)?;
+            from_file(&daemon, &project, &path, name, replace).await
+        }
         "vault.asks" => {
             let open = daemon.read(asks)?.open;
             Ok(json!({"asks": open.iter().map(Ask::to_json).collect::<Vec<_>>()}))
@@ -306,6 +376,7 @@ pub async fn call(
         }
         "vault.remove" => {
             let Remove { name, confirmed } = serde_json::from_value(params)?;
+            let _writing = writing(&name).await;
             let entries = daemon.read(|store| store.vault_entries())?;
             let Some(entry) = entries.iter().find(|entry| entry.name == name) else {
                 return Err(Failure::new(
@@ -387,9 +458,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     };
     // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
-    if let Some(project) = &project {
-        crate::projects::load_project(daemon, project)?;
-    }
+    let _writing = writing(&asked.name).await;
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -403,6 +472,12 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     // Which username was masked with the secret: an edit without a secret that changes it must
     // mask the new Basic form too.
     let username_was = existing.as_ref().and_then(|entry| entry.username.clone());
+    // A copy of another machine's entry stays one while its secret is: a new secret makes it this
+    // machine's own.
+    let shared_from = existing
+        .as_ref()
+        .filter(|_| asked.secret.is_none())
+        .and_then(|entry| entry.shared_from.clone());
     let had = existing.and_then(|entry| entry.bound);
     let bound = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
@@ -416,17 +491,13 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         (None, had) => had,
     };
     let url = given(asked.url);
-    // A worklog's entry is its project's alone: no other project's agent learns it exists.
-    let project = match &bound {
-        Some(bound) => bound_checked(
-            daemon,
-            &asked.name,
-            bound,
-            project.as_deref(),
-            url.as_deref(),
-        )?,
-        None => project,
-    };
+    let project = checked(
+        daemon,
+        &asked.name,
+        project,
+        bound.as_deref(),
+        url.as_deref(),
+    )?;
     let username = given(asked.username);
     let open = daemon
         .read(asks)
@@ -452,9 +523,11 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         project,
         updated_at: now_ms(),
         bound,
+        shared_from,
     };
     if let Some(secret) = &asked.secret {
         // Masked before it is kept anywhere, so that nothing written after can hold it.
+        mask_lines(secret, entry.bound.as_deref());
         secrets::add_vault_login(entry.username.as_deref(), secret);
         daemon
             .vault
@@ -481,9 +554,409 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     Ok(entry.to_json())
 }
 
+/// The vault entry made from the file `path` of the project `project`, which its setup copies
+/// (`docs/remote.md`, "What travels"): the user's act, from a launch on another machine that
+/// lacks the file, so that it is shared with that machine through the vault, never as a file. The
+/// daemon reads the file only now: inside the project's folder, reached through no link, a text
+/// of `LARGEST_COPIED` bytes at most; its text is masked, line by line too, before it is kept,
+/// and nothing that is said of it holds a word of it. The entry is bound to the file
+/// (`uses::file_use`), the only entry a launch lays it from; an entry of that name is replaced
+/// only when it is that file's and `replace` says so, never another entry.
+async fn from_file(
+    daemon: &std::sync::Arc<Daemon>,
+    project: &str,
+    path: &str,
+    name: Option<String>,
+    replace: bool,
+) -> Result<Value, Failure> {
+    let found = crate::projects::load_project(daemon, project)?;
+    if !crate::travelled::fit_path(path) {
+        return Err(Failure::refused(format!(
+            "{:?} is not a path inside the project {project}",
+            path.chars().take(64).collect::<String>()
+        )));
+    }
+    let root = std::fs::canonicalize(&found.folder)
+        .map_err(|error| Failure::refused(format!("{}: {error}", found.folder.display())))?;
+    let file = root.join(path);
+    let cannot = |why: &str| Failure::refused(format!("{path} of {project} {why}"));
+    // Opened once, never through a link: what is checked is the file that is read, whatever is
+    // planted at the path between the two.
+    let mut opened = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&file)
+            .map_err(|error| match error.raw_os_error() {
+                _ if error.kind() == std::io::ErrorKind::NotFound => cannot("is not there"),
+                Some(libc::ELOOP) => {
+                    cannot("is not a file: a link or a folder is not made an entry")
+                }
+                _ => cannot("cannot be read"),
+            })?
+    };
+    let metadata = opened.metadata().map_err(|_| cannot("cannot be read"))?;
+    if !metadata.is_file() {
+        return Err(cannot(
+            "is not a file: a link or a folder is not made an entry",
+        ));
+    }
+    if std::fs::canonicalize(&file).map_or(true, |real| !real.starts_with(&root)) {
+        return Err(cannot("leads out of the project"));
+    }
+    if metadata.len() > crate::travelled::LARGEST_COPIED {
+        return Err(cannot(&format!(
+            "is more than {} KiB: a vault entry holds less",
+            crate::travelled::LARGEST_COPIED / 1024
+        )));
+    }
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut opened, crate::travelled::LARGEST_COPIED + 1),
+        &mut text,
+    )
+    .map_err(|_| cannot("cannot be read"))?;
+    if text.len() as u64 > crate::travelled::LARGEST_COPIED {
+        return Err(cannot("grew while it was read"));
+    }
+    let text = zeroize::Zeroizing::new(String::from_utf8(text).map_err(|_| cannot("is not text"))?);
+    let bound = uses::file_use(project, path);
+    mask_lines(&text, Some(&bound));
+    let name = name.unwrap_or_else(|| crate::travelled::entry_for(project, path));
+    let existing = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == name);
+    match existing.map(|entry| entry.bound) {
+        None => {}
+        Some(Some(own)) if own == bound => {
+            if !replace {
+                return Err(Failure::refused(format!(
+                    "the vault entry {name} holds {path} of {project} already: replace it to \
+                     take the file again"
+                )));
+            }
+        }
+        Some(own) => {
+            let what = own.as_deref().and_then(use_said).map_or_else(
+                || "holds another secret".to_owned(),
+                |said| format!("is for {said}"),
+            );
+            return Err(Failure::refused(format!(
+                "the vault entry {name} {what}: {path} of {project} is not made that entry; \
+                 remove it first, or give another name"
+            )));
+        }
+    }
+    let made = set(
+        daemon,
+        json!({"name": name, "secret": *text, "for": bound,
+            "description": format!("The file {path} of the project {project}, which its setup copies")}),
+    )
+    .await
+    .map_err(|failure| Failure {
+        message: masked_of(&failure.message, &text),
+        ..failure
+    })?;
+    eprintln!("flottille daemon: the vault entry {name} was made from {path} of {project}");
+    Ok(made)
+}
+
+/// Whether `entry` is the one a launch from the machine `from` lays its file from: named `name`,
+/// made of that very file (bound to `bound`, `uses::file_use`) and shared from `from`. Any other
+/// entry of this machine's, whatever its name, is never written into a file.
+pub(crate) fn lays_file(entry: &Entry, name: &str, bound: &str, from: &str) -> bool {
+    entry.name == name
+        && entry.bound.as_deref() == Some(bound)
+        && entry.shared_from.as_deref() == Some(from)
+}
+
+/// The secret of the entry `name`, for the file a launch's setup copies (`travelled::lay`): only
+/// the entry `lays_file` takes; none when this machine lacks it or its keyring cannot give it now.
+pub(crate) async fn of_file(
+    daemon: &Daemon,
+    name: &str,
+    bound: &str,
+    from: &str,
+) -> Option<zeroize::Zeroizing<String>> {
+    let entries = daemon.read(|store| store.vault_entries()).ok()?;
+    entries
+        .iter()
+        .find(|entry| lays_file(entry, name, bound, from))?;
+    let secret = daemon.vault.read(name).await.ok().flatten()?;
+    Some(zeroize::Zeroizing::new(secret))
+}
+
+/// Masks each line of a secret of several lines, or of any secret bound to a file (`file:`), and
+/// each line's value, from now on: a file's (`vault.from_file`), of which an agent may come
+/// across one line alone. A value is what follows
+/// a line's first `=` or `:` (`KEY=v`, `key: v`, `"key": "v",`), its quotes and final comma left
+/// out, and the password of an address's `user:password@`. A comment and a part too short to be
+/// told from an ordinary word are left.
+pub(crate) fn mask_lines(secret: &str, bound: Option<&str>) {
+    // A file of one line, with no final newline, is as much a file as any: an agent may read it
+    // from an offset.
+    if !secret.contains('\n') && !bound.is_some_and(|bound| bound.starts_with("file:")) {
+        return;
+    }
+    for line in secret.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        let value = line.find(['=', ':']).map_or(line, |at| {
+            line[at + 1..]
+                .trim()
+                .trim_end_matches(',')
+                .trim_end()
+                .trim_matches(['"', '\''])
+        });
+        for part in [line, value].into_iter().chain(password_in(line)) {
+            if part.chars().count() >= VAULT_SHORTEST {
+                secrets::add_vault_value(part);
+            }
+        }
+    }
+}
+
+/// The password of the first address of `line` that has one (`scheme://user:password@host`).
+fn password_in(line: &str) -> Option<&str> {
+    let after = &line[line.find("://")? + 3..];
+    let authority = &after[..after.find(['/', '"', '\'', ' ']).unwrap_or(after.len())];
+    let userinfo = &authority[..authority.rfind('@')?];
+    Some(&userinfo[userinfo.find(':')? + 1..])
+}
+
+/// The entry `name` sent to the user's machine `machine` (`docs/remote.md`, "Vault entries"): only
+/// as the request the user's device signed, which goes with it for that machine to check; its
+/// secret read from the keyring here and sent with its metadata, in nothing else.
+async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Failure> {
+    let asked = crate::daemon::asked()
+        .filter(|asked| {
+            serde_json::from_str::<Value>(&asked.signed)
+                .is_ok_and(|request| request["signed"]["method"] == "vault.share")
+        })
+        .ok_or_else(|| Failure::refused(NOT_SIGNED))?;
+    let (metadata, secret) = copy_of(daemon, name).await?;
+    let message = flottille_link::Share {
+        request: serde_json::from_str(&asked.signed)?,
+        entry: metadata,
+        secret: flottille_link::Secret(secret.clone()),
+    };
+    crate::link::share(daemon, machine, message)
+        .await
+        .map_err(|why| Failure::refused(masked_of(&why, &secret)))?;
+    eprintln!(
+        "flottille daemon: the vault entry {name} was shared with {machine}, asked by {}",
+        asked.device
+    );
+    Ok(json!({"name": name, "machine": machine}))
+}
+
+/// The entry `name` as it goes to another machine: its metadata, less where this machine's copy
+/// came from (the receiver's to say), and its secret.
+pub(crate) async fn copy_of(
+    daemon: &Daemon,
+    name: &str,
+) -> Result<(Value, zeroize::Zeroizing<String>), Failure> {
+    // Its metadata and its secret of one moment: a Save of it in progress ends first.
+    let _writing = writing(name).await;
+    let Some(entry) = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == name)
+    else {
+        return Err(Failure::new(
+            "not-found",
+            format!("the vault has no entry {name}"),
+        ));
+    };
+    let secret = daemon
+        .vault
+        .read(name)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| {
+            Failure::refused(format!(
+                "the keyring holds no secret for the vault entry {name}: set it again"
+            ))
+        })?;
+    let secret = zeroize::Zeroizing::new(secret);
+    let mut metadata = entry.to_json();
+    // Where it came from is the receiver's to say: the sender's own name for it.
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("shared_from");
+    }
+    Ok((metadata, secret))
+}
+
+/// The entry `entry` another machine of the user's, `from`, shared with this one, its user's
+/// request checked already (`link::Remote::shared`): its metadata checked here as Save checks it
+/// (`checked`), never taken on the sender's word; its secret into this machine's keyring, its
+/// metadata into the store, marked as shared from `from`. It replaces a copy `from` shared
+/// before, never an entry of this machine's own nor another machine's copy. What is refused is
+/// said in a sentence that holds no secret, and leaves nothing behind.
+pub async fn receive(
+    daemon: &std::sync::Arc<Daemon>,
+    entry: &Value,
+    secret: &str,
+    from: &str,
+) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Shared {
+        name: String,
+        description: Option<String>,
+        url: Option<String>,
+        username: Option<String>,
+        project: Option<String>,
+        #[serde(rename = "for")]
+        bound: Option<String>,
+    }
+    let shared: Shared = serde_json::from_value(entry.clone())
+        .map_err(|_| "refused: this is not a vault entry's metadata".to_owned())?;
+    let name = shared.name;
+    if !valid_name(&name) {
+        return Err("refused: this is not a vault entry's name".to_owned());
+    }
+    if secret.chars().count() < VAULT_SHORTEST {
+        return Err(format!(
+            "refused: a secret is {VAULT_SHORTEST} characters at least"
+        ));
+    }
+    let _writing = writing(&name).await;
+    let existing = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|entry| entry.name == name);
+    match existing.as_ref().map(|entry| entry.shared_from.as_deref()) {
+        Some(None) => {
+            return Err(format!(
+                "this machine has its own vault entry {name}: remove or rename it here first"
+            ));
+        }
+        Some(Some(other)) if other != from => {
+            return Err(format!(
+                "the vault entry {name} here was shared from {other}: remove it here first"
+            ));
+        }
+        _ => {}
+    }
+    // What this machine lacks is said as such: the project the entry is for must be here.
+    let here = |project: &str| crate::projects::load_project(daemon, project).is_ok();
+    if let Some(project) = shared
+        .bound
+        .as_deref()
+        .and_then(|bound| bound.strip_prefix("worklog:"))
+        && !here(project)
+    {
+        return Err(format!(
+            "the vault entry {name} is bound to {}, which is not on this machine: add the \
+             project here first",
+            use_said(shared.bound.as_deref().unwrap_or_default()).unwrap_or_default()
+        ));
+    }
+    if let Some(project) = &shared.project
+        && !here(project)
+    {
+        return Err(format!(
+            "the vault entry {name} is the project {project}'s, which is not on this machine: \
+             add the project here first"
+        ));
+    }
+    let project = checked(
+        daemon,
+        &name,
+        shared.project,
+        shared.bound.as_deref(),
+        shared.url.as_deref(),
+    )
+    .map_err(|failure| failure.message)?;
+    let entry = Entry {
+        name: name.clone(),
+        description: shared.description,
+        url: shared.url,
+        username: shared.username,
+        project,
+        updated_at: now_ms(),
+        bound: shared.bound,
+        shared_from: Some(from.to_owned()),
+    };
+    // The copy it replaces, to put back if the store refuses the new one.
+    let before = match &existing {
+        Some(_) => daemon
+            .vault
+            .read(&name)
+            .await
+            .map_err(|why| masked_of(&why, secret))?
+            .map(zeroize::Zeroizing::new),
+        None => None,
+    };
+    // Masked before it is kept anywhere, so that nothing written after can hold it.
+    mask_lines(secret, entry.bound.as_deref());
+    secrets::add_vault_login(entry.username.as_deref(), secret);
+    daemon
+        .vault
+        .store(&name, secret)
+        .await
+        .map_err(|why| masked_of(&why, secret))?;
+    if let Err(error) = daemon.write(|store| store.put_vault_entry(&entry)) {
+        // No secret is left in the keyring that no entry of the store names.
+        let undone = match &before {
+            Some(before) => daemon.vault.store(&name, before).await,
+            None => daemon.vault.delete(&name).await,
+        };
+        if let Err(why) = undone {
+            eprintln!(
+                "flottille daemon: the vault entry {name} shared from {from}: {}",
+                masked_of(&why, secret)
+            );
+        }
+        return Err(masked_of(&error.to_string(), secret));
+    }
+    retool(daemon);
+    eprintln!("flottille daemon: the vault entry {name} was shared from {from}");
+    // An agent that asked for it is told, as when the user sets it here.
+    let open = daemon
+        .read(asks)
+        .map(|state| state.open)
+        .unwrap_or_default();
+    for request in open.iter().filter(|r| entry.name == r.name) {
+        answered(daemon, request, Some(&entry));
+    }
+    Ok(())
+}
+
+/// Removes the copy of the entry `name` that `from` shared, if it is still that copy: a share
+/// that kept it and then failed leaves nothing behind (`extensions::receive_connection`).
+pub(crate) async fn forget_copy(daemon: &Daemon, name: &str, from: &str) {
+    let _writing = writing(name).await;
+    let is_copy = daemon
+        .read(|store| store.vault_entries())
+        .is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.name == name && entry.shared_from.as_deref() == Some(from))
+        });
+    if !is_copy {
+        return;
+    }
+    // The secret first, as a removal does: a keyring that refuses leaves the entry whole.
+    if let Err(why) = daemon.vault.delete(name).await {
+        eprintln!("flottille daemon: the vault entry {name} shared from {from} stays: {why}");
+        return;
+    }
+    let removed =
+        crate::extensions::between_writes(|| daemon.write(|store| store.remove_vault_entry(name)));
+    if let Err(error) = removed {
+        eprintln!("flottille daemon: the vault entry {name} shared from {from} stays: {error}");
+    }
+    retool(daemon);
+}
+
 /// The user's Share of the entry `name` from an agent's connection request: every project's from
 /// now on, the rest of it as it was. A worklog's entry stays its project's alone.
-pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
+pub async fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
     rewritten(daemon, name, |entry| {
         if let Some(bound) = entry.bound.as_deref().filter(|b| b.starts_with("worklog:")) {
             return Err(Failure::refused(format!(
@@ -495,24 +968,29 @@ pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
         entry.project = None;
         Ok(())
     })
+    .await
 }
 
 /// The user's Bind of the entry `name` from an agent's connection request: its `url` becomes
 /// `origin`, the address the request's connection sends it to, read by the daemon; the rest of
 /// it as it was.
-pub fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
+pub async fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
     rewritten(daemon, name, |entry| {
         entry.url = Some(origin.to_owned());
         Ok(())
     })
+    .await
 }
 
-/// The entry `name`'s metadata changed by `change` and written, its secret untouched.
-fn rewritten(
+/// The entry `name`'s metadata changed by `change` and written, its secret untouched; after a
+/// Save of the same entry in progress, never between its read and its write (which would undo
+/// this change).
+async fn rewritten(
     daemon: &Daemon,
     name: &str,
     change: impl FnOnce(&mut Entry) -> Result<(), Failure>,
 ) -> Result<Value, Failure> {
+    let _writing = writing(name).await;
     let mut entry = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -523,6 +1001,26 @@ fn rewritten(
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
     Ok(entry.to_json())
+}
+
+/// The project of the entry `name` whose metadata is `project`, `bound` and `url`, as Save and a
+/// share from another machine check it: the project is one of this machine's, and the use is one
+/// it fits (`bound_checked`).
+fn checked(
+    daemon: &Daemon,
+    name: &str,
+    project: Option<String>,
+    bound: Option<&str>,
+    url: Option<&str>,
+) -> Result<Option<String>, Failure> {
+    if let Some(project) = &project {
+        crate::projects::load_project(daemon, project)?;
+    }
+    // A worklog's entry is its project's alone: no other project's agent learns it exists.
+    match bound {
+        Some(bound) => bound_checked(daemon, name, bound, project.as_deref(), url),
+        None => Ok(project),
+    }
 }
 
 /// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's
@@ -540,7 +1038,8 @@ fn bound_checked(
 ) -> Result<Option<String>, Failure> {
     let Some(said) = use_said(bound) else {
         return Err(Failure::refused(format!(
-            "an entry is bound to worklog:<project> or connection:<name>: {bound} is neither"
+            "an entry is bound to worklog:<project>, connection:<name> or file:<project>/<path>: \
+             {bound} is none of them"
         )));
     };
     if !crate::extensions::bound_possible(bound) {
@@ -689,8 +1188,9 @@ pub fn needs(daemon: &Daemon, project: &Project) -> Vec<Need> {
         needs.push(Need {
             name: name.clone(),
             description: format!(
-                "The Jira API token tickets log_time logs time on {site} with; its username is \
-                 the Jira account's e-mail"
+                "The Jira API token tickets uses on {site} where acli falls short (time, \
+                 worklogs, fields, edits, replies, mentions); its username is the Jira \
+                 account's e-mail"
             ),
             bound: uses::worklog(&project.name),
             takes_username: true,
@@ -871,6 +1371,7 @@ pub async fn load(daemon: &Daemon) {
                 for inner in crate::extensions::secrets_in(&secret) {
                     secrets::add_vault_value(&inner);
                 }
+                mask_lines(&secret, entry.bound.as_deref());
                 secrets::add_vault_login(entry.username.as_deref(), &secret);
             }
             Ok(None) => {}
@@ -1222,6 +1723,7 @@ mod tests {
             project: project.map(str::to_owned),
             updated_at: 0,
             bound: None,
+            shared_from: None,
         }
     }
 
@@ -1515,6 +2017,266 @@ mod tests {
         );
     }
 
+    /// A secret another machine shares, invented.
+    const SHARED: &str = "sh4red-t0ken-9Qx2";
+
+    #[tokio::test]
+    async fn a_share_does_not_replace_this_machine_s_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81", "url": "https://own.example.com"}),
+        )
+        .await);
+
+        let refused = receive(
+            &daemon,
+            &json!({"name": "tracker", "url": "https://theirs.example.com"}),
+            SHARED,
+            "pc",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            refused.contains(
+                "this machine has its own vault entry tracker: remove or rename it here first"
+            ),
+            "{refused}"
+        );
+        let entries = listed(&daemon).await;
+        assert_eq!(entries[0].url.as_deref(), Some("https://own.example.com"));
+        assert_eq!(entries[0].shared_from, None);
+        assert_eq!(
+            daemon.vault.read("tracker").await.unwrap().as_deref(),
+            Some("own-t0ken-Zr81")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_replaces_a_copy_from_the_same_machine_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        receive(&daemon, &json!({"name": "tracker"}), SHARED, "pc")
+            .await
+            .unwrap();
+
+        // Shared again from pc: the copy is replaced.
+        receive(
+            &daemon,
+            &json!({"name": "tracker", "description": "Again"}),
+            "s3cond-t0ken-Lm4P",
+            "pc",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            listed(&daemon).await[0].description.as_deref(),
+            Some("Again")
+        );
+        // From laptop: pc's copy is not laptop's to replace.
+        let refused = receive(&daemon, &json!({"name": "tracker"}), SHARED, "laptop")
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains("the vault entry tracker here was shared from pc"),
+            "{refused}"
+        );
+        assert_eq!(listed(&daemon).await[0].shared_from.as_deref(), Some("pc"));
+        assert_eq!(
+            daemon.vault.read("tracker").await.unwrap().as_deref(),
+            Some("s3cond-t0ken-Lm4P")
+        );
+    }
+
+    /// What this machine refuses of the metadata another machine sent: what Save would refuse.
+    #[tokio::test]
+    async fn a_share_s_metadata_is_checked_as_save_checks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let cases = [
+            (
+                json!({"name": "wiki", "url": "http://wiki.example.com/", "for": "connection:wiki"}),
+                "cannot be on plain http to wiki.example.com",
+            ),
+            (
+                json!({"name": "jira", "for": "worklog:gone"}),
+                "the vault entry jira is bound to the worklog of the project gone, which is not on \
+                 this machine: add the project here first",
+            ),
+            (
+                json!({"name": "notes", "project": "gone"}),
+                "the vault entry notes is the project gone's, which is not on this machine: add \
+                 the project here first",
+            ),
+            (
+                json!({"name": "odd", "for": "bogus"}),
+                "bogus is none of them",
+            ),
+        ];
+        for (entry, said) in cases {
+            let refused = receive(&daemon, &entry, SHARED, "pc").await.unwrap_err();
+            assert!(refused.contains(said), "{entry}: {refused}");
+            let name = entry["name"].as_str().unwrap();
+            assert_eq!(daemon.vault.read(name).await.unwrap(), None, "{name}");
+        }
+        assert!(listed(&daemon).await.is_empty(), "nothing was kept");
+    }
+
+    #[tokio::test]
+    async fn a_share_the_store_refuses_leaves_no_secret_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("store.db");
+        let paths = Paths {
+            runtime: dir.path().join("runtime"),
+            state: dir.path().join("state"),
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(paths.config.join(CHOICE), "backend = \"memory\"\n").unwrap();
+        let store = flottille_core::store::Store::open(&file).unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        let daemon = std::sync::Arc::new(Daemon::new(&paths, store, projects, 0, None));
+        // A disk that refuses the write, played by the store's own refusal.
+        rusqlite::Connection::open(&file)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER full BEFORE INSERT ON vault_entries \
+                 BEGIN SELECT RAISE(ABORT, 'the disk is full'); END",
+            )
+            .unwrap();
+
+        let refused = receive(&daemon, &json!({"name": "tracker"}), SHARED, "pc")
+            .await
+            .unwrap_err();
+
+        assert!(refused.contains("the disk is full"), "{refused}");
+        assert_eq!(daemon.vault.read("tracker").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_share_at_the_moment_of_a_save_keeps_the_user_s_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81", "url": "https://own.example.com"}),
+        ));
+        let theirs = json!({"name": "tracker", "url": "https://theirs.example.com"});
+        let mut share = std::pin::pin!(receive(&daemon, &theirs, SHARED, "pc",));
+        // The user's Save waits on the keyring when the share comes, which waits on it too.
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        assert!(futures::poll!(share.as_mut()).is_pending());
+        ok(set.await);
+        let shared = share.await;
+
+        assert!(
+            shared.is_err_and(|refused| refused.contains("this machine has its own vault entry")),
+            "the share is refused"
+        );
+        let entries = listed(&daemon).await;
+        assert_eq!(entries[0].url.as_deref(), Some("https://own.example.com"));
+        assert_eq!(entries[0].shared_from, None);
+        assert_eq!(
+            daemon.vault.read("tracker").await.unwrap().as_deref(),
+            Some("own-t0ken-Zr81")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bind_at_the_moment_of_a_save_keeps_the_user_s_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81"}),
+        )
+        .await);
+        // The user saves a new secret while they bind the entry from a connection's request.
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "new-t0ken-Qd52"}),
+        ));
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        let mut bound = std::pin::pin!(bound_to(&daemon, "tracker", "https://notes.example.com"));
+        assert!(futures::poll!(bound.as_mut()).is_pending());
+        ok(set.await);
+        ok(bound.await);
+
+        let entries = listed(&daemon).await;
+        assert_eq!(
+            entries[0].url.as_deref(),
+            Some("https://notes.example.com"),
+            "the Save did not undo the bind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_sent_at_the_moment_of_a_save_is_one_entry_s_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "old-t0ken-Zr81", "url": "https://old.example.com"}),
+        )
+        .await);
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "new-t0ken-Qd52", "url": "https://new.example.com"}),
+        ));
+        let mut copy = std::pin::pin!(copy_of(&daemon, "tracker"));
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        assert!(futures::poll!(copy.as_mut()).is_pending());
+        ok(set.await);
+        let (metadata, secret) = ok(copy.await);
+
+        let pair = (metadata["url"].as_str().unwrap(), secret.as_str());
+        assert!(
+            pair == ("https://new.example.com", "new-t0ken-Qd52")
+                || pair == ("https://old.example.com", "old-t0ken-Zr81"),
+            "the metadata and the secret of one entry: {}",
+            pair.0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_answers_the_ask_waiting_for_its_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        daemon
+            .write(|store| {
+                store.create_agent(
+                    &crate::daemon::tests::an_agent("a1"),
+                    ("agent.created", json!({})),
+                )?;
+                let event = store.append_event(
+                    "vault.asked",
+                    json!({"agent": "a1", "project": "app", "name": "tracker",
+                        "why": "read the tracker"}),
+                )?;
+                Ok(((), event))
+            })
+            .unwrap();
+        assert_eq!(daemon.read(asks).unwrap().open.len(), 1);
+
+        receive(&daemon, &json!({"name": "tracker"}), SHARED, "pc")
+            .await
+            .unwrap();
+
+        assert!(
+            daemon.read(asks).unwrap().open.is_empty(),
+            "the ask is answered"
+        );
+    }
+
     #[tokio::test]
     async fn a_new_entry_still_needs_its_secret() {
         let dir = tempfile::tempdir().unwrap();
@@ -1528,5 +2290,94 @@ mod tests {
         .unwrap_err();
         assert!(refused.message.contains("secret"), "{}", refused.message);
         assert!(listed(&daemon).await.is_empty(), "nothing was kept");
+    }
+
+    #[test]
+    fn a_file_s_lines_are_masked_whatever_their_format() {
+        mask_lines(
+            "token: plainyamlvalue\n  \"json_key\": \"plainjsonvalue\",\n\
+             url = https://alice:plainurlpassword@example.test/x\n\
+             DATABASE_URL=postgres://bob:plainpgpassword@db.example.test/ledger\n",
+            None,
+        );
+        let env = std::collections::BTreeMap::new();
+        for value in [
+            "plainyamlvalue",
+            "plainjsonvalue",
+            "plainurlpassword",
+            "plainpgpassword",
+        ] {
+            let said = secrets::mask(&format!("it is {value} now"), &env);
+            assert_eq!(said, "it is [masked] now", "{value}");
+        }
+    }
+
+    #[test]
+    fn a_one_line_file_s_value_is_masked_alone_without_a_final_newline() {
+        mask_lines("API_TOKEN=oneline-Value-41", Some("file:app/.env"));
+        let env = std::collections::BTreeMap::new();
+        let said = secrets::mask("it is oneline-Value-41 now", &env);
+        assert_eq!(said, "it is [masked] now");
+    }
+
+    #[tokio::test]
+    async fn a_new_secret_set_for_a_file_s_entry_is_masked_line_by_line_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "app-.env", "secret": "API_TOKEN=setfile-Value-52",
+                "for": "file:app/.env"}),
+        )
+        .await);
+        let env = std::collections::BTreeMap::new();
+        let said = secrets::mask("it is setfile-Value-52 now", &env);
+        assert_eq!(said, "it is [masked] now");
+    }
+
+    #[tokio::test]
+    async fn a_file_is_laid_only_from_its_own_entry_shared_by_the_launch_s_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        // The machine's own entry, of no use: never a file, whatever its name.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "github-token", "secret": "own-t0ken-Zr81"}),
+        )
+        .await);
+        // The file's entry, shared from another machine than the launch's.
+        receive(
+            &daemon,
+            &json!({"name": "app-.env", "for": "file:app/.env"}),
+            SHARED,
+            "laptop",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            of_file(&daemon, "github-token", "file:github/token", "pc")
+                .await
+                .is_none()
+        );
+        assert!(
+            of_file(&daemon, "app-.env", "file:app/.env", "pc")
+                .await
+                .is_none()
+        );
+        assert!(
+            of_file(&daemon, "app-.env", "file:app/other", "laptop")
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            of_file(&daemon, "app-.env", "file:app/.env", "laptop")
+                .await
+                .as_deref()
+                .map(String::as_str),
+            Some(SHARED)
+        );
     }
 }

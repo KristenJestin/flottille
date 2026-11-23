@@ -4,7 +4,7 @@
 //! name that picks no one is refused with the sessions it could have meant. Against the real
 //! daemon with the fake ACP agent, throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

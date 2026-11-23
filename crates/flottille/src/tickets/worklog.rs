@@ -20,6 +20,7 @@ use tokio::net::TcpStream;
 use url::{Host, Url};
 
 use super::TicketsCall;
+use super::worklogs::{Current, Site, own_worklog};
 use crate::daemon::Daemon;
 use crate::forge::masked;
 use crate::mcp::Outcome;
@@ -28,7 +29,9 @@ use crate::session_read::{form, shown_date};
 use crate::vault;
 
 /// What a call to the site may take, from the connection to the last byte.
-const WORKLOG_TIME: Duration = Duration::from_secs(30);
+fn worklog_time() -> Duration {
+    crate::test_time::tuned("FLOTTILLE_TEST_SITE_WAIT_MS", Duration::from_secs(30))
+}
 /// How much of an answer is read: a worklog's answer is a few hundred bytes.
 const ANSWER_BYTES: usize = 64 * 1024;
 /// Only a test sends its calls elsewhere than to the tracker's site, to a server of this machine.
@@ -141,18 +144,271 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
     }
 }
 
-/// The refusal of a Jira tracker that names no vault entry for its worklogs, and how to set one.
+/// Why a worklog cannot be changed or deleted, before anyone is asked: GitHub has no worklogs,
+/// a Jira tracker names no entry, the work item or the worklog is not named, and an edit changes
+/// nothing or gives a duration or a start that is wrong.
+pub fn unwritable_change(tracker: &ProjectTracker, action: &str, args: &Value) -> Option<String> {
+    let worklog_token = match tracker {
+        ProjectTracker::Github { .. } => {
+            return Some(format!(
+                "refused: tickets {action} is for Jira: GitHub has no worklogs"
+            ));
+        }
+        ProjectTracker::Jira { worklog_token, .. } => worklog_token,
+    };
+    if worklog_token.is_none() {
+        return Some(no_entry());
+    }
+    if given(args, "ticket").is_none() {
+        return Some(format!(
+            "refused: tickets {action} needs ticket, the work item the worklog is on (ABC-123)"
+        ));
+    }
+    match given(args, "worklog") {
+        None => {
+            return Some(format!(
+                "refused: tickets {action} needs worklog, the id tickets worklogs gives"
+            ));
+        }
+        Some(id) if !id.chars().all(|c| c.is_ascii_digit()) => {
+            return Some(format!(
+                "refused: worklog is the number tickets worklogs gives (10234), not \"{}\"",
+                masked(id)
+            ));
+        }
+        Some(_) => {}
+    }
+    if action == "worklog_delete" {
+        return ["duration", "started", "comment"]
+            .iter()
+            .find(|key| given(args, key).is_some())
+            .map(|key| format!("refused: tickets worklog_delete takes no {key}"));
+    }
+    let (duration, started, comment) = (
+        given(args, "duration"),
+        given(args, "started"),
+        given(args, "comment"),
+    );
+    if duration.is_none() && started.is_none() && comment.is_none() {
+        return Some(
+            "refused: tickets worklog_edit needs at least one of duration, started or comment \
+             to change"
+                .into(),
+        );
+    }
+    duration
+        .and_then(|d| duration_of(d).err())
+        .or_else(|| started.and_then(|s| started_of(s).err()))
+}
+
+/// The worklog an edit or a delete is about, as Jira has it now, with the site's calls signed by
+/// the project's entry: refused when it is not the token's own account's.
+async fn found<'a>(
+    daemon: &Daemon,
+    project: &Project,
+    site: &'a str,
+    key: &Key,
+    id: &str,
+) -> Result<(Site<'a>, String, Current), Outcome> {
+    let (jira, entry, stamp) = super::worklogs::signed_in(daemon, project, site, no_entry())
+        .await
+        .map_err(Outcome::Refused)?;
+    let current = own_worklog(project, &jira, (&entry, stamp), &key.text(), id).await?;
+    Ok((jira, entry, current))
+}
+
+/// What a worklog is, in the words of a card: `1h, started 2026-11-06T08:00:00Z, "comment"`.
+fn described(time: &str, started: u64, comment: &str) -> String {
+    let comment = match comment.is_empty() {
+        true => String::new(),
+        false => format!(", \"{comment}\""),
+    };
+    format!("{time}, started {}{comment}", shown_date(started))
+}
+
+/// What the card says of `worklog_edit` and `worklog_delete`: the work item, the worklog as it is
+/// and what it becomes, or that it goes. Refused, with why, when the worklog is not the token's
+/// own account's, is not on that work item, or cannot be read: nothing is asked of the user then.
+pub async fn change_says(
+    daemon: &Daemon,
+    project: &Project,
+    args: &Value,
+) -> Result<Vec<String>, String> {
+    let action = args["action"].as_str().unwrap_or_default();
+    if !["worklog_edit", "worklog_delete"].contains(&action) {
+        return Ok(Vec::new());
+    }
+    let (Some(ProjectTracker::Jira { site, .. }), Some(ticket), Some(id)) = (
+        &project.tracker,
+        given(args, "ticket"),
+        given(args, "worklog"),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let key = super::accepted(project, ticket).map_err(|why| format!("refused: {why}"))?;
+    let (_, entry, now) = found(daemon, project, site, &key, id)
+        .await
+        .map_err(|outcome| match outcome {
+            Outcome::Refused(why) => why,
+            Outcome::Failed(why) | Outcome::Invalid(why) | Outcome::Held(why) => {
+                // A card without the worklog would say less than what is changed.
+                format!("refused: {why}; nothing was written")
+            }
+            Outcome::Done(why) => why,
+        })?;
+    let was = described(&now.time, now.started, &now.comment);
+    let key = key.text();
+    if action == "worklog_delete" {
+        return Ok(vec![
+            format!("It deletes the worklog {id} of {key}: {was}"),
+            format!("It goes through Jira's API with the vault entry {entry}"),
+        ]);
+    }
+    let change = changes(args)?;
+    Ok(vec![
+        format!(
+            "It changes the worklog {id} of {key}, through Jira's API with the vault entry {entry}"
+        ),
+        format!("It is now: {was}"),
+        format!(
+            "It becomes: {}",
+            described(
+                change.time.as_deref().unwrap_or(&now.time),
+                change.started.unwrap_or(now.started),
+                change.comment.as_deref().unwrap_or(&now.comment),
+            )
+        ),
+    ])
+}
+
+/// What an edit changes, in the forms it is sent in; what is left out stays as it is.
+struct Change {
+    time: Option<String>,
+    started: Option<u64>,
+    comment: Option<String>,
+}
+
+fn changes(args: &Value) -> Result<Change, String> {
+    Ok(Change {
+        time: match given(args, "duration") {
+            Some(text) => Some(duration_of(text)?.0),
+            None => None,
+        },
+        started: match given(args, "started") {
+            Some(text) => Some(started_of(text)?),
+            None => None,
+        },
+        comment: given(args, "comment").map(|text| text.trim().to_owned()),
+    })
+}
+
+/// `tickets worklog_edit` and `tickets worklog_delete`: the worklog of the token's own account
+/// changed or deleted, once the gate let it through. It is read again first, and refused as it was
+/// before the user was asked, if it is not that account's by now.
+pub async fn change(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
+    let Some(tracker @ ProjectTracker::Jira { site, .. }) = &project.tracker else {
+        return Outcome::Refused(format!(
+            "refused: tickets {} is for Jira: GitHub has no worklogs",
+            asked.action
+        ));
+    };
+    let args = json!({"action": asked.action, "ticket": asked.ticket, "worklog": asked.worklog,
+        "duration": asked.duration, "started": asked.started, "comment": asked.comment});
+    if let Some(why) = unwritable_change(tracker, &asked.action, &args) {
+        return Outcome::Refused(why + "; nothing was written");
+    }
+    let id = asked.worklog.as_deref().map(str::trim).unwrap_or_default();
+    let (jira, _, now) = match found(daemon, project, site, key, id).await {
+        Ok(found) => found,
+        Err(outcome) => return outcome,
+    };
+    let path = format!("issue/{}/worklog/{id}", key.text());
+    if asked.action == "worklog_delete" {
+        return match jira.delete(&path).await {
+            Ok(()) => Outcome::Done(format!(
+                "deleted the worklog {id} of {} ({})",
+                key.text(),
+                described(&now.time, now.started, &now.comment)
+            )),
+            Err(why) => Outcome::Failed(why),
+        };
+    }
+    let change = match changes(&args) {
+        Ok(change) => change,
+        Err(why) => return Outcome::Refused(why + "; nothing was written"),
+    };
+    let mut body = json!({});
+    if let Some(time) = &change.time {
+        body["timeSpent"] = json!(time);
+    }
+    if let Some(at) = change.started {
+        body["started"] = json!(jira_time(at));
+    }
+    if let Some(text) = &change.comment {
+        let mut document = crate::adf::from_markdown(text);
+        // The people it mentions are asked of the site: its names are what the comment reads.
+        if !crate::adf::mentions(&document).is_empty()
+            && let Err(outcome) = super::replies::verified(&jira, &mut document).await
+        {
+            return outcome;
+        }
+        body["comment"] = document;
+    }
+    match jira.put(&path, &body).await {
+        Ok(()) => Outcome::Done(format!(
+            "changed the worklog {id} of {}: {}",
+            key.text(),
+            described(
+                change.time.as_deref().unwrap_or(&now.time),
+                change.started.unwrap_or(now.started),
+                change.comment.as_deref().unwrap_or(&now.comment),
+            )
+        )),
+        Err(why) => Outcome::Failed(why),
+    }
+}
+
+/// Whether an `edit` sets something `acli` cannot, which goes through Jira's REST API with the
+/// project's tracker entry: fields, a parent, a fix version.
+pub(super) fn through_api(args: &Value) -> bool {
+    args["fields"].as_object().is_some_and(|f| !f.is_empty())
+        || given(args, "parent").is_some()
+        || given(args, "milestone").is_some()
+        || args["remove_milestone"] == true
+}
+
+/// Why such an edit cannot be done before anyone is asked: a Jira tracker names no entry for it.
+/// None is no leave to skip the other checks of the call.
+pub(super) fn unwritable_edit(tracker: &ProjectTracker) -> Option<String> {
+    match tracker {
+        ProjectTracker::Jira {
+            worklog_token: None,
+            ..
+        } => Some(edit_no_entry()),
+        _ => None,
+    }
+}
+
+fn edit_no_entry() -> String {
+    no_entry_to(
+        "change a work item's fields, parent or fix version with",
+        "changes work items",
+    )
+}
+
+/// The refusal of a Jira tracker that names no Jira API vault entry (the one that serves worklogs,
+/// replies, mentions and the people search), and how to set one.
 pub(super) fn no_entry() -> String {
     no_entry_to("log time with", "logs time")
 }
 
-/// The same refusal for another use of the entry: `to` completes "no vault entry to …", `never`
+/// The same refusal for another use of the entry: `to` completes "no Jira API vault entry to …", `never`
 /// is what Flottille never does with a sign-in it was not given.
 pub(super) fn no_entry_to(to: &str, never: &str) -> String {
     format!(
-        "refused: this project names no vault entry to {to}: the user chooses one \
-         in the project's Settings, Tracker (the window offers the way), or creates one \
-         (flottille vault set <name> --username <their Jira account e-mail>, the secret \
+        "refused: this project names no Jira API vault entry to {to}: the user chooses one \
+         in the project's Settings, Tracker, Jira API access (the window offers the way), or creates one \
+         (vault ask, or flottille vault set <name> --username <their Jira account e-mail>, the secret \
          being a Jira API token) and writes its name in the project's file, [tracker] \
          worklog_token = \"<name>\"; Flottille never {never} with a sign-in it was not \
          given"
@@ -167,6 +423,18 @@ pub fn says(
     project: &Project,
     args: &Value,
 ) -> Result<Vec<String>, String> {
+    if args["action"] == "edit"
+        && through_api(args)
+        && matches!(project.tracker, Some(ProjectTracker::Jira { .. }))
+    {
+        // An entry the vault does not hold is refused here, before the user is asked.
+        let (entry, _, _) = entry_of(daemon, project)?;
+        let key = given(args, "ticket").map_or_else(String::new, |key| format!(" of {key}"));
+        return Ok(vec![format!(
+            "It changes the work item's fields, parent or fix version{key} through Jira's API, \
+             with the vault entry {entry}"
+        )]);
+    }
     if args["action"] != "log_time" {
         return Ok(Vec::new());
     }
@@ -205,7 +473,7 @@ pub(super) fn entry_of(
         ..
     }) = &project.tracker
     else {
-        return Err("this project names no vault entry to log time with".into());
+        return Err("this project names no Jira API vault entry to log time with".into());
     };
     let entries = daemon
         .read(|store| store.vault_entries())
@@ -299,7 +567,25 @@ pub async fn log_time(
     };
     let mut body = json!({"timeSpent": duration, "started": jira_time(started)});
     if let Some(text) = asked.body.as_deref().filter(|b| !b.trim().is_empty()) {
-        body["comment"] = crate::adf::from_markdown(text);
+        let mut document = crate::adf::from_markdown(text);
+        // The people it mentions are asked of the site: its names are what the comment reads.
+        if !crate::adf::mentions(&document).is_empty() {
+            let jira = match super::replies::signed_in(
+                daemon,
+                project,
+                site,
+                super::replies::mention_use("log_time").unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(jira) => jira,
+                Err(refused) => return refused,
+            };
+            if let Err(outcome) = super::replies::verified(&jira, &mut document).await {
+                return outcome;
+            }
+        }
+        body["comment"] = document;
     }
     let credentials =
         base64::engine::general_purpose::STANDARD.encode(format!("{account}:{secret}"));
@@ -308,7 +594,7 @@ pub async fn log_time(
         Ok(url) => url,
         Err(why) => return Outcome::Failed(why),
     };
-    let answer = tokio::time::timeout(WORKLOG_TIME, post(&url, &authorization, &body)).await;
+    let answer = tokio::time::timeout(worklog_time(), post(&url, &authorization, &body)).await;
     // Whatever the site said, the token is not in it as far as anything of ours goes.
     let clean = |text: &str| {
         masked(
@@ -322,7 +608,7 @@ pub async fn log_time(
         Err(_) => Outcome::Failed(format!(
             "the worklog was not confirmed: {site} did not answer in {} s; check the work item \
              before logging it again",
-            WORKLOG_TIME.as_secs()
+            worklog_time().as_secs()
         )),
         Ok(Err(why)) => Outcome::Failed(clean(&why)),
         Ok(Ok((status, text))) if status.is_success() => {
@@ -437,7 +723,7 @@ pub(super) async fn request(
         .await
         .map_err(|e| failed("HTTP failed with", &e))?;
     tokio::spawn(async move {
-        let _ = tokio::time::timeout(WORKLOG_TIME, connection).await;
+        let _ = tokio::time::timeout(worklog_time(), connection).await;
     });
     let host_header = match url.port() {
         Some(port) => format!("{host}:{port}"),

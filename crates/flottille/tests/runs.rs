@@ -3,7 +3,7 @@
 //! stopped and dismissed by the user, and `flottille commands`. The agent is the fake ACP agent,
 //! in a throwaway repository and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -732,7 +732,10 @@ fn a_task_run_in_a_repository_restarts_in_that_repository() {
 
 #[test]
 fn a_double_restart_starts_one_run() {
-    let user = User::with_fake_agent().with_fake_escalation();
+    // The stop's grace is two seconds, not five.
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "2000");
     let (agent, mcp, _) = session(&user);
     let first = start(&mcp, "stubborn");
 

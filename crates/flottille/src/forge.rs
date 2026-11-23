@@ -487,12 +487,7 @@ impl Pull {
                 Some("REVIEW_REQUIRED") => Some("review required"),
                 _ => None,
             },
-            checks: value["statusCheckRollup"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(check_of)
-                .collect(),
+            checks: rollup(value).into_iter().map(check_of).collect(),
             not_started: None,
             comments: comments("comments"),
             reviews: comments("reviews"),
@@ -522,6 +517,53 @@ impl Pull {
 pub(crate) fn is_bot(author: &Value) -> bool {
     let login = author["login"].as_str().unwrap_or_default();
     author["is_bot"] == true || login.starts_with("app/") || login.ends_with("[bot]")
+}
+
+/// The checks of a head, each counted once: its latest run (`latest`). Every read of a pull
+/// request's checks goes through it, so `forge show`, `forge merge` and the items never disagree.
+fn rollup(value: &Value) -> Vec<&Value> {
+    let started = |check: &&Value| {
+        ["startedAt", "createdAt"]
+            .iter()
+            .find_map(|key| check[*key].as_str().filter(|at| !at.starts_with("0001-")))
+            .and_then(crate::session_read::form)
+    };
+    let all = value["statusCheckRollup"].as_array().into_iter().flatten();
+    // A job is a check of its workflow, a commit status one of its own: the same name in two
+    // workflows, or as a status and a run, is two checks (as `forge checks` groups by workflow).
+    let key = |check: &&Value| match check["__typename"].as_str() {
+        Some("StatusContext") => format!("status\0{}", check["context"].as_str().unwrap_or("")),
+        _ => format!(
+            "{}\0{}",
+            check["workflowName"].as_str().unwrap_or(""),
+            check["name"].as_str().unwrap_or("")
+        ),
+    };
+    latest(all.collect(), key, started)
+}
+
+/// The latest run of each check, in the order the checks first appear: by its start, and of two
+/// that started together the one listed last. A run with no start (queued, not begun) is placed
+/// by the listing alone: it is the latest when listed after the other, so a re-run queued after a
+/// pass blocks, and a stale entry listed before the run that replaced it does not count. A run superseded by a newer one of the same check (run again, replaced, cancelled and
+/// started again) counts no more, whatever it said; the forges list them all for a head.
+pub(crate) fn latest<T>(
+    runs: Vec<T>,
+    check: impl Fn(&T) -> String,
+    started: impl Fn(&T) -> Option<u64>,
+) -> Vec<T> {
+    let mut kept: Vec<(String, Option<u64>, T)> = Vec::new();
+    for run in runs {
+        let (name, at) = (check(&run), started(&run));
+        match kept.iter_mut().find(|(other, ..)| *other == name) {
+            Some(newest) if at.is_none() || newest.1.is_none() || at >= newest.1 => {
+                *newest = (name, at, run)
+            }
+            Some(_) => {}
+            None => kept.push((name, at, run)),
+        }
+    }
+    kept.into_iter().map(|(.., run)| run).collect()
 }
 
 /// A check of `statusCheckRollup`: a check run (`status`, `conclusion`) or a commit status
@@ -667,6 +709,11 @@ pub async fn read(repositories: &[Checkout], branches: &[String], obsolete: bool
 /// Whether `bkt` has a context for `host` (`programs`).
 pub(crate) async fn has_bitbucket_context(host: &str) -> Result<bool, String> {
     bitbucket::has_context(host).await
+}
+
+/// Whether `bkt context list --json`'s answer names a context on `host` (`sign_in`).
+pub(crate) fn bitbucket_lists_host(listed: &Value, host: &str) -> bool {
+    bitbucket::lists_host(listed, host)
 }
 
 /// Whether `gh` is there and signed in: its exit code, nothing it prints.
@@ -1234,7 +1281,7 @@ impl ForgeCall {
 
 /// Whether `name` is one branch name by git's rules for a reference (`git check-ref-format`), and
 /// fit to be a path of the forge's API: the base is read there before it is written.
-fn branch_name(name: &str) -> bool {
+pub(crate) fn branch_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with(['-', '/'])
         && !name.ends_with(['/', '.'])
@@ -1487,7 +1534,8 @@ async fn created(
         .read(|store| store.agent(agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none());
+        // A child an agent of another machine launched has no parent here, and is no session.
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
     let events = crate::extensions::subscribed_on_create(daemon, &place.project);
     if !session || events.is_empty() {
         return String::new();
@@ -2350,6 +2398,106 @@ async fn pull_numbered(forge: &Forge, number: u64) -> Result<Option<Pull>, Strin
             bitbucket::pull_numbered(forge, &context, number).await
         }
     }
+}
+
+/// A pull request a review reads: the repository of the project it is on, the forge's name for
+/// it, the branch it merges into and the ref its head is fetched from.
+pub(crate) struct ToReview {
+    pub path: String,
+    pub folder: PathBuf,
+    pub remote: String,
+    pub slug: String,
+    pub base: String,
+    pub head_ref: String,
+}
+
+/// The pull request `number` of a repository of the project's own folder, read now from the
+/// forge declared for it: refused, in a sentence, when the repository has no forge or one its
+/// remote does not lead to, when the forge has no such pull request, or when its head cannot be
+/// fetched.
+pub(crate) async fn pull_to_review(
+    project: &Project,
+    repository: Option<&str>,
+    number: u64,
+) -> Result<ToReview, String> {
+    let names = || {
+        let names: Vec<&str> = project
+            .repositories
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect();
+        names.join(", ")
+    };
+    let chosen = match repository {
+        Some(asked) => project.repositories.iter().find(|r| r.path == asked),
+        None if project.repositories.len() == 1 => project.repositories.first(),
+        None => {
+            return Err(format!(
+                "the project has several repositories: say which one holds pull request \
+                 #{number} with repository, one of {}",
+                names()
+            ));
+        }
+    };
+    let Some(chosen) = chosen else {
+        return Err(format!(
+            "{} is not a repository of the project: it has {}",
+            repository.unwrap_or_default(),
+            names()
+        ));
+    };
+    let checkout = Checkout {
+        path: chosen.path.clone(),
+        folder: match chosen.path.as_str() {
+            "." => project.folder.clone(),
+            path => project.folder.join(path),
+        },
+        remote: chosen.remote.clone(),
+        declared: chosen.forge.clone(),
+    };
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => return Err(format!("{}: {NO_FORGE}", checkout.path)),
+        Err(Some(why)) => return Err(why.trim_start_matches("refused: ").to_owned()),
+    };
+    let pull = match pull_numbered(&forge, number).await {
+        Ok(Some(pull)) => pull,
+        Ok(None) => return Err(format!("{} has no pull request #{number}", forge.slug())),
+        Err(why) if not_found(&why) => {
+            return Err(format!("{} has no pull request #{number}", forge.slug()));
+        }
+        Err(why) => return Err(why),
+    };
+    if !branch_name(&pull.base) {
+        return Err(format!(
+            "pull request #{number} merges into {:?}, which is no branch name git takes",
+            pull.base
+        ));
+    }
+    let head_ref = match &forge {
+        Forge::GitHub { .. } => format!("refs/pull/{number}/head"),
+        Forge::Bitbucket { .. } if !bitbucket::cloud(&forge) => {
+            format!("refs/pull-requests/{number}/from")
+        }
+        // Bitbucket Cloud keeps no ref of a pull request: its source branch, unless that is in a
+        // fork the remote does not have.
+        Forge::Bitbucket { .. } if pull.cross || !branch_name(&pull.head) => {
+            return Err(format!(
+                "pull request #{number} comes from a branch Flottille cannot fetch from {}: a \
+                 fork's, or one with no branch name git takes",
+                checkout.remote
+            ));
+        }
+        Forge::Bitbucket { .. } => format!("refs/heads/{}", pull.head),
+    };
+    Ok(ToReview {
+        path: checkout.path,
+        folder: checkout.folder,
+        remote: checkout.remote,
+        slug: forge.slug(),
+        base: pull.base,
+        head_ref,
+    })
 }
 
 /// What `forge show` says of a pull request of one repository: read now, or `age` ms ago.
@@ -3380,7 +3528,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 "--limit",
                 "50",
                 "--json",
-                "databaseId,headSha,conclusion,workflowName",
+                "databaseId,headSha,conclusion,workflowName,createdAt",
             ])
             .await
             {
@@ -3388,11 +3536,23 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 Err(why) => return Outcome::Failed(why),
             };
             let runs = runs.as_array().cloned().unwrap_or_default();
-            // The runs of the branch's last commit, the newest listed first.
+            // The runs of the branch's last commit, the newest listed first; of each workflow, its
+            // latest run alone, as the pull request's checks count them.
             let head = runs.first().and_then(|run| run["headSha"].as_str());
-            let failed: Vec<&Value> = runs
+            let of_head: Vec<&Value> = runs
                 .iter()
-                .filter(|run| run["headSha"].as_str() == head && run["conclusion"] == "failure")
+                .filter(|run| run["headSha"].as_str() == head)
+                .rev()
+                .collect();
+            let workflow = |run: &&Value| run["workflowName"].as_str().unwrap_or("").to_owned();
+            let created = |run: &&Value| {
+                run["createdAt"]
+                    .as_str()
+                    .and_then(crate::session_read::form)
+            };
+            let failed: Vec<&Value> = latest(of_head, workflow, created)
+                .into_iter()
+                .filter(|run| run["conclusion"] == "failure")
                 .collect();
             if failed.is_empty() {
                 return Outcome::Refused(format!(
@@ -4036,10 +4196,8 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
             .filter(|at| !at.starts_with("0001-"))
             .map(masked)
     };
-    value["statusCheckRollup"]
-        .as_array()
+    rollup(value)
         .into_iter()
-        .flatten()
         .map(|check| {
             let (name, state) = check_of(check);
             flottille_core::item::Check {

@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_core::agent::{Agent, AgentState};
+use flottille_core::agent::{Agent, AgentState, GateMode};
 use flottille_core::approval::{self, Decision, Request};
 use flottille_core::protocol::AgentTrees;
 use flottille_core::question;
@@ -66,6 +66,10 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         Ok(None) => return Outcome::Failed(format!("there is no agent {}", grant.agent)),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
+    // A session it started on another machine is reached through its daemon.
+    if let Some(outcome) = crate::across::call(daemon, &caller, tool, &args).await {
+        return outcome;
+    }
     let done = match tool {
         "agent_launch" => launch(daemon, &caller, args).await,
         "agent_send" => send(daemon, &caller, args),
@@ -94,6 +98,9 @@ fn failed(error: impl std::fmt::Display) -> Outcome {
 
 /// How an agent is named to another: its title and its id.
 pub fn named(agent: &Agent) -> String {
+    if let Some(named) = crate::across::stand_in_name(agent) {
+        return named;
+    }
     match &agent.title {
         Some(title) => format!("\"{title}\" (agent {})", agent.id),
         None => format!("agent {}", agent.id),
@@ -138,6 +145,12 @@ struct Launch {
     base: Option<workspaces::BaseChoice>,
     /// Which agent the launch starts (`docs/tools.md`, "The tree's tools"): never guessed.
     kind: Option<LaunchKind>,
+    /// With `led` or `handed`: the registered project the session is started in, the caller's
+    /// when left out (`docs/tools.md`, "Sessions an agent starts").
+    project: Option<String>,
+    /// Another of the user's machines, a runner, to start it on, in a copy of the caller's place
+    /// (`docs/remote.md`, "Starting a session on another machine"); this one when left out.
+    machine: Option<String>,
 }
 
 /// What `agent_launch` starts: a child in the caller's place, a session the caller leads, or a
@@ -209,9 +222,30 @@ pub fn names_main(daemon: &Daemon, project: &str, name: &str) -> bool {
 
 /// The refusals of a launch that need nothing looked up but the caller's place: checked before
 /// the gate is asked, and again when the launch is performed.
-pub fn launch_refusal(workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
+pub fn launch_refusal(project: &str, workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
     let asked = Launch::of(args.clone())?;
+    asked.elsewhere_refusal(project)?;
+    asked.machine_refusal()?;
     asked.place(workspace).map(|_| ())
+}
+
+/// The other project a launch starts its session in, when it names one that is not the caller's
+/// (`docs/tools.md`, "Sessions an agent starts"): held for the user in every mode.
+pub fn launched_elsewhere<'a>(caller_project: &str, args: &'a Value) -> Option<&'a str> {
+    args["project"]
+        .as_str()
+        .map(str::trim)
+        .filter(|project| !project.is_empty() && *project != caller_project)
+}
+
+/// The mode of a session an agent starts in another project: the mode that project gives a new
+/// session, never above the caller's tree's (`docs/design.md` §7.1). A project gives a new
+/// session Auto; Full is the user's choice for one tree, never carried to another project.
+pub fn mode_elsewhere(caller: GateMode) -> GateMode {
+    match caller {
+        GateMode::Ask => GateMode::Ask,
+        GateMode::Auto | GateMode::Full => GateMode::default(),
+    }
 }
 
 impl Launch {
@@ -230,6 +264,47 @@ impl Launch {
 
     fn kind(&self) -> LaunchKind {
         self.kind.unwrap_or(LaunchKind::Child)
+    }
+
+    /// A child works in its parent's project: only a session is started in another.
+    fn elsewhere_refusal(&self, caller_project: &str) -> Result<(), Outcome> {
+        let elsewhere = self
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|project| !project.is_empty() && *project != caller_project);
+        match elsewhere {
+            Some(project) if !self.session() => Err(refused(format!(
+                "refused: a child works in your project, never in another: project {project} is \
+                 for a session there, agent_launch {{\"kind\": \"led\", \"project\": \
+                 \"{project}\", \"title\": \"...\", \"brief\": \"...\"}}, held for the user"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// On another machine, the agent works in a copy of the caller's place there: no other place
+    /// is taken with `machine`.
+    fn machine_refusal(&self) -> Result<(), Outcome> {
+        if self.machine.is_none() {
+            return Ok(());
+        }
+        let given = [
+            ("workspace", self.workspace.is_some()),
+            ("new_workspace", self.new_workspace.is_some()),
+            ("repositories", self.repositories.is_some()),
+            ("branch", self.branch.is_some()),
+            ("base", self.base.is_some()),
+            ("project", self.project.is_some()),
+        ];
+        match given.iter().find(|(_, given)| *given) {
+            Some((field, _)) => Err(refused(format!(
+                "refused: {field} is not taken with machine: the agent works there in a new \
+                 workspace, a copy of your place (your branch and your uncommitted changes): \
+                 drop {field}"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Whether it starts a session rather than a child.
@@ -294,11 +369,19 @@ impl Launch {
 async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked = Launch::of(args)?;
     let session = asked.session();
-    // Checked again here, as the request was: only a root starts a root.
-    if session && caller.parent.is_some() {
+    // Checked again here, as the request was: only a root starts a root. A child an agent of
+    // another machine launched has no parent here, and is a child: its depth says it.
+    if session && (caller.parent.is_some() || caller.depth > 0) {
         return Err(refused(crate::actions::CHILD_ROOTS));
     }
     let led = asked.kind() == LaunchKind::Led;
+    asked.elsewhere_refusal(&caller.project)?;
+    let elsewhere = asked
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty() && *project != caller.project)
+        .map(str::to_owned);
     let choice = asked.place(caller.workspace.as_deref())?;
     if !session && caller.depth + 1 > DEPTH_LIMIT {
         return Err(refused(format!(
@@ -322,7 +405,24 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             asked.role.as_deref().unwrap_or_default()
         ))
     })?;
-    let project = projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?;
+    asked.machine_refusal()?;
+    if let Some(machine) = &asked.machine {
+        let remote = crate::launches::Asked {
+            kind: asked.kind(),
+            title: asked.title.trim().to_owned(),
+            brief: asked.brief.clone(),
+            provider: asked.provider.unwrap_or_else(|| caller.provider.clone()),
+            model: asked.model.clone(),
+            effort: asked.effort.clone(),
+            role: role.name.to_owned(),
+        };
+        return crate::launches::launch(daemon, caller, machine, remote).await;
+    }
+    let project = match &elsewhere {
+        Some(name) => projects::load_project(daemon, name)
+            .map_err(|f| refused(format!("refused: {}", f.message)))?,
+        None => projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?,
+    };
     // A child runs on its parent's provider unless it names another.
     let provider = asked.provider.or_else(|| Some(caller.provider.clone()));
     let asked_provider = providers::Asked {
@@ -340,7 +440,10 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     };
     let in_main = matches!(&choice, WorkspaceChoice::Existing(name)
         if names_main(daemon, &project.name, name));
+    // In another project, the caller's own place is none of that project's: its folder is meant.
+    let in_main = in_main || (elsewhere.is_some() && matches!(choice, WorkspaceChoice::Own));
     let (workspace, preparing) = match choice {
+        WorkspaceChoice::Own if elsewhere.is_some() => (None, false),
         WorkspaceChoice::Own => (caller.workspace.clone(), false),
         WorkspaceChoice::Existing(_) if in_main => (None, false),
         WorkspaceChoice::Existing(name) => (Some(name), false),
@@ -383,6 +486,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             preparing,
             role,
             parent: (!session).then(|| (caller.id.clone(), caller.depth)),
+            remote_parent_depth: None,
             title: Some(asked.title.trim().to_owned()),
             brief: asked.brief.clone(),
             provider,
@@ -391,7 +495,10 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             // A child's is not read: a tree runs in its root's mode (`judge::mode`). A new root
             // takes the mode of the tree that started it, never a looser one: in Full, the caller
             // could already do all the new session would do.
-            gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
+            gate_mode: Some(match &elsewhere {
+                Some(_) => mode_elsewhere(crate::judge::mode(daemon, &caller.id)),
+                None => crate::judge::mode(daemon, &caller.id),
+            }),
             launched_by: session.then(|| caller.id.clone()),
             led,
             launched: None,
@@ -415,6 +522,19 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         (_, true) => "main, the project folder".to_owned(),
         (Some(w), _) => format!("workspace {w}"),
         (None, _) => "your own place".to_owned(),
+    };
+    // A session of another project: its place is that project's, and writing to it asks the user
+    // once, though the caller started it.
+    let (place, leave) = match &elsewhere {
+        Some(name) => (
+            format!("{place} of project {name}"),
+            format!(
+                " It is a session of project {name}, a lead there with that project's tools: you \
+                 do not act in its places yourself, and your first message to it with \
+                 session_send asks the user once."
+            ),
+        ),
+        None => (place, String::new()),
     };
     // What the answer says it runs on is what its session took: a model or an effort left out is
     // the agent's own to take, which only its session says.
@@ -448,7 +568,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
              it. It asks you its questions: a delivery [flottille:session-turn-ended] wakes you \
              when it asks, reports or ends, with its last message. Answer with session_send, \
              relay to the user with ask, or do nothing; forge unsubscribe with its session stops \
-             the wakes.",
+             the wakes.{leave}",
             named(&child)
         )));
     }
@@ -457,7 +577,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "Started a session for the user, {}, on {runs}, in {place}, handed over. It is the \
              user's, not your child: the user follows it in the window and the agent_* tools do not reach \
              it. You hear nothing more of it unless it writes to you; you can write to it with \
-             session_send.",
+             session_send.{leave}",
             named(&child)
         )));
     }
@@ -521,13 +641,13 @@ impl Drop for Opening<'_> {
 
 /// A slot of a project's children cap, taken by a launch until its child exists (and counts as a
 /// live child), or the launch fails.
-struct Slot<'a> {
+pub(crate) struct Slot<'a> {
     daemon: &'a Daemon,
     project: String,
 }
 
 impl<'a> Slot<'a> {
-    fn take(daemon: &'a Daemon, project: &str, cap: u8) -> Result<Slot<'a>, Outcome> {
+    pub(crate) fn take(daemon: &'a Daemon, project: &str, cap: u8) -> Result<Slot<'a>, Outcome> {
         let mut launching = daemon.launching.lock().unwrap();
         let taken = launching.get(project).copied().unwrap_or(0);
         let running = daemon
@@ -576,11 +696,13 @@ pub fn launch_for_extension(
     brief: &str,
     instructions: String,
     provider: providers::Asked,
+    at: Option<std::path::PathBuf>,
     before: impl FnOnce(&Agent) -> Result<(), String>,
 ) -> Result<Agent, Failure> {
     let launcher = crate::extensions::launched(daemon, &parent.id);
     let allowed = match launcher {
-        None => parent.parent.is_none(),
+        // A child an agent of another machine launched has no parent here, and is no session.
+        None => parent.parent.is_none() && parent.depth == 0,
         Some((owner, _)) => owner.name == extension,
     };
     if !allowed {
@@ -615,10 +737,14 @@ pub fn launch_for_extension(
         &project,
         New {
             id: None,
-            workspace: parent.workspace.clone(),
+            workspace: match at {
+                Some(_) => None,
+                None => parent.workspace.clone(),
+            },
             preparing: false,
             role: &roles::LAUNCHED,
             parent: Some((parent.id.clone(), parent.depth)),
+            remote_parent_depth: None,
             title: Some(title.to_owned()),
             brief: brief.to_owned(),
             provider: provider.provider,
@@ -631,6 +757,7 @@ pub fn launch_for_extension(
                 extension,
                 kind,
                 instructions,
+                at,
             }),
         },
     )?;
@@ -674,15 +801,20 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
         let launched = agent.parent.is_some()
             || agent.launched_by.is_some()
             || agent.detached_from.is_some()
-            || crate::extensions::started(daemon, &agent.id);
+            || crate::extensions::started(daemon, &agent.id)
+            || crate::launches::started_here(daemon, &agent.id);
         if agent.state.is_final() || agent.brief.is_none() || !launched {
             continue;
         }
         let key = format!("brief-{}-{}", agent.id, agent.epoch);
-        if daemon
-            .read(|store| store.delivery(&key))
-            .is_ok_and(|d| d.is_some())
-        {
+        // A compaction's new session was given its brief again under the replay's id: given all
+        // the same, it is never given a third time as news.
+        let replay = flottille_core::prompt::replay_id(&key);
+        if [&key, &replay].into_iter().any(|id| {
+            daemon
+                .read(|store| store.delivery(id))
+                .is_ok_and(|d| d.is_some())
+        }) {
             continue;
         }
         match agent.workspace {
@@ -704,6 +836,16 @@ pub const LAUNCHED: &str = " started this session for the user with this message
 pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
     let brief = agent.brief.clone().unwrap_or_default();
     // Detached, it is still that agent's words.
+    // Started for an agent of another machine: that agent's words, never the user's.
+    if let Some((caller, machine, kind)) = crate::launches::launched_from(daemon, &agent.id) {
+        if kind == "child" {
+            return ("brief", brief);
+        }
+        return (
+            "launched",
+            format!("agent {caller} of {machine}{LAUNCHED}\n\n{brief}"),
+        );
+    }
     let Some(launcher) = agent.launched_by.as_ref().or(agent.detached_from.as_ref()) else {
         // An extension's session was not started with the user's words.
         let theirs = agent.parent.is_none() && !crate::extensions::started(daemon, &agent.id);
@@ -846,6 +988,10 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
 #[serde(deny_unknown_fields)]
 pub struct SessionSend {
     pub session: String,
+    /// Another registered project, whose root sessions a title is matched among
+    /// (`session_name`): by then `session` is the id.
+    #[allow(dead_code)]
+    pub project: Option<String>,
     pub text: String,
 }
 
@@ -869,9 +1015,11 @@ pub fn session_of(
     caller: &Agent,
     asked: &SessionSend,
 ) -> Result<(Agent, Relation), Outcome> {
+    // A caller of another machine stood in for here runs nothing: it is no session.
     let found = daemon
         .read(|store| store.agent(&asked.session))
-        .map_err(failed)?;
+        .map_err(failed)?
+        .filter(|agent| !crate::across::is_stand_in(&agent.id));
     let id = &asked.session;
     let session = match found {
         None => {
@@ -890,29 +1038,31 @@ pub fn session_of(
                 "refused: {id} is one of your children: they are written to with agent_send"
             )));
         }
-        Some(agent) if agent.parent.is_some() => {
+        // A child an agent of another machine launched here has no parent here, and is one.
+        Some(agent) if agent.parent.is_some() || crate::across::remote_child(daemon, &agent) => {
             return Err(refused(format!(
                 "refused: {id} is a child of another session: it is written to by its parent, \
                  never with session_send"
             )));
         }
-        Some(agent) if agent.project != caller.project => {
-            return Err(refused(format!(
-                "refused: {id} is a session of another project, {}, not of {}: an agent writes \
-                 only to the sessions of its own project",
-                agent.project, caller.project
-            )));
-        }
         Some(agent) => agent,
     };
+    let leave = || {
+        daemon
+            .read(|store| store.has_leave(&caller.id, &session.id))
+            .map_err(failed)
+    };
+    // Across projects, even a session the caller started is written to with the user's leave,
+    // once per pair (`docs/tools.md`, "Sessions that talk to each other").
+    let elsewhere = session.project != caller.project;
     let relation = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
-        Relation::Started
+        match !elsewhere || leave()? {
+            true => Relation::Started,
+            false => Relation::NoLeave,
+        }
     } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
         Relation::StartedYou
-    } else if daemon
-        .read(|store| store.has_leave(&caller.id, &session.id))
-        .map_err(failed)?
-    {
+    } else if leave()? {
         Relation::Leave
     } else {
         Relation::NoLeave
@@ -954,6 +1104,27 @@ pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<bool,
     }
 }
 
+/// The pair a leave across projects is asked for, as the user reads it on a request: both
+/// sessions, each with its project, and who started the one reached.
+pub fn sessions_across(daemon: &Daemon, caller: &Agent, session: &Agent) -> (String, String) {
+    let starter = match session.launched_by.as_deref() {
+        Some(id) if id == caller.id => "started by this agent".to_owned(),
+        None => "started by you, not by this agent".to_owned(),
+        Some(id) => match daemon.read(|store| store.agent(id)) {
+            Ok(Some(agent)) => format!("started by {}, not by this agent", named(&agent)),
+            _ => format!("started by agent {id}, not by this agent"),
+        },
+    };
+    (
+        format!("{} of project {}", named(caller), caller.project),
+        format!(
+            "the session {} of project {} ({starter})",
+            named(session),
+            session.project
+        ),
+    )
+}
+
 /// A session another agent acts on, as the user reads it on a request: its name, and who started
 /// it, which is never the agent asking.
 pub fn other_session(daemon: &Daemon, session: &Agent) -> String {
@@ -980,6 +1151,8 @@ pub fn grant_leave(daemon: &Daemon, writer: &str, session: &str, request: u64) {
 
 /// What follows the sender's name on the first line of a message `session_send` delivers.
 pub const SESSION_WROTE: &str = " wrote to this session:";
+/// How the reason of a session its pilot ended starts.
+pub const ENDED_BY_ITS_PILOT: &str = "ended by the session that led it";
 
 /// `session_send`: a message to another session of the caller's project, once the gate let it
 /// through (`Relation`), delivered as `session` under a line naming the sender: an agent's words, never the user's.
@@ -988,10 +1161,14 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: SessionSend = arguments("session_send", args)?;
     let (session, relation) = session_of(daemon, caller, &asked)?;
     // A following ties a session to the one that started it; two sessions a leave joins have none.
-    let following = match relation {
-        Relation::Started => Some((caller.id.as_str(), &session)),
-        Relation::StartedYou => Some((session.id.as_str(), caller)),
-        Relation::Leave | Relation::NoLeave => None,
+    // Told by who started whom, not by the relation: across projects the first message of a pair
+    // is performed once the user allowed it, before the leave is kept, as `NoLeave`, and it counts.
+    let following = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
+        Some((caller.id.as_str(), &session))
+    } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
+        Some((session.id.as_str(), caller))
+    } else {
+        None
     };
     if let Some((starter, followed)) = following
         && crate::subscriptions::paused(daemon, starter, &followed.id)
@@ -1218,7 +1395,7 @@ pub(crate) fn ago(ms: u64) -> String {
     }
 }
 
-fn cut(text: &str, limit: usize) -> String {
+pub(crate) fn cut(text: &str, limit: usize) -> String {
     let count = text.chars().count();
     if count <= limit {
         return text.to_owned();
@@ -1482,9 +1659,14 @@ enum Stopped {
 }
 
 /// What `agent_stop` ends, or the refusal, before anything is asked: the caller itself, a child
-/// of another session, a session of another project, an unknown id or a session that ended.
+/// of another session, an unknown id or a session that ended. A session of another project is
+/// ended as one of the caller's: its own when it leads it, the user's to allow otherwise.
 fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome> {
-    let found = daemon.read(|store| store.agent(id)).map_err(failed)?;
+    // A caller of another machine stood in for here runs nothing: it is no agent to stop.
+    let found = daemon
+        .read(|store| store.agent(id))
+        .map_err(failed)?
+        .filter(|agent| !crate::across::is_stand_in(&agent.id));
     match found {
         None => Err(refused(format!(
             "refused: {id} names no agent: agent_stop ends one of your children or a session of \
@@ -1505,15 +1687,12 @@ fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome
         Some(agent) if agent.id == caller.id => Err(refused(format!(
             "refused: {id} is your own session: agent_stop ends another; end your turn instead"
         ))),
-        Some(agent) if agent.parent.is_some() => Err(refused(format!(
-            "refused: {id} is a child of another session: it is stopped by its parent, never by \
-             you"
-        ))),
-        Some(agent) if agent.project != caller.project => Err(refused(format!(
-            "refused: {id} is a session of another project, {}, not of {}: an agent ends only \
-             the sessions of its own project",
-            agent.project, caller.project
-        ))),
+        Some(agent) if agent.parent.is_some() || crate::across::remote_child(daemon, &agent) => {
+            Err(refused(format!(
+                "refused: {id} is a child of another session: it is stopped by its parent, never \
+                 by you"
+            )))
+        }
         Some(agent) if agent.state.is_final() => Err(refused(format!(
             "refused: {} has {} already",
             named(&agent),
@@ -1533,7 +1712,11 @@ fn caller_of(daemon: &Daemon, grant: &Grant) -> Result<Agent, Outcome> {
 /// What `agent_stop` does, in words, for a session the user is asked to end: the session, where
 /// it works, who started it, and what ending does; nothing for a child, stopped as ever. A call
 /// that names nothing it may end is the refusal, before anything is asked.
-pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+pub async fn stop_says(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
     let asked: StopChild = arguments("agent_stop", args.clone())?;
     let caller = caller_of(daemon, grant)?;
     let Stopped::Session(session) = stopped(daemon, &caller, &asked.agent_id)? else {
@@ -1542,6 +1725,10 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
     let place = match &session.workspace {
         Some(name) => format!("the workspace {name}"),
         None => "main".to_owned(),
+    };
+    let place = match session.project == caller.project {
+        true => place,
+        false => format!("{place} of project {}", session.project),
     };
     let starter = match session.launched_by.as_deref() {
         Some(id) if id == caller.id && session.led => "this agent, which leads it".to_owned(),
@@ -1552,11 +1739,36 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
             _ => format!("agent {id}, not by this agent"),
         },
     };
-    Ok(vec![format!(
+    let mut says = vec![format!(
         "End the session {}, in {place}, started by {starter}: its tree, its runs and what was \
          queued for it are stopped; its workspace stays",
         named(&session)
-    )])
+    )];
+    // The sessions it leads end with it: the user reads them here, as the window's confirmation
+    // lists them (`agent.ending`), before the end is allowed.
+    let ending = ending(daemon, &session.id)
+        .await
+        .map_err(|failure| failed(failure.message))?;
+    for led in ending["sessions"].as_array().into_iter().flatten() {
+        let title = match led["title"].as_str() {
+            Some(title) => format!(
+                "\"{title}\" (agent {})",
+                led["id"].as_str().unwrap_or_default()
+            ),
+            None => format!("agent {}", led["id"].as_str().unwrap_or_default()),
+        };
+        let unsaved = match led["state"].as_str() {
+            Some("clean") | None => String::new(),
+            Some("uncommitted") => ", which holds uncommitted changes".to_owned(),
+            Some("unpushed") => ", which holds commits not pushed".to_owned(),
+            Some(_) => ", whose work cannot be checked".to_owned(),
+        };
+        says.push(format!(
+            "It ends with it the session {title}, in project {}{unsaved}",
+            led["project"].as_str().unwrap_or_default()
+        ));
+    }
+    Ok(says)
 }
 
 /// Whether an `agent_stop` ends a session that is neither one of the caller's children nor one
@@ -1656,7 +1868,9 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
              the report names"
         )));
     }
-    if caller.reported_at.is_some() && caller.parent.is_some() {
+    // A child of an agent of another machine reports to it as to a parent here.
+    let parented = caller.parent.is_some() || crate::across::remote_child(daemon, caller);
+    if caller.reported_at.is_some() && parented {
         return Err(refused(
             "refused: you reported already: your session ends with this turn, end it now",
         ));
@@ -1668,7 +1882,7 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
             let (_, event) = store.change_agent(
                 &caller.id,
                 AgentChange {
-                    reported_at: caller.parent.is_some().then_some(Some(now_ms())),
+                    reported_at: parented.then_some(Some(now_ms())),
                     ..AgentChange::default()
                 },
                 Some(("agent.reported", json!({"agent": caller.id, "text": text}))),
@@ -1676,10 +1890,14 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
             Ok(((), event))
         })
         .map_err(failed)?;
-    if caller.parent.is_none() {
+    if !parented {
         return Ok(Outcome::Done("Your report was shown to the user.".into()));
     }
-    let mut body = format!("reported:\n\n{text}\n\n");
+    // Its words are data: only the daemon names a ref its commits came back into.
+    let mut body = format!(
+        "reported:\n\n{}\n\n",
+        flottille_core::prompt::unforged(&text)
+    );
     body.push_str(&format!(
         "It worked in {}.",
         caller
@@ -1755,11 +1973,24 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
         .collect();
     let question = question::text(&questions);
     let pilot = pilot_of(daemon, caller);
-    let to = match (&caller.parent, &pilot) {
-        (Some(_), _) => "parent",
-        (None, Some(_)) => "pilot",
-        (None, None) => "user",
+    // The machine of the agent of another machine that started it, while it is off: the question
+    // goes to the user instead.
+    let mut offline = ["child", "led"]
+        .into_iter()
+        .find_map(|kind| crate::across::starter(daemon, caller, kind))
+        .and_then(Result::err);
+    let parented = caller.parent.is_some()
+        || (crate::across::remote_child(daemon, caller) && offline.is_none());
+    let to = match (parented, &pilot) {
+        (true, _) => "parent",
+        (false, Some(_)) => "pilot",
+        (false, None) => "user",
     };
+    let mut asked = json!({"agent": caller.id, "question": question, "questions": questions,
+        "to": to, "pilot": pilot});
+    if let Some(machine) = &offline {
+        asked["offline"] = json!(machine);
+    }
     daemon
         .write(|store| {
             let (_, event) = store.change_agent(
@@ -1768,23 +1999,41 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
                     waiting_on_answer: Some(true),
                     ..AgentChange::default()
                 },
-                Some((
-                    "agent.asked",
-                    json!({"agent": caller.id, "question": question, "questions": questions,
-                        "to": to, "pilot": pilot}),
-                )),
+                Some(("agent.asked", asked.clone())),
             )?;
             Ok(((), event))
         })
         .map_err(failed)?;
-    if let Some(pilot) = pilot {
+    // The pilot's machine may have gone off between the check and the write, its questions moved
+    // before this one was written: checked again, and moved too.
+    let gone = pilot
+        .as_ref()
+        .and_then(|_| crate::across::starter(daemon, caller, "led"))
+        .and_then(Result::err);
+    if let (Some(pilot), Some(machine)) = (&pilot, gone) {
+        if let Ok(Some(session)) = daemon.read(|store| store.agent(&caller.id)) {
+            questions_to_user(daemon, &session, pilot, Some(&machine));
+        }
+        offline = Some(machine);
+    } else if let Some(pilot) = pilot {
         return Ok(Outcome::Done(format!(
             "Your question went to agent {pilot}, which leads this session: it is told when your \
              turn ends, and its answer comes later as [flottille:session]. Go on with what does \
              not depend on it, or end your turn saying what you wait for."
         )));
     }
-    if caller.parent.is_none() {
+    if let Some(machine) = &offline {
+        let whose = match crate::across::remote_child(daemon, caller) {
+            true => "your parent",
+            false => "the agent that leads this session",
+        };
+        return Ok(Outcome::Done(format!(
+            "Your question was given to the user, as {machine} is offline, the machine of {whose}; \
+             the answer comes later as a message. Go on with what does not depend on it, or end \
+             your turn saying what you wait for."
+        )));
+    }
+    if !parented {
         return Ok(Outcome::Done(
             "Your question was given to the user; the answer comes later as a message. Go on \
              with what does not depend on it, or end your turn saying what you wait for."
@@ -1813,6 +2062,10 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
 /// (`docs/tools.md`, "Where a question goes"). A pilot that ended its subscription, or whose
 /// following is paused, is not woken, so the session's questions go to the user.
 pub fn pilot_of(daemon: &Daemon, agent: &Agent) -> Option<String> {
+    // An agent of another machine leads it while the link to that machine is up.
+    if let Some(Ok(pilot)) = crate::across::starter(daemon, agent, "led") {
+        return Some(pilot);
+    }
     let pilot = agent.launched_by.as_ref().filter(|_| agent.led)?;
     crate::subscriptions::following(daemon, pilot, Some(&agent.id))
         .iter()
@@ -1869,7 +2122,7 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
         Ok(((), events))
     })?;
     daemon.mcp.detached(&session.id);
-    let moved = questions_to_user(daemon, &session, &starter);
+    let moved = questions_to_user(daemon, &session, &starter, None);
     let title = session.title.clone().unwrap_or_else(|| session.id.clone());
     let starter_alive = daemon
         .read(|store| store.agent(&starter))
@@ -1913,23 +2166,29 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
 /// The pilot no longer reads `session` (it stopped following it, it ended, or the user detached
 /// the session): the questions still open to it are asked again of the user (`agent.asked` to
 /// the user, `moved_from` the pilot), which closes the pilot's, so that the session waits on the
-/// user and the inbox shows them. How many went.
-pub fn questions_to_user(daemon: &Daemon, session: &Agent, pilot: &str) -> usize {
+/// user and the inbox shows them. How many went. `offline` names the pilot's machine when they
+/// go because it is off (`docs/remote.md`, "Where a question goes when the parent is off").
+pub fn questions_to_user(
+    daemon: &Daemon,
+    session: &Agent,
+    pilot: &str,
+    offline: Option<&str>,
+) -> usize {
     if session.parent.is_some() || !session.waiting_on_answer || session.state.is_final() {
         return 0;
     }
     let open = unanswered_to(daemon, &session.id, "pilot").unwrap_or_default();
     for question in &open {
+        let mut asked = json!({"agent": session.id, "question": question["question"],
+            "questions": question["questions"], "to": "user", "pilot": null, "moved_from": pilot});
+        if let Some(machine) = offline {
+            asked["offline"] = json!(machine);
+        }
         let _ = daemon.write(|store| {
             let (_, event) = store.change_agent(
                 &session.id,
                 AgentChange::default(),
-                Some((
-                    "agent.asked",
-                    json!({"agent": session.id, "question": question["question"],
-                        "questions": question["questions"], "to": "user",
-                        "pilot": null, "moved_from": pilot}),
-                )),
+                Some(("agent.asked", asked.clone())),
             )?;
             Ok(((), event))
         });
@@ -1962,7 +2221,7 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
     {
         return;
     }
-    let moved = questions_to_user(daemon, &session, &following.agent);
+    let moved = questions_to_user(daemon, &session, &following.agent, None);
     let name = match daemon.read(|store| store.agent(&following.agent)) {
         Ok(Some(pilot)) => named(&pilot),
         _ => format!("agent {}", following.agent),
@@ -1981,48 +2240,69 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
     );
 }
 
-/// The pilot ended: the sessions it led go on, handed to the user, each told once.
-fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
-    let Ok(agents) = daemon.read(|store| store.agents()) else {
-        return;
-    };
-    for session in agents
-        .into_iter()
-        .filter(|agent| agent.led && agent.launched_by.as_deref() == Some(pilot.id.as_str()))
-    {
-        let _ = daemon.write(|store| {
-            let (_, event) = store.change_agent(
-                &session.id,
-                AgentChange {
-                    led: Some(false),
-                    ..AgentChange::default()
-                },
-                Some((
-                    "agent.handed",
-                    json!({"agent": session.id, "from": pilot.id}),
-                )),
-            )?;
-            Ok(((), event))
-        });
-        if session.state.is_final() {
-            continue;
-        }
-        let moved = questions_to_user(daemon, &session, &pilot.id);
-        deliveries::deliver(
-            daemon,
-            &session.id,
-            "handed",
-            Some(format!("handed-{}-{}", session.id, pilot.id)),
-            &format!(
-                "{}, which led this session, ended. The session goes on, handed to the user: what \
-                 you need answered now goes through ask to the user, and that agent no longer \
-                 reads you.{}",
-                named(pilot),
-                moved_said(moved)
-            ),
-            approval::BETWEEN_TURNS,
-        );
+/// The pilot ended for good: the sessions it leads end with it, in its project and in others,
+/// and each one's own led sessions in turn, since it ends as any session does. A led session the
+/// user kept was detached before and is no one's to end. A pilot that failed ends nothing: it can
+/// be resumed, and its sessions go on led by it.
+fn end_led(daemon: &Arc<Daemon>, pilot: &Agent) {
+    for session in led_by_pilot(daemon, &pilot.id) {
+        stop_tree(daemon, &session.id, "its pilot ended");
     }
+}
+
+/// The sessions that end with `pilot`'s end, its led sessions and theirs in turn, the oldest
+/// first: what the user is told before they confirm.
+fn led_by_pilot(daemon: &Daemon, pilot: &str) -> Vec<Agent> {
+    let agents = daemon.read(|store| store.agents()).unwrap_or_default();
+    let mut found: Vec<Agent> = Vec::new();
+    let mut pilots = vec![pilot.to_owned()];
+    while let Some(pilot) = pilots.pop() {
+        let sessions: Vec<&Agent> = agents
+            .iter()
+            .filter(|agent| {
+                agent.led
+                    && agent.launched_by.as_deref() == Some(pilot.as_str())
+                    && !agent.state.is_final()
+            })
+            .collect();
+        for session in sessions {
+            pilots.push(session.id.clone());
+            found.push(session.clone());
+        }
+    }
+    found
+}
+
+/// `agent.ending`: the led sessions the end of `id` would end, by title and project, each with
+/// what its workspace holds that is not saved (`clean`, `uncommitted`, `unpushed` or `unknown`,
+/// as `project.removal` says it). Nothing is changed.
+pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
+    let mut sessions = Vec::new();
+    for session in led_by_pilot(daemon, id) {
+        let workspace = match &session.workspace {
+            Some(name) => daemon
+                .read(|store| store.workspace(&session.project, name))
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let (state, losses) = match workspace {
+            Some(workspace) => match workspaces::loss_state(daemon, &workspace).await {
+                Ok(found) => found,
+                Err(failure) => ("unknown", vec![failure.message]),
+            },
+            None => ("clean", Vec::new()),
+        };
+        sessions.push(json!({
+            "id": session.id,
+            "title": session.title,
+            "project": session.project,
+            "workspace": session.workspace,
+            "state": state,
+            "losses": losses,
+        }));
+    }
+    Ok(json!({"agent": id, "sessions": sessions}))
 }
 
 // Requests.
@@ -2033,6 +2313,8 @@ struct Answer {
     request_id: u64,
     decision: Choice,
     why: String,
+    /// The machine a child of the caller runs on, which holds the request.
+    machine: Option<String>,
 }
 
 #[derive(Deserialize, PartialEq)]
@@ -2045,6 +2327,15 @@ enum Choice {
 fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: Answer = arguments("approval_answer", args)?;
     let number = asked.request_id;
+    // A request of another machine is answered there (`across::call`): none of the caller's
+    // children runs on this one.
+    if let Some(machine) = &asked.machine {
+        return Err(refused(format!(
+            "refused: no child of yours runs on {}: request #{number} is not held by this \
+             agent there; leave machine out for a request of this machine",
+            machine.chars().take(64).collect::<String>()
+        )));
+    }
     daemon
         .read(|store| store.request(number))
         .map_err(failed)?
@@ -2090,10 +2381,12 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "Request #{number} is refused; the agent that asked is told why."
         )));
     }
-    let to = caller
+    // A child an agent of another machine launched forwards to it.
+    let above = caller
         .parent
         .clone()
-        .unwrap_or_else(|| approval::USER.to_owned());
+        .or_else(|| crate::across::caller_of(daemon, caller, "child"));
+    let to = above.clone().unwrap_or_else(|| approval::USER.to_owned());
     let forwarded = daemon
         .write(|store| {
             Ok(match store.forward(number, &caller.id, &why, &to)? {
@@ -2103,7 +2396,7 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         })
         .map_err(failed)?
         .ok_or_else(|| refused(format!("refused: request #{number} was answered meanwhile")))?;
-    if caller.parent.is_none() {
+    if above.is_none() {
         return Ok(Outcome::Done(format!(
             "Request #{number} went to the user, with your why. Its answer comes to the agent \
              that asked."
@@ -2117,6 +2410,10 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
 
 /// Tells the agent that holds the request, a parent, that it is held for it (`child-asks`).
 pub fn asks_parent(daemon: &Arc<Daemon>, request: &Request) {
+    // A parent of another machine is told there.
+    if crate::across::asks_parent(daemon, request) {
+        return;
+    }
     let Ok(Some(holder)) = daemon.read(|store| store.agent(&request.held_by)) else {
         return;
     };
@@ -2165,6 +2462,19 @@ pub fn asks_parent(daemon: &Arc<Daemon>, request: &Request) {
 /// A delivery to the agent's parent about it: `text` follows its name. Nothing for a root.
 pub fn tell_parent(daemon: &Arc<Daemon>, child: &Agent, kind: &str, text: &str, urgency: &str) {
     let Some(parent) = &child.parent else {
+        // A child an agent of another machine launched: told there, its commits going back
+        // with its report.
+        if crate::across::remote_child(daemon, child) {
+            crate::across::tell(
+                daemon,
+                &child.id,
+                kind,
+                &format!("Your child {} {text}", named(child)),
+                urgency,
+                kind == "child-report",
+                matches!(kind, "child-report" | "child-failed"),
+            );
+        }
         return;
     };
     // The agents an extension launched under a session are the extension's: it tells the
@@ -2286,6 +2596,8 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         let events = store.cancel_requests(id, &format!("agent {id} {}", state.as_str()))?;
         Ok(((), events))
     });
+    // A launch of another machine's agent held for the user, whose request just went with it.
+    crate::launches::cancelled(daemon, id);
     deliveries::forget(daemon, id);
     crate::subscriptions::ended(daemon, id);
     let why = match state {
@@ -2293,7 +2605,24 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         _ => format!("ended: {reason}"),
     };
     crate::subscriptions::followed_ended(daemon, &agent, &why);
-    hand_over(daemon, &agent);
+    // Its pilot on another machine is told, unless it ended it.
+    if crate::across::remote_led(daemon, &agent) && !reason.starts_with(ENDED_BY_ITS_PILOT) {
+        crate::across::tell(
+            daemon,
+            id,
+            crate::subscriptions::TURN_ENDED,
+            &format!(
+                "Session {} {why}. Your following of it is over.",
+                named(&agent)
+            ),
+            approval::BETWEEN_TURNS,
+            false,
+            true,
+        );
+    }
+    if state == AgentState::Ended {
+        end_led(daemon, &agent);
+    }
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });
@@ -2399,15 +2728,32 @@ async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
             return;
         }
     };
+    // The pilot's workspace tool reaches its own project's workspaces: a session led from another
+    // project is stopped, and its workspace is left to that session and its project (a workspace
+    // of the same name in the pilot's project is none of this one).
+    let across = matches!(
+        daemon.read(|store| store.agent(pilot)),
+        Ok(Some(pilot)) if pilot.project != session.project
+    );
+    let text = match across {
+        true => format!(
+            "{} reported and its branch is in {branch}: stop it. Its workspace {workspace} is in \
+             project {}, which your workspace tool does not reach: it is that session's, or that \
+             project's, to remove, never one of yours",
+            named(session),
+            session.project
+        ),
+        false => format!(
+            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
+            named(session)
+        ),
+    };
     deliveries::deliver(
         daemon,
         pilot,
         LED_INTEGRATED,
         Some(id),
-        &format!(
-            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
-            named(session)
-        ),
+        &text,
         approval::BETWEEN_TURNS,
     );
 }
@@ -2422,7 +2768,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     if agent.state.is_final() {
         return;
     }
-    if agent.parent.is_none() {
+    if agent.parent.is_none() && !crate::across::remote_child(daemon, &agent) {
         crate::subscriptions::turn_ended(daemon, &agent);
         remind_integrated(daemon, &agent);
         return;
@@ -2501,7 +2847,8 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
     let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
         return;
     };
-    if agent.parent.is_none() {
+    // A child an agent of another machine launched has no parent here, and is a child.
+    if agent.parent.is_none() && agent.depth == 0 {
         return;
     }
     if let Some(brief) = &agent.brief {
@@ -2613,6 +2960,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "led_by": agent.launched_by.as_ref().filter(|_| agent.led),
         // The agent the user detached it from, kept for the record (`docs/tools.md`, "Detach").
         "detached_from": agent.detached_from,
+        // The agent of another machine that started it here (`launches::launched_from_shown`).
+        "launched_from": crate::launches::launched_from_shown(daemon, &agent.id),
         "depth": agent.depth,
         "epoch": agent.epoch,
         "state": agent.state,
@@ -2774,7 +3123,12 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
     let taken: Vec<_> = daemon
         .read(|store| store.last_deliveries_of(id, answers, 64))?
         .into_iter()
-        .filter(|delivery| matches!(delivery.state.as_str(), "sending" | "sent"))
+        // A pilot's answer still queued, the session busy, answers too: it reaches the session
+        // whatever becomes of the pilot's machine.
+        .filter(|delivery| {
+            matches!(delivery.state.as_str(), "sending" | "sent")
+                || (to == "pilot" && delivery.state == "queued")
+        })
         .collect();
     // When the newest answer the root took was written: a message of the user's, or for a
     // question to its pilot, a `session_send` of that pilot, whose key names it. An answer from
@@ -2912,8 +3266,78 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A child an agent of another machine launched here, as the store keeps it: no parent, one
+    /// below that agent's depth.
+    pub(crate) fn a_child_of_another_machine() -> Agent {
+        Agent {
+            depth: 1,
+            role: "worker".into(),
+            ..crate::daemon::tests::an_agent("c1")
+        }
+    }
+
+    /// A daemon on temporary folders and a throwaway store holding `agent`.
+    pub(crate) fn a_daemon_with(dir: &std::path::Path, agent: &Agent) -> Arc<Daemon> {
+        let paths = flottille_core::paths::Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(agent, ("agent.created", json!({})))
+            .unwrap();
+        let projects = projects::Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    #[tokio::test]
+    async fn a_child_of_another_machine_s_agent_starts_no_session_even_given_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = a_child_of_another_machine();
+        let daemon = a_daemon_with(dir.path(), &child);
+
+        for kind in ["led", "handed"] {
+            let launched = launch(
+                &daemon,
+                &child,
+                json!({"kind": kind, "title": "Another", "brief": "Do more."}),
+            )
+            .await;
+            assert!(
+                matches!(&launched, Err(Outcome::Refused(why)) if why == crate::actions::CHILD_ROOTS),
+                "{kind}"
+            );
+        }
+        // Nor does it pilot an extension's agents: it is no session.
+        let piloted = launch_for_extension(
+            &daemon,
+            "review",
+            &child,
+            "pilot",
+            "Review",
+            "Read the change.",
+            String::new(),
+            providers::Asked {
+                provider: None,
+                model: None,
+                effort: None,
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            piloted.message.contains("cannot have children"),
+            "{}",
+            piloted.message
+        );
+        assert_eq!(daemon.read(Store::agents).unwrap().len(), 1);
+    }
 
     #[test]
     fn a_duration_is_said_in_its_unit() {

@@ -204,6 +204,7 @@ never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading argumen
 provider = "claude"                   # the provider of its agents that name none; default: the first one enabled
 model = "sonnet"                      # the model of its agents on that provider that name none; default: the provider's
 windows = true                        # its agents' runs may open windows on your screen (docs/tools.md); the user's alone, default false
+from_machine = "3f2a…"                # written by Flottille alone, on a project it made for a launch of another machine: that machine's key; its settings that travel follow that machine's (docs/remote.md, "Which project")
 
 [[repositories]]                      # at least one
 path = "."                            # relative to the folder; "." is the folder itself
@@ -303,7 +304,7 @@ repository"). It is one of:
 `kind = "jira"` with `site` (the Jira Cloud site, `acme.atlassian.net`) and `projects`, the keys of
 its Jira projects (at least one), and optionally `worklog_token`, the name of the vault entry that
 logs time on Jira (`docs/tickets.md`, "Logging time"). A project with no `[tracker]` takes no
-ticket. With Jira chosen, the Tracker dialog has the field `Log time with`: a select of the vault
+ticket. With Jira chosen, the Tracker dialog has the field `Jira API access with`: a select of the vault
 entries the project sees (its own and the global ones; name and username, never a secret), `None`
 first, saved as `worklog_token`; under it a link, `New entry in the vault`, opens Settings, Vault on
 a new entry and goes back to the project's Tracker when that dialog closes.

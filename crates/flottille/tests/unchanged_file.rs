@@ -4,7 +4,7 @@
 //! fake ACP agent, whose compactions it does not, in a throwaway repository and temporary XDG
 //! folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

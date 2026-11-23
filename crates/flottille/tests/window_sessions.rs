@@ -3,7 +3,7 @@
 //! its days field unfolds when it is switched on, and every movement is animated. No window opens
 //! on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,7 +28,9 @@ fn window<'a>(
     };
     cx.update(|cx| flottille_window::init_with(env, cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
-    cx.simulate_resize(size(px(1280.), px(1600.)));
+    // Tall enough for the whole Agents tab: the page scrolls, and a click needs the control drawn
+    // in view.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
     (shell, cx)
 }
 

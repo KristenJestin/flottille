@@ -3,7 +3,7 @@
 //! write to another, on both sessions' pages, and Withdraw takes it back through the daemon, its
 //! row folding away. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,9 +30,14 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 
 /// A session the user starts in `app`, its first turn ended: its id and MCP session.
 fn root(user: &User) -> (String, Mcp) {
+    root_in(user, "app")
+}
+
+/// A session the user starts in `project`, its first turn ended: its id and MCP session.
+fn root_in(user: &User, project: &str) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = user
-        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .call("agent.run", json!({"project": project, "message": "hello"}))
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
     let (url, authorization) = server_of(user, opened);
@@ -44,14 +49,19 @@ fn root(user: &User) -> (String, Mcp) {
 
 /// The project `app` over a throwaway repository.
 fn app(user: &User) {
-    let folder = user.path("work/app");
+    project(user, "app");
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+}
+
+/// A project over a throwaway repository.
+fn project(user: &User, name: &str) {
+    let folder = user.path(&format!("work/{name}"));
     user.git_init(&folder);
-    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    std::fs::write(folder.join("README.md"), format!("{name}\n")).unwrap();
     user.git(&folder, &["add", "."]);
     user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-    user.call("project.add", json!({"folder": folder, "name": "app"}))
+    user.call("project.add", json!({"folder": folder, "name": name}))
         .unwrap();
-    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
 }
 
 /// A first message from `mcp`'s session to `session`, held for the user's leave: its request.
@@ -72,6 +82,20 @@ fn pair(user: &User) -> (String, String) {
     app(user);
     let (writer, mcp) = root(user);
     let (session, _) = root(user);
+    let number = first_send(&mcp, &session);
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
+    eventually("the leave", || store.has_leave(&writer, &session).unwrap());
+    (writer, session)
+}
+
+/// A session of `app` and one of `kit`, the first let by the user write to the second: their ids.
+fn pair_across(user: &User) -> (String, String) {
+    app(user);
+    project(user, "kit");
+    let (writer, mcp) = root(user);
+    let (session, _) = root_in(user, "kit");
     let number = first_send(&mcp, &session);
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
@@ -281,4 +305,35 @@ fn a_refused_withdrawal_is_said_in_a_toast(cx: &mut TestAppContext) {
         )]
     );
     assert!(!present(cx, "rail-leaves-error"));
+}
+
+#[gpui_kit::test]
+fn the_write_access_across_projects_is_listed_on_both_sessions(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (writer, session) = pair_across(&user);
+    let key = format!("{writer}-{session}");
+    let (shell, cx) = window(&user, cx);
+
+    // The session of kit says who may write to it, and the writer's own page where it may write.
+    let shown = open(&shell, cx, &session);
+    until(&shell, cx, "the rail lists the leave", |cx| {
+        !rows(&shown, cx).is_empty()
+    });
+    settle(cx);
+    assert_eq!(label(cx, "rail-leaves-title").unwrap(), "Write access");
+    assert_eq!(
+        label(cx, &format!("leave-said-{key}")).unwrap(),
+        format!("agent {writer} may write here")
+    );
+
+    let shown = open(&shell, cx, &writer);
+    until(&shell, cx, "the writer's rail lists the leave", |cx| {
+        !rows(&shown, cx).is_empty()
+    });
+    settle(cx);
+    assert_eq!(label(cx, "rail-leaves-title").unwrap(), "Write access");
+    assert_eq!(
+        label(cx, &format!("leave-said-{key}")).unwrap(),
+        format!("May write to agent {session}")
+    );
 }

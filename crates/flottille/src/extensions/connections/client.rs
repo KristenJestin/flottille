@@ -60,7 +60,7 @@ pub struct Live {
     servers: Mutex<HashMap<String, Arc<Server>>>,
     started: AtomicU64,
     /// The sign-in that waits for the browser, of each connection.
-    pub(super) signing: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    pub(super) signing: Mutex<HashMap<String, super::oauth::Signing>>,
     /// The tokens of a connection that could not be written to the vault after a refresh gave
     /// new ones: the old refresh token is spent, so these are the only good ones, kept here until
     /// the vault takes them.

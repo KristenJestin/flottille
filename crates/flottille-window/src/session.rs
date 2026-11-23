@@ -15,7 +15,7 @@
 
 use crate::glyphs;
 use crate::state::{AgentState, Pill, StateIcon, Status};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::ops::Range;
@@ -29,8 +29,8 @@ use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
-    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Piece,
-    PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
+    Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
+    Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
     changed, changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line,
     presence, presence_of, section_label, selectable, space, text_region, tint, tipped_when_cut,
     toast, toggle_id, turning,
@@ -60,6 +60,8 @@ use crate::conversation::{
     ConnectionReview, Conversation, DiffLine, Ending, STARTED_SESSION_KIND, Summary,
     TIME_LOGGING_KIND, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
+use crate::end_led::{self, LedEnd};
+use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
 use crate::links_card::{LinksCard, Open};
@@ -82,14 +84,14 @@ use crate::subscriptions::SubscriptionList;
 use crate::text_viewer::TextViewer;
 use crate::to_end::ToEnd;
 use crate::tree::place_name;
-use crate::waiting::{Waiting, sentences};
+use crate::waiting::Waiting;
+use flottille_protocol::words::{forwarded, judged, sentences, source as source_line};
 use gpui_design_system::drawer::Closed;
 
 /// Width of the session page's right rail.
 pub const RAIL: f32 = 290.;
 
-/// How the screen names the root agent, which has no name of its own there.
-pub const THE_CONVERSATION: &str = "the conversation";
+pub use flottille_protocol::words::THE_CONVERSATION;
 
 /// What the confirmation of ending a session says: how many agents end.
 pub fn end_sentence(count: usize) -> String {
@@ -280,6 +282,9 @@ pub struct Opened {
     pub started_by: Option<String>,
     /// The agent that leads it, by the name it goes by; `None` for a session no agent leads.
     pub led_by: Option<String>,
+    /// The agent of another machine whose child its root is (`agent b1 of pc`): its parent writes
+    /// to it, never the user, so no composer is drawn.
+    pub child_of: Option<String>,
 }
 
 pub struct SessionPage {
@@ -299,6 +304,11 @@ pub struct SessionPage {
     unchecked: bool,
     /// One state per agent, read by its rail row and its line in the sub-agents list.
     statuses: HashMap<String, Entity<Status>>,
+    /// One state per session or child this tree started on another machine, by its row's key.
+    remote_statuses: RefCell<HashMap<String, Entity<Status>>>,
+    /// The launches on other machines the lists were last built from: a change of them rebuilds
+    /// the sub-agents lists, so that a child that goes folds away.
+    remote_launched: Vec<crate::model::RemoteAgent>,
     conversation: Entity<ConversationView>,
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
@@ -316,6 +326,9 @@ pub struct SessionPage {
     /// The command whose output the link reads, when its panel is open.
     watching: Option<String>,
     requests: HashMap<u64, Request>,
+    /// The requests for a vault entry that wait for the user, those an agent of the session
+    /// asked, the oldest first: their cards are in the rail's "Waiting for you".
+    vault_asks: Vec<VaultAsk>,
     decisions: HashMap<u64, String>,
     /// How many pages of the shown agent's conversation are read, from its end.
     pages: usize,
@@ -338,6 +351,8 @@ pub struct SessionPage {
     needs_you: bool,
     /// The confirmation of ending the session is open.
     ending: bool,
+    /// The led sessions that end with it, as the daemon read them when the confirmation opened.
+    led: Vec<LedEnd>,
     /// What the daemon said when it refused to end the session.
     end_error: Option<SharedString>,
     /// What the header said last of who started or leads it, and the element id it said it in,
@@ -349,6 +364,8 @@ pub struct SessionPage {
     resume_error: Option<SharedString>,
     /// A reload of the root's tools was asked and not answered yet.
     reloading: bool,
+    /// It was opened by a switch to its machine: its sections enter, one after the other.
+    arrived: bool,
     renders: usize,
     _status: Subscription,
     _run_drawer: Subscription,
@@ -424,8 +441,10 @@ impl SessionPage {
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
         ask_dock.update(cx, |dock, cx| dock.attach(page.clone(), cx));
-        let conversation =
-            cx.new(|cx| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, cx));
+        let project = opened.project.clone();
+        let conversation = cx.new(|cx| {
+            ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, project, cx)
+        });
         let _status = cx.observe(&status, |this, status, cx| {
             let needs_you = status.read(cx).state() == AgentState::NeedsYou;
             if this.needs_you != needs_you {
@@ -447,6 +466,8 @@ impl SessionPage {
             providers: Providers::default(),
             unchecked: false,
             statuses: HashMap::new(),
+            remote_statuses: RefCell::new(HashMap::new()),
+            remote_launched: Vec::new(),
             conversation,
             rail,
             drawer,
@@ -458,6 +479,7 @@ impl SessionPage {
             run_drawer,
             watching: None,
             requests: HashMap::new(),
+            vault_asks: Vec::new(),
             decisions: HashMap::new(),
             pages: 1,
             read: false,
@@ -470,11 +492,13 @@ impl SessionPage {
             text_viewer: cx.new(|_| TextViewer::new()),
             needs_you,
             ending: false,
+            led: Vec::new(),
             end_error: None,
             by_said: (SharedString::default(), "session-started-by"),
             resuming: false,
             resume_error: None,
             reloading: false,
+            arrived: false,
             renders: 0,
             _status,
             _run_drawer,
@@ -681,6 +705,10 @@ impl SessionPage {
     }
 
     /// The rail's "Waiting for you" section.
+    pub(crate) fn shell(&self) -> WeakEntity<Shell> {
+        self.shell.clone()
+    }
+
     pub fn waiting(&self, cx: &gpui_kit::App) -> Entity<Waiting> {
         self.rail.read(cx).waiting.clone()
     }
@@ -781,6 +809,9 @@ impl SessionPage {
         if self.endable() && !self.ending {
             self.ending = true;
             self.end_error = None;
+            self.led.clear();
+            let session = self.opened.id.clone();
+            self.perform(Command::ReadEnding { session }, cx);
             cx.notify();
         }
     }
@@ -799,6 +830,14 @@ impl SessionPage {
         let session = self.opened.id.clone();
         self.perform(Command::Stop { session }, cx);
         cx.notify();
+    }
+
+    /// The led sessions the end would end, as the daemon read them: the confirmation lists them.
+    pub fn led_read(&mut self, led: Vec<LedEnd>, cx: &mut Context<Self>) {
+        if self.ending && self.led != led {
+            self.led = led;
+            cx.notify();
+        }
     }
 
     /// What the daemon answered to an end: it says why when it refused.
@@ -1218,6 +1257,15 @@ impl SessionPage {
 
     /// [`SessionPage::select`], for the window's history going back to a place: it does not
     /// record it again.
+    /// Opened by a switch to the machine it runs on: its header, its conversation and its
+    /// composer enter staggered, as a page that shows up.
+    pub fn arrive(&mut self, cx: &mut Context<Self>) {
+        if !self.arrived {
+            self.arrived = true;
+            cx.notify();
+        }
+    }
+
     pub fn show(&mut self, agent: &str, cx: &mut Context<Self>) {
         self.drawer.update(cx, |drawer, cx| drawer.close(cx));
         // An agent that left the tree has no conversation to show: the session's is. Before the
@@ -1237,7 +1285,9 @@ impl SessionPage {
         let parent = self.parent_of(agent).map(|p| self.said_name(&p));
         let (page, name) = (cx.entity().downgrade(), self.said_name(agent));
         let shown = self.shown.clone();
-        self.conversation = cx.new(|cx| ConversationView::new(page, &shown, name, parent, cx));
+        let project = self.opened.project.clone();
+        self.conversation =
+            cx.new(|cx| ConversationView::new(page, &shown, name, parent, project, cx));
         self.rail
             .update(cx, |rail, cx| rail.set_selected(agent.to_owned(), cx));
         self.sync_pending(cx);
@@ -1392,6 +1442,10 @@ impl SessionPage {
             SessionUpdate::Requests(requests) => {
                 self.requests = requests.into_iter().map(|r| (r.number, r)).collect();
                 // The rail's cards do not wait for the conversation to be read.
+                self.refresh_conversation(cx);
+            }
+            SessionUpdate::VaultAsks(asks) => {
+                self.vault_asks = asks;
                 self.refresh_conversation(cx);
             }
             SessionUpdate::Decided { number, decision } => {
@@ -1928,7 +1982,7 @@ impl SessionPage {
                 };
                 match kind {
                     None => {
-                        let lines = self.sub_agents();
+                        let lines = self.sub_agents(cx);
                         if row.read(cx).sub_agents != lines {
                             row.update(cx, |row, cx| {
                                 row.sub_agents = lines;
@@ -1961,12 +2015,67 @@ impl SessionPage {
             .filter_map(|number| self.card(number))
             .filter(|card| card.decision.is_none())
             .collect();
+        let asks: Vec<(VaultAsk, String)> = self
+            .vault_asks
+            .iter()
+            .map(|ask| (ask.clone(), self.said_name(&ask.agent)))
+            .collect();
         let waiting = self.waiting(cx);
-        waiting.update(cx, |waiting, cx| waiting.set(cards, cx));
+        waiting.update(cx, |waiting, cx| {
+            waiting.set(cards, cx);
+            waiting.set_asks(asks, cx);
+        });
     }
 
-    /// The children of the shown agent, as its sub-agents list shows them.
-    fn sub_agents(&self) -> Vec<SubAgent> {
+    /// The sessions and the children this tree started on other machines, those of an agent of
+    /// the tree: the rail lists them beside its agents.
+    fn remote(&self, cx: &App) -> Vec<crate::model::RemoteAgent> {
+        let launched = cx
+            .try_global::<crate::model::RemoteAgents>()
+            .map(|launched| launched.0.clone())
+            .unwrap_or_default();
+        launched
+            .into_iter()
+            .filter(|remote| self.tree.iter().any(|agent| agent.id == remote.caller))
+            .collect()
+    }
+
+    /// The state of a remote agent's row, made when it first comes and moved as it changes.
+    fn remote_status(&self, remote: &crate::model::RemoteAgent, cx: &mut App) -> Entity<Status> {
+        let status = self
+            .remote_statuses
+            .borrow_mut()
+            .entry(remote.key.clone())
+            .or_insert_with(|| cx.new(|_| Status::new(remote.mark)))
+            .clone();
+        status.update(cx, |status, cx| status.set(remote.mark, cx));
+        status
+    }
+
+    /// The children of the shown agent, as its sub-agents list shows them: its own, then those
+    /// it started on other machines.
+    fn sub_agents(&self, cx: &mut App) -> Vec<SubAgent> {
+        let remote: Vec<SubAgent> = self
+            .remote(cx)
+            .into_iter()
+            .filter(|remote| remote.kind == "child" && remote.caller == self.shown)
+            .map(|remote| SubAgent {
+                id: remote.key.clone(),
+                name: remote.title.clone(),
+                provider: String::new(),
+                model: None,
+                runs_on: format!("on {}", remote.machine),
+                doing: remote.state.clone(),
+                status: self.remote_status(&remote, cx),
+                asks: false,
+                machine: Some(RemoteMark {
+                    machine: remote.machine.clone(),
+                    agent: remote.agent.clone(),
+                    icon: remote.icon.clone(),
+                    colour: remote.colour.clone(),
+                }),
+            })
+            .collect();
         self.tree
             .iter()
             .filter(|a| a.parent.as_deref() == Some(&self.shown))
@@ -1983,8 +2092,10 @@ impl SessionPage {
                         .requests
                         .values()
                         .any(|r| r.agent == agent.id && self.decision(r.number).is_none()),
+                    machine: None,
                 })
             })
+            .chain(remote)
             .collect()
     }
 
@@ -2000,10 +2111,7 @@ impl SessionPage {
             base: request.is_some_and(|r| r.base),
             judgement: request
                 .and_then(|r| r.judgement.as_ref())
-                .map(|(by, verdict, reason)| match verdict.as_str() {
-                    "failed" => format!("The judge ({by}) could not decide: {reason}"),
-                    _ => format!("The judge ({by}) asks you: {reason}"),
-                }),
+                .map(|(by, verdict, reason)| judged(by, verdict, reason)),
             kind: request.map_or_else(|| "call".to_owned(), |r| r.kind.clone()),
             says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
@@ -2012,7 +2120,7 @@ impl SessionPage {
                 let forwards: Vec<String> = r
                     .forwards
                     .iter()
-                    .map(|(by, said)| format!("{} forwards it: {said}", self.said_name(by)))
+                    .map(|(by, said)| forwarded(&self.said_name(by), said))
                     .collect();
                 sentences(
                     r.reasons
@@ -2022,11 +2130,16 @@ impl SessionPage {
                 )
             }),
             source: request.map(|r| {
-                let mut source = format!("asked by {}", self.said_name(&r.agent));
-                for (by, _) in &r.forwards {
-                    source.push_str(&format!(" · forwarded by {}", self.said_name(by)));
-                }
-                format!("{source} · #{number}")
+                let forwarders: Vec<String> = r
+                    .forwards
+                    .iter()
+                    .map(|(by, _)| self.said_name(by))
+                    .collect();
+                source_line(
+                    number,
+                    &self.said_name(&r.agent),
+                    forwarders.iter().map(String::as_str),
+                )
             }),
             asker: request.map(|r| self.said_name(&r.agent)),
             decision,
@@ -2037,6 +2150,14 @@ impl SessionPage {
 impl Render for SessionPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
+        let launched = cx
+            .try_global::<crate::model::RemoteAgents>()
+            .map(|launched| launched.0.clone())
+            .unwrap_or_default();
+        if self.remote_launched != launched {
+            self.remote_launched = launched;
+            self.refresh_conversation(cx);
+        }
         let asks = self.asks(cx);
         let room = self.room.take();
         self.ask_dock.update(cx, |dock, cx| {
@@ -2048,6 +2169,16 @@ impl Render for SessionPage {
         let wide = self.layout == Layout::Wide;
         let drawer = self.drawer.clone();
         let place = self.opened.place.clone();
+        // The machine the session runs on, when the user has several: `[icon] server / main`.
+        let machine = self.shell.upgrade().and_then(|shell| {
+            let shown = crate::machines::shown_machine(cx);
+            shell
+                .read(cx)
+                .machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| crate::machines::front_choice(read, shown.as_deref()))
+        });
         let header = div()
             .id("session-header")
             .flex_none()
@@ -2091,6 +2222,36 @@ impl Render for SessionPage {
                     },
                 )
             })
+            .children(machine.map(|machine| {
+                enter(
+                    "session-machine-enter",
+                    0,
+                    div()
+                        .id("session-machine")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_color(p.faint)
+                        .aria_label(SharedString::from(machine.title.clone()))
+                        .child(crate::machines::mark(
+                            "session-machine-mark",
+                            &machine.icon,
+                            &machine.colour,
+                            13.,
+                            window,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .mono(12.)
+                                .text_color(p.mute)
+                                .child(SharedString::from(machine.title)),
+                        )
+                        .child(div().mono(12.).child("/"))
+                        .test_support(),
+                )
+            }))
             .child(
                 div()
                     .id("session-place")
@@ -2216,6 +2377,7 @@ impl Render for SessionPage {
                 },
             ))
             .map(|d| match (root, self.ended_line()) {
+                (true, None) if self.opened.child_of.is_some() => d.child(self.read_only(cx)),
                 (true, None) => d.child(self.queued.clone()).child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
                 (false, _) => d.child(self.read_only(cx)),
@@ -2231,7 +2393,7 @@ impl Render for SessionPage {
             .flex()
             .flex_col()
             .child(self.room.watch(crate::ask_dock::Part::Column))
-            .child(header)
+            .child(self.section(0, header))
             // The conversation gives up its room to the dock first, down to what it keeps: past
             // that the questions of the card scroll.
             .child(
@@ -2284,7 +2446,7 @@ impl Render for SessionPage {
                     .child(self.ask_dock.clone())
                     .test_support(),
             )
-            .child(dock)
+            .child(self.section(2, dock))
             .test_support();
         div()
             .id("session-page")
@@ -2313,6 +2475,20 @@ impl Render for SessionPage {
 }
 
 impl SessionPage {
+    /// The section `index` of the page: it enters, after those before it, once the page arrived
+    /// by a switch to its machine (the conversation's rows, section 1, enter as their own).
+    fn section(&self, index: usize, section: impl IntoElement) -> AnyElement {
+        match self.arrived {
+            true => enter(
+                ElementId::Name(format!("session-section-{}-{index}", self.opened.id).into()),
+                index,
+                section,
+            )
+            .into_any_element(),
+            false => section.into_any_element(),
+        }
+    }
+
     /// The confirmation of ending the session: it names how many agents end.
     fn end_modal(&self, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
@@ -2334,15 +2510,10 @@ impl SessionPage {
                     ))
                     .test_support(),
             )
+            .child(end_led::block("session-end", &self.led, cx))
             .action(
-                Button::danger(
-                    "session-end-confirm",
-                    match count {
-                        0 | 1 => "End session".to_owned(),
-                        n => format!("End {n} agents"),
-                    },
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
+                Button::danger("session-end-confirm", end_led::end_label(count, &self.led))
+                    .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
             )
     }
 
@@ -2395,7 +2566,7 @@ impl SessionPage {
     /// `None` while the root is shown.
     pub fn read_only_text(&self) -> Option<(String, String)> {
         if self.shown == self.opened.id {
-            return None;
+            return self.child_text().map(|said| (said, String::new()));
         }
         Some((
             format!(
@@ -2407,7 +2578,20 @@ impl SessionPage {
         ))
     }
 
-    /// In place of the composer while a sub-agent is read: it belongs to the conversation.
+    /// What the bar in place of the composer says of a root that is a child of an agent of
+    /// another machine: `None` for a session of the user's.
+    pub fn child_text(&self) -> Option<String> {
+        self.opened.child_of.as_ref().map(|parent| {
+            format!(
+                "This conversation is a child of {parent}, which launched it from there: only \
+                 its parent writes to it."
+            )
+        })
+    }
+
+    /// In place of the composer while a sub-agent is read: it belongs to the conversation. And
+    /// while the conversation is a child of an agent of another machine: it belongs to that agent,
+    /// and there is nothing here to go back to.
     fn read_only(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (said, back) = self.read_only_text().unwrap_or_default();
@@ -2426,12 +2610,15 @@ impl SessionPage {
             .py(space::MD)
             .text_size(px(13.))
             .text_color(p.mute)
+            .aria_label(said.clone())
             .child(div().flex_1().min_w_0().child(SharedString::from(said)))
-            .child(Button::quiet("back-to-root", back).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.select(&root, cx);
-                },
-            )))
+            .when(!back.is_empty(), |d| {
+                d.child(Button::quiet("back-to-root", back).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.select(&root, cx);
+                    },
+                )))
+            })
             .test_support()
     }
 }
@@ -2596,14 +2783,17 @@ impl ConversationView {
         id: &str,
         me: String,
         parent: Option<String>,
+        project: String,
         cx: &mut Context<Self>,
     ) -> Self {
         let list = Self::list();
         let to_end = cx.new(|_| ToEnd::new(list.clone()));
+        let mut model = Conversation::new(me, parent);
+        model.set_project(project);
         let this = Self {
             page,
             id: id.to_owned(),
-            model: Conversation::new(me, parent),
+            model,
             rows: Vec::new(),
             specials: Vec::new(),
             earlier: false,
@@ -3573,7 +3763,9 @@ impl ConversationView {
             Block::Question { answers, .. } => self.rows[at].read(cx).asking || answers.is_some(),
             // Waiting for the pilot, which the user may answer first.
             Block::Asked { moved, .. } => !moved && self.rows[at].read(cx).asking,
-            Block::VaultAsk(ask) => ask.open,
+            // Its line stays in sight once answered too: it is the conversation's one record of
+            // what the user decided, and a rare one.
+            Block::VaultAsk(_) => true,
             Block::ConnectionReview(review) => review.open,
             _ => false,
         }
@@ -3989,6 +4181,13 @@ impl Render for ConversationView {
     }
 }
 
+/// The refs a delivery names its commits came back into from another machine: the daemon's own
+/// lines (`flottille_core::prompt::came_back`), never an agent's words.
+fn returned_refs(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter_map(flottille_core::prompt::returned_ref)
+}
+
 /// A child in the sub-agents list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubAgent {
@@ -4003,6 +4202,19 @@ pub struct SubAgent {
     /// A request of its own waits for the user: a child never needs them itself, but what it
     /// asked and its parent forwarded is theirs to answer.
     pub asks: bool,
+    /// It runs on another machine: the one it runs on, drawn on its line.
+    pub machine: Option<RemoteMark>,
+}
+
+/// The machine a sub-agent runs on, when it is not this one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteMark {
+    pub machine: String,
+    /// Its id on that machine.
+    pub agent: String,
+    /// The machine's icon and colour, as the member list signs them.
+    pub icon: String,
+    pub colour: String,
 }
 
 /// What a request's card shows, once the page knows it.
@@ -4039,14 +4251,7 @@ impl ApprovalCard {
     /// Why a base card always comes back: a session's first message to another asks a leave,
     /// which the daemon's reason names.
     pub fn always_says(&self) -> &'static str {
-        let leave = self
-            .why
-            .as_deref()
-            .is_some_and(|why| why.contains("has not written to that one before"));
-        match leave {
-            true => LEAVE_SAYS,
-            false => BASE_SAYS,
-        }
+        flottille_protocol::words::always_says(self.why.as_deref().unwrap_or_default())
     }
 
     /// The one-line record a decided card folds into.
@@ -4152,6 +4357,8 @@ pub struct Row {
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
+    /// The children of other machines, which fold away when they go.
+    remote_rows: Listing<SubAgent>,
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
@@ -4199,7 +4406,7 @@ impl Row {
         cx: &mut gpui_kit::App,
     ) -> Entity<Row> {
         let sub_agents = match block {
-            Block::SubAgents => page.sub_agents(),
+            Block::SubAgents => page.sub_agents(cx),
             _ => Vec::new(),
         };
         let card = match block {
@@ -4228,6 +4435,7 @@ impl Row {
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
+                remote_rows: Listing::default().at_rest(),
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
@@ -4423,6 +4631,20 @@ impl Row {
         if self.asking != asking {
             self.asking = asking;
             cx.notify();
+        }
+    }
+
+    /// The refs a report says its commits came back into from another machine, in words:
+    /// `Branch back: refs/flottille/machines/server/<launch>/feat/export`.
+    fn branches_back(&self) -> Option<String> {
+        let Block::Report { text, .. } = &*self.block else {
+            return None;
+        };
+        let refs: Vec<&str> = returned_refs(text).collect();
+        match refs.as_slice() {
+            [] => None,
+            [one] => Some(format!("Branch back: {one}")),
+            many => Some(format!("Branches back: {}", many.join(", "))),
         }
     }
 
@@ -4973,6 +5195,7 @@ impl Render for MarkdownPiece {
                 TextView::new(&self.state)
                     .style(style)
                     .image_source(no_image)
+                    .on_link_click(|url, _, _, cx| crate::tunnels::open_markdown_link(url, cx))
                     .code_block_actions(move |block, _, _| code_actions(block, &p)),
             )
             .text_selection_scope(scope)
@@ -5907,23 +6130,80 @@ impl Render for Row {
                         self.pills.insert(agent.id.clone(), pill);
                     }
                 }
-                let rows = self.sub_agents.iter().map(|agent| {
+                // A child on another machine folds away when it is gone (its machine ended it, or
+                // the launch is no longer listed), and unfolds as it comes.
+                self.remote_rows.sync(
+                    self.sub_agents
+                        .iter()
+                        .filter(|agent| agent.machine.is_some())
+                        .map(|agent| (agent.id.clone(), agent.clone())),
+                    cx.background_executor().now(),
+                    cx.reduce_motion(),
+                );
+                let build = |agent: &SubAgent, window: &mut Window, cx: &mut gpui_kit::App| {
                     let target = agent.id.clone();
                     let page = self.page.clone();
+                    let there = agent.machine.clone();
+                    // A child on another machine carries that machine's icon, in its
+                    // colour, beside its state.
+                    let leading = div()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(self.icons[&agent.id].clone())
+                        .children(agent.machine.as_ref().map(|there| {
+                            crate::machines::mark(
+                                format!("sub-agent-{}-mark", agent.id),
+                                &there.icon,
+                                &there.colour,
+                                12.,
+                                window,
+                                cx,
+                            )
+                        }));
                     ListRow::new(
                         ElementId::Name(format!("sub-agent-{}", agent.id).into()),
                         SharedString::from(agent.name.clone()),
                     )
-                    .leading(self.icons[&agent.id].clone())
+                    .leading(leading)
                     .detail(SharedString::from(agent.runs_on.clone()))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
                     .on_click(move |_, _, cx| {
-                        if let Some(page) = page.upgrade() {
-                            page.update(cx, |page, cx| page.select(&target, cx));
+                        let Some(page) = page.upgrade() else {
+                            return;
+                        };
+                        match &there {
+                            // Its page is that machine's: it is brought in front.
+                            Some(there) => {
+                                let shell = page.read(cx).shell.clone();
+                                let (machine, agent) = (there.machine.clone(), there.agent.clone());
+                                shell
+                                    .update(cx, |shell, cx| {
+                                        shell.open_elsewhere(machine, agent, cx)
+                                    })
+                                    .ok();
+                            }
+                            None => page.update(cx, |page, cx| page.select(&target, cx)),
                         }
                     })
-                });
+                };
+                let mut rows: Vec<AnyElement> = self
+                    .sub_agents
+                    .iter()
+                    .filter(|agent| agent.machine.is_none())
+                    .map(|agent| build(agent, window, cx).into_any_element())
+                    .collect();
+                for listed in self.remote_rows.rows() {
+                    rows.push(
+                        Item::new(
+                            ElementId::Name(format!("sub-agent-{}-item", listed.key).into()),
+                            listed.placement,
+                            build(listed.value, window, cx),
+                        )
+                        .into_any_element(),
+                    );
+                }
                 // Folded to one line that counts them until a click opens the list: twenty
                 // sub-agents would fill several screens of the conversation.
                 let turn = turning(id("sub-agents-toggle"), self.open, window, cx);
@@ -6029,6 +6309,19 @@ impl Render for Row {
                                     })),
                                 move |d, t| d.text_color(mix(p.mute, p.text, t)),
                             ))
+                            // A branch that came back from another machine is named folded too:
+                            // the ref to review and merge.
+                            .child(div().children(self.branches_back().map(|branches| {
+                                div()
+                                    .id(id("report-branch"))
+                                    .aria_label(SharedString::from(branches.clone()))
+                                    .px(space::LG)
+                                    .pb(space::SM)
+                                    .text_size(px(12.))
+                                    .text_color(p.mute)
+                                    .child(SharedString::from(branches))
+                                    .test_support()
+                            })))
                             .child(presence(
                                 id("report-body"),
                                 self.open,
@@ -6052,14 +6345,7 @@ impl Render for Row {
             // where it leads and Open (a thumbnail for a picture), so that a toast missed is not
             // lost. Nothing opens until the click.
             Block::Links { links } => {
-                let page = self.page.clone();
-                let open: Open = Rc::new(move |target, cx| {
-                    let target = target.to_owned();
-                    page.update(cx, |page, cx| {
-                        crate::open::shown(&page.follow.opener, &target, cx)
-                    })
-                    .ok();
-                });
+                let open: Open = Rc::new(crate::tunnels::open_shown);
                 self.links.draw(self.at, links, &open, cx)
             }
             // A time not logged for want of the project's vault entry: the line, and the way to
@@ -6092,7 +6378,7 @@ impl Render for Row {
                     )
                     .child(
                         div().flex_none().child(
-                            Button::secondary(id("time-logging-setup"), "Set up time logging")
+                            Button::secondary(id("time-logging-setup"), "Set up Jira API access")
                                 .on_click(move |_, window, cx| {
                                     if let Some((shell, project)) = &opened {
                                         shell
@@ -6489,15 +6775,10 @@ impl Row {
         presence(id("asked"), !moved, card).into_any_element()
     }
 
-    /// The agent's request for a vault entry: what was prefilled, where the secret goes, the
-    /// agent's reason, and the way in to the vault's form; it folds away once answered.
+    /// The agent's request for a vault entry, as the conversation records it: one quiet line, the
+    /// card with its buttons being in the rail's "Waiting for you".
     fn render_vault_ask(&mut self, ask: VaultAsk, cx: &mut Context<Self>) -> AnyElement {
-        let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell.clone()) else {
-            return div().into_any_element();
-        };
-        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
-        let title = gpui_design_system::quoted_title(&self.title(cx));
-        crate::vault_ask::card(self.at, &title, when, &ask, shell, cx)
+        crate::vault_ask::line(self.at, &ask, palette(cx))
     }
 
     /// The connection the agent's accepted request left waiting for the user's review: the card
@@ -6643,15 +6924,7 @@ impl SessionPage {
     }
 }
 
-/// Why a base card comes back whatever the mode, said on it.
-pub const BASE_SAYS: &str = "Flottille always asks you for this, in Ask and in Auto: it may lose \
-                             work or reach what must stay private, so no judge decides it.";
-
-/// Why the first message of a session to another always comes back, said on its card instead of
-/// `BASE_SAYS`: what it asks is a lasting leave, in every mode.
-pub const LEAVE_SAYS: &str = "Flottille always asks you this, in every mode: allowing it lets \
-                              this session write to that one until either ends or you withdraw \
-                              it.";
+pub use flottille_protocol::words::{BASE_SAYS, LEAVE_SAYS};
 
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
@@ -7085,6 +7358,9 @@ pub struct SessionRail {
     gauges: HashMap<String, Motion>,
     /// How many task runs each agent last had going: its row says it while the count folds away.
     last_runs: HashMap<String, usize>,
+    /// The sessions and children started on other machines the rail has drawn: one that is gone
+    /// from the tree's launches folds away with its last words.
+    remote_seen: HashMap<String, crate::model::RemoteAgent>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -7172,6 +7448,7 @@ impl SessionRail {
             review_choice: HashMap::new(),
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
+            remote_seen: HashMap::new(),
             menu,
             linked: false,
             removable,
@@ -7540,6 +7817,100 @@ impl SessionRail {
             cx.notify();
         }
     }
+}
+
+/// The row of a session or a child this tree started on another machine, in the rail's Agents:
+/// its machine's icon in its colour, its title, and the machine and its state. A click brings
+/// that machine in front on it. It unfolds as it comes and folds away as it goes, and fades while
+/// its machine is off.
+fn remote_row(
+    remote: &crate::model::RemoteAgent,
+    present: bool,
+    shell: Option<WeakEntity<Shell>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let p = palette(cx);
+    let id = format!("rail-remote-{}", remote.agent);
+    let off = fade(format!("{id}-off"), remote.offline, HOVER, window, cx);
+    let (machine, agent) = (remote.machine.clone(), remote.agent.clone());
+    let mark = crate::machines::mark(
+        format!("{id}-mark"),
+        &remote.icon,
+        &remote.colour,
+        13.,
+        window,
+        cx,
+    );
+    let row = div()
+        .id(ElementId::Name(format!("{id}-row").into()))
+        .w_full()
+        .h(px(RAIL_ROW))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .pl(space::SM)
+        .pr(space::XS)
+        .rounded(px(8.))
+        .opacity(1.0 - 0.45 * off)
+        .cursor_pointer()
+        .child(
+            div()
+                .w(px(16.))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(mark),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .medium()
+                        .text_size(px(13.))
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(SharedString::from(remote.title.clone())),
+                )
+                .child(
+                    div()
+                        .mono(11.)
+                        .text_color(p.faint)
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(SharedString::from(format!(
+                            "{} · {}",
+                            remote.machine, remote.state
+                        ))),
+                ),
+        )
+        .on_click(move |_, _, cx| {
+            if let Some(shell) = &shell {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open_elsewhere(machine.clone(), agent.clone(), cx)
+                    })
+                    .ok();
+            }
+        });
+    let named = div()
+        .id(ElementId::Name(id.clone().into()))
+        .aria_label(SharedString::from(format!(
+            "{} on {}",
+            remote.title, remote.machine
+        )))
+        .child(hoverable(row, move |d, t| d.bg(p.hover.opacity(t))))
+        .test_support();
+    presence(
+        ElementId::Name(format!("{id}-block").into()),
+        present,
+        named,
+    )
+    .into_any_element()
 }
 
 impl Render for SessionRail {
@@ -8163,6 +8534,23 @@ impl Render for SessionRail {
                     );
                 }
             }
+        }
+        // The sessions and children this tree started on other machines: a row each, with its
+        // machine's icon. One that is gone folds away with its words.
+        let remote = self
+            .page
+            .upgrade()
+            .map(|page| page.read(cx).remote(cx))
+            .unwrap_or_default();
+        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
+        for found in &remote {
+            self.remote_seen.insert(found.key.clone(), found.clone());
+        }
+        let mut seen: Vec<_> = self.remote_seen.values().cloned().collect();
+        seen.sort_by(|a, b| a.key.cmp(&b.key));
+        for found in seen {
+            let here = remote.iter().any(|now| now.key == found.key);
+            rows.push(remote_row(&found, here, shell.clone(), window, cx));
         }
         let agents = div()
             .id("rail-agents")
@@ -9143,6 +9531,8 @@ pub struct Reply {
     activity: Option<Activity>,
     /// The pictures that go with the next message.
     attached: Attachments,
+    /// What the daemon keeps of the draft, and the wait before it is written.
+    keeping: Keeping,
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
@@ -9164,13 +9554,15 @@ impl Reply {
         });
         let subscriptions = vec![
             cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
-                this.attached.chip_changed(event, cx)
+                this.attached.chip_changed(event, cx);
+                this.draft_changed(cx);
             }),
             cx.subscribe_in(
                 &field,
                 window,
                 |this, field, event, window, cx| match event {
                     InputEvent::Change => {
+                        this.draft_changed(cx);
                         let text = field.read(cx).value().to_string();
                         let has_text = !text.trim().is_empty();
                         if this.has_text != has_text {
@@ -9199,6 +9591,7 @@ impl Reply {
         let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
         let reply = Self {
             shell,
+            keeping: Keeping::new(DraftKey::Session(session.clone())),
             session,
             project,
             commands: None,
@@ -9293,6 +9686,87 @@ impl Reply {
         self.attached.pictures()
     }
 
+    /// How many times the draft was written to the daemon.
+    pub fn drafts_sent(&self) -> usize {
+        self.keeping.sent()
+    }
+
+    /// The composer as the daemon keeps it: its text and its pictures.
+    fn draft_now(&self, cx: &App) -> Draft {
+        let (text, pictures) = self.attached.draft(cx);
+        Draft { text, pictures }
+    }
+
+    /// The draft changed: it is written 500 ms after the last change.
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.changed(cx, Self::keep_draft_now);
+    }
+
+    /// Writes the draft to the daemon now, when it does not hold it already. Asked once this
+    /// update is over: the shell may be the one updating (it started or answered something).
+    fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(write) = self.draft_to_write(cx, false) {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, _| shell.perform(write)).ok();
+            });
+        }
+    }
+
+    /// What the daemon must be asked to keep the draft as it is now, if it does not hold it
+    /// (`closing`: the window is closing, `Keeping::write`).
+    pub fn draft_to_write(&mut self, cx: &mut Context<Self>, closing: bool) -> Option<Command> {
+        let now = self.draft_now(cx);
+        self.keeping.write(now, closing)
+    }
+
+    /// Whether the daemon answered the read of the draft.
+    pub fn draft_was_read(&self) -> bool {
+        self.keeping.was_read()
+    }
+
+    /// The daemon answered the read of the draft: a composer still empty takes it, a field the
+    /// user typed in meanwhile keeps their words, and is written.
+    pub fn draft_read(
+        &mut self,
+        found: Option<Draft>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = !self.draft_now(cx).is_empty();
+        self.keeping.answered(found.clone());
+        match found {
+            Some(draft) if !typed => {
+                let Draft { text, pictures } = draft;
+                self.restore_all(&text, pictures, Vec::new(), false, window, cx);
+            }
+            _ if typed => self.draft_changed(cx),
+            _ => {}
+        }
+        // The row says whether it holds a draft, and now it knows.
+        cx.notify();
+    }
+
+    /// The daemon did not answer the read of the draft: nothing is written, and it is asked
+    /// again.
+    pub fn draft_read_failed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.read_failed(cx, Self::read_draft_again);
+    }
+
+    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+        let key = self.keeping.key().clone();
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
+            .ok();
+    }
+
+    /// The daemon answered a write of the draft.
+    pub fn draft_written(&mut self, result: Written, cx: &mut Context<Self>) {
+        if self.keeping.wrote(result) {
+            self.draft_changed(cx);
+        }
+    }
+
     /// The composer holds something the user has not sent: text, or a picture.
     pub fn holds_draft(&self) -> bool {
         self.has_text || !self.attachments().is_empty()
@@ -9345,11 +9819,13 @@ impl Reply {
     /// Attaches a picture, or says in a toast why not; the text in the field stays.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
         self.attached.attach(image, cx, Self::attached_of);
+        self.draft_changed(cx);
     }
 
     /// Attaches the picture a file holds (a file dropped on the composer, or picked).
     pub fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         self.attached.attach_file(path, cx, Self::attached_of);
+        self.draft_changed(cx);
     }
 
     /// Attaches a large text as a file, as a paste of it does (#848).
@@ -9359,6 +9835,7 @@ impl Reply {
 
     pub fn detach(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.attached.detach(at, window, cx);
+        self.draft_changed(cx);
     }
 
     /// The root runs a turn.
@@ -9980,6 +10457,9 @@ impl Reply {
         self.tokens
             .update(cx, |field, cx| field.set_value(Vec::new(), window, cx).ok());
         self.typed("", cx);
+        // Sent: its draft goes now, not 500 ms later, so that a window closed right after does
+        // not bring the sent words back.
+        self.keep_draft_now(cx);
         self.ask(key, cx);
     }
 
@@ -10045,7 +10525,7 @@ impl Reply {
                 bytes: image.bytes.clone(),
             })
             .collect();
-        self.restore_all(&pending.text, pictures, pending.texts, window, cx);
+        self.restore_all(&pending.text, pictures, pending.texts, true, window, cx);
     }
 
     /// The message `key` is recorded: it is shown as the daemon has it now.
@@ -10064,7 +10544,7 @@ impl Reply {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.restore_all(text, pictures, Vec::new(), window, cx);
+        self.restore_all(text, pictures, Vec::new(), true, window, cx);
     }
 
     /// [`Reply::restore`], with the pasted texts the message carried: their markers become their
@@ -10074,6 +10554,7 @@ impl Reply {
         text: &str,
         pictures: Vec<Picture>,
         pasted: Vec<Pasted>,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -10105,8 +10586,11 @@ impl Reply {
         self.dismissed = self.slash.is_some();
         self.rechip = true;
         self.list_commands(cx);
-        let focus = self.field.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
+        // A draft read at opening does not take the focus from where the user put it.
+        if focus {
+            let focus = self.field.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
         cx.notify();
     }
 

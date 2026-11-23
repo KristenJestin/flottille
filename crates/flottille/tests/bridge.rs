@@ -1,7 +1,7 @@
 //! Flottille's Claude bridge (`flottille bridge claude`), driven over ACP as the daemon drives it,
 //! in front of the fake `claude` (`crates/flottille-fake-claude`). No real `claude` ever runs here.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};

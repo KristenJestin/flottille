@@ -3,7 +3,7 @@
 //! compositor.
 //!
 //! ```text
-//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place|provider|model|effort] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--tickets] [--item <key>] [--open-step <workspace> <position>] [--card-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--details] [--workspace-menu] [--project-settings <project> [--repository <path>] [--tracker] [--section <n>] [--use-forge <path>] [--remove-repository <path>] [--remove-project]] [--size <w>x<h>]
+//! cargo run -p flottille-window --example shell [--features frames] -- [--project <name>] [--add-project <folder>] [--session <id> [--agent <id>]] [--tree] [--rail] [--settings] [--menu place] [--new-workspace] [--add-command] [--edit-command <name>] [--add-skill] [--edit-skill <name>] [--edit-task <name>] [--edit-setup <number>] [--run-task <name>] [--tickets] [--item <key>] [--open-step <workspace> <position>] [--card-menu <workspace>] [--remove <workspace>] [--slash <text>] [--attach <picture>] [--end] [--ended] [--open-run <text of its line>] [--details] [--workspace-menu] [--project-settings <project> [--repository <path>] [--tracker] [--section <n>] [--use-forge <path>] [--remove-repository <path>] [--remove-project]] [--size <w>x<h>]
 //! ```
 //!
 //! `--project` opens a project's page, `--add-project` the "Add a project" modal with the
@@ -111,9 +111,6 @@ fn main() {
             "--menu" => {
                 menu = Some(match args.next().as_deref() {
                     Some("place") => Menu::Place,
-                    Some("provider") => Menu::Provider,
-                    Some("model") => Menu::Model,
-                    Some("effort") => Menu::Effort,
                     other => panic!("no picker {other:?}"),
                 })
             }
@@ -132,7 +129,7 @@ fn main() {
         let connect = Arc::new(move || UnixStream::connect(&socket));
         let (window, shell) = gpui_kit::open_window(options, cx, |window, cx| {
             flottille_window::frame_counter(window, cx);
-            cx.new(|cx| Shell::new(connect, window, cx))
+            cx.new(|cx| Shell::new(connect, None, window, cx))
         })
         .expect("a window");
         // Once the first read of the daemon has come.

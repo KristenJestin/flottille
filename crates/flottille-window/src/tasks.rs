@@ -4,16 +4,16 @@
 //! its output, live, in the run drawer. The window writes
 //! nothing itself: every change and every run is the daemon's (`task.*`, `run.*`).
 
-use std::time::Duration;
-
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use gpui_design_system::drawer::Closed;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
-    Menu, Modal, RadioChoices, Section, Select, SelectOption, Switch, Toast, Type, fade, palette,
-    presence, space, toast,
+    Button, ChipOption, ChipPicker, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine,
+    ListCard, ListRow, Listing, Menu, Modal, RadioChoices, Section, Select, SelectOption, Switch,
+    Toast, Type, fade, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -27,7 +27,8 @@ use serde_json::{Value, json};
 
 use crate::actions::{Command, RunAct, RunAnswer, RunFrom};
 use crate::commands::{
-    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+    boxed, line_field, menu_of, optional_line, perform_later, problem_line, section_blocks, spaced,
+    stack,
 };
 use crate::project::{only_at_root, repository_label};
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, Watch};
@@ -300,6 +301,8 @@ impl Flag {
 struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
+    /// What the picker of needs searches the services with.
+    needs: Entity<InputState>,
     ready: ReadyFields,
 }
 
@@ -308,6 +311,9 @@ struct Fields {
 pub(crate) struct ReadyFields {
     pub ready: [Entity<InputState>; 3],
     pub url: [Entity<InputState>; 2],
+    /// The kinds last chosen: drawn while their choice folds away after its switch is turned
+    /// off, and chosen again when it is turned back on.
+    last: Cell<(ReadyKind, AddressKind)>,
 }
 
 impl ReadyFields {
@@ -315,6 +321,7 @@ impl ReadyFields {
         Self {
             ready: ReadyKind::ALL.map(|kind| line_field(kind.field().1, window, cx)),
             url: AddressKind::ALL.map(|kind| line_field(kind.field(service).1, window, cx)),
+            last: Cell::new((ReadyKind::ALL[0], AddressKind::ALL[0])),
         }
     }
 
@@ -330,6 +337,10 @@ impl ReadyFields {
         window: &mut Window,
         cx: &mut App,
     ) {
+        self.last.set((
+            ready.as_ref().map_or(ReadyKind::ALL[0], |(kind, _)| *kind),
+            url.as_ref().map_or(AddressKind::ALL[0], |(kind, _)| *kind),
+        ));
         for (at, field) in self.ready.iter().enumerate() {
             let text = match ready {
                 Some((kind, text)) if ready_at(*kind) == at => text.clone(),
@@ -406,9 +417,9 @@ pub struct TasksSection {
     /// The flags and the repository the form shows.
     flags: TaskInfo,
     fields: Option<Fields>,
-    /// The services of the machine, which a task may need, or why they cannot be read; `None`
-    /// until the daemon has said.
-    services: Option<Result<Vec<String>, String>>,
+    /// The services of the machine, which a task may need, each with its command line, or why
+    /// they cannot be read; `None` until the daemon has said.
+    services: Option<Result<Vec<(String, String)>, String>>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -487,17 +498,27 @@ impl TasksSection {
         &self.flags.needs
     }
 
-    /// The services of the machine the daemon listed, which the form offers, or why it could not.
-    pub fn set_services(&mut self, services: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+    /// The services of the machine the daemon listed, each with its command line, which the form
+    /// offers, or why it could not.
+    pub fn set_services(
+        &mut self,
+        services: Result<Vec<(String, String)>, String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.services.as_ref() != Some(&services) {
             self.services = Some(services);
             cx.notify();
         }
     }
 
-    /// The task needs the service, or no longer does.
-    pub fn toggle_need(&mut self, service: &str, cx: &mut Context<Self>) {
-        toggle_name(&mut self.flags.needs, service);
+    /// The field the picker of needs searches the services with.
+    pub fn needs_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.needs)
+    }
+
+    /// The services the task needs, as the picker gives them: in the order they were added.
+    pub fn set_needs(&mut self, needs: Vec<String>, cx: &mut Context<Self>) {
+        self.flags.needs = needs;
         cx.notify();
     }
 
@@ -566,6 +587,7 @@ impl TasksSection {
         if self.fields.is_none() {
             let name = line_field("test", window, cx);
             let line = line_field("pnpm test", window, cx);
+            let needs = line_field("Add a service…", window, cx);
             let ready = ReadyFields::new(false, window, cx);
             // Typing clears what a refusal said.
             for input in [&name, &line].into_iter().chain(ready.inputs()) {
@@ -576,7 +598,12 @@ impl TasksSection {
                         }
                     }));
             }
-            self.fields = Some(Fields { name, line, ready });
+            self.fields = Some(Fields {
+                name,
+                line,
+                needs,
+                ready,
+            });
         }
         self.fields.as_ref().expect("made above")
     }
@@ -590,6 +617,7 @@ impl TasksSection {
         name.update(cx, |f, cx| f.set_value(shown.name.clone(), window, cx));
         line.update(cx, |f, cx| f.set_value(shown.line.clone(), window, cx));
         fields.ready.fill(&shown.ready, &shown.url, window, cx);
+        fields.needs.update(cx, |f, cx| f.set_value("", window, cx));
         // The services a task may need: the file is the user's to edit by hand too.
         perform_later(&self.shell, Command::Services, cx);
         self.flags = shown;
@@ -1005,6 +1033,7 @@ impl TasksSection {
                 .into_any_element(),
             None => boxed("task-name", Input::new(&fields.name), cx).into_any_element(),
         };
+        let needs = fields.needs.clone();
         let body = div()
             .id("task-form")
             .flex()
@@ -1015,49 +1044,67 @@ impl TasksSection {
                     .flex_col()
                     .gap(space::LG)
                     .child(
-                        div()
-                            .flex()
-                            .child(
-                                div().flex_1().min_w_0().child(
-                                    Field::new("task-name-field", "Name", name)
-                                        .hint("Agents run it by this name."),
-                                ),
-                            )
+                        Section::new("task-section-run", "What it runs")
+                            .tag("required")
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex_grow(asked)
-                                    .overflow_hidden()
-                                    .ml(space::MD * asked)
-                                    .opacity(asked)
-                                    .when(asked > 0., |d| {
-                                        d.child(
-                                            Field::new("task-place-field", "Runs in", place)
-                                                .hint("Or one repository of the place."),
-                                        )
-                                    }),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(space::LG)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .child(
+                                                div().flex_1().min_w_0().child(
+                                                    Field::new("task-name-field", "Name", name)
+                                                        .hint("Agents run it by this name."),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .flex_grow(asked)
+                                                    .overflow_hidden()
+                                                    .ml(space::MD * asked)
+                                                    .opacity(asked)
+                                                    .when(asked > 0., |d| {
+                                                        d.child(
+                                                            Field::new(
+                                                                "task-place-field",
+                                                                "Runs in",
+                                                                place,
+                                                            )
+                                                            .hint("Or one repository of the place."),
+                                                        )
+                                                    }),
+                                            ),
+                                    )
+                                    .child(Field::new(
+                                        "task-line-field",
+                                        "Command line",
+                                        boxed("task-line", Input::new(&fields.line), cx),
+                                    )),
                             ),
                     )
-                    .child(Field::new(
-                        "task-line-field",
-                        "Command line",
-                        boxed("task-line", Input::new(&fields.line), cx),
-                    ))
-                    .child(Field::new(
-                        "task-kind",
-                        "What it is",
-                        div().flex().flex_col().gap(space::MD).children(kinds),
-                    ))
-                    .child(ask)
+                    .child(optional_line("task-optional", cx))
+                    .child(
+                        Section::new("task-section-kind", "What it is")
+                            .sentence(
+                                "What agents may do with it without asking, and what they are \
+                                 told of it.",
+                            )
+                            .child(div().flex().flex_col().gap(space::MD).children(kinds)),
+                    )
                     .child(needs_field(
                         "task",
+                        &needs,
                         self.services
                             .as_ref()
                             .map(|listed| listed.as_deref().map_err(String::as_str)),
                         None,
                         &self.flags.needs,
-                        |this: &mut Self, name, cx| this.toggle_need(name, cx),
+                        |this: &mut Self, needs, cx| this.set_needs(needs, cx),
                         cx,
                     ))
                     .child(ready_and_url(
@@ -1069,30 +1116,17 @@ impl TasksSection {
                         |this: &mut Self, kind, cx| this.choose_ready(kind, cx),
                         |this: &mut Self, kind, cx| this.choose_url(kind, cx),
                         cx,
-                    )),
+                    ))
+                    .child(Section::new("task-section-agents", "Agents").child(ask)),
             )
-            .child(problem_line(
-                "task-error",
-                self.form_error.clone(),
-                space::LG,
-                cx,
-            ))
             .test_support();
-        modal.child(body).action(
+        // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
+        let error = problem_line("task-error", self.form_error.clone(), px(0.), cx);
+        modal.child(body).kept(error).action(
             Button::primary("save-task", if original.is_some() { "Save" } else { "Add" })
                 .disabled(self.saving)
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
         )
-    }
-}
-
-/// Adds `name` to `names`, or takes it out when it is there.
-pub(crate) fn toggle_name(names: &mut Vec<String>, name: &str) {
-    match names.iter().position(|n| n == name) {
-        Some(at) => {
-            names.remove(at);
-        }
-        None => names.push(name.to_owned()),
     }
 }
 
@@ -1103,36 +1137,30 @@ pub(crate) fn needs_line(id: ElementId, needs: &[String]) -> LabelledLine {
         .child(SharedString::from(said))
 }
 
-/// The services a task or a service needs, chosen from those of the machine (`<prefix>-need-<name>`
-/// switches each); `own` is a service's own name, never offered to itself. `offered` is `None`
-/// until the daemon has listed them, and why it could not when it failed.
+/// The services a task or a service needs, chosen from those of the machine with a picker of
+/// chips (`<prefix>-needs`: its chips, its search field, its menu, its count). `own` is a
+/// service's own name, never offered to itself; `search` is the field the picker types in.
+/// `offered` is `None` until the daemon has listed the services, and why it could not when it
+/// failed. `set` is given the whole list each add or removal makes, in the order added.
 pub(crate) fn needs_field<V: 'static>(
     prefix: &'static str,
-    offered: Option<Result<&[String], &str>>,
+    search: &Entity<InputState>,
+    offered: Option<Result<&[(String, String)], &str>>,
     own: Option<&str>,
     chosen: &[String],
-    toggle: fn(&mut V, &str, &mut Context<V>),
+    set: fn(&mut V, Vec<String>, &mut Context<V>),
     cx: &mut Context<V>,
 ) -> AnyElement {
     let p = palette(cx);
     let offered_or_why = offered;
-    let offered: Vec<String> = offered
+    let options: Vec<ChipOption> = offered
         .and_then(Result::ok)
         .unwrap_or_default()
         .iter()
-        .filter(|name| Some(name.as_str()) != own)
-        .cloned()
+        .filter(|(name, _)| Some(name.as_str()) != own)
+        .map(|(name, line)| ChipOption::new(name.clone(), name.clone()).detail(line.clone()))
         .collect();
-    let switches = offered.iter().map(|name| {
-        let toggled = name.clone();
-        Switch::new(
-            ElementId::Name(format!("{prefix}-need-{name}").into()),
-            chosen.contains(name),
-            SharedString::from(name.clone()),
-        )
-        .on_click(cx.listener(move |this, _, _, cx| toggle(this, &toggled, cx)))
-    });
-    let none = offered.is_empty().then(|| {
+    let none = options.is_empty().then(|| {
         let (said, ink) = match offered_or_why {
             None => ("Reading the services of the machine…".to_owned(), p.faint),
             Some(Err(why)) => (format!("The services cannot be read: {why}"), p.fail),
@@ -1150,23 +1178,38 @@ pub(crate) fn needs_field<V: 'static>(
             .child(said)
             .test_support()
     });
-    Field::new(
-        ElementId::Name(format!("{prefix}-needs-field").into()),
+    let this = cx.entity().downgrade();
+    let picker = ChipPicker::new(
+        ElementId::Name(format!("{prefix}-needs").into()),
         "Needs",
-        div()
-            .flex()
-            .flex_col()
-            .gap(space::MD)
-            .children(switches)
-            .children(none),
+        search,
+        options,
+        chosen.iter().cloned().map(SharedString::from),
     )
-    .optional()
-    .hint("The services of the machine it needs: started first, and waited for until ready.")
-    .into_any_element()
+    .placeholder("Add a service…")
+    .on_change(move |keys, _, cx| {
+        let needs = keys.iter().map(ToString::to_string).collect();
+        this.update(cx, |this, cx| set(this, needs, cx)).ok();
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::SM)
+        .child(picker)
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(p.faint)
+                .child("Started first, and waited for until ready."),
+        )
+        .children(none)
+        .into_any_element()
 }
 
-/// When a run is ready, and where it answers: each a choice, and under it the field the choice
-/// needs, which unfolds with it. A task's form (`prefix` `task`) and a service's draw it.
+/// When a run is ready, and where it answers: two sections of a form, each a switch ("Wait until
+/// it is ready", "Link to it on its run") and, once it is on, the kinds to choose from and under
+/// the chosen one the field it needs, which unfold with it. A switch off says nothing. A task's
+/// form (`prefix` `task`) and a service's draw them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ready_and_url<V: 'static>(
     prefix: &'static str,
@@ -1178,39 +1221,58 @@ pub(crate) fn ready_and_url<V: 'static>(
     choose_url: fn(&mut V, Option<AddressKind>, &mut Context<V>),
     cx: &mut Context<V>,
 ) -> AnyElement {
+    let (mut last_ready, mut last_url) = fields.last.get();
+    last_ready = ready_kind.unwrap_or(last_ready);
+    last_url = url_kind.unwrap_or(last_url);
+    fields.last.set((last_ready, last_url));
+
     let this = cx.entity().downgrade();
-    let mut ready = RadioChoices::new(format!("{prefix}-ready"), "Ready when").choice(
-        "none",
-        "Not said",
-        "A run of it is running, and that is all.",
-    );
+    let on = ready_kind.is_some();
+    let ready_switch = Switch::new(
+        ElementId::Name(format!("{prefix}-ready-switch").into()),
+        on,
+        "Wait until it is ready",
+    )
+    .on_click(move |_, _, cx| {
+        let kind = (!on).then_some(last_ready);
+        this.update(cx, |this, cx| choose_ready(this, kind, cx))
+            .ok();
+    });
+    let this = cx.entity().downgrade();
+    let mut ready = RadioChoices::new(format!("{prefix}-ready"), "It is ready when");
     for kind in ReadyKind::ALL {
         let (title, line) = kind.choice();
         ready = ready.choice(kind.key(), title, line);
     }
     let ready = ready
-        .chosen(ready_kind.map_or(0, |kind| ready_at(kind) + 1))
+        .chosen(ready_at(last_ready))
         .on_choose(move |index, _, cx| {
-            let kind = index.checked_sub(1).map(|at| ReadyKind::ALL[at]);
+            let kind = Some(ReadyKind::ALL[index]);
             this.update(cx, |this, cx| choose_ready(this, kind, cx))
                 .ok();
         });
+
     let this = cx.entity().downgrade();
-    let mut url = RadioChoices::new(format!("{prefix}-url"), "Its address").choice(
-        "none",
-        "None",
-        "It serves nothing to open.",
-    );
+    let on = url_kind.is_some();
+    let url_switch = Switch::new(
+        ElementId::Name(format!("{prefix}-url-switch").into()),
+        on,
+        "Link to it on its run",
+    )
+    .on_click(move |_, _, cx| {
+        let kind = (!on).then_some(last_url);
+        this.update(cx, |this, cx| choose_url(this, kind, cx)).ok();
+    });
+    let this = cx.entity().downgrade();
+    let mut url = RadioChoices::new(format!("{prefix}-url"), "Its address");
     for kind in AddressKind::ALL {
         let (title, line) = kind.choice(service);
         url = url.choice(kind.key(), title, line);
     }
-    let url = url
-        .chosen(url_kind.map_or(0, |kind| url_at(kind) + 1))
-        .on_choose(move |index, _, cx| {
-            let kind = index.checked_sub(1).map(|at| AddressKind::ALL[at]);
-            this.update(cx, |this, cx| choose_url(this, kind, cx)).ok();
-        });
+    let url = url.chosen(url_at(last_url)).on_choose(move |index, _, cx| {
+        let kind = Some(AddressKind::ALL[index]);
+        this.update(cx, |this, cx| choose_url(this, kind, cx)).ok();
+    });
     // `<prefix>-<choice>-<kind>` is the block and its field; the box is `<id>-input`.
     let block = |id: String, shown: bool, field: (&str, &str, &str), input| {
         let (label, _, hint) = field;
@@ -1252,38 +1314,47 @@ pub(crate) fn ready_and_url<V: 'static>(
             )
         })
         .collect();
+    let ready_sentence = match service {
+        true => "Services and tasks that need it start once this is true.",
+        false => "Tasks and services that need it start once this is true.",
+    };
     div()
         .flex()
         .flex_col()
         .gap(space::LG)
         .child(
-            div()
-                .flex()
-                .flex_col()
+            Section::new(format!("{prefix}-section-ready"), "Ready when")
+                .sentence(ready_sentence)
                 .child(
-                    Field::new(
-                        ElementId::Name(format!("{prefix}-ready-field").into()),
-                        "Ready when",
-                        ready,
-                    )
-                    .optional(),
-                )
-                .children(ready_blocks),
+                    stack(space::MD)
+                        .child(spaced(space::MD, ready_switch))
+                        .child(
+                            presence(
+                                ElementId::Name(format!("{prefix}-ready-kinds").into()),
+                                ready_kind.is_some(),
+                                ready,
+                            )
+                            .space(space::MD),
+                        )
+                        .children(ready_blocks),
+                ),
         )
         .child(
-            div()
-                .flex()
-                .flex_col()
+            Section::new(format!("{prefix}-section-address"), "Its address")
+                .sentence("Shown on its run, a link that opens it.")
                 .child(
-                    Field::new(
-                        ElementId::Name(format!("{prefix}-url-field").into()),
-                        "Its address",
-                        url,
-                    )
-                    .optional()
-                    .hint("Shown on its run, a link that opens it."),
-                )
-                .children(url_blocks),
+                    stack(space::MD)
+                        .child(spaced(space::MD, url_switch))
+                        .child(
+                            presence(
+                                ElementId::Name(format!("{prefix}-url-kinds").into()),
+                                url_kind.is_some(),
+                                url,
+                            )
+                            .space(space::MD),
+                        )
+                        .children(url_blocks),
+                ),
         )
         .into_any_element()
 }
@@ -1435,13 +1506,6 @@ impl ProjectTasks {
 
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
-    }
-
-    /// Opens a run's address with the system's default handler.
-    pub fn open_link(&self, url: &str, cx: &App) {
-        if let Some(shell) = self.shell.upgrade() {
-            shell.read(cx).open_link(url);
-        }
     }
 
     pub fn commands(&self) -> &Entity<CommandList> {

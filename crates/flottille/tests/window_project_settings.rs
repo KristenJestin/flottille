@@ -3,7 +3,7 @@
 //! Features tab a list that opens a page for each project-scoped feature. On GPUI's test platform
 //! in front of a real daemon in temporary folders. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -991,4 +991,59 @@ fn a_project_overrides_a_subject_and_goes_back_to_settings(cx: &mut TestAppConte
         0,
         "nothing moves at rest"
     );
+}
+
+#[gpui_kit::test]
+fn the_project_settings_say_why_the_agent_is_not_lent(cx: &mut TestAppContext) {
+    // The account's `~/.ssh` is a link, which cannot be kept read-only to runs: the user's SSH
+    // agent is then lent to no push.
+    let user = user();
+    let home = user.path("home");
+    std::fs::create_dir_all(user.path("elsewhere")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(user.path("elsewhere"), home.join(".ssh")).unwrap();
+    project(&user, "app");
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let why = settings["pushes_unlent"].as_str().unwrap_or_default();
+    assert!(why.contains("is not a folder"), "{settings}");
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, "app", cx);
+
+    assert!(visible(cx, "project-settings-unlent"));
+    let said = label(cx, "project-settings-unlent").unwrap_or_default();
+    assert!(said.contains("over SSH are refused"), "{said}");
+    assert!(said.contains("is not a folder"), "the reason: {said}");
+    assert!(said.contains("flottille doctor"), "what to do: {said}");
+}
+
+#[gpui_kit::test]
+fn the_window_says_why_a_push_is_not_lifted_without_landlock(cx: &mut TestAppContext) {
+    // A kernel without Landlock, as a test build can play it: no push the gate lets through is
+    // run outside the sandbox, over SSH or not.
+    let user = user().with_env("FLOTTILLE_TEST_NO_LANDLOCK", "1");
+    project(&user, "app");
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let why = settings["pushes_unlifted"].as_str().unwrap_or_default();
+    assert!(why.contains("no Landlock"), "{settings}");
+    assert!(
+        why.contains("the folder a push runs from"),
+        "one sentence, no run of spaces: {why}"
+    );
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, "app", cx);
+
+    assert!(visible(cx, "project-settings-unlent"));
+    let said = label(cx, "project-settings-unlent").unwrap_or_default();
+    assert!(said.contains("No push an agent asks for"), "{said}");
+    assert!(
+        !said.contains("over SSH"),
+        "every push, not SSH's alone: {said}"
+    );
+    assert!(said.contains("no Landlock"), "the reason: {said}");
+    assert!(said.contains("terminal of your own"), "what to do: {said}");
+    assert!(said.contains("flottille doctor"), "{said}");
 }

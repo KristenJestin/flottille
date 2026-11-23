@@ -5,8 +5,8 @@
 //! the fake ACP agent and whose `gh` is the fake one, with a throwaway user. No window opens on a
 //! screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,6 +97,10 @@ fn script() -> Value {
             "arguments": {"kind": "child", "title": "curious", "brief": "ask your parent"}}}]},
         {"when": "ask your parent", "do": [{"mcp": {"tool": "ask_parent",
             "arguments": {"question": "Page Équipe asks: apps/front/src/team.tsx, which layout should the grid take?"}}}]},
+        {"when": "say a link with a user name", "do": [
+            {"say": "[github.com/org/repo#1](https://github.com@evil.example/)"}]},
+        {"when": "say a link to a file", "do": [{"say": "[report](file:///etc/passwd)"}]},
+        {"when": "say a link to the web", "do": [{"say": "[docs](https://example.org/docs)"}]},
         {"when": "say a lot", "do": [{"say": LONG}]},
         {"when": "say more", "do": [{"say": "One more thing."}]},
         {"when": "think alone", "do": [{"say": "Let me see."}, {"think": "Which file first."},
@@ -605,8 +609,10 @@ fn cancelling_a_waiting_message_folds_its_bubble_away_and_the_root_never_receive
 ) {
     let user = user();
     let lead = lead(&user);
+    // The turn lasts until it is cancelled: one that ends first hands the root the message before
+    // the click, however slow the runner.
     let (shell, page, _, delivery, cx) =
-        with_a_waiting_message(&user, &lead, "work a while", "azdsqdsq", cx);
+        with_a_waiting_message(&user, &lead, "work until stopped", "azdsqdsq", cx);
 
     cx.update(|window, cx| window.click(queued_button(&delivery, "cancel"), cx));
 
@@ -620,7 +626,7 @@ fn cancelling_a_waiting_message_folds_its_bubble_away_and_the_root_never_receive
     // shows it.
     user.call("agent.cancel", json!({"agent": lead})).unwrap();
     until(&shell, cx, "the turn ends", |cx| {
-        row_of(&page, cx, |b| is_message(b, "work a while")).is_some()
+        row_of(&page, cx, |b| is_message(b, "work until stopped")).is_some()
             && state_of(&user, &lead) == "idle"
     });
     assert!(prompts(&user).iter().all(|p| !p.contains("azdsqdsq")));
@@ -644,11 +650,13 @@ fn editing_a_waiting_message_puts_its_text_and_pictures_in_the_composer_after_wh
     user.fake_script(with_images);
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let lead = lead(&user);
+    // The turn never ends: one that ends first hands the root the message before the edit, or the
+    // edited one when it is sent again, however slow the runner.
     let (shell, page, reply, delivery, cx) = {
         let (shell, page, cx) = open_session(&user, &lead, cx);
         user.call(
             "agent.send",
-            json!({"agent": lead, "message": "work a while"}),
+            json!({"agent": lead, "message": "work until stopped"}),
         )
         .unwrap();
         let reply = shell
@@ -3823,4 +3831,71 @@ fn a_long_waiting_message_stays_inside_its_card(cx: &mut TestAppContext) {
     guard::narrow(cx);
     settle(cx);
     guard::assert_stays_inside(&shell, cx, queued_id(&delivery));
+}
+
+/// What the window opens, as a link of a reply is clicked: what its opener was given, and what
+/// reached the platform by itself (`cx.open_url`, which a text view uses when it is given no
+/// handler).
+fn opened_by_the_click_on(
+    link_of: &str,
+    cx: &mut TestAppContext,
+) -> (Vec<PathBuf>, Option<String>) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, link_of);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let opened: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let given = opened.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            given.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    until(&shell, cx, "the reply is read", |cx| {
+        row_of(
+            &page,
+            cx,
+            |b| matches!(b, Block::Text { text } if text.starts_with('[')),
+        )
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(
+        &page,
+        cx,
+        |b| matches!(b, Block::Text { text } if text.starts_with('[')),
+    )
+    .unwrap();
+    cx.update(|window, cx| {
+        window.click_at(
+            format!("row-{at}-text-region"),
+            gpui_kit::point(px(4.), px(4.)),
+            cx,
+        )
+    });
+    settle(cx);
+    let platform = cx.opened_url();
+    let opened = opened.lock().unwrap().clone();
+    (opened, platform)
+}
+
+#[gpui_kit::test]
+fn a_markdown_link_with_a_user_name_in_its_host_opens_nothing(cx: &mut TestAppContext) {
+    let (opened, platform) = opened_by_the_click_on("say a link with a user name", cx);
+    assert_eq!(opened, Vec::<PathBuf>::new());
+    assert_eq!(platform, None);
+}
+
+#[gpui_kit::test]
+fn a_markdown_link_to_a_file_opens_nothing(cx: &mut TestAppContext) {
+    let (opened, platform) = opened_by_the_click_on("say a link to a file", cx);
+    assert_eq!(opened, Vec::<PathBuf>::new());
+    assert_eq!(platform, None);
+}
+
+#[gpui_kit::test]
+fn a_markdown_link_to_the_web_opens_in_the_system_s_handler(cx: &mut TestAppContext) {
+    let (opened, platform) = opened_by_the_click_on("say a link to the web", cx);
+    assert_eq!(opened, [PathBuf::from("https://example.org/docs")]);
+    assert_eq!(platform, None, "through the window's opener, not the kit's");
 }

@@ -319,6 +319,9 @@ pub async fn prepared(
     tool: &str,
     args: &Value,
 ) -> Result<Vec<String>, Outcome> {
+    if let Some(says) = crate::across::says(daemon, grant, tool, args) {
+        return Ok(says);
+    }
     if tool == "agent_launch" {
         return launch_says(daemon, grant, args).await;
     }
@@ -326,7 +329,7 @@ pub async fn prepared(
         return session_says(daemon, grant, args);
     }
     if tool == "agent_stop" {
-        return crate::tree::stop_says(daemon, grant, args);
+        return crate::tree::stop_says(daemon, grant, args).await;
     }
     if tool == "session_read" {
         return crate::session_read::says(daemon, grant, args);
@@ -356,6 +359,13 @@ pub async fn prepared(
         // refused here, before the user is asked.
         says.extend(
             crate::tickets::worklog_says(daemon, &grant.place, &project, args)
+                .map_err(Outcome::Refused)?,
+        );
+        // The worklog an edit or a delete is about, as it is and what it becomes; one that is not
+        // the account's own is refused here, before the user is asked.
+        says.extend(
+            crate::tickets::worklog_change_says(daemon, &project, args)
+                .await
                 .map_err(Outcome::Refused)?,
         );
         // The labels, which the user reads whole; the sprint as the site names it.
@@ -462,6 +472,10 @@ pub async fn prepared(
             says.push(format!("Its head: {}", head.map_err(Outcome::Refused)?));
         }
         return Ok(says);
+    }
+    // A finding is filed by any agent and changes nothing of the project or the machine.
+    if tool == "services" && crate::findings::is(args) {
+        return Ok(Vec::new());
     }
     if tool == "services" {
         return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
@@ -875,13 +889,14 @@ fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
     })
 }
 
-/// Whether the agent is a root, the agent the user talks to.
+/// Whether the agent is a root, the agent the user talks to. A child an agent of another machine
+/// launched has no parent here: its depth says it is a child.
 fn is_root(daemon: &Daemon, grant: &Grant) -> bool {
     daemon
         .read(|store| store.agent(&grant.agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none())
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0)
 }
 
 /// A task in words: its line, where it runs and what it is.
@@ -2195,7 +2210,14 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
     if root && !is_root(daemon, grant) {
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
     }
-    crate::tree::launch_refusal(grant.place.workspace.as_deref(), args)?;
+    crate::tree::launch_refusal(&grant.place.project, grant.place.workspace.as_deref(), args)?;
+    // Judged by the machine it starts on, with its own words.
+    if !args["machine"].is_null() {
+        return Ok(Vec::new());
+    }
+    if let Some(elsewhere) = crate::tree::launched_elsewhere(&grant.place.project, args) {
+        return launch_elsewhere_says(daemon, grant, elsewhere, args).await;
+    }
     let title = args["title"].as_str().unwrap_or_default();
     let mut says = match (args["new_workspace"].as_str(), args["workspace"].is_null()) {
         (Some(name), true) => {
@@ -2258,6 +2280,95 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
     Ok(says)
 }
 
+/// What a launch in another project does, in words, for the user who decides it every time: the
+/// two projects and the caller, the kind, the place in that project and the first message whole
+/// (`docs/tools.md`, "Sessions an agent starts"). A project that is not registered is refused
+/// before anything is asked.
+async fn launch_elsewhere_says(
+    daemon: &Daemon,
+    grant: &Grant,
+    elsewhere: &str,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
+    let project = projects::load_project(daemon, elsewhere).map_err(|failure| {
+        Outcome::Refused(format!(
+            "refused: {}: agent_launch starts a session in a registered project only",
+            failure.message
+        ))
+    })?;
+    let caller = daemon
+        .read(|store| store.agent(&grant.agent))
+        .map_err(|error| Outcome::Failed(error.to_string()))?
+        .ok_or_else(|| Outcome::Failed(format!("there is no agent {}", grant.agent)))?;
+    let title = args["title"].as_str().unwrap_or_default();
+    let whose = match args["kind"].as_str() {
+        Some("led") => {
+            "led by it, a session of that project the user sees and may talk to, \
+            which asks it its questions and wakes it"
+        }
+        _ => "for the user, handed over, theirs",
+    };
+    let mut says = Vec::new();
+    let place = match (args["new_workspace"].as_str(), args["workspace"].as_str()) {
+        (Some(name), None) => {
+            let repositories: Option<Vec<String>> =
+                serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
+            let bases = bases_of(
+                &project,
+                serde_json::from_value(args["base"].clone()).unwrap_or_default(),
+                repositories.as_deref(),
+            )?;
+            // The services its setup starts are told as that project's own place reaches them.
+            says = create_says(
+                daemon,
+                &crate::place::Place::main(&project, project.folder.clone()),
+                &project,
+                name,
+                &repositories,
+                args["branch"].as_str(),
+                &bases,
+            )
+            .await?;
+            says[0] = format!("{} of project {}", says[0], project.name);
+            format!("the new workspace {name}")
+        }
+        (None, Some(name)) if !crate::tree::names_main(daemon, &project.name, name) => {
+            if !matches!(
+                daemon.read(|store| store.workspace(&project.name, name)),
+                Ok(Some(_))
+            ) {
+                return Err(Outcome::Refused(format!(
+                    "refused: project {} has no workspace {name}: name one of its workspaces, \
+                     main for its folder, or new_workspace for a new one",
+                    project.name
+                )));
+            }
+            format!("its workspace {name}")
+        }
+        _ => "main, its project folder".to_owned(),
+    };
+    says.insert(
+        0,
+        format!(
+            "{}'s session {} asks to start a session in {}: \"{title}\", {whose}, in {place}, a \
+             lead there with that project's own tools, settings and vault entries (asked by agent \
+             {})",
+            grant.place.project,
+            match &caller.title {
+                Some(title) => format!("\"{title}\""),
+                None => format!("agent {}", caller.id),
+            },
+            project.name,
+            caller.id
+        ),
+    );
+    says.push(format!(
+        "Its first message: {}",
+        args["brief"].as_str().unwrap_or_default()
+    ));
+    Ok(says)
+}
+
 /// What `session_send` does, in words: the session written to and the text whole, or, for its
 /// first message to a session it did not start, the leave it asks with that message; or the
 /// refusal of a session the caller may not write to, before anything is asked.
@@ -2272,6 +2383,16 @@ fn session_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Stri
         Relation::Started => "which you started",
         Relation::StartedYou => "the agent that started this session",
         Relation::Leave => "which the user let you write to",
+        Relation::NoLeave if session.project != caller.project => {
+            let (writer, reached) = crate::tree::sessions_across(daemon, &caller, &session);
+            return Ok(vec![
+                format!(
+                    "Let the session {writer} read and write to {reached}, from now on without \
+                     asking you"
+                ),
+                format!("Its first message: {}", asked.text),
+            ]);
+        }
         Relation::NoLeave => {
             return Ok(vec![
                 format!(
@@ -2564,7 +2685,7 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
             says.push(format!("Set the tracker to {}", checked.said()));
             if let Some((entry, site)) = newly_sent(project, &checked) {
                 says.push(format!(
-                    "Log time with it: the secret of the vault entry `{entry}` will be sent to \
+                    "Jira API access with it: the secret of the vault entry `{entry}` will be sent to \
                      {site}"
                 ));
             }
@@ -2797,6 +2918,41 @@ fn settings_text(project: &Project, settings: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_child_of_another_machine_s_agent_is_refused_a_session_by_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = crate::tree::tests::a_child_of_another_machine();
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &child);
+        let grant = Grant {
+            agent: child.id.clone(),
+            epoch: 0,
+            tools: Vec::new(),
+            place: crate::place::Place {
+                project: "app".into(),
+                workspace: None,
+                root: dir.path().into(),
+                repositories: Vec::new(),
+                branch: String::new(),
+                variables: Default::default(),
+                home: None,
+            },
+            launched: false,
+        };
+
+        for kind in ["led", "handed"] {
+            let says = launch_says(
+                &daemon,
+                &grant,
+                &json!({"kind": kind, "title": "Another", "brief": "Do more."}),
+            )
+            .await;
+            assert!(
+                matches!(&says, Err(Outcome::Refused(why)) if why == CHILD_ROOTS),
+                "{kind}"
+            );
+        }
+    }
 
     #[test]
     fn only_the_writes_are_a_family_the_gate_holds() {

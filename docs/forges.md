@@ -70,6 +70,14 @@ on the line of a program that is not ready (Check again); never in a loop and ne
 (`docs/cli.md`), which names the programs of the registered projects only, a missing one a warning
 and never a failure.
 
+### Signing in from the window
+
+The window's Settings, Agents, list `gh`, `glab`, `acli` and `bkt` under **Forges and trackers**
+(those the projects use first), each with its version and whether it is signed in, and start their
+own sign-in on the machine shown: `docs/agents.md`, "Signing in", which says each command, what it
+shows and what it keeps (nothing but the address and the code, in memory, while it runs). The
+checks above are unchanged; `glab`'s is its own `glab auth status --hostname <host>`.
+
 ## The forge of a repository
 
 **Each repository declares its forge, and nothing is guessed.** The project's file says it, per
@@ -140,7 +148,17 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
   and the checks as one mark: `failing` when one fails, else `pending` when one runs, else
   `passing` (skipped ones count as passing in the mark, but a merge needs one that passed: a pull
   request whose checks were all skipped is refused like one with none); none when there are no
-  checks;
+  checks. **Each check counts once, its latest run**: GitHub lists every run of a check on the
+  head (a run again, a workflow run superseded or cancelled and started again, the same name
+  twice). A check is a job of its workflow (`workflowName` and `name`) or a commit status (its
+  `context`), so two workflows with a job of one name, or a status and a run of one name, are
+  two checks. Of the runs of a check, the one that started last (`startedAt`, else `createdAt`;
+  of two that started together the one listed last) is the check, whatever the others said; a
+  run with no start (queued) is placed by the listing alone, the latest when listed after the
+  other. A check is `pending` only when that run is queued or runs, and a cancelled run that is
+  the latest still fails. `forge` `show`, `forge` `merge` and the items read the checks through
+  that one rule; `forge` `checks` runs again the latest run of each workflow of the
+  head (`gh run list … --json …,createdAt`) when it failed, and refuses when none did;
 - its comments (their number; `forge` `show` gives their text, and the reviews');
 - with `detail: full`, its **review threads** ("Review threads" below), counted otherwise where
   they were read;
@@ -372,10 +390,13 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   `ref_name`), its `selector.type` and `selector.pattern`, and, for a pull request's, its
   `destination`: one branch can be the source of two pull requests, and a passing build for one
   does not hide a failed build for the other. A status no pipeline of the list explains (another
-  CI's, an older build) is kept. When the pipelines cannot be read, the statuses are shown as `bkt`
-  gives them. **Known limits**: only the newest 50 pipelines are read (no second page), so a status
-  of an older build is kept as it is; and a "re-run failed steps" in Bitbucket's page keeps the
-  build number, so the statuses of the build are all that are read. Both fail safe.
+  CI's, an older build) is kept, and of several such statuses of one key (another CI's runs of
+  one check; two jobs that show one name have two keys, so they are two checks), the latest made
+  (`created_on`, Data Center `dateAdded`) counts alone, as on GitHub. When the pipelines cannot
+  be read, the statuses are shown as `bkt` gives them. **Known limits**: only the newest 50
+  pipelines are read (no second page), so a status of an older build is kept as it is; and a
+  "re-run failed steps" in Bitbucket's page keeps the build number, so the statuses of the build
+  are all that are read. Both fail safe.
 - **A status is checked against its pipeline (Cloud).** Bitbucket leaves the status of a stopped
   build at `INPROGRESS`, which would be `pending` for ever. A status that still says it runs
   takes the word of its pipeline when that ended (`state.name` `COMPLETED`: its
@@ -593,6 +614,22 @@ assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen
 and the maintainer checks them.** What was posted is recorded like a comment (the body and each
 comment on a line), so that it is read back as an agent's.
 
+### A pull request for a review
+
+Review reads a pull request of the project's forge, by its number, to review it (`docs/tools.md`,
+"Review", `review {action: start, pull_request}`, #1091). The repository is the one the call names
+or the project's only one, its forge declared and checked against its remote as for any read; one
+with no forge is refused (`no forge set for this repository`), a pull request the forge does not
+have is refused (`acme/app has no pull request #99`), before anything is fetched. Reading it gives
+the branch it merges into and where its head is fetched from, with the user's own `git` over
+the repository's remote (`git::output_remote`, no shell, `--end-of-options` before the remote and
+the refspecs): GitHub's `refs/pull/<n>/head`, which a fork's pull request has too; Bitbucket Data
+Center's `refs/pull-requests/<n>/from`; Bitbucket Cloud has no ref of a pull request, so its
+source branch, `refs/heads/<branch>`, which a pull request from a fork has not (refused, and so is
+a branch name git does not take). The head and the base branch are fetched into refs of Flottille's
+own (`refs/flottille/review/…`, deleted as soon as the place holds the head), never into the user's
+branches nor their remote-tracking refs. Nothing is written on the forge.
+
 ### Review threads
 
 A comment on a line of the diff and its replies are a **review thread**. `forge show` with
@@ -665,8 +702,8 @@ from the forges' API documentation, not seen on a real server, and the maintaine
 
 ### Agents never run `bkt`
 
-The gate refuses every `bkt` line an agent runs, reads included, as it does `acli`
-(`docs/tools.md`). `bkt`'s token is in the OS keychain, or in an encrypted file under the user's
+The gate makes every `bkt` line an agent runs a base call, reads included (`acli` and `gh` have
+their reads pass, `docs/tools.md`, "`acli` in a run"). `bkt`'s token is in the OS keychain, or in an encrypted file under the user's
 configuration folder (`internal/secret/store.go:17`, `:295`, `:404`), keyed by the host
 (`host/<host>/token`); no variable of ours moves either. `BKT_CONFIG_DIR` moves only the file
 that lists hosts and contexts (`internal/config/config.go:245-253`), and a configuration that

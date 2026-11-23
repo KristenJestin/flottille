@@ -73,6 +73,72 @@ has Codex settings of its own, `/etc/codex`, Codex is not ready.
 An agent is refused at its start, with a sentence that says why and names the providers that
 are ready, while its provider is not enabled or not ready ("Providers", below).
 
+## Signing in
+
+Flottille provides no login of its own. It can drive each program's **own** sign-in from the
+window (Settings, Agents), on the machine shown, so that a runner without a screen is signed in
+without a terminal: the user finishes it in their browser, on any device. The agents' programs
+(`claude`, `opencode`, `codex`) are signed in on their provider's row; the forges' and trackers'
+(`gh`, `glab`, `acli`, `bkt`, `docs/forges.md`) in the section **Forges and trackers** under it.
+The methods are in `docs/protocol.md` ("The sign-in methods"): they are the user's (`drive`), a
+`viewer` is refused them, and no tool of an agent starts one; bare mode does not move.
+
+**Whether it is signed in** is the program's own status, read for its exit code and the account's
+name only, the rest of what it prints dropped at once: never stored, logged, put in an event or
+shown. The account's name is masked to its first letter, and its domain's for an address
+(`o***`, `s***@e***`).
+
+**What a sign-in shows and keeps.** The daemon runs the program's command below, spawned without
+a shell with the daemon's environment (the user's own configuration, where the program keeps its
+login), its input closed unless it asks for a code. It reads what the program prints line by line
+for two things only: the first address it names and the one-time code it shows; every line is
+dropped once read. The address and the code are held in the daemon's memory while the sign-in
+runs and given only in the answer to `signin.start` (and `signin.list` says that one runs), to the
+caller that started it alone (the device that signed its request, or this machine's own clients):
+another one is told that it runs and where it was started from. The address is kept without the
+user and password it may hold, and masked. The window shows it, opened with the system's default
+handler of the machine the window runs on when it is an `http://` or `https://` address only, and
+the code with a copy button. A code the browser shows for the user to paste back is typed
+in the dialog's hidden field and sent once (`signin.code`): written to the program's input with a
+line's end, which then closes, and kept nowhere. When the program ends, its own status says
+whether it is signed in now; `signin.changed` says the program and the state only. A sign-in is
+cut after 15 minutes (a device code lasts that long); Cancel kills its process group.
+
+| Program | Signed in | Sign-in run | It asks for | Sign-out | Source |
+|---|---|---|---|---|---|
+| `claude` | `claude auth status` (exit 0; the account is its JSON's `email`) | `claude auth login` | the address, then the code the browser shows, pasted back | `claude auth logout` | Claude Code's CLI reference (`claude auth login`, `status`, `logout`) and its authentication page ("Paste code here if prompted") |
+| `opencode` | its login file's presence (above) | none: `opencode auth login` asks its questions in a terminal; the row says that line | | `opencode auth logout`, in a terminal | OpenCode's `auth login`, an interactive prompt |
+| `codex` | `codex login status` (exit 0) | `codex login --device-auth` | the address and the device code | `codex logout` | OpenAI's Codex authentication page (device code for remote or headless machines) |
+| `gh` | `gh auth status --hostname <host>` (exit 0; the account is the word after `account` on the host's line) | `gh auth login --web --hostname <host> --git-protocol https`, with `GH_PROMPT_DISABLED=1` | the address and the device code (`internal/authflow/flow.go`: without a terminal it prints both and waits) | `gh auth logout --hostname <host>` | `gh auth login --help`, `gh auth status --help` |
+| `glab` | `glab auth status --hostname <host>` (exit 0) | `glab auth login --hostname <host> --device` | the address and the device code (`internal/oauth2/device.go`); GitLab 17.9 or later | `glab auth logout --hostname <host>` | glab's `docs/source/auth/login.md` (`--device`, "for headless environments") |
+| `acli` | `acli jira auth status` (exit 0; its `Site:` line, as the tickets read it) | `acli jira auth login --web` | the address when it prints one; its browser must be on the machine signing in (Atlassian's CLOUD-13014 asks for a device flow) | `acli jira auth logout` | Atlassian's `acli jira auth login` reference |
+| `bkt`, Bitbucket Cloud | a context for the host (`docs/forges.md`), never `bkt auth` | `bkt auth login https://bitbucket.org --kind cloud --web` | the address it prints when it cannot open a browser itself; it waits on `127.0.0.1` of the machine signing in, so its browser must be there | `bkt auth logout api.bitbucket.org` (it removes the host's contexts too) | `bkt`'s README, `pkg/cmd/auth/auth.go`, `pkg/oauth/flow.go` and `server.go` |
+| `bkt`, Data Center | the same | none: its token is asked in a terminal ("token is required when not running in a TTY"); the row says `bkt auth login https://<host> --web-token` | | `bkt auth logout <host>` | the same |
+
+What each program prints is read once in a temporary `HOME` and XDG folders, the command stopped
+after its first lines, and the fakes print that wording (the older one kept as a second scenario
+where the parser still reads it). The one-time code is read after `one-time code`, in the forms
+the programs print it: after a colon, in parentheses, or alone on the line under; and only when
+it looks like a code (groups of capital letters and digits joined by dashes, `ABCD-1234`). With
+none found, the dialog says to finish in the browser with the code the program shows (#1248).
+
+| Program | Version read | What it printed |
+|---|---|---|
+| `gh` | 2.104.0 (2026-11) | with a clipboard utility: `! One-time code (XXXX-XXXX) copied to clipboard`, then `Open this URL to continue in your web browser: <address>`; without one: `! Failed to copy one-time code to clipboard`, a sentence on the line under it, then `! First copy your one-time code: XXXX-XXXX` and the same address line (older versions print the colon form alone) |
+| `claude` | 2.1.330 | `Opening browser to sign in…`, `If the browser didn't open, visit:`, the address on the line under, `Paste code here if prompted >` |
+| `glab`, `codex`, `acli`, `bkt` | not read | not installed where the check ran: their fakes keep the wording of their documentation, to read once on a machine that has them |
+
+A program with no flow that works without a terminal says, in its row, the one line the user
+would type in a terminal on that machine, with a Copy button, and nothing else. After a Bitbucket
+Cloud sign-in, `bkt` still needs a context for the workspace (`docs/forges.md`, "The programs it
+needs"): until one exists, its row says it is not signed in.
+
+The tests never run a real program: the daemon looks the programs of a sign-in up in the folder
+`FLOTTILLE_TEST_PROGRAMS` names, when it names one, instead of `PATH`, and every test's user names
+its own (`crates/flottille/tests/common`), where the fakes are linked (`crates/flottille-fake-gh`,
+whose `sign_in.rs` the other fakes share; the fake `gh` is the fake `glab` through a link of that
+name).
+
 ## Providers
 
 A provider is what an agent runs on: `claude`, `opencode` and `codex`, in this order. Each is a
@@ -174,21 +240,40 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   (`docs/developer.md`) and changes nothing: the models stay as they were, and are not asked again
   before the state of the provider changes or it is enabled again. A read is announced by
   `provider.models_read` (`docs/events.md`). Until a listing or a session said them, they are
-  `null`, an agent may ask any model and effort, and one its session does not offer fails the agent
-  ("The options", below). Once they are known, a model or an effort they do not hold is refused
+  `null`, an agent may ask any model and effort, and one its session does not offer is replaced at
+  its start (below), never a failure. Once they are known, a model or an effort they do not hold is refused
   at once, naming those the provider offers. A model asked as a listed model's id without its
   date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
   and its agent's choice, the Auto judge's (`provider.set_judge`) and the session's own check
-  hold the listed id. An id that two listed models answer to is taken for none. The efforts of a model are `null` until a session
+  hold the listed id. An id that two listed models answer to is taken for none. What the user
+  or an agent asks (a pick, `agent.options`, a new session's model, the judge's or the new
+  sessions' setting) is matched only so: another model is never put in its place, and one the
+  list does not hold is refused, naming what is offered. The model a session was stored on (its
+  `chosen`, `taken` or `pending`), and a project's or the new sessions' setting's model at a
+  session's start, may have left the list since (an alias the provider's update dropped, `fable`,
+  or an id it replaced, `claude-fable-5-1`): it is the newest listed model of its family (#1076),
+  the ids whose words end with its own (`claude-fable-*` for `fable`), ordered by the version in
+  the id (`5-2` before `5-1` before `5`), then by its date (`-YYYYMMDD` or `-YYYY-MM-DD`, never
+  read as a version), then by the id, never by the list's order. No family listed: at a session's
+  start the session runs on the provider's default model (a project's model is refused, as
+  before; the setting's is let go); if the agent refuses the model of the family, on its default
+  too, said once. Either way the start goes on: the session's `chosen` and `taken` become the
+  model that runs, the user's message is sent, and `agent.options_replaced` says why once in its
+  conversation (`the model fable is no longer offered by the agent: running claude-fable-5-2`).
+  An effort the agent refuses at start is let go the same way, said the same way, and leaves the
+  session's `chosen`: it is not said again at the next start. A change of the effort alone is checked against the model the agent runs on
+  resolved so, never refused because that model left the list. A session's start that finds the
+  provider's list changed announces it (`provider.models_read`), so that the window's pickers
+  never offer a model the list no longer holds. The efforts of a model are `null` until a session
   had that model, or, for Claude, until a listing or any session said them all: its bridge gives
   every model's from `claude`'s answer to `initialize`, so that no model is ever set to learn
   them. Setting a model is no free probe: `claude` may check a model id it has not checked yet
   with a one-token request to the API (`set_model`'s check of 2.1.312). While a Claude model's
   efforts are `null` for the version there is now, the daemon lists its models again, once per
-  state of the provider; the window shows the effort picker's skeleton while a listing runs
+  state of the provider; the window's agent picker says no effort until a listing ran
   (`models_learning` of `provider.list`, `provider.models_learning`). An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
-  fails the agent.
+  lets it go at its start, said (`agent.options_replaced`).
 - **Refusals** name what is available: `there is no provider gemini: the providers are claude,
   opencode, codex`; `provider opencode is not enabled (…); the ready providers are claude`; `provider
   opencode is not ready: `opencode` is not on PATH (…); no provider is ready: see `flottille
@@ -246,7 +331,7 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   before the next prompt. A change asked while the previous one is being set is merged with it
   and kept: only the values set leave `pending`. A model change makes a pending effort the new
   model is known not to offer go, said in the answer (`dropped`). A value the agent's session
-  refuses never fails the agent, unlike at start: it goes on with its previous options, that value
+  refuses never fails the agent, nor at start: it goes on with its previous options, that value
   leaves `pending`, and `agent.options_refused` says why. A value it replaces with another is
   what it has now. An error that is not a refusal (its process or its service failing) leaves the
   change pending, logged, and it is tried again before the next prompt. What the agent has once
@@ -787,6 +872,8 @@ For Claude:
 - **Forge tokens and their configuration**: `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
   `GITHUB_ENTERPRISE_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `BITBUCKET_*`, `BKT_*`, `GH_CONFIG_DIR`,
   `GLAB_CONFIG_DIR`.
+- **The user's SSH agent**: `SSH_AUTH_SOCK`, for every provider (`docs/vault.md`, "The runtime
+  folder").
 - **Any other variable whose name ends in** `_TOKEN`, `_SECRET`, `_PASSWORD` or `_API_KEY`,
   **except the agent's own sign-in**: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`.
@@ -801,13 +888,13 @@ certificate variables (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `NODE_EXTRA_C
 the rest of the user's environment (`PATH`, `HOME`, locale). This means that a sign-in through a
 cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not reach the agent.
 
-For OpenCode: the same forge tokens and secret-looking names, except the API keys it takes
+For OpenCode: the same forge tokens, SSH agent and secret-looking names, except the API keys it takes
 (above), every `OPENCODE_*` variable of the user's (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
 `OPENCODE_PERMISSION`…), which would undo its bare mode (Flottille sets the ones it needs), and
 every `OTEL_*` one, which would send OpenCode's traces to the user's collector, its headers with
 them (`core/src/observability/otlp.ts`).
 
-For Codex: the same forge tokens and secret-looking names, except `CODEX_ACCESS_TOKEN`, its
+For Codex: the same forge tokens, SSH agent and secret-looking names, except `CODEX_ACCESS_TOKEN`, its
 sign-in, and every `CODEX_*` variable of the user's (`CODEX_HOME`, which Flottille sets,
 `CODEX_SQLITE_HOME`, `CODEX_API_KEY`…), `OPENAI_*` (a key the app server would use for the
 realtime voice, not for its models), `AWS_*` (a cloud's models) and `OTEL_*`.
@@ -924,7 +1011,8 @@ extension's first message to its session), the first message of a session an age
 line naming that agent: it is the agent's words, never the user's), a message another session
 wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
 the agent leads, when it asked or reported (`session-turn-ended`, `docs/tools.md`, "Following a
-session"), a led session's pilot that ended (`handed`), a
+session"), what a led session asked the user while its pilot's machine was off, once that machine
+is back (`session-meanwhile`, `docs/remote.md`), a led session's pilot that ended (`handed`), a
 parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
@@ -1117,6 +1205,13 @@ Every 5 seconds, the daemon looks at what only time decides:
 - `FLOTTILLE_TEST_CLOCK`: set (to anything), the daemon answers `test.advance {"ms"}` on its
   socket: its clock moves that far ahead, and the sweep runs at once. The tests see minutes pass
   this way without waiting for them. Without it, `test.advance` is an unknown method.
+- `FLOTTILLE_TEST_RELEASE_WAIT_MS`, `FLOTTILLE_TEST_SITE_WAIT_MS`, `FLOTTILLE_TEST_RUN_GRACE_MS`,
+  `FLOTTILLE_TEST_READER_MS`: in a test build (`debug_assertions`), the waits a test would
+  otherwise sit through, in milliseconds: the wait for the processes of a removed project's agents
+  (15 s), what a call to a ticket site may take (30 s), the grace a run asked to stop has before
+  its group is killed (5 s), and a page reader's time on the clock (25 s, with a second less of
+  CPU). A release build reads none of them (`src/test_time.rs`). The tests' wall clock for an
+  invitation's five minutes moves by `FLOTTILLE_TEST_WALL_AHEAD_FILE` (`docs/remote.md`).
 
 All of them are read by the daemon (or the bridge it starts) from its environment, which is the environment of the command that
 started it.

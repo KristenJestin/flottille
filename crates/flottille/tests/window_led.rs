@@ -3,7 +3,7 @@
 //! folds with it, and the user detaches it from its pilot from the row's menu. No window opens on a
 //! screen.
 
-mod common;
+use crate::common;
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -15,7 +15,8 @@ use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::{
-    session_detach_id, session_id, session_mark_id, session_menu_id, session_waits_id,
+    session_detach_id, session_end_id, session_id, session_mark_id, session_menu_id,
+    session_waits_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
@@ -116,6 +117,11 @@ fn label(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> Option<String> 
 /// The lead the user started and the session it leads: their ids.
 fn lead_and_led(user: &User) -> (String, String) {
     project(user);
+    started_led(user)
+}
+
+/// The lead the user started in `atlas` and the session it leads, which the user allowed.
+fn started_led(user: &User) -> (String, String) {
     let lead = user
         .call(
             "agent.start",
@@ -1034,4 +1040,140 @@ fn the_tie_runs_on_between_two_rows_of_the_same_lead(cx: &mut TestAppContext) {
         "no gap between the first row's line and the second row's turn: {below:?} {next:?} {row:?}"
     );
     let _ = family;
+}
+
+/// A lead whose led session, "Docs", works in a workspace holding a file not committed.
+fn lead_and_led_with_unsaved_work(user: &User) -> (String, String) {
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led",
+                "workspace": "docs"}}}]}
+    ]}));
+    project(user);
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "atlas", "name": "docs", "offline": true}),
+        )
+        .unwrap();
+    let folder = workspace["folder"].as_str().unwrap();
+    std::fs::write(std::path::Path::new(folder).join("draft.md"), "not saved\n").unwrap();
+    started_led(user)
+}
+
+#[gpui_kit::test]
+fn the_end_confirmation_lists_the_led_sessions_and_their_unsaved_work(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, led) = lead_and_led_with_unsaved_work(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(&led)).is_some()
+    });
+    settle(cx);
+
+    // The pilot's end asks once and lists what ends with it.
+    cx.update(|window, cx| window.hover(session_id(&lead), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_menu_id(&lead), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_end_id(&lead), cx));
+    until(&shell, cx, "the led session is listed", |cx| {
+        label(cx, ("sidebar-end-led-".to_owned() + &led).into()).is_some()
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, ("sidebar-end-led-".to_owned() + &led).into()).as_deref(),
+        Some("Session Docs in atlas, uncommitted changes")
+    );
+    assert_eq!(
+        label(cx, "sidebar-end-confirm".into()).as_deref(),
+        Some("End 2 sessions")
+    );
+
+    // Cancelled, nothing ends.
+    cx.update(|window, cx| window.click("sidebar-end-modal-cancel", cx));
+    settle(cx);
+    for id in [&lead, &led] {
+        let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+        assert_ne!(shown["agent"]["state"], "ended", "{shown}");
+    }
+
+    // Confirmed once, both end and leave the project's level.
+    cx.update(|window, cx| window.hover(session_id(&lead), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_menu_id(&lead), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_end_id(&lead), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("sidebar-end-confirm", cx));
+    until(&shell, cx, "both rows left the project's level", |cx| {
+        listed(&shell, cx).is_empty()
+    });
+    for id in [&lead, &led] {
+        let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+        assert_eq!(shown["agent"]["state"], "ended", "{shown}");
+    }
+}
+
+#[gpui_kit::test]
+fn a_session_with_no_led_session_lists_none_in_its_end_confirmation(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(&led)).is_some()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.hover(session_id(&led), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_menu_id(&led), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_end_id(&led), cx));
+    settle(cx);
+    std::thread::sleep(Duration::from_millis(300));
+    settle(cx);
+
+    assert_eq!(
+        label(cx, ("sidebar-end-led-".to_owned() + &led).into()),
+        None
+    );
+    assert_eq!(
+        label(cx, "sidebar-end-confirm".into()).as_deref(),
+        Some("End session")
+    );
+}
+
+#[gpui_kit::test]
+fn the_session_page_s_end_confirmation_lists_the_led_sessions_too(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, led) = lead_and_led_with_unsaved_work(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(&led)).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the pilot's page", |cx| {
+        label(cx, "rail-agent-menu".into()).is_some()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("rail-agent-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-agent-end", cx));
+    until(&shell, cx, "the led session is listed", |cx| {
+        label(cx, ("session-end-led-".to_owned() + &led).into()).is_some()
+    });
+    assert_eq!(
+        label(cx, ("session-end-led-".to_owned() + &led).into()).as_deref(),
+        Some("Session Docs in atlas, uncommitted changes")
+    );
+
+    cx.update(|window, cx| window.click("session-end-confirm", cx));
+    until(&shell, cx, "both ended", |_| {
+        [&lead, &led].iter().all(|id| {
+            user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "ended"
+        })
+    });
 }

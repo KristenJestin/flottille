@@ -4,7 +4,7 @@
 //! be used is said under the fields. On GPUI's test platform in front of a real daemon, with
 //! throwaway repositories and temporary XDG folders. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

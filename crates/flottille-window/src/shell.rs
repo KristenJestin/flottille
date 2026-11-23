@@ -3,8 +3,8 @@
 //! again only the parts a change touches.
 
 use crate::glyphs;
-use crate::state::{AgentState, StateIcon, Status};
-use std::collections::{HashMap, HashSet};
+use crate::state::AgentState;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, HOVER, Motion, RISE};
 use gpui_design_system::{
     Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, Tie, Toast, ToastStack, Type,
-    dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, keys_held,
+    dismiss_on_navigate, dismiss_top_overlay, enter, fade, forget_overlays, icon, keys_held,
     open_overlay, palette, presence, pressable, space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,15 +28,22 @@ use gpui_kit::{
 };
 use lyon_tessellation::{LineCap, LineJoin};
 
-use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
+use crate::actions::{Actions, Command, Details, Outcome, Pick, Reading, RunFrom};
 use crate::add_project::AddProject;
+use crate::arrange::{Arrangement, Change, Listed};
 use crate::composer::{Choice, Composer, PlaceChoice};
+use crate::end_led::LedEnd;
 use crate::extensions::Registry;
 use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
+use crate::group_name::GroupName;
 use crate::history::{History, Way};
+use crate::kept::{DraftKey, Folds, Written, machine_key};
 use crate::link::{self, Connect, Seen, Update};
+use crate::machines::Machines;
+use crate::machines_page::{MachinesSection, RemovalDialog};
+use crate::modals::Modals;
 use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
@@ -48,7 +55,8 @@ use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
-use crate::tree::{EndedNode, ProjectNode, SessionRow, Sidebar};
+use crate::tree::{Arranged, ArrangedGroup};
+use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -101,6 +109,17 @@ pub enum Selection {
     },
     /// The services of the machine.
     Services,
+    /// What is new since the version last run.
+    WhatsNew,
+}
+
+/// A page of another machine to open once that machine is in front.
+#[derive(Clone, Debug, PartialEq)]
+enum There {
+    /// A session, by its id there.
+    Session(String),
+    /// A project's page, by its name.
+    Project(String),
 }
 
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
@@ -119,11 +138,48 @@ impl Sharing {
     }
 }
 
+/// How a window starts again from the binary that replaced its own, given the page it shows
+/// (`Shell::page_name`): false when there is no other file to start from.
+pub type Reexec = Arc<dyn Fn(Option<String>) -> bool + Send + Sync>;
+
+/// The page a name of [`Shell::page_name`] is, and the tab of Settings it names.
+fn page_named(name: &str) -> Option<(Selection, Option<usize>)> {
+    let (kind, rest) = name.split_once(':').unwrap_or((name, ""));
+    Some(match kind {
+        "session" => (Selection::Session(rest.to_owned()), None),
+        "project" => (Selection::Project(rest.to_owned()), None),
+        "settings" => (Selection::Settings, rest.parse().ok()),
+        "project-settings" => (Selection::ProjectSettings(rest.to_owned()), None),
+        "spec" => {
+            let (spec, project) = rest.split_once(':')?;
+            (
+                Selection::Spec {
+                    project: project.to_owned(),
+                    spec: spec.parse().ok()?,
+                },
+                None,
+            )
+        }
+        "services" => (Selection::Services, None),
+        "whats-new" => (Selection::WhatsNew, None),
+        _ => return None,
+    })
+}
+
 pub struct Shell {
     seen: Arc<Seen>,
     /// What "Restart Flottille" runs, off the UI's thread: `flottille daemon stop`, after which
     /// the link starts Flottille again.
     restart: Arc<dyn Fn() + Send + Sync>,
+    /// This window's own build, and how it starts again from the binary that replaced it: once
+    /// the daemon says another build, the window becomes that one, on the page it shows.
+    build: Option<(String, Reexec)>,
+    /// Set once the window asked to start again: it asks once.
+    reexecuted: bool,
+    /// The page to open once the daemon's first read is in: the one shown before a re-exec.
+    reopen: Option<(Selection, Option<usize>)>,
+    /// The Version section of Settings, General.
+    version: Entity<crate::version::VersionSection>,
     snapshot: Snapshot,
     layout: Layout,
     selected: Option<Selection>,
@@ -141,6 +197,8 @@ pub struct Shell {
     toasts: Entity<ToastStack>,
     /// The dialog of an agent's request to write a connection, opened from its card.
     connection_request: Entity<ConnectionRequest>,
+    /// The host of the dialogs, drawn over whatever page is shown.
+    modals: Entity<Modals>,
     /// The requests for a vault entry whose dismissal was sent: their Dismiss waits for the
     /// daemon's answer.
     dismissing: HashSet<u64>,
@@ -148,16 +206,54 @@ pub struct Shell {
     /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
     bell_shown: Motion,
     projects: HashMap<String, Entity<ProjectNode>>,
+    /// The projects' rows in a machine's section, by project then machine, while the projects are
+    /// shown by machine.
+    machine_projects: HashMap<(String, String), Entity<ProjectNode>>,
+    /// The machines' sections, by name.
+    sections: HashMap<String, Entity<MachineNode>>,
+    /// The user's choice (`window.get`): the projects are shown by machine.
+    by_machine: bool,
+    /// They are shown by machine now: the choice, and another machine to group by.
+    grouped: bool,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
     ended: Option<Entity<EndedNode>>,
+    /// What the daemon keeps of what the sidebar has folded: read once at opening, which makes
+    /// the nodes as they were left, then what was last written. `None` until it is read: nothing
+    /// is written before, which would replace it with the defaults.
+    kept: Folds,
+    kept_read: bool,
+    /// What was last asked of the daemon to keep and it did not answer yet (or refused): the same
+    /// state is not asked twice.
+    kept_asked: Option<Folds>,
+    /// How many writes of the sidebar's state in a row the daemon did not take, and the wait that
+    /// ends with the next try.
+    kept_failures: u32,
+    kept_retry: Option<Task<()>>,
+    /// The user's order and groups of projects: one key of the daemon's window state, apart from
+    /// the sidebar's folds, written only when the user arranges (`arranged`), so that a window
+    /// that only folds a project never writes over what another made. This is what the daemon
+    /// held when it last said so (as the window opened, then with each change it kept).
+    arrangement_kept: Arrangement,
+    /// What the user did that the daemon has not kept yet, and whether it was asked: the daemon
+    /// applies each to the arrangement it holds, which another window may have changed since this
+    /// one read it. They are asked at once, in order, and answered in order.
+    arrangement_queue: VecDeque<(Change, bool)>,
+    /// How many asks in a row the daemon did not take, and the wait that ends with the next try.
+    arrangement_failures: u32,
+    arrangement_retry: Option<Task<()>>,
+    arrangement_waiting: bool,
+    /// The sessions the daemon kept a draft of when the window opened: their rows say it before
+    /// their pages are opened.
+    listed_drafts: HashSet<String>,
+    /// What the composers hold went to the daemon already (the window closes once).
+    closed: bool,
     sessions: HashMap<String, Entity<SessionRow>>,
     /// The pull request of each workspace (its project and name) as a project page last read it:
     /// a session's row says it on its second line. The sidebar asks the forge for none of them.
     pulls: HashMap<(String, String), PullRequest>,
-    /// The tickets and pull requests the sessions' agents created or changed, oldest first: each
-    /// marks its session's row and rings the bell until the session is opened. They live as long
-    /// as the window.
-    forged: Vec<Forged>,
+    /// The notifications the window has asked the daemon to mark read: it asks once for each,
+    /// whatever the answer takes.
+    marked: HashSet<u64>,
     /// What is new in each session since it was last opened, the last of it in words: an agent
     /// said something, reported, was woken, or changed a ticket or a pull request. A session's
     /// row says it with one dot, unless a state mark takes its place; they live as long as the
@@ -197,6 +293,8 @@ pub struct Shell {
     settings: Entity<SettingsPage>,
     /// The services page, one for the window's life.
     services: Entity<crate::services::ServicesPage>,
+    /// What's new, one page for the window's life.
+    whats_new: Entity<crate::whats_new::WhatsNewPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
@@ -221,12 +319,37 @@ pub struct Shell {
     add_project: Entity<AddProject>,
     /// The dialog that renames a session.
     rename: Entity<RenameSession>,
+    /// The dialog that makes a group of projects.
+    group_form: Entity<GroupName>,
+    /// The user's order and groups of projects.
+    arrangement: Arrangement,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
     /// What the window knows of the parts of Flottille it draws in its places (Specs).
     extensions: Entity<Registry>,
     /// The open spec's page; made again for another spec.
     spec_page: Option<Entity<SpecPage>>,
+    /// The user's machines, read from this machine whichever one is shown.
+    remote: crate::machines::Remote,
+    /// The machine shown, which every other connection of the window goes to.
+    aim: crate::machines::Aim,
+    machines: Entity<MachinesSection>,
+    /// Another machine was chosen, and its first read has not come yet: the connections cut
+    /// for it are no broken link.
+    switching: bool,
+    /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
+    /// machine.
+    switch_wait: Option<Task<()>>,
+    /// The page to open once the first read of the machine brought in front came: that machine
+    /// (`None`: this one) and the session or the project there.
+    open_there: Option<(Option<String>, There)>,
+    /// The rows of other machines' sessions whose close was asked: gone from the list at once.
+    closing: HashSet<String>,
+    /// The daemon's last read as it gave it, before the sessions on other machines are added
+    /// under their pilots.
+    read: Option<Snapshot>,
+    /// The machine chosen while its key is read.
+    choosing: Option<Task<()>>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -243,6 +366,11 @@ type Work = (
     Vec<(String, Preparation)>,
     Vec<(String, Option<AgentState>)>,
 );
+
+/// Whether what an agent showed is an address of the web, not a file.
+fn is_address(target: &str) -> bool {
+    target.starts_with("http://") || target.starts_with("https://")
+}
 
 /// What a row's dot says: `New since you looked: opened a pull request`.
 fn unread_words(said: &str) -> String {
@@ -264,8 +392,13 @@ pub fn now_ms() -> u64 {
 
 impl Shell {
     /// The shell, its updates taken as the link sends them.
-    pub fn new(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut shell = Self::new_polled(connect, window, cx);
+    pub fn new(
+        connect: Connect,
+        device: Option<crate::device::Device>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut shell = Self::new_polled_with(connect, device, window, cx);
         if let Some(mut updates) = shell.updates.take() {
             shell._link = cx.spawn_in(window, async move |this: WeakEntity<Shell>, cx| {
                 while let Some(update) = updates.next().await {
@@ -284,50 +417,193 @@ impl Shell {
     /// The shell, its updates taken only by [`Shell::poll`]: on GPUI's test platform, another
     /// thread may not wake the UI's tasks.
     pub fn new_polled(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_polled_with(connect, None, window, cx)
+    }
+
+    /// [`Shell::new_polled`], with the device key of this session's clients, which signs what
+    /// the user does to the hub's list and each request to another machine.
+    pub fn new_polled_with(
+        connect: Connect,
+        device: Option<crate::device::Device>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (sender, updates) = unbounded();
-        let seen = link::spawn_into(connect.clone(), sender.clone());
+        // The machines are this machine's to say; everything else goes to the machine shown.
+        let remote = crate::machines::Remote::spawn(connect.clone(), device, sender.clone());
+        let aim = crate::machines::Aim::default();
+        let local = connect.clone();
+        let connect = aim.connect(connect);
+        let seen = link::spawn_aimed_into(connect.clone(), aim.generations(), sender.clone());
         let follow = Follow {
             connect: connect.clone(),
             updates: sender.clone(),
             opener: crate::open::system(),
         };
-        let actions = Actions::spawn(connect, sender);
+        let actions = Actions::spawn_aimed(aim.clone(), local, sender);
         let this = cx.entity().downgrade();
+        cx.set_global(crate::tunnels::Tunnels::new(this.clone()));
+        cx.set_global(crate::shown_files::ShownFiles::new(
+            connect.clone(),
+            this.clone(),
+        ));
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
+        let about = cx.new(|_| crate::about::AboutEditor::new(this.clone()));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
-        let vault = cx.new(|_| VaultSection::new(this.clone()));
-        let connections = cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone()));
+        let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(this.clone()));
+        let modals = cx.new(|_| Modals::new());
+        let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
+        let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
+        let sign_in = cx.new(|_| crate::sign_in::SignInSection::new(this.clone(), modals.clone()));
+        let connections =
+            cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
+        let machines = {
+            let (modals, remote) = (modals.clone(), remote.clone());
+            cx.new(|cx| {
+                let mut section = MachinesSection::new(modals, remote);
+                section.fields(window, cx);
+                section
+            })
+        };
+        let removal = {
+            let machines = machines.clone();
+            cx.new(|cx| RemovalDialog::new(machines, cx))
+        };
         {
             let reading = connections.clone();
             cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
         }
-        let settings = cx.new(|_| {
+        let filing = cx.new(|cx| crate::findings::Filing::new(this.clone(), window, cx));
+        let check = cx.new(|_| crate::check::CheckSection::new(this.clone()));
+        let settings = cx.new(|cx| {
+            // A provider's row draws its sign-in from the section: it follows the section's list.
+            cx.observe(&sign_in, |_, _, cx| cx.notify()).detach();
             SettingsPage::new(
                 this.clone(),
                 rules.clone(),
+                about.clone(),
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
+                travelled.clone(),
                 vault.clone(),
                 connections.clone(),
+                machines.clone(),
+                version.clone(),
+                sign_in.clone(),
+                filing.clone(),
+                check.clone(),
             )
         });
         let services = {
             let this = this.clone();
             cx.new(|cx| crate::services::ServicesPage::new(this, cx))
         };
+        let whats_new = {
+            let this = this.clone();
+            cx.new(|_| crate::whats_new::WhatsNewPage::new(this))
+        };
         let main = {
             let (this, settings, services) = (this.clone(), settings.clone(), services.clone());
-            cx.new(|cx| MainArea::new(this, settings, services, cx))
+            let whats_new = whats_new.clone();
+            cx.new(|cx| MainArea::new(this, settings, services, whats_new, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
         let toasts = cx.new(ToastStack::new);
         let connection_request = cx.new(|_| ConnectionRequest::new(this.clone()));
+        // The dialogs of the window, in the order they are first drawn: each is the kit's modal,
+        // and opens through the host over whichever page is shown.
+        modals.update(cx, |modals, cx| {
+            modals.add(
+                crate::vault::MODAL,
+                &vault,
+                |vault, window, cx| vault.dialog(window, cx),
+                VaultSection::is_open,
+                VaultSection::focus_handle,
+                cx,
+            );
+            modals.add(
+                crate::sign_in::MODAL,
+                &sign_in,
+                |section, window, cx| section.dialog(window, cx),
+                crate::sign_in::SignInSection::is_open,
+                crate::sign_in::SignInSection::focus_handle,
+                cx,
+            );
+            modals.add(
+                crate::vault::SHARE_MODAL,
+                &vault,
+                |vault, window, cx| vault.share_dialog(window, cx),
+                VaultSection::is_sharing,
+                |_, _| None,
+                cx,
+            );
+            modals.add(
+                crate::extensions::connections::FORM_MODAL,
+                &connections,
+                |section, _, cx| section.form_dialog(cx),
+                ConnectionsSection::form_is_open,
+                ConnectionsSection::form_focus,
+                cx,
+            );
+            modals.add(
+                crate::extensions::connections::REVIEW_MODAL,
+                &connections,
+                |section, window, cx| section.review_dialog(window, cx),
+                ConnectionsSection::review_is_open,
+                |_, _| None,
+                cx,
+            );
+            modals.add(
+                crate::extensions::connections::SHARE_MODAL,
+                &connections,
+                |section, window, cx| section.share_dialog(window, cx),
+                ConnectionsSection::is_sharing,
+                |_, _| None,
+                cx,
+            );
+            modals.add_view(
+                crate::extensions::connection_request::MODAL,
+                &connection_request,
+                ConnectionRequest::is_open,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::CONNECT_MODAL,
+                &machines,
+                MachinesSection::connect_dialog,
+                MachinesSection::connect_is_open,
+                MachinesSection::connect_focus,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::RENAME_MODAL,
+                &machines,
+                MachinesSection::rename_dialog,
+                MachinesSection::rename_is_open,
+                MachinesSection::rename_focus,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::LOOK_MODAL,
+                &machines,
+                MachinesSection::look_dialog,
+                MachinesSection::look_is_open,
+                |_, _| None,
+                cx,
+            );
+            modals.add_view(
+                crate::machines_page::REMOVAL_DIALOG,
+                &removal,
+                RemovalDialog::is_open,
+                cx,
+            );
+        });
         let add_project = {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
@@ -336,7 +612,12 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| RenameSession::new(this, window, cx))
         };
+        let group_form = {
+            let this = this.clone();
+            cx.new(|cx| GroupName::new(this, window, cx))
+        };
         let focus = cx.focus_handle();
+        modals.update(cx, |modals, _| modals.fallback(focus.clone()));
         let switcher = {
             let (this, focus) = (this.clone(), focus.clone());
             cx.new(|cx| Switcher::new(this, focus, window, cx))
@@ -363,6 +644,10 @@ impl Shell {
         let mut shell = Self {
             seen,
             restart: Arc::new(restart_flottille),
+            build: None,
+            reexecuted: false,
+            reopen: None,
+            version,
             snapshot: Snapshot::default(),
             layout: Layout::Wide,
             selected: None,
@@ -375,14 +660,31 @@ impl Shell {
             bell,
             toasts,
             connection_request,
+            modals,
             dismissing: HashSet::new(),
             bell_open: false,
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
+            machine_projects: HashMap::new(),
+            sections: HashMap::new(),
+            by_machine: false,
+            grouped: false,
             ended: None,
+            kept: Folds::default(),
+            kept_read: false,
+            kept_asked: None,
+            kept_failures: 0,
+            kept_retry: None,
+            arrangement_kept: Arrangement::default(),
+            arrangement_queue: VecDeque::new(),
+            arrangement_failures: 0,
+            arrangement_retry: None,
+            arrangement_waiting: false,
+            listed_drafts: HashSet::new(),
+            closed: false,
             sessions: HashMap::new(),
             pulls: HashMap::new(),
-            forged: Vec::new(),
+            marked: HashSet::new(),
             news: HashMap::new(),
             sharing: HashMap::new(),
             forms: HashMap::new(),
@@ -394,12 +696,18 @@ impl Shell {
             _chose: None,
             replies: HashMap::new(),
             docks: HashMap::new(),
-            _drafts: Vec::new(),
+            // Whatever way the program ends (the window closed, the desktop's quit, a signal),
+            // what the composers hold is with the daemon first.
+            _drafts: vec![cx.on_app_quit(|shell, cx| {
+                shell.closing(cx);
+                async {}
+            })],
             providers: Providers::default(),
             providers_read: 0,
             last_pick: None,
             settings,
             services,
+            whats_new,
             rules,
             judge_noticed: false,
             compaction_picked: false,
@@ -411,9 +719,20 @@ impl Shell {
             project_settings: None,
             add_project,
             rename,
+            group_form,
+            arrangement: Arrangement::default(),
             switcher,
             extensions,
             spec_page: None,
+            remote,
+            aim,
+            machines,
+            switching: false,
+            switch_wait: None,
+            open_there: None,
+            closing: HashSet::new(),
+            read: None,
+            choosing: None,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -424,6 +743,352 @@ impl Shell {
         // Given once the window is built: a root built after would take it back.
         cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
+    }
+
+    /// What this machine's daemon said of the user's machines.
+    fn machines_news(
+        &mut self,
+        news: crate::machines::News,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let read = matches!(news, crate::machines::News::Read(_));
+        self.machines
+            .update(cx, |section, cx| section.news(news, window, cx));
+        self.say_held(cx);
+        if let Some(read) = self.machines.read(cx).machines() {
+            let launched = crate::model::remote_agents(read);
+            if cx
+                .try_global::<crate::model::RemoteAgents>()
+                .is_none_or(|now| now.0 != launched)
+            {
+                cx.set_global(crate::model::RemoteAgents(launched));
+                cx.refresh_windows();
+            }
+        }
+        // The sessions on other machines, or their state, may have changed: their rows follow.
+        if read
+            && !self.switching
+            && let Some(last) = self.read.clone()
+        {
+            let merged = self.with_elsewhere(last, cx);
+            if merged != self.snapshot {
+                self.show(merged, window, cx);
+            }
+        }
+    }
+
+    /// `read`, of the machine in front, with the sessions of every other machine (`docs/remote.md`,
+    /// "One list of every machine"), and, while this machine is in front, those its agents started
+    /// on others under their pilots: another machine's tree is its own.
+    fn with_elsewhere(&self, read: Snapshot, cx: &App) -> Snapshot {
+        let Some(machines) = self.machines.read(cx).machines() else {
+            return read;
+        };
+        let front = self.aim.machine();
+        let read = match front {
+            None => read.with_elsewhere(machines),
+            Some(_) => read,
+        };
+        let mut merged = read.with_lists(machines, front.as_deref());
+        merged
+            .elsewhere
+            .retain(|session| !self.closing.contains(&session.id));
+        merged
+    }
+
+    /// Opens the session `agent` of `machine`: the window brings that machine in front, then
+    /// opens that session once its first read came. The switch's own wait applies: past it, the
+    /// window is back on this machine and says why.
+    pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
+        self.choose_then(
+            Some(machine.clone()),
+            Some((Some(machine), There::Session(agent))),
+            cx,
+        );
+    }
+
+    /// Opens the session `agent` of this machine, listed while another machine's is open: this
+    /// machine comes back in front, then the session opens.
+    pub fn open_here(&mut self, agent: String, cx: &mut Context<Self>) {
+        self.choose_then(None, Some((None, There::Session(agent))), cx);
+    }
+
+    /// The user confirmed the end of the session of the row `session`: one of another machine's
+    /// list is closed through this machine's daemon, which keeps the close while that machine is
+    /// off (`docs/remote.md`, "One list of every machine"), and leaves the list at once; any
+    /// other is stopped where it runs.
+    pub fn end_confirmed(&mut self, session: String, window: &mut Window, cx: &mut Context<Self>) {
+        let listed = self
+            .snapshot
+            .elsewhere(&session)
+            .and_then(|found| found.elsewhere.clone())
+            .filter(|there| there.listed && !there.here);
+        let Some(there) = listed else {
+            self.perform(Command::Stop { session });
+            return;
+        };
+        self.closing.insert(session);
+        self.remote.close(there.machine, there.agent);
+        if let Some(last) = self.read.clone() {
+            let merged = self.with_elsewhere(last, cx);
+            self.show(merged, window, cx);
+        }
+    }
+
+    /// This machine's daemon kept the close of `agent` of `machine`, or said why not: a refused
+    /// close brings its row back.
+    fn closed(
+        &mut self,
+        machine: String,
+        agent: String,
+        refused: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offline = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.machine(&machine))
+            .filter(|found| !found.online())
+            .map(|found| found.state_words());
+        let toast = match (refused, offline) {
+            (Some(why), _) => {
+                self.closing
+                    .remove(&crate::model::elsewhere_id(&machine, &agent));
+                if let Some(last) = self.read.clone() {
+                    let merged = self.with_elsewhere(last, cx);
+                    self.show(merged, window, cx);
+                }
+                gpui_design_system::Toast::failure("The session was not closed").detail(why)
+            }
+            (None, Some(state)) => gpui_design_system::Toast::success("Session closed").detail(
+                format!("{machine} is {state}: it closes there when it is back"),
+            ),
+            (None, None) => gpui_design_system::Toast::success("Session closed"),
+        };
+        gpui_design_system::toast(toast, cx);
+    }
+
+    /// The Machines section of Settings.
+    pub fn machines(&self) -> &Entity<MachinesSection> {
+        &self.machines
+    }
+
+    /// Says to every page whether the machine in front takes changes now ([`crate::machines::Held`]),
+    /// when that changed.
+    fn say_held(&mut self, cx: &mut Context<Self>) {
+        let front = self.aim.machine();
+        let holding = crate::machines::holding(front.as_deref(), self.machines.read(cx).machines());
+        if crate::machines::held(cx) != holding {
+            cx.set_global(crate::machines::Held(holding));
+            cx.refresh_windows();
+        }
+    }
+
+    /// The machine whose list names `project` while the machine in front has no such project:
+    /// `Some(None)` for this machine, listed while another is in front.
+    fn machine_of_project(&self, project: &str, cx: &App) -> Option<Option<String>> {
+        let front = self.read.as_ref()?;
+        if front.projects.iter().any(|p| p.name == project) {
+            return None;
+        }
+        let machines = self.machines.read(cx).machines()?;
+        let names =
+            |listed: &[crate::machines::Listed]| listed.iter().any(|s| s.project == project);
+        if self.aim.machine().is_some() && names(&machines.lists.this) {
+            return Some(None);
+        }
+        machines
+            .lists
+            .machines
+            .iter()
+            .find(|(name, listed)| Some(name) != self.aim.machine().as_ref() && names(listed))
+            .map(|(name, _)| Some(name.clone()))
+    }
+
+    /// The machine the window shows, when it is not this one.
+    pub fn machine_shown(&self) -> Option<String> {
+        self.aim.machine()
+    }
+
+    /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
+    /// signed with the device key. One that is off, or needs an update, is said so and not shown.
+    pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.choose_then(name, None, cx);
+    }
+
+    /// Shows the machine `name` (`None`: this one) on the page of `project`: the composer's
+    /// picker chose where the session starts, and that machine's page of the project is where it
+    /// starts. One that is off is said so and not shown, as `choose_machine` does.
+    pub fn choose_machine_for(
+        &mut self,
+        name: Option<String>,
+        project: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let then = Some((name.clone(), There::Project(project.to_owned())));
+        self.choose_then(name, then, cx);
+    }
+
+    /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
+    /// once the switch starts, never for a machine that is off or whose key could not be read.
+    fn choose_then(
+        &mut self,
+        name: Option<String>,
+        then: Option<(Option<String>, There)>,
+        cx: &mut Context<Self>,
+    ) {
+        // A choice still reading the key gives way to this one.
+        self.choosing = None;
+        if name == self.aim.machine() {
+            return;
+        }
+        self.open_there = None;
+        let Some(name) = name else {
+            self.switch_to(None, cx);
+            self.open_there = then;
+            return;
+        };
+        let read: Option<Machines> = self.machines.read(cx).machines().cloned();
+        let machine = read.as_ref().and_then(|read| read.machine(&name)).cloned();
+        if let Some(machine) = machine.filter(|machine| !machine.online()) {
+            let detail = machine
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{} is {}", machine.name, machine.state_words()));
+            gpui_design_system::toast(
+                gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
+                    .detail(detail),
+                cx,
+            );
+            return;
+        }
+        // Read off the UI thread: a locked keyring holds the read until it is unlocked.
+        let remote = self.remote.clone();
+        self.choosing = Some(cx.spawn(async move |this, cx| {
+            let key = cx.background_spawn(async move { remote.key() }).await;
+            this.update(cx, |shell, cx| match key {
+                Ok(key) => {
+                    shell.switch_to(Some((name, Arc::new(key))), cx);
+                    shell.open_there = then;
+                }
+                Err(why) => gpui_design_system::toast(
+                    gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
+                        .detail(why),
+                    cx,
+                ),
+            })
+            .ok();
+        }));
+    }
+
+    /// Shows `aimed` (`None`: this machine), and waits for its first read.
+    fn switch_to(
+        &mut self,
+        aimed: Option<(String, Arc<flottille_link::DeviceKey>)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.switching = true;
+        self.aim_at(aimed, cx);
+        self.wait_for_the_first_read(cx);
+    }
+
+    /// A machine that went down before its first read would leave the window on a skeleton: the
+    /// wait has the limit the window gives a daemon that does not answer.
+    fn wait_for_the_first_read(&mut self, cx: &mut Context<Self>) {
+        self.switch_wait = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(link::NOT_ANSWERING).await;
+            this.update(cx, |shell, cx| shell.give_up_switching(cx))
+                .ok();
+        }));
+    }
+
+    /// Aims every connection of the window at `aimed` (`None`: this machine), and shows the tree
+    /// as waiting for its first read.
+    fn aim_at(
+        &mut self,
+        aimed: Option<(String, Arc<flottille_link::DeviceKey>)>,
+        cx: &mut Context<Self>,
+    ) {
+        // The other machine's events start from its own first: none of this one's is resumed.
+        let shown = aimed.as_ref().map(|(name, _)| name.clone());
+        // What the machine left said is not merged with what the next one says.
+        self.read = None;
+        self.seen.last_seq.store(0, Ordering::SeqCst);
+        self.seen.connections.store(0, Ordering::SeqCst);
+        self.aim.set(aimed);
+        cx.set_global(crate::machines::Shown(shown));
+        self.say_held(cx);
+        self.read_folders(cx);
+        self.seen.last_seq.store(0, Ordering::SeqCst);
+        self.seen.connections.store(0, Ordering::SeqCst);
+        self.waiting_for_the_daemon(true, cx);
+    }
+
+    /// The session of another machine asked for, once that machine's read holds it: its page is
+    /// opened, on the agent asked for.
+    fn open_there_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((machine, there)) = self.open_there.clone() else {
+            return;
+        };
+        let agent = match there {
+            There::Session(agent) => agent,
+            There::Project(project) => {
+                if self.aim.machine() != machine
+                    || !self.snapshot.projects.iter().any(|p| p.name == project)
+                {
+                    return;
+                }
+                self.open_there = None;
+                self.open(Selection::Project(project), window, cx);
+                return;
+            }
+        };
+        let root = self.snapshot.root_of(&agent);
+        if self.aim.machine() != machine || self.snapshot.session(&root).is_none() {
+            return;
+        }
+        self.open_there = None;
+        self.open(Selection::Session(root.clone()), window, cx);
+        if let Some(page) = self.session_page.clone() {
+            page.update(cx, |page, cx| {
+                page.arrive(cx);
+                if root != agent {
+                    page.show(&agent, cx);
+                }
+            });
+        }
+    }
+
+    /// The machine chosen gave no first read in time: the window is on this machine again, and
+    /// says why.
+    fn give_up_switching(&mut self, cx: &mut Context<Self>) {
+        self.switch_wait = None;
+        self.open_there = None;
+        if !self.switching {
+            return;
+        }
+        // This machine itself gave no read: its own disconnections are said again from now on.
+        let Some(name) = self.aim.machine() else {
+            self.switching = false;
+            return;
+        };
+        let why = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.machine(&name))
+            .filter(|machine| !machine.online())
+            .map(|machine| format!("{} is {}", machine.name, machine.state_words()))
+            .unwrap_or_else(|| format!("{name} did not answer"));
+        // Still switching, back to this machine: the connections cut for it are no broken link.
+        self.switch_to(None, cx);
+        gpui_design_system::toast(
+            gpui_design_system::Toast::failure(format!("{name} cannot be shown")).detail(why),
+            cx,
+        );
     }
 
     /// Applies the updates the link sent since the last call.
@@ -453,6 +1118,7 @@ impl Shell {
             return None;
         };
         let this = cx.entity().downgrade();
+        let made = !self.forms.contains_key(name);
         let forms = self.forms.entry(name.clone()).or_insert_with(|| {
             let (a, b) = (this.clone(), this);
             (
@@ -460,6 +1126,12 @@ impl Shell {
                 cx.new(|cx| NewWorkspace::new(b, name.clone(), window, cx)),
             )
         });
+        if made {
+            // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
+            self.actions.send(Command::DraftRead {
+                key: DraftKey::Project(name.clone()),
+            });
+        }
         let forms = forms.clone();
         // Shown, the composer is on Auto: a mode chosen for one session never reaches the next.
         forms.0.update(cx, |composer, cx| composer.reset_mode(cx));
@@ -516,8 +1188,27 @@ impl Shell {
     /// Opens the form that adds a project.
     pub fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
+        let asks_machine = self
+            .machines
+            .read(cx)
+            .machines()
+            .is_some_and(|read| crate::machines::choices(read).len() > 1);
         self.add_project
-            .update(cx, |form, cx| form.open(window, cx));
+            .update(cx, |form, cx| form.open(asks_machine, window, cx));
+        self.read_folders(cx);
+    }
+
+    /// The folders the machine shown offers to add a project from, while the form is open on
+    /// another machine: this one's are picked with the system's dialog.
+    fn read_folders(&mut self, cx: &mut Context<Self>) {
+        if let Some(machine) = self.aim.machine()
+            && self.add_project.read(cx).is_open()
+        {
+            self.perform(Command::ProjectFolders {
+                machine: Some(machine),
+                path: None,
+            });
+        }
     }
 
     /// The dialog that renames a session.
@@ -532,6 +1223,223 @@ impl Shell {
         };
         self.rename
             .update(cx, |form, cx| form.open(session, &title, window, cx));
+    }
+
+    /// The dialog that makes a group of projects.
+    pub fn group_form(&self) -> &Entity<GroupName> {
+        &self.group_form
+    }
+
+    /// Whether a group has this name already.
+    pub fn group_named(&self, name: &str) -> bool {
+        self.arrangement.names(name)
+    }
+
+    /// The projects' list as the user arranged it, for the projects the window holds.
+    pub fn listing(&self) -> Listed {
+        self.arrangement.listed(
+            &self
+                .snapshot
+                .projects
+                .iter()
+                .map(|project| project.name.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Whether the Projects header's menu offers Group by machine now (there is another machine).
+    pub fn offers_grouping(&self, cx: &App) -> bool {
+        self.sidebar.read(cx).offers_grouping()
+    }
+
+    /// "New group…" in the Projects header's menu: the dialog.
+    pub fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_form.update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The names of the projects the window holds, in the order the daemon lists them.
+    fn project_names(&self) -> Vec<String> {
+        self.snapshot
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect()
+    }
+
+    /// A group made, from the dialog: at the end of the groups, unfolded.
+    pub fn add_group(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.arrange(Change::add_group(name), cx);
+    }
+
+    /// A group removed: its projects go back to the list, at the end, none removed.
+    pub fn remove_group(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        self.arrange(Change::RemoveGroup(id.to_owned()), cx);
+    }
+
+    /// A project row dragged to `index` among the rows of `group` (`None`: outside any group).
+    pub fn project_moved(
+        &mut self,
+        project: &str,
+        group: Option<&str>,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let change = Change::MoveProject {
+            present: self.project_names(),
+            key: project.to_owned(),
+            group: group.map(str::to_owned),
+            index,
+        };
+        self.arrange(change, cx);
+    }
+
+    /// A group's heading dragged to `index` among the groups.
+    pub fn group_moved(
+        &mut self,
+        group: &str,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = group.to_owned();
+        self.arrange(Change::MoveGroup { id, index }, cx);
+    }
+
+    /// A group's heading clicked: its rows fold away or unfold.
+    pub fn group_opened(
+        &mut self,
+        group: &str,
+        open: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = group.to_owned();
+        self.arrange(Change::OpenGroup { id, open }, cx);
+    }
+
+    /// The rows of the projects as the user arranged them, from the nodes the tree holds.
+    fn arranged_rows(
+        &self,
+        present: &[String],
+        nodes: &HashMap<String, Entity<ProjectNode>>,
+    ) -> Arranged {
+        let layout = self.arrangement.listed(present);
+        let rows = |keys: &[String]| -> Vec<Entity<ProjectNode>> {
+            keys.iter()
+                .filter_map(|key| nodes.get(key).cloned())
+                .collect()
+        };
+        Arranged {
+            groups: layout
+                .groups
+                .iter()
+                .map(|group| ArrangedGroup {
+                    id: group.id.clone(),
+                    name: group.name.clone(),
+                    open: group.open,
+                    rows: rows(&group.projects),
+                })
+                .collect(),
+            loose: rows(&layout.loose),
+        }
+    }
+
+    /// The list draws the arrangement.
+    fn show_arrangement(&mut self, cx: &mut Context<Self>) {
+        let present = self.project_names();
+        let arranged = self.arranged_rows(&present, &self.projects);
+        if self.sidebar.read(cx).arranged() != &arranged {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
+        }
+    }
+
+    /// The user changed the arrangement: the list draws it, and the daemon keeps it, under its
+    /// own key, by applying the change to the arrangement it holds. This is the only place it is
+    /// written.
+    fn arrange(&mut self, change: Change, cx: &mut Context<Self>) {
+        self.arrangement.apply(&change);
+        self.arrangement_queue.push_back((change, false));
+        self.show_arrangement(cx);
+        self.keep_arrangement();
+    }
+
+    /// The changes not asked yet are asked of the daemon, unless it could not take one lately.
+    fn keep_arrangement(&mut self) {
+        if !self.kept_read || self.arrangement_waiting {
+            return;
+        }
+        let unasked: Vec<Change> = self
+            .arrangement_queue
+            .iter_mut()
+            .filter(|(_, sent)| !*sent)
+            .map(|(change, sent)| {
+                *sent = true;
+                change.clone()
+            })
+            .collect();
+        for change in unasked {
+            self.perform(Command::ArrangementChange { change });
+        }
+    }
+
+    /// What the daemon holds, with what the user did since and it has not kept yet.
+    fn arrangement_now(&self) -> Arrangement {
+        let mut now = self.arrangement_kept.clone();
+        for (change, _) in &self.arrangement_queue {
+            now.apply(change);
+        }
+        now
+    }
+
+    /// The daemon answered the ask of a change: the arrangement it holds now is the base of what
+    /// the list shows, so that what another window arranged shows here too. A change it could not
+    /// take is asked again, later.
+    fn arrangement_answered(
+        &mut self,
+        change: Change,
+        held: Option<Arrangement>,
+        result: Written,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(held) = held {
+            self.arrangement_kept = held;
+        }
+        let at = self
+            .arrangement_queue
+            .iter()
+            .position(|(asked, sent)| *sent && *asked == change);
+        match (result, at) {
+            (Written::Retry, Some(at)) => {
+                self.arrangement_queue[at].1 = false;
+                let wait = (crate::kept::DEBOUNCE * 2u32.pow(self.arrangement_failures.min(6)))
+                    .min(Duration::from_secs(30));
+                self.arrangement_failures += 1;
+                self.arrangement_waiting = true;
+                self.arrangement_retry = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |shell, _| {
+                        shell.arrangement_waiting = false;
+                        shell.keep_arrangement()
+                    })
+                    .ok();
+                }));
+            }
+            // Kept, or refused for good, or gone: asking again would be answered the same.
+            (Written::Retry, None) => {}
+            (_, at) => {
+                self.arrangement_failures = 0;
+                if let Some(at) = at {
+                    self.arrangement_queue.remove(at);
+                }
+            }
+        }
+        let now = self.arrangement_now();
+        if now != self.arrangement {
+            self.arrangement = now;
+            self.show_arrangement(cx);
+        }
     }
 
     /// The quick switcher.
@@ -619,9 +1527,21 @@ impl Shell {
         self.settings.update(cx, |page, cx| page.choose(tab, cx));
     }
 
+    /// How this window signs what only the user's device may ask, rather than with the process's
+    /// signer (`link::sign_with`): a window of its own device, as a test's two machines have.
+    pub fn sign_with(&mut self, sign: crate::link::Sign) {
+        self.actions.sign_with(sign);
+    }
+
     /// What opens a folder in the user's editor, for the session pages opened from now on.
     pub fn set_opener(&mut self, opener: Opener) {
         self.follow.opener = opener;
+    }
+
+    /// Opens a file of this machine with the system's default handler: a copy of another
+    /// machine's file the window wrote (`crate::shown_files`).
+    pub fn open_local(&self, path: &std::path::Path) {
+        (self.follow.opener)(path);
     }
 
     /// Opens a link (a pull request) with the system's default handler.
@@ -629,13 +1549,121 @@ impl Shell {
         (self.follow.opener)(std::path::Path::new(url));
     }
 
+    /// Opens an address of the machine shown, with the system's default handler: this machine's
+    /// own as it is. On another machine, an address of that machine itself (a run's, or a
+    /// `localhost` link) opens through a tunnel, then the handler is given the local address; one
+    /// of the web opens as it is; a path of that machine opens nowhere here (`docs/remote.md`,
+    /// "Tunnels"). `run` is the run whose address it is, when the row knows it.
+    pub fn open_address(&mut self, run: Option<&str>, url: &str, cx: &mut Context<Self>) {
+        use crate::tunnels::{Ask, Tunnels, failed};
+        let Some(machine) = self.aim.machine() else {
+            self.open_link(url);
+            return;
+        };
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            failed(&format!("{url} is a file of {machine}"), cx);
+            return;
+        }
+        if !flottille_core::address::is_local(url) {
+            self.open_link(url);
+            return;
+        }
+        let port = flottille_core::address::local_port(url);
+        // A link has no run: it names a port, and the machine's runs say which one serves it.
+        let (run, port) = match (run, port) {
+            (Some(run), _) => (Some(run.to_owned()), None),
+            (None, Some(port)) => (None, Some(port)),
+            (None, None) => {
+                failed(
+                    &format!(
+                        "{url} names no port, so nothing of {machine} can be reached through it"
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let ask = Ask {
+            machine,
+            run,
+            port,
+            url: url.to_owned(),
+        };
+        let held = cx.global::<Tunnels>();
+        if let Some(tunnel) = held.reaching(&ask) {
+            let local = flottille_core::address::through(url, tunnel.local_port);
+            (self.follow.opener)(std::path::Path::new(&local));
+            return;
+        }
+        if held.is_opening(&ask) {
+            return;
+        }
+        cx.global_mut::<Tunnels>().begin(ask.clone());
+        self.perform(Command::TunnelOpen(ask));
+    }
+
+    /// Opens what an agent showed (`show_link`) after the checks Open makes: of this machine, as
+    /// it is; of another, through [`Shell::open_address`].
+    pub fn open_shown(&mut self, target: &str, cx: &mut Context<Self>) {
+        match self.aim.machine() {
+            None => crate::open::shown(&self.follow.opener, target, cx),
+            Some(_) => self.open_address(None, target, cx),
+        }
+    }
+
+    /// Closes one of the tunnels the window holds; its connection says when it is closed.
+    pub fn close_tunnel(&mut self, tunnel: &str, _cx: &mut Context<Self>) {
+        self.perform(Command::TunnelClose {
+            tunnel: tunnel.to_owned(),
+        });
+    }
+
+    /// What a connection that holds a tunnel said: the local address is opened once it is open, a
+    /// failure is a toast with its reason, an ended tunnel leaves its row.
+    fn tunnel_news(&mut self, news: crate::tunnels::News, cx: &mut Context<Self>) {
+        use crate::tunnels::{News, Tunnels, failed};
+        match news {
+            News::Opened { ask, tunnel } => {
+                let local = flottille_core::address::through(&ask.url, tunnel.local_port);
+                cx.global_mut::<Tunnels>().opened(&ask, tunnel);
+                (self.follow.opener)(std::path::Path::new(&local));
+            }
+            News::Refused { ask, why } => {
+                cx.global_mut::<Tunnels>().refused(&ask);
+                failed(&why, cx);
+            }
+            News::Closed { tunnel, .. } => cx.global_mut::<Tunnels>().closed(&tunnel),
+            News::NotClosed { why } => {
+                gpui_design_system::toast(
+                    gpui_design_system::Toast::failure(format!("Not closed: {why}")),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Whether the session's composer holds a draft: what the field holds once its page was
+    /// opened and the daemon answered, what the daemon kept when the window opened until then.
+    fn draft_held(&self, session: &str, cx: &App) -> bool {
+        let listed = self.listed_drafts.contains(session);
+        self.replies.get(session).map_or(listed, |reply| {
+            let reply = reply.read(cx);
+            reply.holds_draft() || (!reply.draft_was_read() && listed)
+        })
+    }
+
+    /// Every row says whether its composer holds a draft.
+    fn say_drafts(&self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.keys().cloned().collect();
+        for id in ids {
+            self.say_draft(&id, cx);
+        }
+    }
+
     /// Tells a session's row whether its composer holds a draft; the row says it as a pencil
     /// while the session is not the open one.
     fn say_draft(&self, session: &str, cx: &mut Context<Self>) {
-        let held = self
-            .replies
-            .get(session)
-            .is_some_and(|reply| reply.read(cx).holds_draft());
+        let held = self.draft_held(session, cx);
         if let Some(row) = self.sessions.get(session)
             && row.read(cx).draft() != held
         {
@@ -672,10 +1700,11 @@ impl Shell {
             return Some(open);
         }
         let session = self.snapshot.session(id)?;
-        let (project, started_by, led_by) = (
+        let (project, started_by, led_by, child_of) = (
             session.project.clone(),
             session.started_by.clone(),
             session.led_by.clone(),
+            session.child_of.clone(),
         );
         let folder = match place {
             None => self
@@ -699,6 +1728,7 @@ impl Shell {
             folder: folder.map(Into::into),
             started_by,
             led_by,
+            child_of,
         };
         let this = cx.entity().downgrade();
         let reply = match self.replies.get(id) {
@@ -715,6 +1745,10 @@ impl Shell {
                     shell.say_draft(&session, cx);
                 }));
                 self.replies.insert(id.clone(), reply.clone());
+                // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
+                self.actions.send(Command::DraftRead {
+                    key: DraftKey::Session(id.clone()),
+                });
                 reply
             }
         };
@@ -776,9 +1810,21 @@ impl Shell {
     /// "End session" in a session's row: the confirmation, which counts the agents that end.
     pub fn ask_end_of(&mut self, session: &str, cx: &mut Context<Self>) {
         let Some(found) = self.snapshot.session(session) else {
+            // A session of another machine's list: it alone ends, through its machine.
+            if self
+                .snapshot
+                .elsewhere(session)
+                .is_some_and(|found| found.elsewhere.as_ref().is_some_and(|t| t.listed))
+            {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.ask_end(session.to_owned(), 1, cx));
+            }
             return;
         };
         let (id, count) = (found.id.clone(), found.live);
+        self.perform(Command::ReadEnding {
+            session: id.clone(),
+        });
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.ask_end(id, count, cx));
     }
@@ -800,24 +1846,55 @@ impl Shell {
         cx.notify();
     }
 
-    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
-    /// from what the daemon last said.
+    /// A row folded or unfolded the led sessions under it: the level that holds it is drawn
+    /// again at once, from what the daemon last said, in the arrangement shown (`show`).
     pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+        let snapshot = &self.snapshot;
+        let Some(found) = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .find(|s| s.id == session)
+        else {
+            eprintln!("flottille: the fold of {session} has no session to draw it from");
             return;
         };
-        let live = self.snapshot.live_sessions_of(&project);
-        let rows: Vec<Entity<SessionRow>> = live
-            .iter()
-            .filter_map(|s| self.sessions.get(&s.id).cloned())
+        let project = found.project.clone();
+        // Grouped by machine, the level is the project's under the session's machine, and holds
+        // that machine's sessions only.
+        let machine = self.grouped.then(|| snapshot.machine_of(found).to_owned());
+        let live: Vec<&crate::model::Session> = snapshot
+            .live_sessions_of(&project)
+            .into_iter()
+            .filter(|s| {
+                machine
+                    .as_deref()
+                    .is_none_or(|m| snapshot.machine_of(s) == m)
+            })
             .collect();
-        if rows.len() != live.len() {
+        let node = match &machine {
+            Some(machine) => self
+                .machine_projects
+                .get(&(project.clone(), machine.clone())),
+            None => self.projects.get(&project),
+        };
+        let Some(node) = node.cloned() else {
+            eprintln!("flottille: the fold of {session} has no level of {project} to draw");
             return;
-        }
+        };
+        // A session with no row yet is left out, said, and the others are drawn.
+        let (live, rows): (Vec<_>, Vec<_>) = live
+            .into_iter()
+            .filter_map(|s| match self.sessions.get(&s.id) {
+                Some(row) => Some((s, row.clone())),
+                None => {
+                    eprintln!("flottille: no row for {} of {project} yet", s.id);
+                    None
+                }
+            })
+            .unzip();
         let rows = nested(&live, &rows, cx);
-        if let Some(node) = self.projects.get(&project).cloned() {
-            node.update(cx, |node, cx| node.set_rows(rows, cx));
-        }
+        node.update(cx, |node, cx| node.set_rows(rows, cx));
     }
 
     /// "Resume" in an ended session's row.
@@ -854,6 +1931,23 @@ impl Shell {
         &self.main
     }
 
+    /// The vault's section, whichever page is shown: its form is a dialog over that page.
+    pub fn vault(&self, cx: &gpui_kit::App) -> Entity<VaultSection> {
+        self.settings.read(cx).vault().clone()
+    }
+
+    /// The connections' section, whichever page is shown: its form and its review are dialogs
+    /// over that page.
+    pub fn connections(&self, cx: &gpui_kit::App) -> Entity<ConnectionsSection> {
+        self.settings.read(cx).connections().clone()
+    }
+
+    /// The dialogs open over the page, the first opened first and the one on top last, by the
+    /// id of their modal.
+    pub fn modal_stack(&self, cx: &gpui_kit::App) -> Vec<&'static str> {
+        self.modals.read(cx).stack(cx)
+    }
+
     /// The window's toasts, at its bottom right.
     pub fn toasts(&self) -> &Entity<ToastStack> {
         &self.toasts
@@ -869,6 +1963,165 @@ impl Shell {
 
     pub fn session(&self, id: &str) -> Option<&Entity<SessionRow>> {
         self.sessions.get(id)
+    }
+
+    /// The row of the project `name` in the section of `machine`, while the projects are shown by
+    /// machine.
+    pub fn project_on(&self, name: &str, machine: &str) -> Option<&Entity<ProjectNode>> {
+        self.machine_projects
+            .get(&(name.to_owned(), machine.to_owned()))
+    }
+
+    /// The section of `machine`, while the projects are shown by machine.
+    pub fn section(&self, machine: &str) -> Option<&Entity<MachineNode>> {
+        self.sections.get(machine)
+    }
+
+    /// Whether the projects are shown by machine now: the user chose it, and there is another
+    /// machine to group by.
+    pub fn is_by_machine(&self) -> bool {
+        self.grouped
+    }
+
+    /// Group by machine, turned on or off from the Projects header's menu: the rows move to their
+    /// sections or back, and the daemon keeps the choice.
+    pub fn toggle_by_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.by_machine = !self.by_machine;
+        self.rearrange(window, cx);
+        self.sidebar_changed(cx);
+    }
+
+    /// The rows again from the snapshot held, as the projects are now to be shown.
+    fn rearrange(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot.clone();
+        self.show(snapshot, window, cx);
+    }
+
+    /// The window is closing, or the program is ending: what its composers hold is written to the
+    /// daemon at once, and the process waits (a moment at most) until it is.
+    pub fn closing(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        let replies: Vec<_> = self.replies.values().cloned().collect();
+        let composers: Vec<_> = self
+            .forms
+            .values()
+            .map(|(composer, _)| composer.clone())
+            .collect();
+        let mut writes: Vec<Command> = Vec::new();
+        for reply in replies {
+            writes.extend(reply.update(cx, |reply, cx| reply.draft_to_write(cx, true)));
+        }
+        for composer in composers {
+            writes.extend(composer.update(cx, |composer, cx| composer.draft_to_write(cx, true)));
+        }
+        for write in writes {
+            self.perform(write);
+        }
+        self.kept_asked = None;
+        self.sidebar_changed(cx);
+        self.actions.flush(std::time::Duration::from_secs(2));
+    }
+
+    /// What the sidebar has folded, as its nodes show it now.
+    fn folds_now(&self, cx: &Context<Self>) -> Folds {
+        // What was last asked of the daemon, which the nodes that are not shown now keep.
+        let last = self.kept_asked.as_ref().unwrap_or(&self.kept);
+        let by_machine = self.is_by_machine();
+        let exists = |name: &str| self.snapshot.projects.iter().any(|p| p.name == name);
+        Folds {
+            projects: match by_machine {
+                true => last
+                    .projects
+                    .iter()
+                    .filter(|(name, _)| exists(name))
+                    .map(|(name, open)| (name.clone(), *open))
+                    .collect(),
+                false => self
+                    .projects
+                    .iter()
+                    .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
+                    .collect(),
+            },
+            by_machine: self.by_machine,
+            machines: match by_machine {
+                true => self
+                    .sections
+                    .iter()
+                    .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
+                    .collect(),
+                false => last.machines.clone(),
+            },
+            on_machines: match by_machine {
+                true => self
+                    .machine_projects
+                    .iter()
+                    .map(|((name, machine), node)| {
+                        (machine_key(machine, name), node.read(cx).is_open())
+                    })
+                    .collect(),
+                false => last.on_machines.clone(),
+            },
+            leads: self
+                .sessions
+                .iter()
+                .filter(|(_, row)| row.read(cx).leads() > 0)
+                .map(|(id, row)| (id.clone(), row.read(cx).is_open()))
+                .collect(),
+            ended: self
+                .ended
+                .as_ref()
+                .map(|group| group.read(cx).is_open())
+                .or(self.kept.ended),
+        }
+    }
+
+    /// A node of the sidebar was folded or unfolded, or one is gone: the daemon keeps what is
+    /// folded now, and forgets the projects and the leads that no longer exist. What it did not
+    /// take is asked again (`kept_written`).
+    pub fn sidebar_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.kept_read {
+            return;
+        }
+        let now = self.folds_now(cx);
+        if now == self.kept || self.kept_asked.as_ref() == Some(&now) {
+            return;
+        }
+        self.perform(Command::WindowSet {
+            key: "sidebar".into(),
+            value: now.to_json(),
+        });
+        self.kept_asked = Some(now);
+    }
+
+    /// The daemon answered a write of the sidebar's state: it is what the daemon keeps once it
+    /// took it, and it is asked again, later, when it could not.
+    fn kept_written(&mut self, value: serde_json::Value, result: Written, cx: &mut Context<Self>) {
+        let value = Folds::of(&serde_json::json!({"sidebar": value}));
+        match result {
+            Written::Kept => {
+                self.kept_failures = 0;
+                if self.kept_asked.as_ref() == Some(&value) {
+                    self.kept_asked = None;
+                }
+                self.kept = value;
+            }
+            Written::Retry => {
+                if self.kept_asked.as_ref() == Some(&value) {
+                    self.kept_asked = None;
+                }
+                let wait = (crate::kept::DEBOUNCE * 2u32.pow(self.kept_failures.min(6)))
+                    .min(Duration::from_secs(30));
+                self.kept_failures += 1;
+                self.kept_retry = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |shell, cx| shell.sidebar_changed(cx)).ok();
+                }));
+            }
+            // Refused for good, or gone: asking again would be answered the same.
+            Written::Gone | Written::Refused => {}
+        }
     }
 
     /// The "Ended" group at the bottom of the tree, once a session ended.
@@ -893,8 +2146,19 @@ impl Shell {
 
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
-            Update::Disconnected(_) => {
+            // Read or cut on a connection made for the machine shown before: not this one's.
+            Update::Snapshot(_, aimed) | Update::Disconnected(_, aimed)
+                if aimed != self.aim.generation() => {}
+            Update::Disconnected(..) if self.switching => {}
+            Update::Machines(news) => self.machines_news(*news, window, cx),
+            Update::Closed {
+                machine,
+                agent,
+                refused,
+            } => self.closed(machine, agent, refused, window, cx),
+            Update::Disconnected(..) => {
                 self.set_online(false, cx);
+                self.waiting_for_the_daemon(false, cx);
                 self.texts_due = true;
             }
             Update::NotAnswering(since) => self
@@ -902,22 +2166,76 @@ impl Shell {
                 .update(cx, |main, cx| main.set_not_answering(since, cx)),
             // The link subscribed to the events before it read: an edit made before that is in
             // what the pages read, not in the events, so they read it again.
-            Update::Snapshot(snapshot) => {
+            Update::Snapshot(snapshot, _) => {
+                let switched = std::mem::take(&mut self.switching);
+                self.switch_wait = None;
                 self.set_online(true, cx);
+                self.waiting_for_the_daemon(false, cx);
                 self.main.update(cx, |main, cx| main.set_read(cx));
+                // What the machine now shown lists, and its connections: the reads made when the
+                // window opened went to the machine it was on then.
+                if switched {
+                    // What Settings and a project's settings show is that machine's now.
+                    self.texts_due = true;
+                    self.extensions.update(cx, |registry, cx| registry.read(cx));
+                    let connections = self.settings.read(cx).connections().clone();
+                    connections.update(cx, |section, cx| section.read(cx));
+                }
+                self.read = Some(snapshot.clone());
+                let snapshot = self.with_elsewhere(snapshot, cx);
                 self.show(snapshot, window, cx);
+                self.open_there_now(window, cx);
+                if let Some((page, tab)) = self.reopen.take()
+                    && self.page_of(&page, cx) != Page::Empty
+                {
+                    self.open(page, window, cx);
+                    if let Some(tab) = tab {
+                        self.settings.update(cx, |page, cx| page.choose(tab, cx));
+                    }
+                }
                 if std::mem::take(&mut self.texts_due) {
                     self.read_texts(cx);
                 }
             }
+            Update::Kept(folds, arrangement, drafts) => {
+                let by_machine = folds.by_machine;
+                self.kept = folds;
+                self.kept_read = true;
+                // What the daemon keeps of how the projects are shown comes after the first rows.
+                // It is read once, as the window opens: another window's later changes are seen by
+                // the windows opened after them.
+                self.arrangement_kept = arrangement;
+                let now = self.arrangement_now();
+                let moved = std::mem::replace(&mut self.arrangement, now) != self.arrangement;
+                if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
+                    self.rearrange(window, cx);
+                } else if moved {
+                    self.show_arrangement(cx);
+                }
+                self.keep_arrangement();
+                self.listed_drafts = drafts;
+                self.say_drafts(cx);
+            }
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
+            Update::AboutChanged => self.actions.send(Command::AboutRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::FindingsChanged => self.actions.send(Command::FindingsRead),
+            Update::UpdateShown(shown) => self.update_shown(&shown, cx),
+            Update::WhatsNewShown(shown) => self.whats_new_shown(&shown, cx),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             Update::VaultChanged => self.actions.send(Command::Vault),
+            Update::ProgramSignIn {
+                program,
+                state,
+                why,
+            } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.changed(&program, &state, why, cx));
+            }
             Update::SignIn { said, name, why } => {
                 let section = self.settings.read(cx).connections().clone();
                 section.update(cx, |section, cx| {
@@ -1133,6 +2451,18 @@ impl Shell {
                     page.update(cx, |page, cx| page.end_answered(refused, cx));
                 }
             }
+            Outcome::EndingRead { session, read } => {
+                // A read that failed lists nothing: the sentence says what ends.
+                let led = read.map(|read| LedEnd::read(&read)).unwrap_or_default();
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.led_read(&session, led.clone(), cx)
+                });
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.led_read(led, cx));
+                }
+            }
             Outcome::Resumed { session, refused } => {
                 self.sidebar.update(cx, |sidebar, cx| {
                     sidebar.answered(&session, refused.clone(), cx)
@@ -1202,6 +2532,12 @@ impl Shell {
                     && page.read(cx).id() == session
                 {
                     page.update(cx, |page, cx| page.command_answered(answer, cx));
+                }
+            }
+            // Asked once for each, unless the daemon could not: the next look asks again.
+            Outcome::NotificationsRead { failed } => {
+                if failed {
+                    self.marked.clear();
                 }
             }
             Outcome::SubscriptionCancelled { session, refused } => {
@@ -1397,6 +2733,10 @@ impl Shell {
                     }
                 }
             }
+            Outcome::ProjectFolders { machine, read } => {
+                self.add_project
+                    .update(cx, |form, cx| form.folders_answered(machine, read, cx));
+            }
             Outcome::ProjectDetected { seq, read, .. } => {
                 self.add_project
                     .update(cx, |form, cx| form.detect_answered(seq, read, cx));
@@ -1464,6 +2804,24 @@ impl Shell {
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
             }
+            Outcome::SignIns(listed) => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.listed(listed, cx));
+            }
+            Outcome::SignInStarted { program, answer } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.started(&program, answer, cx));
+            }
+            Outcome::SignInAnswered {
+                program,
+                what,
+                refused,
+            } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(&program, what, refused, cx)
+                });
+            }
             Outcome::Vault { listed } => {
                 // A project's Tracker offers the entries it sees to log time with.
                 if let (Some(page), Ok(entries)) = (self.project_settings.clone(), &listed) {
@@ -1472,24 +2830,59 @@ impl Shell {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.listed(listed, cx));
             }
+            Outcome::ShareMachines { listed } => {
+                let section = self.settings.read(cx).vault().clone();
+                section.update(cx, |section, cx| section.share_machines(listed, cx));
+            }
+            Outcome::VaultShared {
+                name,
+                machine,
+                refused,
+            } => {
+                let section = self.settings.read(cx).vault().clone();
+                section.update(cx, |section, cx| section.shared(name, machine, refused, cx));
+            }
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, window, cx));
-                // An entry made from a project's Tracker or Vault tab: back to it.
-                if let Some((project, at)) = section.update(cx, |section, _| section.take_return())
-                {
-                    self.open_project_settings_at(&project, at, window, cx);
-                }
-                // An entry made for an agent's request to write a connection: back to it.
+                // An entry made for an agent's request to write a connection: its dialog, still
+                // open under the entry's, reads the request again.
                 if let Some(number) = section.update(cx, |section, _| section.take_request_return())
                 {
                     self.open_connection_request(number, cx);
                 }
             }
+            Outcome::Update { method, answer } if method.starts_with("whatsnew.") => {
+                // What is new is asked through the update's command: it is the same kind of
+                // request, answered by what `whatsnew.show` says.
+                if let Ok(shown) = &answer {
+                    self.whats_new_shown(shown, cx);
+                }
+            }
+            Outcome::Update { method, answer } => {
+                if let Ok(shown) = &answer {
+                    self.update_shown(shown, cx);
+                }
+                self.version
+                    .update(cx, |section, cx| section.answered(method, answer, cx));
+            }
+            Outcome::About { written, shown } => {
+                let editor = self.settings.read(cx).about().clone();
+                editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
+            }
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
             }
+            Outcome::Findings(listed) => {
+                self.settings
+                    .update(cx, |page, cx| page.findings_answered(listed, cx));
+            }
+            Outcome::FindingsExported(done) => {
+                self.settings
+                    .update(cx, |page, cx| page.findings_exported(done, cx));
+            }
+            Outcome::Tunnel(news) => self.tunnel_news(news, cx),
             Outcome::Asked {
                 then: crate::extensions::Then::Connections(then),
                 answer,
@@ -1518,9 +2911,29 @@ impl Shell {
                 self.connection_request
                     .update(cx, |dialog, cx| dialog.answered(then, answer, cx));
                 if let Some(name) = review {
-                    self.review_connection(&name, window, cx);
+                    self.review_connection(&name, cx);
                 }
             }
+            Outcome::Asked {
+                then: crate::extensions::Then::Findings(crate::findings::Then::Filed { id }),
+                answer,
+            } => {
+                let filing = self.settings.read(cx).filing().clone();
+                filing.update(cx, |filing, cx| filing.answered(id, answer, cx));
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::Check(then),
+                answer,
+            } => {
+                let check = self.settings.read(cx).check().clone();
+                check.update(cx, |check, cx| check.answered(then, answer, cx));
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::Tunnels(then),
+                answer,
+            } => self
+                .services
+                .update(cx, |page, cx| page.tunnels_answered(then, answer, cx)),
             Outcome::Asked { then, answer } => {
                 let page = match &then {
                     crate::extensions::Then::Specs(specs) => specs.for_page(),
@@ -1538,6 +2951,51 @@ impl Shell {
                         .update(cx, |registry, cx| registry.answered(then, answer, cx)),
                 }
             }
+            // A read that failed is not "no draft": the composer writes nothing, and the read is
+            // asked again.
+            Outcome::Draft { key, found } => match key {
+                DraftKey::Session(id) => {
+                    if let Some(reply) = self.replies.get(&id).cloned() {
+                        match found {
+                            Ok(found) => {
+                                reply.update(cx, |reply, cx| reply.draft_read(found, window, cx))
+                            }
+                            Err(_) => reply.update(cx, |reply, cx| reply.draft_read_failed(cx)),
+                        }
+                    }
+                }
+                DraftKey::Project(name) => {
+                    let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
+                    if let Some(composer) = composer {
+                        match found {
+                            Ok(found) => composer
+                                .update(cx, |composer, cx| composer.draft_read(found, window, cx)),
+                            Err(_) => {
+                                composer.update(cx, |composer, cx| composer.draft_read_failed(cx))
+                            }
+                        }
+                    }
+                }
+            },
+            Outcome::DraftWritten { key, result } => match key {
+                DraftKey::Session(id) => {
+                    if let Some(reply) = self.replies.get(&id).cloned() {
+                        reply.update(cx, |reply, cx| reply.draft_written(result, cx));
+                    }
+                }
+                DraftKey::Project(name) => {
+                    let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
+                    if let Some(composer) = composer {
+                        composer.update(cx, |composer, cx| composer.draft_written(result, cx));
+                    }
+                }
+            },
+            Outcome::WindowKept { value, result, .. } => self.kept_written(value, result, cx),
+            Outcome::ArrangementKept {
+                change,
+                arrangement,
+                result,
+            } => self.arrangement_answered(change, arrangement, result, cx),
             Outcome::ToolResults { written, shown } => {
                 self.settings.update(cx, |page, cx| {
                     page.tool_results_answered(shown, written, cx)
@@ -1553,7 +3011,9 @@ impl Shell {
             Outcome::Appearance { written, shown, .. } => {
                 match &shown {
                     Ok(appearance) => {
-                        gpui_design_system::appearance::appear(appearance.clone(), cx)
+                        gpui_design_system::appearance::appear(appearance.clone(), cx);
+                        // What the daemon keeps is the copy the next first frame is drawn in.
+                        crate::look::remember(appearance, cx);
                     }
                     // A choice not kept: the window goes back to what the daemon keeps.
                     Err(_) if written => self.ask_appearance(None),
@@ -1675,6 +3135,12 @@ impl Shell {
                         section.answered(shown, written, window, cx)
                     });
                 }
+            }
+            Outcome::TravelledFolder { written, shown } => {
+                let section = self.settings.read(cx).travelled_folder().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(shown, written, window, cx)
+                });
             }
             Outcome::Skills { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
@@ -1831,7 +3297,12 @@ impl Shell {
                 if let Some(page) = self.project_settings.clone() {
                     let names = listed
                         .as_ref()
-                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map(|services| {
+                            services
+                                .iter()
+                                .map(|s| (s.name.clone(), s.line.clone()))
+                                .collect()
+                        })
                         .map_err(Clone::clone);
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.set_services(names, cx));
@@ -1989,7 +3460,11 @@ impl Shell {
                         .bell
                         .iter()
                         .rev()
-                        .find(|item| item.session == session.id)
+                        .find(|item| {
+                            item.needs_you
+                                && !item.resolved
+                                && item.session.as_deref() == Some(session.id.as_str())
+                        })
                         .map(|item| item.detail.clone())
                 })
                 .flatten();
@@ -2143,14 +3618,18 @@ impl Shell {
     /// Asks the daemon for what the settings page edits.
     fn read_settings(&mut self) {
         self.actions.send(Command::RulesRead { project: None });
+        self.actions.send(Command::AboutRead);
         self.actions.send(Command::JudgeRead);
         self.actions.send(Command::CompactionRead);
         self.actions.send(Command::DeveloperRead);
+        self.actions.send(Command::FindingsRead);
         self.actions.send(Command::ToolResultsRead);
         self.actions.send(Command::SessionsRead);
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
+        self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
+        self.actions.send(Command::SignIns);
         self.ask_appearance(None);
     }
 
@@ -2174,6 +3653,78 @@ impl Shell {
                 project: Some(name),
             });
         }
+    }
+
+    /// This window's build (its `--version`) and how it starts again from its binary, given the
+    /// page it shows: what the binary gives; a window given none never starts again.
+    pub fn set_build(&mut self, full: String, reexec: Reexec) {
+        self.build = Some((full, reexec));
+    }
+
+    /// The page to open once the daemon's first read is in, as [`Shell::page_name`] names it.
+    pub fn reopen(&mut self, page: &str) {
+        self.reopen = page_named(page);
+    }
+
+    /// The page shown, named for [`Shell::reopen`]: `session:<id>`, `project:<name>`,
+    /// `settings:<tab>`, `project-settings:<name>`, `spec:<n>:<project>`, `services`.
+    pub fn page_name(&self, cx: &gpui_kit::App) -> Option<String> {
+        Some(match self.selected.as_ref()? {
+            Selection::Session(id) => format!("session:{id}"),
+            Selection::Project(name) => format!("project:{name}"),
+            Selection::Settings => format!("settings:{}", self.settings.read(cx).tab()),
+            Selection::ProjectSettings(name) => format!("project-settings:{name}"),
+            Selection::Spec { project, spec } => format!("spec:{spec}:{project}"),
+            Selection::Services => "services".to_owned(),
+            Selection::WhatsNew => "whats-new".to_owned(),
+        })
+    }
+
+    pub fn version(&self) -> &Entity<crate::version::VersionSection> {
+        &self.version
+    }
+
+    /// What the daemon says of an update: the Version section and the sidebar's foot show it,
+    /// and a daemon of another build than this window's has the window start again from the
+    /// binary that replaced it, on the page it shows.
+    fn update_shown(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+        let shown = crate::version::Shown::of(value);
+        let foot = shown.foot_line();
+        let build = shown.build_line();
+        let full = shown.full.clone();
+        self.version
+            .update(cx, |section, cx| section.set_shown(shown, cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_version_line(foot, cx));
+        self.whats_new
+            .update(cx, |page, cx| page.set_build(Some(build), cx));
+        let Some((own, reexec)) = self.build.clone() else {
+            return;
+        };
+        if full.is_empty() || full == own || self.reexecuted {
+            return;
+        }
+        self.reexecuted = true;
+        let page = self.page_name(cx);
+        // What the composers hold reaches the daemon before this process becomes another.
+        self.closing(cx);
+        if !reexec(page) {
+            // No newer file at the binary's path: this window goes on as it is.
+            self.closed = false;
+        }
+    }
+
+    /// What the daemon says is new since the version last run: the page, the sidebar's mark and
+    /// the Version section follow it. Never opens the page: the user does.
+    fn whats_new_shown(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+        let notes = crate::whats_new::Notes::of(value);
+        let (mark, since) = (notes.mark(), notes.since.clone());
+        self.whats_new
+            .update(cx, |page, cx| page.set_notes(notes, cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_whats_new(mark, cx));
+        self.version
+            .update(cx, |section, cx| section.set_whats_new(since, cx));
     }
 
     /// What "Restart Flottille" runs, in place of `flottille daemon stop`.
@@ -2215,6 +3766,15 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Whether the parts that show what the daemon says are waiting for it: they show skeletons
+    /// until it answered, and stop when it cannot be reached (the top bar says it reconnects).
+    fn waiting_for_the_daemon(&mut self, waiting: bool, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_loading(waiting, cx));
+        self.main
+            .update(cx, |main, cx| main.set_reachable(waiting, cx));
     }
 
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
@@ -2268,8 +3828,12 @@ impl Shell {
                 let id = session.id.clone();
                 // A session opened before the tree showed it (one just started).
                 let selected = self.selected == Some(Selection::Session(session.id.clone()));
+                let open = self.kept.leads.get(&session.id).copied();
                 cx.new(|cx| {
                     let mut row = SessionRow::new(id, this, cx);
+                    if let Some(open) = open {
+                        row.restore_open(open);
+                    }
                     row.set_selected(selected, cx);
                     row
                 })
@@ -2292,10 +3856,7 @@ impl Shell {
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
-            let held = self
-                .replies
-                .get(&session.id)
-                .is_some_and(|reply| reply.read(cx).holds_draft());
+            let held = self.draft_held(&session.id, cx);
             if row.read(cx).draft() != held {
                 row.update(cx, |row, cx| row.set_draft(held, cx));
             }
@@ -2306,10 +3867,16 @@ impl Shell {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
+                // A session another machine lists is closed from here, through this machine's
+                // daemon; one an agent of this machine started there is ended or detached there.
+                let there = session.elsewhere.as_ref();
+                let closable = there.is_some_and(|there| there.listed && !there.here);
+                row.set_elsewhere(there, cx);
+                row.set_tag(session.tag.as_deref(), cx);
                 row.set_actions(
-                    session.ended,
-                    session.resumable,
-                    session.started_by.as_deref(),
+                    session.ended || (there.is_some() && !closable),
+                    session.resumable && there.is_none(),
+                    session.started_by.as_deref().filter(|_| there.is_none()),
                     cx,
                 );
                 if session.ended {
@@ -2334,33 +3901,157 @@ impl Shell {
         // A workspace that is gone takes its pull request with it.
         self.pulls
             .retain(|(project, name), _| snapshot.workspace(project, name).is_some());
-        for project in &snapshot.projects {
-            let mut marks = Vec::new();
-            let live = snapshot.live_sessions_of(&project.name);
-            let rows = self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
-            let rows = nested(&live, &rows, cx);
-            let node = self.projects.remove(&project.name).unwrap_or_else(|| {
-                let name = project.name.clone();
-                let this = this.clone();
-                cx.new(|cx| ProjectNode::new(name, this, cx))
-            });
-            let mark = AgentState::strongest(marks);
-            if !node.read(cx).holds(&rows, mark, cx) {
-                node.update(cx, |node, cx| node.set(rows, mark, cx));
+        let grouped = self.by_machine && snapshot.homes.len() > 1;
+        let mut section_nodes = Vec::new();
+        let mut sections = HashMap::new();
+        let mut machine_projects = HashMap::new();
+        if grouped {
+            // One section for each machine, each with the projects it has and its own sessions.
+            for home in &snapshot.homes {
+                let mut nodes = Vec::new();
+                for project in snapshot
+                    .projects
+                    .iter()
+                    .filter(|project| project.homes.iter().any(|h| h.machine == home.machine))
+                {
+                    let mut marks = Vec::new();
+                    let live: Vec<&crate::model::Session> = snapshot
+                        .live_sessions_of(&project.name)
+                        .into_iter()
+                        .filter(|session| snapshot.machine_of(session) == home.machine)
+                        .collect();
+                    let rows =
+                        self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+                    let rows = nested(&live, &rows, cx);
+                    let key = (project.name.clone(), home.machine.clone());
+                    let node = self.machine_projects.remove(&key).unwrap_or_else(|| {
+                        let this = this.clone();
+                        let kept = machine_key(&home.machine, &project.name);
+                        let open = self
+                            .kept
+                            .on_machines
+                            .get(&kept)
+                            .or_else(|| self.kept.projects.get(&project.name))
+                            .copied()
+                            .unwrap_or(true);
+                        let (name, machine) = key.clone();
+                        cx.new(|cx| ProjectNode::new(name, Some(machine), this, open, cx))
+                    });
+                    let mark = AgentState::strongest(marks);
+                    if !node.read(cx).holds(&rows, mark, cx) {
+                        node.update(cx, |node, cx| node.set(rows, mark, cx));
+                    }
+                    // Its commands run on the machine this was read from.
+                    let commands =
+                        match snapshot.this_machine.as_deref() == Some(home.machine.as_str()) {
+                            true => project.commands,
+                            false => 0,
+                        };
+                    if node.read(cx).commands() != commands {
+                        node.update(cx, |node, cx| node.set_commands(commands, cx));
+                    }
+                    let homes = std::slice::from_ref(home);
+                    if !node
+                        .read(cx)
+                        .says(project.title(), project.apart.as_deref(), homes)
+                    {
+                        node.update(cx, |node, cx| {
+                            node.set_look(
+                                project.title(),
+                                project.apart.as_deref(),
+                                homes.to_vec(),
+                                cx,
+                            )
+                        });
+                    }
+                    nodes.push(node.clone());
+                    machine_projects.insert(key, node);
+                }
+                let section = self.sections.remove(&home.machine).unwrap_or_else(|| {
+                    let this = this.clone();
+                    let open = self
+                        .kept
+                        .machines
+                        .get(&home.machine)
+                        .copied()
+                        .unwrap_or(true);
+                    let home = home.clone();
+                    cx.new(|cx| MachineNode::new(home, this, open, cx))
+                });
+                if section.read(cx).home() != home || section.read(cx).projects(cx) != nodes {
+                    section.update(cx, |section, cx| section.set(home.clone(), nodes, cx));
+                }
+                section_nodes.push(section.clone());
+                sections.insert(home.machine.clone(), section);
             }
-            if node.read(cx).commands() != project.commands {
-                node.update(cx, |node, cx| node.set_commands(project.commands, cx));
+        } else {
+            for project in &snapshot.projects {
+                let mut marks = Vec::new();
+                let live = snapshot.live_sessions_of(&project.name);
+                let rows =
+                    self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+                let rows = nested(&live, &rows, cx);
+                let node = self.projects.remove(&project.name).unwrap_or_else(|| {
+                    let name = project.name.clone();
+                    let this = this.clone();
+                    let open = self.kept.projects.get(&name).copied().unwrap_or(true);
+                    cx.new(|cx| ProjectNode::new(name, None, this, open, cx))
+                });
+                let mark = AgentState::strongest(marks);
+                if !node.read(cx).holds(&rows, mark, cx) {
+                    node.update(cx, |node, cx| node.set(rows, mark, cx));
+                }
+                if node.read(cx).commands() != project.commands {
+                    node.update(cx, |node, cx| node.set_commands(project.commands, cx));
+                }
+                if !node
+                    .read(cx)
+                    .says(project.title(), project.apart.as_deref(), &project.homes)
+                {
+                    node.update(cx, |node, cx| {
+                        node.set_look(
+                            project.title(),
+                            project.apart.as_deref(),
+                            project.homes.clone(),
+                            cx,
+                        )
+                    });
+                }
+                project_nodes.push(node.clone());
+                projects.insert(project.name.clone(), node);
             }
-            project_nodes.push(node.clone());
-            projects.insert(project.name.clone(), node);
         }
+        // The rows of the other way of showing the projects are on their way out: their
+        // sessions' rows are the new ones', which they must not show a second time.
+        for node in self
+            .projects
+            .values()
+            .chain(self.machine_projects.values())
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if !node.read(cx).sessions(cx).is_empty() {
+                node.update(cx, |node, cx| node.set_rows(Vec::new(), cx));
+            }
+        }
+        self.machine_projects = machine_projects;
+        self.grouped = grouped;
+        for section in self.sections.values().cloned().collect::<Vec<_>>() {
+            if !section.read(cx).projects(cx).is_empty() {
+                section.update(cx, |section, cx| {
+                    section.set(section.home().clone(), Vec::new(), cx)
+                });
+            }
+        }
+        self.sections = sections;
         // The ended sessions leave their places for one folded group below every project.
         let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
         let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
-            self.ended = Some(cx.new(EndedNode::new));
+            let open = self.kept.ended.unwrap_or(false);
+            self.ended = Some(cx.new(|cx| EndedNode::new(this.clone(), open, cx)));
         }
         if let Some(group) = self.ended.clone() {
             if !group.read(cx).holds(&rows, cx) {
@@ -2369,11 +4060,42 @@ impl Shell {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
-        self.projects = projects;
+        match grouped {
+            true => {
+                // The user's list folds away as it was, and its rows come back when it does: the
+                // nodes stay, the projects that are gone from them.
+                self.projects
+                    .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
+            }
+            false => self.projects = projects,
+        }
         self.sessions = sessions;
-        if self.sidebar.read(cx).projects() != project_nodes {
+        let offered = snapshot.homes.len() > 1;
+        let sidebar = self.sidebar.read(cx);
+        // First, so that the rows below are taken (or kept, while shown by machine).
+        if sidebar.is_by_machine() != grouped
+            || sidebar.offers_grouping() != offered
+            || !sidebar.has_menu()
+        {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_arrangement(grouped, offered, cx)
+            });
+        }
+        let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
+        let arranged = self.arranged_rows(&names, &self.projects);
+        self.sidebar_changed(cx);
+        // GPUI Fast takes any update for a change: touch the list only when it did.
+        if !grouped && self.sidebar.read(cx).projects() != project_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_projects(project_nodes, cx));
+        }
+        if !grouped && self.sidebar.read(cx).arranged() != &arranged {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
+        }
+        if self.sidebar.read(cx).sections() != section_nodes {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_sections(section_nodes, cx));
         }
 
         self.forms
@@ -2392,8 +4114,10 @@ impl Shell {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
         }
+        // The sessions on other machines are found there, not here: they are not in `sessions`.
+        let read = self.snapshot.clone();
         self.switcher
-            .update(cx, |switcher, cx| switcher.set_snapshot(&self.snapshot, cx));
+            .update(cx, |switcher, cx| switcher.set_snapshot(&read, cx));
         self.ring(cx);
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -2430,15 +4154,15 @@ impl Shell {
         }
     }
 
-    /// A ticket or a pull request an agent changed: its session's row is marked and the bell
-    /// rings, unless the session is the one open, where it is in sight.
+    /// A ticket or a pull request an agent changed: its session's row is marked, unless the
+    /// session is the one open, where it is in sight. The bell's item is the daemon's own
+    /// notification, which comes with its event.
     fn forged(&mut self, forged: Forged, cx: &mut Context<Self>) {
         let session = self.snapshot.root_of(&forged.agent);
         if self.selected == Some(Selection::Session(session.clone())) {
             return;
         }
         self.news.insert(session, unread_words(&forged.said));
-        self.forged.push(forged);
         self.ring(cx);
     }
 
@@ -2469,17 +4193,41 @@ impl Shell {
         let toast = match sharing.links.as_slice() {
             [only] => {
                 let target = only.target.clone();
-                gpui_design_system::Toast::success(format!(
-                    "The agent shares a link: {}",
-                    only.name()
-                ))
-                .action("Open", move |_, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            crate::open::shown(&shell.follow.opener, &target, cx)
+                let video = crate::shown_files::is_video(&target);
+                let sent = video || crate::links_card::is_picture(&target);
+                match self.aim.machine().filter(|_| !is_address(&target)) {
+                    // A picture or a video of another machine: that machine sends a copy.
+                    Some(machine) if sent => {
+                        let link = crate::conversation::ShownLink {
+                            title: only.title.clone(),
+                            whence: only.whence.clone(),
+                            target: target.clone(),
+                            agent: only.agent.clone(),
+                            seq: only.seq,
+                        };
+                        let kind = if video { "video" } else { "picture" };
+                        gpui_design_system::Toast::success(format!(
+                            "The agent shares a {kind} of {machine}: {}",
+                            only.name()
+                        ))
+                        .action(if video { "Play" } else { "Open" }, move |_, cx| {
+                            crate::shown_files::open(&link, cx)
                         })
-                        .ok();
-                })
+                    }
+                    // A file of another machine is shown where it is, never opened here.
+                    Some(machine) => gpui_design_system::Toast::success(format!(
+                        "The agent shares a file of {machine}: {target}"
+                    )),
+                    None => gpui_design_system::Toast::success(format!(
+                        "The agent shares a link: {}",
+                        only.name()
+                    ))
+                    .action("Open", move |_, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.open_shown(&target, cx))
+                            .ok();
+                    }),
+                }
             }
             shared => gpui_design_system::Toast::success(format!(
                 "The agent shares {} links",
@@ -2521,50 +4269,83 @@ impl Shell {
         }
     }
 
-    /// Brings the bell and the sessions' marks up to what waits for the user and what the
-    /// agents changed: each item says why it is there, a short excerpt, and its session.
+    /// Brings the bell and the sessions' marks up to the notification centre the daemon keeps
+    /// and what the agents changed: each item says why it is there, a short excerpt, and its
+    /// session, which the panel groups them by.
     fn ring(&mut self, cx: &mut Context<Self>) {
-        let snapshot = &self.snapshot;
-        let mut bell: Vec<BellItem> = snapshot.bell.clone();
-        for forged in &self.forged {
-            let session = snapshot.root_of(&forged.agent);
-            bell.push(BellItem {
-                key: match forged.ticket {
-                    true => format!("ticket-{}", forged.seq),
-                    false => format!("pull-{}", forged.seq),
-                },
-                session,
-                label: forged.said.clone(),
-                detail: forged.excerpt.clone(),
-                at: forged.at,
-            });
-        }
-        bell.sort_by_key(|item| item.at);
         for (id, row) in &self.sessions {
             let said = self.news.get(id).map(String::as_str);
             if row.read(cx).unread() != said {
                 row.update(cx, |row, cx| row.set_unread(said, cx));
             }
         }
-        let items: Vec<(BellItem, String)> = bell
-            .into_iter()
+        // What waits on another machine says which: the inbox is that machine's.
+        let there = self.aim.machine();
+        let snapshot = &self.snapshot;
+        let rows: Vec<BellRow> = snapshot
+            .bell
+            .iter()
             .map(|item| {
-                let title = snapshot
-                    .session(&item.session)
+                let found = item.session.as_deref().and_then(|id| snapshot.session(id));
+                let mut title = found
                     .map(|s| match &s.started_by {
                         Some(by) => format!("{} · started by {by}", s.title),
                         None => s.title.clone(),
                     })
-                    .unwrap_or_default();
-                (item, title)
+                    .unwrap_or_else(|| "Flottille".to_owned());
+                if let Some(machine) = &there {
+                    title = format!("{title} · on {machine}");
+                }
+                BellRow {
+                    item: item.clone(),
+                    title,
+                    project: found.map(|s| s.project.clone()).unwrap_or_default(),
+                }
             })
             .collect();
-        let count = items.len();
-        if self.top.read(cx).count != count {
-            self.top.update(cx, |top, cx| top.set_count(count, cx));
+        let counts = snapshot.unread;
+        if self.top.read(cx).counts() != counts {
+            self.top.update(cx, |top, cx| top.set_counts(counts, cx));
         }
-        if self.bell.read(cx).items != items {
-            self.bell.update(cx, |bell, cx| bell.set(items, cx));
+        if self.bell.read(cx).rows != rows {
+            self.bell.update(cx, |bell, cx| bell.set(rows, counts, cx));
+        } else if self.bell.read(cx).counts != counts {
+            self.bell.update(cx, |bell, cx| bell.set_counts(counts, cx));
+        }
+        // What arrives in the session that is open stays unread: the window may be open with
+        // nobody looking. Opening the session, its row or "Mark all read" reads it.
+    }
+
+    /// Asks the daemon to mark a session's unread notifications read, once for each.
+    fn read_session(&mut self, session: &str) {
+        let unread: Vec<u64> = self
+            .snapshot
+            .bell
+            .iter()
+            .filter(|item| !item.read && item.session.as_deref() == Some(session))
+            .map(|item| item.id)
+            .filter(|id| !self.marked.contains(id))
+            .collect();
+        if !unread.is_empty() {
+            self.marked.extend(unread);
+            self.perform(Command::ReadNotifications(Reading::Session(
+                session.to_owned(),
+            )));
+        }
+    }
+
+    /// "Mark all read" in the bell's panel.
+    pub fn read_all(&mut self) {
+        let unread: Vec<u64> = self
+            .snapshot
+            .bell
+            .iter()
+            .filter(|item| !item.read)
+            .map(|item| item.id)
+            .collect();
+        if !unread.is_empty() {
+            self.marked.extend(unread);
+            self.perform(Command::ReadNotifications(Reading::All));
         }
     }
 
@@ -2753,48 +4534,36 @@ impl Shell {
         }
     }
 
-    /// "New entry" in Settings' Vault, its dialog prefilled with `prefill` (a project's Tracker, a
-    /// project's Vault tab, an agent's request), `why` the agent's reason when it is one. Closed,
-    /// the window goes back to `back`, the project page it came from.
+    /// "New entry", the vault's dialog prefilled with `prefill` (a project's Tracker, a project's
+    /// Vault tab), `why` the agent's reason when it is one. It opens over the page the user is
+    /// on, and closing it leaves them there.
     pub fn add_vault_entry(
         &mut self,
         prefill: &crate::vault::VaultEntry,
         why: Option<String>,
-        back: Option<(String, crate::project_settings::Reveal)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
+        let vault = self.vault(cx);
         vault.update(cx, |vault, cx| {
-            vault.add_prefilled(prefill, why, back, window, cx)
+            vault.add_prefilled(prefill, why, window, cx)
         });
     }
 
-    /// A row of a project's Vault tab: Settings, Vault, the entry in its own dialog; closed, it
-    /// goes back to that tab. An entry gone since the row was drawn leaves nothing to open: the
-    /// window stays on the tab.
+    /// A row of a project's Vault tab: the entry in its own dialog, over the tab. An entry gone
+    /// since the row was drawn leaves nothing to open.
     pub fn replace_vault_entry_for(
         &mut self,
-        project: &str,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
-        if !vault.update(cx, |vault, cx| vault.replace_in(project, name, window, cx)) {
-            self.open_project_settings_at(
-                project,
-                crate::project_settings::Reveal::Vault,
-                window,
-                cx,
-            );
-        }
+        let vault = self.vault(cx);
+        vault.update(cx, |vault, cx| vault.replace_of_project(name, window, cx));
     }
 
-    /// An agent's request for a vault entry, from its card: Settings, Vault, on a new entry
-    /// prefilled with it.
+    /// An agent's request for a vault entry, from its card: a new entry prefilled with it, over
+    /// the session.
     pub fn add_asked_vault_entry(
         &mut self,
         entry: crate::vault::VaultEntry,
@@ -2804,16 +4573,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
+        let vault = self.vault(cx);
         vault.update(cx, |vault, cx| {
             vault.add_asked(&entry, why, host, connection, window, cx)
         });
     }
 
     /// "New entry…" on the dialog of an agent's request to write a connection, which names the
-    /// entry `name` that is not made: Settings, Vault, on a new entry named so, its address the
-    /// `host` the request sends it to. Saved or closed, the request's dialog is back.
+    /// entry `name` that is not made: a new entry named so, its address the `host` the request
+    /// sends it to, stacked over the request's dialog, which reads the request again once it is
+    /// saved.
     pub fn add_vault_entry_for_request(
         &mut self,
         number: u64,
@@ -2822,8 +4591,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
+        let vault = self.vault(cx);
         vault.update(cx, |vault, cx| {
             vault.add_for_request(number, name, host, window, cx)
         });
@@ -2843,25 +4611,16 @@ impl Shell {
         self.dismissing.contains(&ask)
     }
 
-    /// A connection's review `Edit entry`: Settings, Vault, on the entry's dialog.
-    pub fn replace_vault_entry(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
-        vault.update(cx, |vault, cx| vault.replace(name, window, cx));
-    }
-
     /// Opens the dialog of an agent's request to write a connection.
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
         self.connection_request
             .update(cx, |dialog, cx| dialog.open(number, cx));
     }
 
-    /// The review of the connection `name`, over the page the user is on: Connections' page,
-    /// where the review opens (the kit's modal, as the form's Save leads to it).
-    pub fn review_connection(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let at = crate::settings::Reveal::Feature(crate::extensions::connections::NAME.into());
-        self.open_settings_at(at, window, cx);
-        let section = self.settings.read(cx).connections().clone();
+    /// The review of the connection `name`, over the page the user is on (the kit's modal, as
+    /// the form's Save leads to it).
+    pub fn review_connection(&mut self, name: &str, cx: &mut Context<Self>) {
+        let section = self.connections(cx);
         section.update(cx, |section, cx| {
             section.open_review_after_request(name, cx)
         });
@@ -2872,8 +4631,8 @@ impl Shell {
         &self.connection_request
     }
 
-    /// "Edit" on a request's dialog: Connections' page, the server's form filled with the agent's
-    /// values, whose Save answers the request `number`.
+    /// "Edit" on a request's dialog: the server's form filled with the agent's values, over the
+    /// page the user is on, whose Save answers the request `number`.
     pub fn answer_connection_request(
         &mut self,
         number: u64,
@@ -2882,9 +4641,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let at = crate::settings::Reveal::Feature(crate::extensions::connections::NAME.into());
-        self.open_settings_at(at, window, cx);
-        let section = self.settings.read(cx).connections().clone();
+        let section = self.connections(cx);
         section.update(cx, |section, cx| {
             section.answer_request(number, server, adding, window, cx)
         });
@@ -2903,6 +4660,14 @@ impl Shell {
 
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        // A project of another machine only: its page is that machine's, brought in front.
+        if let Selection::Project(project) = &selection
+            && let Some(machine) = self.machine_of_project(project, cx)
+        {
+            let then = Some((machine.clone(), There::Project(project.clone())));
+            self.choose_then(machine, then, cx);
+            return;
+        }
         self.select(selection, window, cx);
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.set_bell(false, cx);
@@ -2964,14 +4729,10 @@ impl Shell {
         {
             row.update(cx, |row, cx| row.set_selected(true, cx));
         }
-        // Opened, the session's changes are seen: its mark and its items in the bell go.
+        // Opened, the session's changes are seen: its mark goes, and its notifications are read.
         if let Selection::Session(id) = &selection {
-            let before = self.forged.len();
-            let snapshot = &self.snapshot;
-            self.forged
-                .retain(|forged| &snapshot.root_of(&forged.agent) != id);
-            let read = self.news.remove(id).is_some();
-            if read || self.forged.len() != before {
+            self.read_session(id);
+            if self.news.remove(id).is_some() {
                 self.ring(cx);
             }
         }
@@ -2985,6 +4746,14 @@ impl Shell {
         // Left, the services page stops reading the output it shows: nothing is in sight.
         if self.selected == Some(Selection::Services) && selection != Selection::Services {
             self.services.update(cx, |page, cx| page.close_output(cx));
+        }
+        // Opened, what is new is seen for good: the daemon keeps it, and the mark goes.
+        if selection == Selection::WhatsNew && self.selected != Some(Selection::WhatsNew) {
+            self.whats_new.update(cx, |page, cx| page.opened(cx));
+            self.perform(Command::Update {
+                method: "whatsnew.seen",
+                params: serde_json::json!({}),
+            });
         }
         // Opened, the services are read again: what runs changes outside the window too.
         if selection == Selection::Services && self.selected != Some(Selection::Services) {
@@ -3026,6 +4795,7 @@ impl Shell {
         match selection {
             Selection::Settings => Page::Settings,
             Selection::Services => Page::Services,
+            Selection::WhatsNew => Page::WhatsNew,
             // A project just added is not in the daemon's last read yet: its page, open, stays.
             Selection::ProjectSettings(name) => {
                 let open = self
@@ -3095,7 +4865,7 @@ impl Shell {
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
             Some(Selection::Spec { project, .. }) => Some(project.clone()),
-            Some(Selection::Settings | Selection::Services) | None => None,
+            Some(Selection::Settings | Selection::Services | Selection::WhatsNew) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {
@@ -3147,9 +4917,9 @@ impl Shell {
     pub fn bell_sessions(&self, cx: &App) -> Vec<String> {
         self.bell
             .read(cx)
-            .items
+            .rows
             .iter()
-            .map(|(_, title)| title.clone())
+            .map(|row| row.title.clone())
             .collect()
     }
 
@@ -3162,16 +4932,26 @@ impl Shell {
         self.bell_open
     }
 
-    /// Opens what a bell item waits in: its session.
+    /// Opens what a bell item is about: its session, which marks its notifications read; one
+    /// that is no session's is marked read by itself.
     pub fn choose(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self
+        let Some(item) = self
             .snapshot
             .bell
             .iter()
             .find(|item| item.key == key)
-            .map(|item| item.session.clone());
-        if let Some(session) = session {
-            self.open(Selection::Session(session), window, cx);
+            .cloned()
+        else {
+            return;
+        };
+        match item.session {
+            Some(session) if self.snapshot.session(&session).is_some() => {
+                self.open(Selection::Session(session), window, cx)
+            }
+            _ if !item.read && self.marked.insert(item.id) => {
+                self.perform(Command::ReadNotifications(Reading::Ids(vec![item.id])))
+            }
+            _ => {}
         }
     }
 
@@ -3268,6 +5048,15 @@ impl Render for Shell {
                     this.toggle_switcher(window, cx);
                     return;
                 }
+                // A key no field of an open dialog took: Escape closes the one on top, whichever
+                // dialog it is and wherever the focus went when the one above it closed.
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default()
+                    && dismiss_top_overlay(window, cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 let way = match event.keystroke.key.as_str() {
                     "left" => Way::Back,
                     "right" => Way::Forward,
@@ -3279,6 +5068,9 @@ impl Render for Shell {
                     if dismiss_top_overlay(window, cx) {
                         // Whatever held the focus in it is going: the next key must still arrive.
                         window.focus(&this.focus, cx);
+                        // The overlays say again which are open as the shell is drawn: one that
+                        // closed must not be dismissed again by the next key.
+                        cx.notify();
                     } else {
                         this.go(way, window, cx);
                     }
@@ -3294,6 +5086,7 @@ impl Render for Shell {
             })
             .child(self.add_project.clone())
             .child(self.rename.clone())
+            .child(self.group_form.clone())
             .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()
@@ -3315,7 +5108,7 @@ impl Render for Shell {
                         .child(self.bell.clone()),
                 )
             })
-            .child(self.connection_request.clone())
+            .child(self.modals.clone())
             .child(self.toasts.clone())
     }
 }
@@ -3323,7 +5116,8 @@ impl Render for Shell {
 /// The top bar: the mark, search, and the bell with the count of what waits for the user.
 pub struct TopBar {
     shell: WeakEntity<Shell>,
-    count: usize,
+    /// The unread notifications: those that need the user, and the others.
+    counts: (usize, usize),
     online: bool,
     menu: bool,
 }
@@ -3332,24 +5126,29 @@ impl TopBar {
     fn new(shell: WeakEntity<Shell>) -> Self {
         Self {
             shell,
-            count: 0,
+            counts: (0, 0),
             online: true,
             menu: false,
         }
     }
 
-    /// How many things wait for the user.
+    /// How many notifications are unread.
     pub fn count(&self) -> usize {
-        self.count
+        self.counts.0 + self.counts.1
+    }
+
+    /// The unread ones that need the user, and the others.
+    pub fn counts(&self) -> (usize, usize) {
+        self.counts
     }
 
     pub fn online(&self) -> bool {
         self.online
     }
 
-    fn set_count(&mut self, count: usize, cx: &mut Context<Self>) {
-        if self.count != count {
-            self.count = count;
+    fn set_counts(&mut self, counts: (usize, usize), cx: &mut Context<Self>) {
+        if self.counts != counts {
+            self.counts = counts;
             cx.notify();
         }
     }
@@ -3395,12 +5194,16 @@ impl Render for TopBar {
         let menu_shell = self.shell.clone();
         let settings_shell = self.shell.clone();
         let services_shell = self.shell.clone();
-        let mut bell =
-            Button::icon("bell", Icon::Bell, "Waiting for you").on_click(move |_, _, cx| {
-                shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
-            });
-        if self.count > 0 {
-            bell = bell.badge(Badge::count(self.count));
+        let mut bell = Button::icon(
+            "bell",
+            Icon::Bell,
+            counts_said(self.counts, "Notifications"),
+        )
+        .on_click(move |_, _, cx| {
+            shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
+        });
+        if self.count() > 0 {
+            bell = bell.badge(Badge::count(self.count()));
         }
         div()
             .flex_none()
@@ -3495,15 +5298,104 @@ impl Render for TopBar {
     }
 }
 
-/// The list the bell opens: what waits for the user and what the agents changed, oldest first.
-/// Each item says why it is there, a short excerpt, and its session, each on one line cut with an
-/// ellipsis. Its marks exist only while it is open, so that a closed list asks for no frame.
+/// A notification with the session it belongs to, as the panel groups them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BellRow {
+    pub item: BellItem,
+    /// The session's title, and who started it when an agent did; `Flottille` for what is no
+    /// session's.
+    pub title: String,
+    pub project: String,
+}
+
+/// The unread counts said apart: `2 need you · 5 new`; the fallback when nothing is unread.
+fn counts_said((needs, new): (usize, usize), none: &str) -> String {
+    match (needs, new) {
+        (0, 0) => none.to_owned(),
+        (needs, 0) => format!("{needs} need you"),
+        (0, new) => format!("{new} new"),
+        (needs, new) => format!("{needs} need you · {new} new"),
+    }
+}
+
+/// What the panel's list draws: a session's heading, or one notification under it.
+#[derive(Clone, Debug, PartialEq)]
+enum Entry {
+    Group {
+        session: Option<String>,
+        title: String,
+        project: String,
+        unread: usize,
+    },
+    Row(BellRow),
+}
+
+/// The panel's order: the sessions with something unread first, the one that heard last on top;
+/// under each, its unread notifications first, then the rest, the newest first.
+fn grouped(rows: &[BellRow]) -> Vec<(String, Entry)> {
+    let mut groups: Vec<(Option<String>, Vec<&BellRow>)> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|(session, _)| *session == row.item.session)
+        {
+            Some((_, found)) => found.push(row),
+            None => groups.push((row.item.session.clone(), vec![row])),
+        }
+    }
+    let newest = |rows: &[&BellRow], unread: bool| {
+        rows.iter()
+            .filter(|row| !unread || !row.item.read)
+            .map(|row| row.item.at)
+            .max()
+            .unwrap_or(0)
+    };
+    groups.sort_by_key(|(_, rows)| {
+        let unread = rows.iter().any(|row| !row.item.read);
+        std::cmp::Reverse((unread, newest(rows, unread)))
+    });
+    let mut entries = Vec::new();
+    for (session, mut rows) in groups {
+        rows.sort_by_key(|row| (row.item.read, std::cmp::Reverse((row.item.at, row.item.id))));
+        let first = rows[0];
+        entries.push((
+            format!("bell-group-{}", session.as_deref().unwrap_or("flottille")),
+            Entry::Group {
+                session,
+                title: first.title.clone(),
+                project: first.project.clone(),
+                unread: rows.iter().filter(|row| !row.item.read).count(),
+            },
+        ));
+        for row in rows {
+            entries.push((row.item.key.clone(), Entry::Row(row.clone())));
+        }
+    }
+    entries
+}
+
+/// The element id of a session's heading in the panel, and of its title.
+pub fn bell_group_id(session: &str) -> ElementId {
+    ElementId::Name(format!("bell-group-{session}").into())
+}
+
+pub fn bell_group_title_id(session: &str) -> ElementId {
+    ElementId::Name(format!("bell-group-{session}-title").into())
+}
+
+/// The element id of a notification's line under its title, which is its excerpt.
+pub fn bell_line_id(key: &str) -> ElementId {
+    ElementId::Name(format!("bell-{key}-line").into())
+}
+
+/// The panel the bell opens: the notification centre the daemon keeps, grouped by session, the
+/// unread first, each with its time. Each line is one line cut with an ellipsis. It draws nothing
+/// while it is closed, so that a closed panel asks for no frame.
 pub struct BellList {
     shell: WeakEntity<Shell>,
-    items: Vec<(BellItem, String)>,
-    list: Listing<(BellItem, String)>,
-    /// The pulsing mark of each item that waits for the user, by its key.
-    marks: HashMap<String, Entity<StateIcon>>,
+    rows: Vec<BellRow>,
+    counts: (usize, usize),
+    list: Listing<Entry>,
     open: bool,
 }
 
@@ -3511,77 +5403,95 @@ impl BellList {
     fn new(shell: WeakEntity<Shell>) -> Self {
         Self {
             shell,
-            items: Vec::new(),
+            rows: Vec::new(),
+            counts: (0, 0),
             list: Listing::default(),
-            marks: HashMap::new(),
             open: false,
         }
     }
 
-    fn set(&mut self, items: Vec<(BellItem, String)>, cx: &mut Context<Self>) {
-        if self.items != items {
-            self.items = items;
-            if self.open {
-                self.show(true, cx);
-            }
-            cx.notify();
-        }
+    fn set(&mut self, rows: Vec<BellRow>, counts: (usize, usize), cx: &mut Context<Self>) {
+        self.rows = rows;
+        self.counts = counts;
+        cx.notify();
+    }
+
+    fn set_counts(&mut self, counts: (usize, usize), cx: &mut Context<Self>) {
+        self.counts = counts;
+        cx.notify();
     }
 
     fn show(&mut self, open: bool, cx: &mut Context<Self>) {
         self.open = open;
-        if !open {
-            self.marks.clear();
-        }
-        for (item, _) in self.items.iter().filter(|(item, _)| waits(item)) {
-            if open && !self.marks.contains_key(&item.key) {
-                let status = cx.new(|_| Status::new(AgentState::NeedsYou));
-                let mark = cx.new(|cx| StateIcon::new(status, cx));
-                self.marks.insert(item.key.clone(), mark);
-            }
-        }
         cx.notify();
     }
 
-    /// The words of each item, in order: why it is there, its excerpt, its session.
+    /// The words of each notification, in the order they were kept: why it is there, its
+    /// excerpt, its session.
     pub fn said(&self) -> Vec<(String, String, String)> {
-        self.items
+        self.rows
             .iter()
-            .map(|(item, session)| (item.label.clone(), item.detail.clone(), session.clone()))
+            .map(|row| {
+                (
+                    label_of(&row.item),
+                    row.item.detail.clone(),
+                    row.title.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// The panel's order: each session's key, then the keys of its notifications.
+    pub fn order(&self) -> Vec<String> {
+        grouped(&self.rows)
+            .into_iter()
+            .map(|(key, _)| key)
             .collect()
     }
 }
 
-/// Whether a bell item waits for the user's answer, rather than tells them of a change.
-fn waits(item: &BellItem) -> bool {
-    item.key.starts_with("request-") || item.key.starts_with("question-")
+/// Why a notification is there: once what it waited for was answered, it says so rather than
+/// that it still waits.
+fn label_of(item: &BellItem) -> String {
+    if !item.resolved {
+        return item.label.clone();
+    }
+    match item.kind.as_str() {
+        "request" => match item.label.strip_suffix(" waits for you") {
+            Some(request) => format!("{request} answered"),
+            None => "Request answered".to_owned(),
+        },
+        "question" => "Question answered".to_owned(),
+        "vault" => "Vault entry answered".to_owned(),
+        "paused" => "The session wakes again".to_owned(),
+        _ => item.label.clone(),
+    }
 }
 
-/// The element id of a bell item's line under its title, of its excerpt, of its session.
-pub fn bell_line_id(key: &str) -> ElementId {
-    ElementId::Name(format!("bell-{key}-line").into())
-}
-
-pub fn bell_session_id(key: &str) -> ElementId {
-    ElementId::Name(format!("bell-{key}-session").into())
+/// How a kind of notification is drawn in front of its title.
+fn glyph_of(kind: &str) -> gpui_design_system::Icon {
+    match kind {
+        "request" | "question" | "vault" => Icon::Bell,
+        "ticket" => glyphs::TICKET,
+        "pull_request" => glyphs::PULL_REQUEST,
+        // A failure is told, never confused with a request that waits.
+        "failure" | "unchecked" | "put_back" | "dropped" => Icon::Warning,
+        _ => Icon::Text,
+    }
 }
 
 impl Render for BellList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let at = cx.background_executor().now();
-        self.list.sync(
-            self.items
-                .iter()
-                .map(|(item, session)| (item.key.clone(), (item.clone(), session.clone()))),
-            at,
-            cx.reduce_motion(),
-        );
+        let entries = grouped(&self.rows);
+        self.list.sync(entries, at, cx.reduce_motion());
+        let now = now_ms();
         let list = div()
             .id("bell-list")
             .occlude()
-            .w(px(340.))
-            .max_h(px(420.))
+            .w(px(360.))
+            .max_h(px(480.))
             .overflow_y_scroll()
             .p(space::SM)
             .rounded(px(12.))
@@ -3594,74 +5504,183 @@ impl Render for BellList {
         let list = dismiss_on_navigate(list, move |_, cx| {
             shell.update(cx, |shell, cx| shell.set_bell(false, cx)).ok();
         });
-        let rows: Vec<AnyElement> = self
-            .list
-            .rows()
-            .map(|row| {
-                let (item, session) = row.value;
-                let shell = self.shell.clone();
-                let key = item.key.clone();
-                let leading = match self.marks.get(&item.key) {
-                    Some(mark) => mark.clone().into_any_element(),
-                    None => icon(match item.key.starts_with("ticket-") {
-                        true => glyphs::TICKET,
-                        false => glyphs::PULL_REQUEST,
-                    })
-                    .size(px(14.))
-                    .text_color(p.acc)
-                    .into_any_element(),
-                };
-                let line = |id: ElementId, text: &str, ink| {
-                    div()
-                        .id(id)
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(px(12.))
-                        .text_color(ink)
-                        .aria_label(SharedString::from(text.to_owned()))
-                        .child(SharedString::from(text.to_owned()))
-                        .test_support()
-                };
-                let below = div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .when(!item.detail.is_empty(), |d| {
-                        d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
-                    })
-                    .child(line(bell_session_id(&item.key), session, p.faint));
-                let content = ListRow::new(
-                    ElementId::Name(format!("bell-{}", item.key).into()),
-                    SharedString::from(item.label.clone()),
-                )
-                .leading(leading)
-                .below(below)
-                .on_click(move |_, window, cx| {
-                    shell
-                        .update(cx, |shell, cx| shell.choose(&key, window, cx))
-                        .ok();
-                });
-                Item::new(
-                    ElementId::Name(format!("bell-item-{}", row.key).into()),
-                    row.placement,
-                    content,
-                )
-                .into_any_element()
-            })
-            .collect();
-        list.child(presence(
-            "bell-empty",
-            self.list.is_empty(),
-            div()
-                .p(space::MD)
-                .text_color(p.faint)
-                .child("Nothing waits for you."),
-        ))
-        .children(rows)
-        .test_support()
-        .into_any_element()
+        let header_shell = self.shell.clone();
+        let header = div()
+            .flex_none()
+            .px(space::SM)
+            .pb(space::SM)
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .id("bell-counts")
+                    .aria_label(counts_said(self.counts, "Nothing unread"))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(counts_said(self.counts, "Nothing unread"))
+                    .test_support(),
+            )
+            .child(
+                Button::quiet("bell-mark-all", "Mark all read")
+                    .disabled(self.counts == (0, 0))
+                    .on_click(move |_, _, cx| {
+                        header_shell.update(cx, |shell, _| shell.read_all()).ok();
+                    }),
+            );
+        let rows: Vec<AnyElement> =
+            self.list
+                .rows()
+                .map(|row| {
+                    let content = match row.value {
+                        Entry::Group {
+                            session,
+                            title,
+                            project,
+                            unread,
+                        } => {
+                            let key = session.as_deref().unwrap_or("flottille");
+                            let faded = fade(
+                                ElementId::Name(format!("bell-group-{key}-unread").into()),
+                                *unread > 0,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            div()
+                                .id(bell_group_id(key))
+                                .px(space::SM)
+                                .pt(space::MD)
+                                .pb(space::XS)
+                                .flex()
+                                .items_baseline()
+                                .gap(space::SM)
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .id(bell_group_title_id(key))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.5))
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                        .text_color(mix(p.mute, p.text, faded))
+                                        .aria_label(SharedString::from(title.clone()))
+                                        .child(SharedString::from(title.clone()))
+                                        .test_support(),
+                                )
+                                .when(!project.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.))
+                                            .text_color(p.faint)
+                                            .child(SharedString::from(project.clone())),
+                                    )
+                                })
+                                .test_support()
+                                .into_any_element()
+                        }
+                        Entry::Row(BellRow { item, .. }) => {
+                            let shell = self.shell.clone();
+                            let key = item.key.clone();
+                            // Read or unread moves: the ink and the fill fade over `HOVER`.
+                            let unread = fade(
+                                ElementId::Name(format!("bell-{}-unread", item.key).into()),
+                                !item.read,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            // Answered, its glyph gives way to a check: the two cross-fade.
+                            let done = fade(
+                                ElementId::Name(format!("bell-{}-resolved", item.key).into()),
+                                item.resolved,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            let ink = mix(p.faint, p.acc, unread);
+                            let leading = div()
+                                .relative()
+                                .size(px(14.))
+                                .child(div().absolute().inset_0().opacity(1. - done).child(
+                                    icon(glyph_of(&item.kind)).size(px(14.)).text_color(ink),
+                                ))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .opacity(done)
+                                        .child(icon(Icon::Check).size(px(14.)).text_color(ink)),
+                                )
+                                .into_any_element();
+                            let line = |id: ElementId, text: &str, ink| {
+                                div()
+                                    .id(id)
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(12.))
+                                    .text_color(ink)
+                                    .aria_label(SharedString::from(text.to_owned()))
+                                    .child(SharedString::from(text.to_owned()))
+                                    .test_support()
+                            };
+                            let below = div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .when(!item.detail.is_empty(), |d| {
+                                    d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
+                                });
+                            let when = crate::model::ago(now, item.at);
+                            ListRow::new(
+                                ElementId::Name(format!("bell-{}", item.key).into()),
+                                SharedString::from(label_of(item)),
+                            )
+                            .leading(leading)
+                            .below(below)
+                            .trailing(
+                                div()
+                                    .id(ElementId::Name(format!("bell-{}-time", item.key).into()))
+                                    .text_size(px(11.))
+                                    .text_color(p.faint)
+                                    .aria_label(SharedString::from(when.clone()))
+                                    .child(SharedString::from(when))
+                                    .test_support(),
+                            )
+                            .decorate(move |row| row.opacity(0.6 + 0.4 * unread))
+                            .on_click(move |_, window, cx| {
+                                shell
+                                    .update(cx, |shell, cx| shell.choose(&key, window, cx))
+                                    .ok();
+                            })
+                            .into_any_element()
+                        }
+                    };
+                    Item::new(
+                        ElementId::Name(format!("bell-item-{}", row.key).into()),
+                        row.placement,
+                        content,
+                    )
+                    .into_any_element()
+                })
+                .collect();
+        list.child(header)
+            .child(presence(
+                "bell-empty",
+                self.list.is_empty(),
+                div()
+                    .p(space::MD)
+                    .text_color(p.faint)
+                    .child("No notifications."),
+            ))
+            .children(rows)
+            .test_support()
+            .into_any_element()
     }
 }
 
@@ -3755,7 +5774,18 @@ fn nested(
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
         }
-        let runs = led_by.map_or_else(String::new, |_| live[at].runs.clone());
+        // A session led from another project sits among its own project's rows, and says who
+        // leads it there, with that project (`model`), before what it runs on.
+        let runs = match (led_by, pilots[at], live[at].led_by.as_deref()) {
+            (Some(_), _, _) => live[at].runs.clone(),
+            (None, None, Some(by)) if live[at].led_from_elsewhere => {
+                match live[at].runs.is_empty() {
+                    true => format!("led by {by}"),
+                    false => format!("led by {by} · {}", live[at].runs),
+                }
+            }
+            _ => String::new(),
+        };
         if row.read(cx).runs() != runs {
             row.update(cx, |row, cx| row.set_runs(&runs, cx));
         }

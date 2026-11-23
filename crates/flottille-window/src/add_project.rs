@@ -1,12 +1,18 @@
-//! Adding a project from the window, as `flottille project add` does: its folder (typed, or
-//! picked with the system's own dialog), the repositories the daemon detects in it shown before
-//! anything is registered, then the project's settings page, where its forges and tracker are
-//! declared. The folder is detected by itself: once typing rests, or at once for a picked one.
+//! Adding a project from the window, as `flottille project add` does: on which machine first, when
+//! the user has others that run agents (choosing one shows it, as opening one of its sessions
+//! does); its folder (typed, or picked with the system's own dialog on this machine, picked from
+//! the folders that machine lists on another: `docs/remote.md`, "Paths are picked, not typed"),
+//! the repositories the daemon detects in it shown before anything is registered, then the
+//! project's settings page, where its forges and tracker are declared. The folder is detected by
+//! itself: once typing rests, or at once for a picked one.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui_design_system::{Button, Modal, Type, enter, palette, presence, space};
+use gpui_design_system::{
+    Button, Field, ListCard, ListRow, Modal, RadioChoices, Select, SelectOption, Type, enter,
+    palette, presence, presence_of, space,
+};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -42,6 +48,38 @@ pub fn repository_name(folder: &str, path: &str) -> String {
     }
 }
 
+/// A folder of another machine, as `project.folders` lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub name: String,
+    pub path: String,
+    /// It is a Git repository itself: it is picked, not opened.
+    pub repository: bool,
+    pub repositories: usize,
+    /// The project already registered there.
+    pub project: Option<String>,
+}
+
+/// A folder of another machine and what is in it, as `project.folders` says it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Browsed {
+    pub path: String,
+    /// From `~`: `~/code`.
+    pub shown: String,
+    pub parent: Option<String>,
+    pub folders: Vec<Entry>,
+}
+
+/// What a machine said of a folder, or why it could not be read.
+pub type Listed = Result<Browsed, String>;
+
+/// The step the dialog is at: on which machine, then the folder there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Machine,
+    Folder,
+}
+
 pub struct AddProject {
     shell: WeakEntity<Shell>,
     open: bool,
@@ -59,6 +97,14 @@ pub struct AddProject {
     pause: Option<Task<()>>,
     /// Adding, while the daemon answers.
     busy: Option<&'static str>,
+    /// The folders another machine listed (`project.folders`): the machine they are of, and each
+    /// one's path and how it is shown (`~/code/app`), or why they could not be read.
+    folders: Option<(Option<String>, Listed)>,
+    /// The machine the form was last drawn for: what was typed for another is let go.
+    drawn_for: Option<String>,
+    step: Step,
+    /// Whether the dialog asks on which machine: the user has other machines that run agents.
+    asks_machine: bool,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -90,6 +136,10 @@ impl AddProject {
             detecting: false,
             pause: None,
             busy: None,
+            folders: None,
+            drawn_for: None,
+            step: Step::Folder,
+            asks_machine: false,
             error: None,
             _subscriptions: subscriptions,
         }
@@ -116,9 +166,21 @@ impl AddProject {
         self.error.as_deref()
     }
 
-    pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The step the dialog is at.
+    pub fn step(&self) -> Step {
+        self.step
+    }
+
+    /// Opens the dialog, on which machine first when `asks_machine`, the user having others.
+    pub fn open(&mut self, asks_machine: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.error = None;
+        self.asks_machine = asks_machine;
+        self.step = if asks_machine {
+            Step::Machine
+        } else {
+            Step::Folder
+        };
         let focus = self.folder.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -261,6 +323,64 @@ impl AddProject {
         cx.notify();
     }
 
+    /// The folders `machine` listed, or why not: kept for that machine only.
+    pub fn folders_answered(
+        &mut self,
+        machine: Option<String>,
+        read: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = |value: &Value| value.as_str().map(str::to_owned);
+        let listed = read.map(|read| Browsed {
+            path: text(&read["path"]).unwrap_or_default(),
+            shown: text(&read["shown"]).unwrap_or_default(),
+            parent: text(&read["parent"]),
+            folders: read["folders"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|folder| Entry {
+                    name: text(&folder["name"]).unwrap_or_default(),
+                    path: text(&folder["path"]).unwrap_or_default(),
+                    repository: folder["repository"] == true,
+                    repositories: folder["repositories"].as_u64().unwrap_or_default() as usize,
+                    project: text(&folder["project"]),
+                })
+                .collect(),
+        });
+        self.folders = Some((machine, listed));
+        cx.notify();
+    }
+
+    /// Opens the folder `path` of the machine shown: its folders are listed in place of these.
+    fn browse_to(&mut self, path: String, cx: &mut Context<Self>) {
+        let machine = crate::machines::shown_machine(cx);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::ProjectFolders {
+                    machine,
+                    path: Some(path),
+                })
+            })
+            .ok();
+    }
+
+    /// From on which machine to the folder there, and back.
+    fn go_to_step(&mut self, step: Step, cx: &mut Context<Self>) {
+        self.step = step;
+        self.error = None;
+        cx.notify();
+    }
+
+    /// The folders listed by the machine shown, once it answered.
+    pub fn folders(&self, cx: &gpui_kit::App) -> Option<&Listed> {
+        let shown = crate::machines::shown_machine(cx);
+        self.folders
+            .as_ref()
+            .filter(|(machine, _)| *machine == shown)
+            .map(|(_, listed)| listed)
+    }
+
     /// The project registered: its name, for the shell to open its settings; or why not.
     pub fn add_answered(
         &mut self,
@@ -288,8 +408,245 @@ impl AddProject {
     }
 }
 
+impl AddProject {
+    /// On which machine: this one first, then the other machines that run agents, each with its
+    /// role and state; choosing one shows it, as opening one of its sessions does.
+    fn machine_choice(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = palette(cx);
+        let read = self
+            .shell
+            .upgrade()
+            .and_then(|shell| shell.read(cx).machines().read(cx).machines().cloned())
+            .unwrap_or_default();
+        let choices = crate::machines::choices(&read);
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let names: Vec<Option<String>> = choices.iter().map(|choice| choice.name.clone()).collect();
+        let weak = self.shell.clone();
+        let choose = move |at: usize, _: &mut Window, cx: &mut gpui_kit::App| {
+            let name = names[at].clone();
+            weak.update(cx, |shell, cx| shell.choose_machine(name, cx))
+                .ok();
+        };
+        let control = if choices.len() <= gpui_design_system::radio::MAX_RADIO_CHOICES {
+            choices
+                .iter()
+                .fold(
+                    RadioChoices::new("add-project-machine", "On which machine?"),
+                    |radios, choice| {
+                        radios
+                            .choice(choice.key(), choice.title.clone(), choice.line())
+                            .leading(crate::glyphs::device(&choice.icon))
+                            .tint(crate::machines::shade(&choice.colour))
+                    },
+                )
+                .chosen(chosen)
+                .on_choose(choose)
+                .into_any_element()
+        } else {
+            let options = choices
+                .iter()
+                .map(|choice| {
+                    SelectOption::new(choice.key(), choice.title.clone())
+                        .leading(crate::glyphs::device(&choice.icon))
+                        .tint(crate::machines::shade(&choice.colour))
+                        .line(choice.line())
+                })
+                .collect::<Vec<_>>();
+            Select::new("add-project-machine", options, chosen)
+                .on_choose(choose)
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::LG)
+            .child(Field::new(
+                "add-project-machine-field",
+                "On which machine?",
+                control,
+            ))
+            .child(
+                div().text_size(px(12.5)).text_color(p.mute).child(
+                    "The project lives in that machine's folders, and its sessions run there.",
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The folder: typed or picked with the system's dialog on this machine; on another, picked in
+    /// that machine's folders, opened one after the other, never typed.
+    fn folder_choice(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(machine) = crate::machines::shown_machine(cx) else {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(space::LG)
+                .child(div().text_size(px(12.5)).text_color(palette(cx).mute).child(
+                    "A folder that is a Git repository, or holds some one or two levels down. \
+                     Nothing is written in it.",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap(space::SM)
+                        .child(div().flex_1().child(field_frame(
+                            "add-project-folder",
+                            &self.folder,
+                            cx,
+                        )))
+                        .child(
+                            Button::secondary("add-project-browse", "Browse…").on_click(
+                                cx.listener(|this, _, window, cx| this.browse(window, cx)),
+                            ),
+                        ),
+                )
+                .into_any_element();
+        };
+        let p = palette(cx);
+        let intro = div()
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .child(SharedString::from(format!(
+                "Folders of {machine}. Paths are picked, never typed."
+            )));
+        let listed = match self.folders(cx) {
+            None => {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(intro)
+                    .child(
+                        div()
+                            .id("add-project-folders-reading")
+                            .mono(11.5)
+                            .text_color(p.faint)
+                            .child("Reading its folders…")
+                            .test_support(),
+                    )
+                    .into_any_element();
+            }
+            Some(listed) => listed.clone(),
+        };
+        let browsed = match listed {
+            Ok(browsed) => browsed,
+            Err(why) => {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(intro)
+                    .child(problem_line(
+                        "add-project-folders-error",
+                        Some(SharedString::from(format!(
+                            "Its folders cannot be read: {why}"
+                        ))),
+                        px(0.),
+                        cx,
+                    ))
+                    .into_any_element();
+            }
+        };
+        let typed = self.folder.read(cx).value().trim().to_owned();
+        let this = cx.entity().downgrade();
+        let mut list = ListCard::new("add-project-folders");
+        if let Some(parent) = browsed.parent.clone() {
+            let this = this.clone();
+            list = list.row(
+                ListRow::new("add-project-up", "..")
+                    .mono()
+                    .line("The folder above")
+                    .on_click(move |_, _, cx| {
+                        let parent = parent.clone();
+                        this.update(cx, |this, cx| this.browse_to(parent, cx)).ok();
+                    }),
+            );
+        }
+        for entry in &browsed.folders {
+            let said = match (&entry.project, entry.repository, entry.repositories) {
+                (Some(_), _, _) => Some("already a project".to_owned()),
+                (None, true, 1) => Some("a repository".to_owned()),
+                (None, true, n) => Some(format!("{n} repositories")),
+                (None, false, _) => None,
+            };
+            let mut row = ListRow::new(
+                ElementId::Name(format!("add-project-folder-{}", entry.name).into()),
+                SharedString::from(entry.name.clone()),
+            )
+            .mono()
+            .selected(entry.path == typed);
+            if let Some(said) = said {
+                row = row.line(SharedString::from(said));
+            }
+            // A repository is picked; any other folder is opened; a project's is neither.
+            if entry.project.is_none() {
+                let (this, path, pick) = (this.clone(), entry.path.clone(), entry.repository);
+                row = row.on_click(move |_, window, cx| {
+                    let path = path.clone();
+                    this.update(cx, |this, cx| match pick {
+                        true => this.set_folder(PathBuf::from(path), window, cx),
+                        false => this.browse_to(path, cx),
+                    })
+                    .ok();
+                });
+            }
+            list = list.row(row);
+        }
+        let empty = browsed
+            .folders
+            .is_empty()
+            .then(|| SharedString::from(format!("{} holds no folder.", browsed.shown)));
+        let path = SharedString::from(format!("{machine}: {}", browsed.shown));
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .child(intro)
+            .child(
+                div()
+                    .id("add-project-path")
+                    .aria_label(path.clone())
+                    .mono(12.)
+                    .text_color(p.faint)
+                    .child(path)
+                    .test_support(),
+            )
+            // Another folder opened: its list rises in where the last one was.
+            .child(enter(
+                ElementId::Name(format!("add-project-list-{}", browsed.path).into()),
+                0,
+                div()
+                    .child(list)
+                    .child(presence_of("add-project-empty", empty, move |line| {
+                        div()
+                            .id("add-project-empty")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.faint)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    })),
+            ))
+            .into_any_element()
+    }
+}
+
 impl Render for AddProject {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = crate::machines::shown_machine(cx);
+        if self.drawn_for != shown {
+            // A folder of one machine is no folder of another.
+            self.drawn_for = shown.clone();
+            for field in [&self.folder, &self.name] {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+            self.changed(cx);
+        }
         let p = palette(cx);
         let this = cx.entity().downgrade();
         // Folding away, the result still shows what it held.
@@ -340,76 +697,78 @@ impl Render for AddProject {
             )
             .into_any_element(),
             None => Button::primary("add-project-next", "Add project")
-                .disabled(self.detected.is_none())
+                .disabled(self.detected.is_none() || crate::machines::held(cx).is_some())
                 .on_click(cx.listener(|this, _, _, cx| this.next(cx)))
                 .into_any_element(),
         };
-        Modal::new("add-project-modal", "Add a project")
+        let title = match (self.step, &shown) {
+            (Step::Folder, Some(machine)) => format!("Add a project on {machine}"),
+            _ => "Add a project".to_owned(),
+        };
+        let modal = Modal::new("add-project-modal", SharedString::from(title))
             .open(self.open)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
-            })
+            });
+        if self.step == Step::Machine {
+            // Each step enters as it is shown, where the other was.
+            return modal
+                .child(enter(
+                    "add-project-step-machine",
+                    0,
+                    self.machine_choice(cx),
+                ))
+                .action(
+                    Button::primary("add-project-step-next", "Next: pick the folder")
+                        .on_click(cx.listener(|this, _, _, cx| this.go_to_step(Step::Folder, cx))),
+                );
+        }
+        let body = div()
+            .flex()
+            .flex_col()
             .child(
-                // The body's gap is the kit's: the blocks sit in a column of their own, after the
-                // lines that are always there, with the space above them themselves.
                 div()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(space::LG)
-                            .child(div().text_size(px(12.5)).text_color(p.mute).child(
-                                "A folder that is a Git repository, or holds some one or two \
-                                 levels down. Nothing is written in it.",
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(space::SM)
-                                    .child(div().flex_1().child(field_frame(
-                                        "add-project-folder",
-                                        &self.folder,
-                                        cx,
-                                    )))
-                                    .child(
-                                        Button::secondary("add-project-browse", "Browse…")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.browse(window, cx)
-                                            })),
-                                    ),
-                            )
-                            .child(field_frame("add-project-name", &self.name, cx)),
-                    )
-                    .child(
-                        presence(
-                            "add-project-looking",
-                            self.detecting,
-                            div()
-                                .id("add-project-looking")
-                                .mono(11.5)
-                                .text_color(p.faint)
-                                .child("Looking…")
-                                .test_support(),
-                        )
-                        .space(space::LG),
-                    )
-                    .child(
-                        presence(
-                            "add-project-found",
-                            self.detected.is_some(),
-                            div().children(detected),
-                        )
-                        .space(space::LG),
-                    )
-                    .child(problem_line(
-                        "add-project-error",
-                        self.error.clone(),
-                        space::LG,
-                        cx,
-                    )),
+                    .gap(space::LG)
+                    .child(self.folder_choice(cx))
+                    .child(field_frame("add-project-name", &self.name, cx)),
             )
-            .action(action)
+            .child(
+                presence(
+                    "add-project-looking",
+                    self.detecting,
+                    div()
+                        .id("add-project-looking")
+                        .mono(11.5)
+                        .text_color(p.faint)
+                        .child("Looking…")
+                        .test_support(),
+                )
+                .space(space::LG),
+            )
+            .child(
+                presence(
+                    "add-project-found",
+                    self.detected.is_some(),
+                    div().children(detected),
+                )
+                .space(space::LG),
+            )
+            .child(problem_line(
+                "add-project-error",
+                self.error.clone(),
+                space::LG,
+                cx,
+            ));
+        let modal = modal.child(enter("add-project-step-folder", 0, body));
+        let modal = match self.asks_machine {
+            true => modal.action(
+                Button::secondary("add-project-back", "Back")
+                    .on_click(cx.listener(|this, _, _, cx| this.go_to_step(Step::Machine, cx))),
+            ),
+            false => modal,
+        };
+        modal.action(action)
     }
 }

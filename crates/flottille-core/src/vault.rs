@@ -19,10 +19,15 @@ pub struct Entry {
     pub project: Option<String>,
     /// Milliseconds since the Unix epoch.
     pub updated_at: u64,
-    /// The one use that reads it (`worklog:<project>`, `connection:<name>`); any feature that
+    /// The one use that reads it (`worklog:<project>`, `connection:<name>`,
+    /// `file:<project>/<path>`); any feature that
     /// names it when `None`.
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub bound: Option<String>,
+    /// The machine of the user's it was shared from: a copy of that machine's entry, not kept in
+    /// sync (`docs/remote.md`, "Vault entries"); `None` for this machine's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_from: Option<String>,
 }
 
 /// The use of the worklog of `project`: the token its tracker logs time with.
@@ -33,6 +38,12 @@ pub fn worklog(project: &str) -> String {
 /// The use of the connection `name`: what its server is given.
 pub fn connection(name: &str) -> String {
     format!("connection:{name}")
+}
+
+/// The use of the file `path` of the project `project`, as its setup copies it: what a launch on
+/// another machine lays from the entry (`docs/remote.md`, "What travels"), and nothing else.
+pub fn file_use(project: &str, path: &str) -> String {
+    format!("file:{project}/{path}")
 }
 
 /// What the daemon says when the server of a connection asks to be signed in (a `401`), and the
@@ -69,6 +80,10 @@ pub fn use_said(bound: &str) -> Option<String> {
             Some(format!("the worklog of the project {project}"))
         }
         ("connection", name) if !name.is_empty() => Some(format!("the connection {name}")),
+        ("file", file) => file
+            .split_once('/')
+            .filter(|(project, path)| !project.is_empty() && !path.is_empty())
+            .map(|(project, path)| format!("the file {path} of the project {project}")),
         _ => None,
     }
 }
@@ -82,6 +97,9 @@ pub fn use_stops(bound: &str) -> Option<String> {
         ("connection", name) if !name.is_empty() => {
             Some(format!("the connection {name} can no longer start"))
         }
+        ("file", file) => file.split_once('/').map(|(project, path)| {
+            format!("a launch on another machine can no longer lay {path} of {project}")
+        }),
         _ => None,
     }
 }
@@ -108,7 +126,8 @@ impl Entry {
     /// As every client and tool shows it: its metadata, each field present.
     pub fn to_json(&self) -> Value {
         json!({"name": self.name, "description": self.description, "url": self.url,
-            "username": self.username, "project": self.project, "for": self.bound})
+            "username": self.username, "project": self.project, "for": self.bound,
+            "shared_from": self.shared_from})
     }
 }
 

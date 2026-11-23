@@ -3,7 +3,7 @@
 //! its composer too, and its state line says it once; a failed root whose session is known shows
 //! Resume. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

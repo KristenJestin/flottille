@@ -555,6 +555,7 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         message,
         images: Vec::new(),
         texts: Vec::new(),
+        upload: None,
     };
     let started = ask(paths, "agent.start", &asked)?;
     let agent = &started["agent"];
@@ -586,6 +587,7 @@ fn agent_send(paths: &Paths, args: Value) -> Done {
             message: asked.message,
             images: Vec::new(),
             texts: Vec::new(),
+            upload: None,
             compact: None,
         },
     )
@@ -974,6 +976,7 @@ fn events_since(paths: &Paths, args: Value) -> Done {
         .watch(WatchParams {
             after: Some(after),
             client: None,
+            forge: None,
         })
         .map_err(failure)?;
     let last = Client::connect_or_start(paths)

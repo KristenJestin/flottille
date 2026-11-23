@@ -2,7 +2,7 @@
 //! standing on a fake ACP agent of its own, the provider, model and effort chosen per agent and
 //! checked against the providers enabled and ready and the models they offer. No real agent runs.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -253,11 +253,12 @@ fn an_unknown_model_is_refused_naming_the_provider_s_models() {
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
     project(&user);
 
-    // Before any session the models are not known: the agent fails once its session says so,
-    // and what it offered is kept.
+    // Before any session the models are not known: the agent's session says what it offers,
+    // which is kept, and it starts on the default instead (#1076).
     let first = id(&start(&user, json!({"message": "hello", "model": "fake-huge"})).unwrap());
-    eventually("the first agent failing", || {
-        agent(&user, &first)["state"] == "failed"
+    eventually("the first agent on the default", || {
+        agent(&user, &first)["state"] == "idle"
+            && agent(&user, &first)["taken"]["model"] == "fake-small"
     });
 
     let (code, message) =

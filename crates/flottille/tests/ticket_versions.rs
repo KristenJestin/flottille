@@ -4,7 +4,7 @@
 //! (`crates/flottille-fake-acli`); the remotes are throwaway bare repositories; the escalating
 //! programs are fakes, first on the daemon's `PATH`, and none runs.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -314,7 +314,7 @@ fn milestones_say_what_acli_printed_when_it_prints_no_versions() {
 }
 
 #[test]
-fn create_sets_a_work_item_s_fix_version_and_edit_and_removal_are_refused() {
+fn create_sets_a_work_item_s_fix_version_by_its_name_or_its_id() {
     let user = user();
     on_jira(&user);
     user.acli_script(json!({"versions": versions(), "created": "ABC-7",
@@ -372,21 +372,6 @@ fn create_sets_a_work_item_s_fix_version_and_edit_and_removal_are_refused() {
         last["files"][0]["json"]["additionalAttributes"]["fixVersions"],
         json!([{"name": "1.1"}])
     );
-
-    // A work item already made is not moved: acli's edit takes no custom field, so no fix
-    // version, and nothing is asked of the user, nothing run.
-    let before = acli_calls(&user).len();
-    for args in [
-        json!({"action": "edit", "ticket": "ABC-1", "milestone": "1.0"}),
-        json!({"action": "edit", "ticket": "ABC-1", "remove_milestone": true}),
-    ] {
-        let said = refused_at_once(&user, &mcp, args.clone());
-        for word in ["acli", "edit", "fix version", "Jira"] {
-            assert!(said.contains(word), "{args}: {word}: {said}");
-        }
-        assert!(said.contains("nothing was written"), "{said}");
-    }
-    assert_eq!(acli_calls(&user).len(), before, "{:?}", acli_calls(&user));
 }
 
 #[test]

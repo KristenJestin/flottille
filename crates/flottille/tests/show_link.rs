@@ -3,7 +3,7 @@
 //! agent is a fake ACP agent, in throwaway repositories and temporary XDG folders; the programs
 //! that open a link on a desktop are fakes first on `PATH`, and none of them may have run.
 
-mod common;
+use crate::common;
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};

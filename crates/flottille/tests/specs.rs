@@ -4,7 +4,7 @@
 //! statuses, its lock, its mode and its tickets. Temporary XDG folders, throwaway projects, a Jira
 //! tracker that is declared and never read.
 
-mod common;
+use crate::common;
 
 use common::User;
 use common::mcp::Mcp;

@@ -3,7 +3,7 @@
 //! or not, and what to do when not. Fakes of the three, a PATH of the test's own and temporary XDG
 //! folders: no real `gh`, `bkt` nor `acli` is ever run, and none of their folders is read.
 
-mod common;
+use crate::common;
 
 use common::User;
 use serde_json::{Value, json};
@@ -81,7 +81,15 @@ fn doctor_lists_the_forge_and_tracker_programs_the_projects_use() {
     // `bkt` is asked once for each host the projects use: the contexts decide.
     assert_eq!(entry(&report, "bkt", "bitbucket.org")["signed_in"], true);
     assert_eq!(entry(&report, "bkt", "git.example.com")["signed_in"], true);
-    assert_eq!(report["warnings"], json!([]), "{report}");
+    // No git in its `PATH`: doctor says no push is lifted, and nothing else.
+    let warnings = report["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{report}");
+    assert!(
+        warnings[0]
+            .to_string()
+            .contains("no git of the daemon's PATH"),
+        "{report}"
+    );
 
     assert!(text.contains("Forges and trackers"), "{text}");
     for word in ["gh", "bkt", "acli", "bitbucket.org", "git.example.com"] {

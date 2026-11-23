@@ -165,6 +165,25 @@ pub(crate) async fn has_context(host: &str) -> Result<bool, String> {
     Ok(list().await?.iter().any(|context| on_host(context, host)))
 }
 
+/// Whether `bkt context list --json`'s answer names a context on `host` (`sign_in`).
+pub(crate) fn lists_host(listed: &Value, host: &str) -> bool {
+    listed["contexts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|context| context["host"].as_str())
+        .any(|named| {
+            on_host(
+                &Context {
+                    name: String::new(),
+                    host: named.to_owned(),
+                    active: false,
+                },
+                host,
+            )
+        })
+}
+
 /// A host key without its port, lowercase.
 fn hostname(key: &str) -> String {
     key.split(':').next().unwrap_or(key).to_ascii_lowercase()
@@ -970,14 +989,34 @@ async fn statuses_of(forge: &Forge, context: &str, id: &str) -> Result<Vec<Value
             ));
         }
     };
-    if statuses
+    let statuses = if statuses
         .iter()
         .any(|s| build_of(forge, s["url"].as_str()).is_some())
         && let Some(pipelines) = recent_pipelines(forge, context).await
     {
-        return Ok(counted(forge, statuses, &pipelines));
-    }
-    Ok(statuses)
+        counted(forge, statuses, &pipelines)
+    } else {
+        statuses
+    };
+    Ok(latest(forge, statuses))
+}
+
+/// Each check of the head once, its latest status (`super::latest`, by when it was made): another
+/// CI that posts a status per run of the same check. A pipeline's step is a check of that build
+/// alone: `counted` already keeps the latest build of each pipeline, and two pipelines that both
+/// count (a branch's and a pull request's, two destinations) are two checks.
+fn latest(forge: &Forge, statuses: Vec<Value>) -> Vec<Value> {
+    let check = |status: &Value| {
+        let build = build_of(forge, status["url"].as_str());
+        // By its key, which Bitbucket keeps one status of: two jobs showing one name are two checks.
+        let key = status["key"].as_str().or(status["name"].as_str());
+        format!("{}\0{build:?}", key.unwrap_or("check"))
+    };
+    let made = |status: &Value| match &status["created_on"] {
+        Value::String(at) => crate::session_read::form(at),
+        _ => status["dateAdded"].as_u64(),
+    };
+    super::latest(statuses, check, made)
 }
 
 /// The newest 50 pipelines of a Cloud repository, as the API gives them; none on Data Center and

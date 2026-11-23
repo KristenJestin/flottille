@@ -5,7 +5,7 @@
 //! fake ACP agents (`crates/flottille-fake-agent`), in throwaway repositories and temporary XDG
 //! folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -577,6 +577,34 @@ fn in_full_writing_bashrc_is_refused() {
 }
 
 #[test]
+fn in_full_writing_a_curlrc_is_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    // What every `curl` of the user reads: a `proxy` there would serve the update another build.
+    for curlrc in [user.path("home/.curlrc"), user.path("config/curlrc")] {
+        for (tool, args) in [
+            (
+                "fs_write",
+                json!({"path": curlrc, "content": "proxy = \"http://127.0.0.1:9\"\n"}),
+            ),
+            (
+                "run",
+                json!({"line": format!("cp README.md {}", curlrc.display())}),
+            ),
+        ] {
+            let said = refused(mcp.call(tool, args.clone()));
+            assert!(said.contains("startup"), "{args}: {said}");
+        }
+        assert!(!curlrc.exists(), "{} was written", curlrc.display());
+    }
+    assert!(no_request(&user));
+}
+
+#[test]
 fn in_full_systemd_run_and_tmux_are_refused() {
     let user = User::with_fake_agent()
         .with_allowing_judge()
@@ -723,7 +751,11 @@ fn a_run_cannot_read_the_user_s_runtime_folder() {
     let kept = read(&note);
     let open = read(&elsewhere);
 
-    assert!(kept.contains("PermissionError"), "{kept}");
+    // Denied by Landlock, or not there at all where the run's namespace empties the folder.
+    assert!(
+        kept.contains("PermissionError") || kept.contains("FileNotFoundError"),
+        "{kept}"
+    );
     assert!(!kept.contains("kept from runs"), "{kept}");
     assert!(open.contains("open to runs"), "{open}");
 }

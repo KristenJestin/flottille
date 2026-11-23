@@ -34,6 +34,10 @@ const BATCH: usize = 500;
 pub struct SessionRead {
     /// Left out: the caller's own session.
     pub session: Option<String>,
+    /// Another registered project, whose root sessions a title is matched among
+    /// (`session_name`): by then `session` is the id.
+    #[allow(dead_code)]
+    pub project: Option<String>,
     pub last: Option<u64>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -67,21 +71,17 @@ fn failed(error: impl std::fmt::Display) -> Outcome {
     Outcome::Failed(error.to_string())
 }
 
-/// The session `session_read` reads, or the refusal: a root of the caller's project, other than
-/// the caller (whose own, or none given, is answered with its mode, `own_mode`).
-pub fn session_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome> {
+/// The session `session_read` reads, or the refusal: a root, of the caller's project or another,
+/// other than the caller (whose own, or none given, is answered with its mode, `own_mode`).
+pub fn session_of(daemon: &Daemon, id: &str) -> Result<Agent, Outcome> {
     let session = daemon
         .read(|store| store.agent(id))
         .map_err(failed)?
+        // A caller of another machine stood in for here runs nothing: it is no session.
+        .filter(|agent| !crate::across::is_stand_in(&agent.id))
         .ok_or_else(|| refused(format!("refused: there is no session {id}")))?;
-    if session.project != caller.project {
-        return Err(refused(format!(
-            "refused: {id} is a session of another project, {}, not of {}: an agent reads only \
-             the sessions of its own project",
-            session.project, caller.project
-        )));
-    }
-    if session.parent.is_some() {
+    // A child an agent of another machine launched here has no parent here, and is one.
+    if session.parent.is_some() || crate::across::remote_child(daemon, &session) {
         return Err(refused(format!(
             "refused: {} is a child agent, not a session: its parent reads its conversation \
              (agent_status, action conversation)",
@@ -89,6 +89,32 @@ pub fn session_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Ou
         )));
     }
     Ok(session)
+}
+
+/// Whether a read of another project's session asks the user's leave: one the caller did not
+/// start, read for the first time, is the user's other conversation in another project; the
+/// leave, once per pair, lets the caller read and write to it from then on (`docs/tools.md`,
+/// "Sessions that read each other"). A read the tool refuses asks nothing.
+pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
+    let Ok(read) = serde_json::from_value::<SessionRead>(args.clone()) else {
+        return false;
+    };
+    let Ok(caller) = caller_of(daemon, grant) else {
+        return false;
+    };
+    let Some(id) = other(&read, &caller) else {
+        return false;
+    };
+    match session_of(daemon, id) {
+        Ok(session) => {
+            session.project != caller.project
+                && session.launched_by.as_deref() != Some(caller.id.as_str())
+                && !daemon
+                    .read(|store| store.has_leave(&caller.id, &session.id))
+                    .unwrap_or(false)
+        }
+        Err(_) => false,
+    }
 }
 
 /// The session the request names when it is not the caller's own: no `session`, or the caller's
@@ -159,7 +185,7 @@ pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>,
     let Some(id) = other(&read, &caller) else {
         return Ok(Vec::new());
     };
-    let session = session_of(daemon, &caller, id)?;
+    let session = session_of(daemon, id)?;
     let page = asked(&read)?;
     let which = match &page.reading {
         _ if read.cursor.is_some() => "the next page of a reading it began".to_owned(),
@@ -178,9 +204,27 @@ pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>,
             ),
         },
     };
+    if session.project == caller.project {
+        return Ok(vec![format!(
+            "Read the conversation of the session {}, another session of this project: {which}",
+            named(&session)
+        )]);
+    }
+    if needs_leave(daemon, grant, args) {
+        let (reader, reached) = crate::tree::sessions_across(daemon, &caller, &session);
+        return Ok(vec![format!(
+            "Let the session {reader} read and write to {reached}, from now on without asking \
+             you; read now: {which}"
+        )]);
+    }
     Ok(vec![format!(
-        "Read the conversation of the session {}, another session of this project: {which}",
-        named(&session)
+        "Read the conversation of the session {} of project {}, {}: {which}",
+        named(&session),
+        session.project,
+        match session.launched_by.as_deref() == Some(caller.id.as_str()) {
+            true => "which this agent started",
+            false => "which the user let this agent read and write to",
+        }
     )])
 }
 
@@ -198,7 +242,7 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
     let Some(id) = other(&read, &caller) else {
         return Ok(own_mode(daemon, &caller));
     };
-    let session = session_of(daemon, &caller, id)?;
+    let session = session_of(daemon, id)?;
     let asked = asked(&read)?;
     // Each message is masked of the secrets of the session's place and of the reader's before it
     // is cut: masking the page afterwards would leave the start of a secret the cut went through.

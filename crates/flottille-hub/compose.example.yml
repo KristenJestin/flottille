@@ -1,0 +1,37 @@
+# Flottille's hub with docker compose (docs/releases.md, "What CI publishes").
+#
+#   FLOTTILLE_HUB_IMAGE=ghcr.io/<owner>/<repository>-hub:<version> docker compose -f compose.example.yml up -d
+#
+# The first start makes the hub's key. Each device then pairs in pair mode, run beside the hub
+# that runs, which prints a code and its QR for one device:
+#
+#   docker compose -f compose.example.yml exec hub /flottille-hub --state /var/lib/flottille-hub pair \
+#     --public-url https://hub.example.net
+#
+# (the address the devices reach the hub at, through the proxy: the image listens on every address,
+# which no device dials).
+#
+# Its log: docker compose -f compose.example.yml logs hub
+#
+# The image listens plain, for a reverse proxy that holds the certificate: the port is published on
+# the host's loopback only, and the proxy (Caddy, nginx, Traefik) must pass HTTP upgrades on, as it
+# does for a WebSocket. Open 443 on the host for the proxy; open nothing for the hub itself. Wanting
+# the hub reached directly, mount a certificate, give `command: ["--listen", "0.0.0.0:7448",
+# "--tls-cert", "/tls/cert.pem", "--tls-key", "/tls/key.pem", "--state", "/var/lib/flottille-hub"]`
+# and publish "7448:7448".
+services:
+  hub:
+    image: ${FLOTTILLE_HUB_IMAGE:?set FLOTTILLE_HUB_IMAGE to the hub image, ghcr.io/owner/repository-hub:version}
+    restart: unless-stopped
+    # The hub writes its state volume only, and needs no privilege.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:7448:7448"
+    volumes:
+      # The hub's key and its member list: lose it and every device is paired again.
+      - flottille-hub-state:/var/lib/flottille-hub
+
+volumes:
+  flottille-hub-state:

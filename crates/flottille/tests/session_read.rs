@@ -4,7 +4,7 @@
 //! another project. Against the real daemon with the fake ACP agent, throwaway repositories,
 //! temporary XDG folders and a clock the tests move ahead.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 
@@ -468,7 +468,7 @@ fn reading_another_session_says_its_mode() {
 }
 
 #[test]
-fn a_session_of_another_project_cannot_be_read() {
+fn a_session_of_another_project_is_read_only_with_the_user_s_leave() {
     let user = user();
     project(&user, "app");
     project(&user, "other");
@@ -476,20 +476,19 @@ fn a_session_of_another_project_cannot_be_read() {
     let (elsewhere, _) = root(&user, "other", "M1");
     let judged = judge_prompts(&user);
 
-    let refused = mcp.call("session_read", json!({"session": elsewhere}));
+    // Not refused since #1058: held for the user's leave, and nothing of it is read meanwhile.
+    let held = mcp.call("session_read", json!({"session": elsewhere}));
 
-    assert!(refused.error, "{}", refused.text);
+    assert!(!held.error, "{}", held.text);
     assert!(
-        refused.text.starts_with(&format!(
-            "refused: {elsewhere} is a session of another project, other, not of app: an agent \
-             reads only the sessions of its own project"
-        )),
+        held.text
+            .starts_with("Waiting for the user's approval, request #"),
         "{}",
-        refused.text
+        held.text
     );
-    assert!(!refused.text.contains("R1"), "{}", refused.text);
+    assert!(!held.text.contains("R1"), "{}", held.text);
     assert_eq!(judge_prompts(&user), judged, "the judge was asked");
-    assert!(no_request(&user));
+    assert!(!no_request(&user));
 }
 
 #[test]

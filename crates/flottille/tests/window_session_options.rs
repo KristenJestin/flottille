@@ -2,7 +2,7 @@
 //! in front of a real daemon whose agent is the fake ACP agent, with a throwaway user. No window
 //! opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -139,10 +139,42 @@ fn open_session<'a>(
     settle(cx);
     cx.update(|window, cx| window.click(session_id(agent), cx));
     until(&shell, cx, "the session's composer shows its model", |cx| {
-        has("session-model-picker", cx)
+        has("session-agent-picker", cx)
     });
     settle(cx);
     (shell, cx)
+}
+
+/// What the session's one picker says closed: `Provider · Model · effort`.
+fn said(cx: &mut VisualTestContext) -> String {
+    label("session-agent-picker", cx).unwrap_or_default()
+}
+
+/// The effort the picker says: the third part of its label, none when it has no effort.
+fn effort_said(cx: &mut VisualTestContext) -> String {
+    said(cx).split(" · ").nth(2).unwrap_or_default().to_owned()
+}
+
+/// Opens the picker's menu when it is closed.
+fn open_menu(cx: &mut VisualTestContext) {
+    if !has("session-agent-picker-menu", cx) {
+        cx.update(|window, cx| window.click("session-agent-picker", cx));
+        settle(cx);
+    }
+}
+
+/// Closes the picker's menu when it is open (a model with efforts leaves it open).
+fn close_menu(cx: &mut VisualTestContext) {
+    if has("session-agent-picker-backdrop", cx) {
+        cx.update(|window, cx| {
+            window.click_at(
+                "session-agent-picker-backdrop",
+                gpui_kit::point(px(4.), px(4.)),
+                cx,
+            )
+        });
+        settle(cx);
+    }
 }
 
 fn options(
@@ -157,50 +189,45 @@ fn options(
 }
 
 #[gpui_kit::test]
-fn the_session_composer_offers_the_model_and_effort_not_the_provider(cx: &mut TestAppContext) {
+fn the_session_composer_offers_the_model_and_effort_of_its_provider_only(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     let id = start(&user, "hello", true);
     let (shell, cx) = open_session(&user, &id, cx);
-    until(&shell, cx, "the efforts are offered", |cx| {
-        has("session-effort-picker", cx)
+    until(&shell, cx, "the efforts are said", |cx| {
+        !effort_said(cx).is_empty()
     });
 
-    assert!(has("session-model-picker", cx));
-    assert!(has("session-effort-picker", cx));
+    // One picker says the three, the provider first; no other provider is offered, a session
+    // never changes its provider.
     assert!(
-        !has("session-provider-picker", cx) && !has("provider-picker", cx),
-        "the provider is shown, not picked"
+        said(cx).to_lowercase().starts_with("claude · "),
+        "the provider is named: {}",
+        said(cx)
     );
-    assert!(
-        label("reply-provider", cx).is_some_and(|label| label.eq_ignore_ascii_case("claude")),
-        "the provider is named"
-    );
-    cx.update(|window, cx| window.click("session-model-picker", cx));
+    open_menu(cx);
     until(&shell, cx, "the models are offered", |cx| {
-        has("model-choice-fake-large", cx)
+        has("session-agent-picker-model-claude-fake-large", cx)
     });
-    assert!(has("model-choice-fake-small", cx));
-    cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    assert!(has("session-agent-picker-model-claude-fake-small", cx));
+    assert!(has("session-agent-picker-provider-claude", cx));
+    assert!(!has("session-agent-picker-provider-opencode", cx));
+    cx.update(|window, cx| window.click("session-agent-picker-model-claude-fake-large", cx));
     eventually("the model is set on the agent", || {
         shown(&user, &id)["taken"]["model"] == "fake-large"
     });
     until(&shell, cx, "the picker says the new model", |cx| {
-        options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large"))
+        said(cx).contains("fake-large")
     });
     until(&shell, cx, "the new model's efforts are offered", |cx| {
-        has("session-effort-picker", cx)
+        has("session-agent-picker-effort-high", cx)
     });
-    cx.update(|window, cx| window.click("session-effort-picker", cx));
-    until(&shell, cx, "the efforts are listed", |cx| {
-        has("effort-choice-high", cx)
-    });
-    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    cx.update(|window, cx| window.click("session-agent-picker-effort-high", cx));
     eventually("the effort is set on the agent", || {
         shown(&user, &id)["taken"]["effort"] == "high"
     });
     until(&shell, cx, "the picker says the new effort", |cx| {
-        options(&shell, &id, cx).read_with(cx, |o, _| o.effort_shown().contains("high"))
+        effort_said(cx) == "high"
     });
     settle(cx);
     assert_eq!(
@@ -211,7 +238,7 @@ fn the_session_composer_offers_the_model_and_effort_not_the_provider(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn the_effort_picker_comes_when_the_efforts_are_learned_after_the_window_opened(
+fn the_effort_comes_into_the_label_when_the_efforts_are_learned_after_the_window_opened(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -220,14 +247,14 @@ fn the_effort_picker_comes_when_the_efforts_are_learned_after_the_window_opened(
     project(&user, "app");
     let id = start(&user, "hello", true);
     let (shell, cx) = open_session(&user, &id, cx);
-    assert!(!has("session-effort-picker", cx));
+    assert_eq!(effort_said(cx), "", "no effort in the label");
 
     // Another session says the efforts of the model: the window reads them once drawn, as on a
     // machine slow enough to read the providers after the first frame.
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
     start(&user, "again", true);
     until(&shell, cx, "the efforts are offered", |cx| {
-        has("session-effort-picker", cx)
+        !effort_said(cx).is_empty()
     });
 }
 
@@ -241,11 +268,7 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
     eventually("the turn runs", || shown(&user, &id)["state"] == "working");
     let (shell, cx) = open_session(&user, &id, cx);
 
-    cx.update(|window, cx| window.click("session-model-picker", cx));
-    until(&shell, cx, "the models are offered", |cx| {
-        has("model-choice-fake-large", cx)
-    });
-    cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    pick_model(&shell, "fake-large", cx);
     until(&shell, cx, "the pending mark shows", marked);
 
     // The mark may come from the window's own echo: the daemon's record is what is waited for,
@@ -255,7 +278,7 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
     });
     assert_eq!(shown(&user, &id)["state"], "working");
     assert!(
-        options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large")),
+        said(cx).contains("fake-large"),
         "the picker already says the model asked"
     );
     assert!(marked(cx), "the mark stays while the turn is held");
@@ -285,12 +308,15 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, Str
 }
 
 fn pick_model(shell: &Entity<Shell>, model: &str, cx: &mut VisualTestContext) {
-    cx.update(|window, cx| window.click("session-model-picker", cx));
-    let choice = format!("model-choice-{model}");
+    open_menu(cx);
+    let choice = format!("session-agent-picker-model-claude-{model}");
     until(shell, cx, "the models are offered", |cx| {
         has(choice.clone(), cx)
     });
     cx.update(|window, cx| window.click(choice.clone(), cx));
+    // A model with efforts leaves the menu open: the change is what is looked at.
+    settle(cx);
+    close_menu(cx);
 }
 
 #[gpui_kit::test]
@@ -332,11 +358,10 @@ fn a_change_made_from_the_command_line_shows_in_the_session_s_pickers(cx: &mut T
 
     until(&shell, cx, "the pickers say the change", |cx| {
         settle(cx);
-        options(&shell, &id, cx).read_with(cx, |o, _| {
-            o.shown().contains("fake-large")
-                && o.model_shown().contains("fake-large")
-                && o.effort_shown().contains("high")
-        }) && !marked(cx)
+        options(&shell, &id, cx).read_with(cx, |o, _| o.shown().contains("fake-large"))
+            && said(cx).contains("fake-large")
+            && effort_said(cx) == "high"
+            && !marked(cx)
     });
 }
 
@@ -368,8 +393,7 @@ fn a_change_the_session_refuses_is_said_in_a_toast_naming_what_it_offers(cx: &mu
         "the picker is back on the model it runs",
         |cx| {
             settle(cx);
-            options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-small"))
-                && !marked(cx)
+            said(cx).contains("fake-small") && !marked(cx)
         },
     );
 }
@@ -387,8 +411,7 @@ fn a_change_made_elsewhere_during_a_turn_is_said_pending_until_it_is_set(cx: &mu
 
     until(&shell, cx, "the pending mark shows", |cx| {
         settle(cx);
-        marked(cx)
-            && options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large"))
+        marked(cx) && said(cx).contains("fake-large")
     });
     std::fs::write(user.path("fake/release"), "").unwrap();
     until(&shell, cx, "the mark is cleared once it is set", |cx| {
@@ -398,19 +421,19 @@ fn a_change_made_elsewhere_during_a_turn_is_said_pending_until_it_is_set(cx: &mu
     });
 }
 
-/// Whether a picker carries the mark of a change waiting.
+/// Whether the picker carries the mark of a change waiting.
 fn marked(cx: &mut VisualTestContext) -> bool {
-    has("session-model-pending", cx) || has("session-effort-pending", cx)
+    has("session-agent-pending", cx)
 }
 
-/// How opaque the model picker's mark is drawn in the last frame: the alpha of the accent quad
+/// How opaque the picker's mark is drawn in the last frame: the alpha of the accent quad
 /// painted where it is; `None` when it is not drawn.
-fn model_mark_opacity(cx: &mut VisualTestContext) -> Option<f32> {
+fn mark_opacity(cx: &mut VisualTestContext) -> Option<f32> {
     cx.update(|window, cx| {
         let acc = gpui_design_system::palette(cx).acc;
         let scale = window.scale_factor();
         let bounds = window
-            .try_find("session-model-pending")?
+            .try_find("session-agent-pending")?
             .bounds()
             .scale(scale);
         window
@@ -465,27 +488,21 @@ fn a_pending_change_is_marked_on_its_picker(cx: &mut TestAppContext) {
     let (shell, cx) = open_session(&user, &id, cx);
     assert!(!marked(cx), "nothing waits");
 
-    pick_model(&shell, "fake-large", cx);
-    // The mark fades in: drawn at once, not yet whole.
-    until(&shell, cx, "the model's picker is marked", |cx| {
-        has("session-model-pending", cx)
-    });
-    let fading = model_mark_opacity(cx).expect("the mark is painted");
+    // Chosen and looked at at once, the menu left open: the mark fades in, not yet whole.
+    open_menu(cx);
+    let choice = "session-agent-picker-model-claude-fake-large";
+    until(&shell, cx, "the models are offered", |cx| has(choice, cx));
+    cx.update(|window, cx| window.click(choice, cx));
+    until(&shell, cx, "the picker is marked", marked);
+    let fading = mark_opacity(cx).expect("the mark is painted");
     assert!(0.0 < fading && fading < 1.0, "part way in: {fading}");
     assert!(
-        !has("session-effort-pending", cx),
-        "only the picker changed"
-    );
-    assert!(
-        options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large")),
+        said(cx).contains("fake-large"),
         "the picker says the model asked"
     );
     settle(cx);
-    assert!(
-        has("session-model-pending", cx),
-        "the mark stays while the change waits"
-    );
-    assert_eq!(model_mark_opacity(cx), Some(1.0), "whole once settled");
+    assert!(marked(cx), "the mark stays while the change waits");
+    assert_eq!(mark_opacity(cx), Some(1.0), "whole once settled");
 
     std::fs::write(user.path("fake/release"), "").unwrap();
     until(&shell, cx, "the mark leaves once the change is set", |cx| {
@@ -501,30 +518,8 @@ fn a_pending_change_is_marked_on_its_picker(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui_kit::test]
-fn the_picker_s_menu_says_when_a_change_applies(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "app");
-    let id = start(&user, "hello", true);
-    let (shell, cx) = open_session(&user, &id, cx);
-    let o = options(&shell, &id, cx);
-    let first = |cx: &mut VisualTestContext| {
-        o.read_with(cx, |o, _| {
-            o.entries(flottille_window::composer::Menu::Model)
-        })[0]
-            .label
-            .clone()
-    };
-    // The models arrive from the daemon after the composer shows.
-    until(&shell, cx, "the model menu has its models", |cx| {
-        o.read_with(cx, |o, _| {
-            !o.entries(flottille_window::composer::Menu::Model)
-                .is_empty()
-        })
-    });
-    assert_ne!(first(cx), flottille_window::session_options::WITH_NEXT);
-
-    // The tree says a change waits, the agent between turns.
+/// The tree says a change waits (`pending`), `working` or not.
+fn waiting(o: &Entity<SessionOptions>, working: bool, cx: &mut VisualTestContext) {
     o.update(cx, |o, cx| {
         o.set_runs(
             flottille_window::session_options::Runs {
@@ -535,81 +530,34 @@ fn the_picker_s_menu_says_when_a_change_applies(cx: &mut TestAppContext) {
                     model: Some("fake-large".into()),
                     effort: None,
                 },
-                working: false,
+                working,
             },
             cx,
         )
     });
-    assert_eq!(first(cx), flottille_window::session_options::WITH_NEXT);
-    let entry = o.read_with(cx, |o, _| {
-        o.entries(flottille_window::composer::Menu::Model)
-    })[0]
-        .clone();
-    assert!(entry.pick.is_none(), "the line picks nothing");
+    settle(cx);
 }
 
 #[gpui_kit::test]
-fn only_the_picker_whose_change_waits_says_when_it_applies(cx: &mut TestAppContext) {
+fn the_mark_of_a_change_says_when_it_applies(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     let id = start(&user, "hello", true);
     let (shell, cx) = open_session(&user, &id, cx);
     let o = options(&shell, &id, cx);
-    // An effort change waits, the model's does not.
-    o.update(cx, |o, cx| {
-        o.set_runs(
-            flottille_window::session_options::Runs {
-                provider: "claude".into(),
-                model: Some("fake-small".into()),
-                effort: Some("low".into()),
-                pending: flottille_window::session_link::Pending {
-                    model: None,
-                    effort: Some("high".into()),
-                },
-                working: false,
-            },
-            cx,
-        )
-    });
-    let first = |menu, cx: &mut VisualTestContext| {
-        o.read_with(cx, |o, _| o.entries(menu))
-            .first()
-            .map(|e| e.label.clone())
-    };
-    let with_next = Some(flottille_window::session_options::WITH_NEXT.to_owned());
-    assert_ne!(
-        first(flottille_window::composer::Menu::Model, cx),
-        with_next
-    );
-    assert_eq!(
-        first(flottille_window::composer::Menu::Effort, cx),
-        with_next
-    );
-}
+    assert!(!marked(cx), "nothing waits");
 
-#[gpui_kit::test]
-fn the_line_that_says_when_a_change_applies_does_not_answer_the_pointer(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "app");
-    let id = start(&user, "slow", false);
-    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
-    let (shell, cx) = open_session(&user, &id, cx);
-    pick_model(&shell, "fake-large", cx);
-    until(&shell, cx, "the change is marked", |cx| {
-        settle(cx);
-        marked(cx)
-    });
-    cx.update(|window, cx| window.click("session-model-picker", cx));
-    until(&shell, cx, "the menu says when it applies", |cx| {
-        has("session-options-applies", cx)
-    });
-    settle(cx);
-    cx.update(|window, cx| window.hover("session-options-applies", cx));
-    cx.run_until_parked();
+    // The agent between turns: the change applies with the next message.
+    waiting(&o, false, cx);
     assert_eq!(
-        cx.update(|window, cx| window.simulate_next_frame(cx)),
-        0,
-        "no hover fades on a line that is not a choice"
+        label("session-agent-pending", cx).as_deref(),
+        Some(flottille_window::session_options::WITH_NEXT)
+    );
+    // A turn runs: it applies after it.
+    waiting(&o, true, cx);
+    assert_eq!(
+        label("session-agent-pending", cx).as_deref(),
+        Some(flottille_window::session_options::AFTER_TURN)
     );
 }
 
@@ -626,24 +574,22 @@ fn own_effort_user() -> User {
     user
 }
 
-/// Every effort label the window draws for the session: what the bar's picker says, and the rows
-/// its list offers.
-fn effort_labels(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) -> Vec<String> {
-    let options = options(shell, agent, cx);
-    let mut said = vec![];
-    said.push(options.read_with(cx, |o, _| o.effort_shown()));
-    said.extend(options.read_with(cx, |o, _| {
-        o.entries(flottille_window::composer::Menu::Effort)
-            .into_iter()
-            .map(|entry| entry.label)
-    }));
+/// The effort label the window draws for the session, and whether its menu offers a row named
+/// `default`: what the picker says, and the rows its list offers.
+fn effort_labels(cx: &mut VisualTestContext) -> Vec<String> {
+    let mut said = vec![effort_said(cx)];
+    open_menu(cx);
+    if has("session-agent-picker-effort-default", cx) {
+        said.push("default".to_owned());
+    }
+    close_menu(cx);
     said
 }
 
 /// What is drawn never reads `default` as an effort, whichever path brought the session here.
-fn assert_no_effort_reads_default(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) {
-    let said = effort_labels(shell, agent, cx);
-    assert!(!said.is_empty(), "no effort is drawn");
+fn assert_no_effort_reads_default(cx: &mut VisualTestContext) {
+    let said = effort_labels(cx);
+    assert!(!said[0].is_empty(), "no effort is drawn");
     for said in said {
         assert!(!said.to_lowercase().contains("default"), "{said:?}");
     }
@@ -656,11 +602,11 @@ fn a_new_session_with_no_effort_chosen_shows_its_effort_by_name(cx: &mut TestApp
     let id = start(&user, "hello", true);
     let (shell, cx) = open_session(&user, &id, cx);
     until(&shell, cx, "the effort is said", |cx| {
-        has("session-effort-picker", cx)
+        !effort_said(cx).is_empty()
     });
 
-    assert_eq!(effort_labels(&shell, &id, cx)[0], "high");
-    assert_no_effort_reads_default(&shell, &id, cx);
+    assert_eq!(effort_labels(cx)[0], "high");
+    assert_no_effort_reads_default(cx);
 }
 
 #[gpui_kit::test]
@@ -681,11 +627,11 @@ fn a_resumed_session_shows_its_effort_by_name(cx: &mut TestAppContext) {
 
     let (shell, cx) = open_session(&user, &id, cx);
     until(&shell, cx, "the effort is said", |cx| {
-        has("session-effort-picker", cx)
+        !effort_said(cx).is_empty()
     });
 
-    assert_eq!(effort_labels(&shell, &id, cx)[0], "high");
-    assert_no_effort_reads_default(&shell, &id, cx);
+    assert_eq!(effort_labels(cx)[0], "high");
+    assert_no_effort_reads_default(cx);
 }
 
 #[gpui_kit::test]
@@ -695,7 +641,7 @@ fn a_model_switch_that_drops_the_effort_shows_the_new_effort_by_name(cx: &mut Te
     let id = start(&user, "hello", true);
     let (shell, cx) = open_session(&user, &id, cx);
     until(&shell, cx, "the effort is said", |cx| {
-        has("session-effort-picker", cx)
+        !effort_said(cx).is_empty()
     });
 
     // `fake-large` has no `high`: the agent goes back to its own choice.
@@ -710,8 +656,63 @@ fn a_model_switch_that_drops_the_effort_shows_the_new_effort_by_name(cx: &mut Te
         "the new model's effort is said by its name",
         |cx| {
             settle(cx);
-            effort_labels(&shell, &id, cx)[0] == "max"
+            effort_labels(cx)[0] == "max"
         },
     );
-    assert_no_effort_reads_default(&shell, &id, cx);
+    assert_no_effort_reads_default(cx);
+}
+
+/// The picker after the agent's list dropped the alias the session was stored on (#1076): every
+/// row it offers sends an id the daemon accepts, and none is the alias that left.
+#[gpui_kit::test]
+fn every_row_of_the_picker_sends_a_model_the_daemon_accepts(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    user.fake_script(json!({
+        "models": ["claude-fable-5-1", "fable", "claude-fable-5-2", "sonnet"],
+        "efforts": ["low", "high"]
+    }));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "app");
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "model": "fable"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let after = answer["after"].as_u64().unwrap().to_string();
+    user.watch(&["--after", &after])
+        .until(|e| e["data"]["agent"] == id.as_str() && e["name"] == "agent.released");
+    let (shell, cx) = open_session(&user, &id, cx);
+    // The agent's update dropped the alias; the session's next process opens on the new list.
+    user.fake_script(json!({
+        "models": ["claude-fable-5-1", "claude-fable-5-2", "sonnet"],
+        "efforts": ["low", "high"]
+    }));
+    user.call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+
+    let row = |model: &str| format!("session-agent-picker-model-claude-{model}");
+    open_menu(cx);
+    until(&shell, cx, "the picker offers the agent's new list", |cx| {
+        settle(cx);
+        !has(row("fable"), cx) && has(row("claude-fable-5-2"), cx)
+    });
+    eventually("the second turn ends", || {
+        shown(&user, &id)["state"] == "idle" && shown(&user, &id)["pending"]["model"].is_null()
+    });
+
+    for model in ["claude-fable-5-1", "claude-fable-5-2", "sonnet"] {
+        open_menu(cx);
+        cx.update(|window, cx| window.click(row(model), cx));
+        settle(cx);
+        until(&shell, cx, "the daemon answers the pick", |cx| {
+            settle(cx);
+            let agent = shown(&user, &id);
+            agent["taken"]["model"] == model
+                || agent["pending"]["model"] == model
+                || !toasts(&shell, cx).is_empty()
+        });
+        assert_eq!(toasts(&shell, cx), [], "{model} refused");
+    }
 }

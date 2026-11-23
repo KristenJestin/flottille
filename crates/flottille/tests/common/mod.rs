@@ -91,13 +91,17 @@ const HARNESS_FILE: &str = "tool-results.toml";
 /// user's own keyring (`docs/vault.md`).
 const KEYRING_FILE: &str = "keyring.toml";
 
+/// And this one: the daemon never checks for an update on its own (`docs/releases.md`,
+/// "Updating"), so that no test reaches the network; `with_update_check` lets it.
+const UPDATES_FILE: &str = "updates.toml";
+
 /// The names in a folder, without the file the harness itself wrote there: what a test asks is
 /// what the daemon left, not what `User::new` put.
 pub fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name != HARNESS_FILE && name != KEYRING_FILE)
+        .filter(|name| ![HARNESS_FILE, KEYRING_FILE, UPDATES_FILE].contains(&name.as_str()))
         .collect();
     names.sort();
     names
@@ -185,7 +189,7 @@ impl User {
             .prefix("flottille-test")
             .tempdir()
             .unwrap();
-        for sub in ["home", "state", "config", "data"] {
+        for sub in ["home", "state", "config", "data", "sign-in-bin"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(dir.path().join(sub))
@@ -196,10 +200,13 @@ impl User {
             .tempdir()
             .unwrap();
         std::os::unix::fs::symlink(runtime.path(), dir.path().join("runtime")).unwrap();
+        // The programs a sign-in runs are looked for there alone (`docs/agents.md`, "Signing in"):
+        // a program the machine has installed is never run, and a test puts its fakes there.
+        let programs = dir.path().join("sign-in-bin").display().to_string();
         let mut user = User {
             dir,
             _runtime: runtime,
-            env: Vec::new(),
+            env: vec![("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs)],
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
         };
@@ -231,6 +238,7 @@ impl User {
             .unwrap();
         std::fs::write(file.join(HARNESS_FILE), "limit = \"off\"\n").unwrap();
         std::fs::write(file.join(KEYRING_FILE), "backend = \"memory\"\n").unwrap();
+        std::fs::write(file.join(UPDATES_FILE), "check = \"never\"\n").unwrap();
         user
     }
 
@@ -238,6 +246,13 @@ impl User {
     /// daemon does not.
     pub fn with_cut_results(self) -> User {
         std::fs::remove_file(self.dir.path().join("config/flottille").join(HARNESS_FILE)).unwrap();
+        self
+    }
+
+    /// This user's daemon checks for updates as it does for everyone (at its start, then every 6
+    /// hours): every other test's daemon never does.
+    pub fn with_update_check(self) -> User {
+        std::fs::remove_file(self.dir.path().join("config/flottille").join(UPDATES_FILE)).unwrap();
         self
     }
 
@@ -410,6 +425,49 @@ impl User {
         let dir = user.path("claude");
         user.with_env("PATH", &path)
             .with_env("FLOTTILLE_FAKE_CLAUDE_DIR", dir.to_str().unwrap())
+    }
+
+    /// The programs this user's daemon signs in with (#1185, `docs/agents.md`, "Signing in"): the
+    /// fakes named (`gh`, `glab`, `acli`, `bkt`, `claude`, `codex`), each a link in `programs`
+    /// with a folder of its own, `sign-in-<name>`. No other program is found there, whatever the
+    /// machine has installed.
+    pub fn with_sign_in_programs(self, names: &[&str]) -> User {
+        let mut user = self;
+        for name in names {
+            let fake = match *name {
+                "gh" | "glab" => fake_gh(),
+                "acli" => fake_acli(),
+                "bkt" => fake_bkt(),
+                "claude" => fake_claude(),
+                "codex" => fake_codex(),
+                other => panic!("no fake {other}"),
+            };
+            std::os::unix::fs::symlink(fake, user.path("sign-in-bin").join(name)).unwrap();
+            let dir = user.path(&format!("sign-in-{name}"));
+            std::fs::create_dir(&dir).unwrap();
+            let variable = format!("FLOTTILLE_FAKE_{}_DIR", name.to_uppercase());
+            user = user.with_env(&variable, dir.to_str().unwrap());
+        }
+        user
+    }
+
+    /// The script of the fake `name` a sign-in runs.
+    pub fn sign_in_script(&self, name: &str, script: Value) {
+        std::fs::write(
+            self.path(&format!("sign-in-{name}/script.json")),
+            script.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// What the fake `name` did of its sign-in, the first first (`sign_in.rs` of the fake `gh`).
+    pub fn sign_in_record(&self, name: &str) -> Vec<Value> {
+        records(&self.path(&format!("sign-in-{name}/sign-in.jsonl")))
+    }
+
+    /// The user finishes the sign-in of the fake `name` in their browser.
+    pub fn approve_sign_in(&self, name: &str) {
+        std::fs::write(self.path(&format!("sign-in-{name}/approve")), "").unwrap();
     }
 
     /// The fake `claude`'s script.
@@ -657,8 +715,10 @@ impl User {
             .iter()
             .map(|(alias, host)| format!("  {alias}) host={host} ;;\n"))
             .collect();
+        // Its own programs from the test's `PATH`: a push's is the system's folders alone.
         let script = format!(
             "#!/bin/sh\n\
+             PATH='{path}'\n\
              echo \"$*\" >> '{calls}'\n\
              if [ \"$1\" = -G ]; then\n\
              case \"$2\" in\n{cases}  *) echo \"ssh: Could not resolve hostname $2\" >&2; exit 255 ;;\n\
@@ -672,21 +732,41 @@ impl User {
              exec git \"${{service#git-}}\" '{remotes}'/\"$repository\"\n",
             calls = self.path("ssh-calls").display(),
             remotes = self.path("remotes").display(),
+            path = std::env::var("PATH").unwrap_or_default(),
         );
         let ssh = self.path("ssh-bin/ssh");
         std::fs::write(&ssh, script).unwrap();
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = self
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
         let path = format!(
             "{}:{}",
             self.path("ssh-bin").display(),
-            self.env
-                .iter()
-                .rev()
-                .find(|(name, _)| name == "PATH")
-                .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+            self.programs_but_ssh(&path).display()
         );
         self.with_env("PATH", &path)
+    }
+
+    /// A folder of links to every program of `path` but `ssh`, the first of each name: the
+    /// daemon's git prefers an `ssh` owned by root to a fake one, and the machine's is.
+    pub fn programs_but_ssh(&self, path: &str) -> PathBuf {
+        let folder = self.path("programs");
+        std::fs::create_dir(&folder).unwrap();
+        for dir in std::env::split_paths(path) {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let link = folder.join(&name);
+                if name != "ssh" && std::fs::symlink_metadata(&link).is_err() {
+                    std::os::unix::fs::symlink(entry.path(), link).unwrap();
+                }
+            }
+        }
+        folder
     }
 
     /// The words of every call of the fake `ssh`, the first first.
@@ -965,9 +1045,15 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("FLOTTILLE_CHECKS_WAIT_MS", "0")
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
+        // Never GitHub's releases: nothing listens there. A test of the update serves its own
+        // (`with_env("FLOTTILLE_RELEASES", ..)`).
+        .env("FLOTTILLE_RELEASES", "http://127.0.0.1:9/repos/none")
         .env_remove("TMUX")
         // Never the machine's SSH agent: a test that lends one sets its own (`with_env`).
-        .env_remove("SSH_AUTH_SOCK");
+        .env_remove("SSH_AUTH_SOCK")
+        // The account's home, which `ssh` reads `~` as: the test's, never the machine's
+        // `~/.ssh` (a test of another sets its own).
+        .env("FLOTTILLE_TEST_ACCOUNT_HOME", dir.join("home"));
     // No display of the machine's: a test that wants one gives its own.
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
         command.env_remove(name);
@@ -1222,4 +1308,25 @@ pub fn landlock_abi() -> i64 {
         )
     }
     .max(0)
+}
+
+/// Whether the kernel gives this user a user namespace in which it may mount: what the private
+/// mount namespace of a confined command needs (`mounts.rs`). A distribution may refuse either
+/// (Ubuntu's AppArmor lets the namespace be made, then refuses its mounts).
+pub fn user_namespaces() -> bool {
+    const PROBE: &str = "import ctypes, os, sys\n\
+        libc = ctypes.CDLL(None, use_errno=True)\n\
+        uid, gid = os.getuid(), os.getgid()\n\
+        if libc.unshare(0x10000000 | 0x00020000) != 0: sys.exit(1)\n\
+        open('/proc/self/setgroups', 'w').write('deny')\n\
+        open('/proc/self/uid_map', 'w').write(f'{uid} {uid} 1')\n\
+        open('/proc/self/gid_map', 'w').write(f'{gid} {gid} 1')\n\
+        sys.exit(0 if libc.mount(b'tmpfs', b'/', b'tmpfs', 0, None) == 0 else 1)\n";
+    Command::new("python3")
+        .args(["-c", PROBE])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }

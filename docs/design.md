@@ -137,7 +137,11 @@ without a prompt (Codex's `model/list` with no thread; Claude's and OpenCode's a
 for a session, with no user message): at the daemon's start, when the provider is enabled, and
 when its program (path or modification time), the names of its API keys set or the presence of
 its sign-in file change. The first session can be given a model (`docs/agents.md`, "The
-models").
+models"). A model a session was stored on that the agent's list no longer holds (an alias its
+update dropped) runs as the newest offered of its family, by the version in its id, else as the
+provider's default; a model the user asks is never replaced, only refused. A model
+or an effort the agent does not offer never ends a session nor drops its message: the session
+starts on what replaces it and its conversation says why, once.
 
 Handshake, session open order (resume, else load, else new), model/effort/mode options, event
 mapping, cancel, idle release of processes and death handling follow `reference/hemera.md` §1.
@@ -203,8 +207,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - the web (every agent): `web`, which reads a page (its main content as Markdown, a PDF's text)
   or searches through DuckDuckGo, never this machine nor a private network; a URL the agent was
-  shown passes, one it built is judged, since a GET sends out what the URL holds (`tools.md`,
-  "The web");
+  shown passes, one it built is judged, since a GET sends out what the URL holds; it also calls
+  an API, signed in with a vault entry the agent names and never sees, each write a call to
+  judge (`tools.md`, "The web");
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
   `tickets`, which lists, searches, reads and writes the tracker's tickets, GitHub issues or Jira
   work items, each write a call to judge (`tickets.md`);
@@ -228,17 +233,21 @@ Flottille's own tools:
   that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
   session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
   ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
-  with the id.
+  with the id. With `project`, a `led` or `handed` session is started in another registered
+  project, held for the user every time, in every mode (§7.2): a full lead of that project, in its
+  places, with its tools, settings and vault entries; a child never is.
 - `session_send {session, text}` (a root): a message to a session the caller started, to the
-  agent that started it, or to any other session of its project once the user gave their leave
-  for that pair (asked with the first message, in every mode, §7.2), judged as a write is; it
+  agent that started it, or to any other session, of its project or another, once the user gave
+  their leave for that pair (asked with the first message, in every mode, §7.2; across projects
+  even to a session the caller started), judged as a write is; it
   arrives as a delivery labelled with its sender, never as the user's, and the answer comes back
   the same way.
 - `session_read {session?, last?, since?, until?, cursor?}` (a root): a page of the conversation
   of another session of the caller's project (the user's messages to it and its agent's replies,
   with their times), the last messages or those between two dates, with a cursor to the next page,
   and the mode of that session's tree; framed as that session's data, never instructions; judged
-  in Ask and Auto; a session of another project is refused. Without `session` (or with the
+  in Ask and Auto; a session of another project the caller did not start is read with the user's
+  leave for the pair, asked once (§7.2). Without `session` (or with the
   caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
 - `session_title {title}` (a root): names its session for the user, 3 to 8 words on one line, at
   most 60 characters, in its first turn and again when the work changes, until the user renames
@@ -355,13 +364,16 @@ the session ends or fails; a plain turn's end wakes nobody. The delivery names t
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
-without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
-user.
+without the user pause it. A session led by a pilot is part of its job: **it ends with
+its pilot** (`docs/tools.md`, "The pilot ends"). A led session the user wants to keep is
+detached first and is then theirs.
 
 A led session stays open after its report: once its work is integrated, its pilot stops it and
 removes its workspace. When a led session reported, is idle and its work is integrated, its
 pilot is reminded once, by `led-integrated` (`"Login" (agent …) reported and its branch is in
-main: stop it and remove its workspace?`), checked at the end of a turn of either. Integrated
+main: stop it and remove its workspace?`; for a session led in another project, only to stop it:
+its workspace is in that project, which the pilot's tools do not reach), checked at the end of a
+turn of either. Integrated
 means in the **base** the work goes into, never in any other branch (a second session's branch
 started from this one holds it too): in every repository that holds commits of its own, the forge
 says its pull request is merged and the branch is no further than the commit it merged (the
@@ -403,6 +415,13 @@ counts against the limit all the same, even one while it loads the session. A ne
 only when the agent says its session is gone (lost or unreadable: any other failure to load it
 keeps the session and fails the agent, to be resumed) or the agent is stuck, and then from its first message, a summary of its conversation when a compactor is set (§5.8)
 and its latest messages word for word (`docs/agents.md`, "A death", "Replacement").
+
+A restart resumes the sessions as they were: one at rest gets no prompt, and nothing already
+delivered is delivered again, a first message given again to a compaction's new session
+included. A delivery is marked taken before its prompt is sent: one a turn that ran had taken is
+in the session's history, taken as sent, and its agent is told its turn was cut; one taken by a
+prompt that never started goes back to the queue, and, as every message still queued, is
+delivered once.
 
 ### 5.6 Subscriptions: waking on what happens outside
 
@@ -669,13 +688,15 @@ role, arguments decoded, place rules, then the call's **class**. The gate grants
 says what kind of call it is, and the session's **mode** says who answers it.
 
 - **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
-  commands the rules know to only read, a task in a workspace. A known program is
+  commands the rules know to only read (those of `gh` and `glab`, and those of `acli` that only
+  show or list: `docs/tools.md`, "`acli` in a run"), a task in a workspace. A known program is
   the system's only: named bare and found through the run's `PATH` outside the project, its
   workspaces, the place and the user's `~/.local/bin` and `~/bin`; an option that runs a program or reads past ignored files toward a secret takes it
   out of this class.
 - **To judge** is everything else: writing in `main`, reading outside the project, a line the
   rules do not know or whose program is the agent's own file, an option of a reading program
-  that runs one, a commit, a push, a forge write, a change of the project an agent asks for.
+  that runs one, a commit, a push, a forge write, a call of an API that writes (`web`), a change
+  of the project an agent asks for.
 - **Base** calls always come to the user in Ask and Auto, with a strong warning, and pass only in
   Full, the mode the user chose for that: a push forced
   (with a lease or not), rewriting history that is on a remote, discarding work in `main` or
@@ -683,7 +704,8 @@ says what kind of call it is, and the session's **mode** says who answers it.
   folders, git settings that run programs or lead pushes (`core`, `alias`, `remote`, `url`,
   `push`, `credential`, `include`, and every key whose value git runs, set by `-c` or `git
   config`, or through the environment), a push naming the program that receives it, running as
-  another user (`sudo`, `doas`, `pkexec`), sensitive places (`.env` files, credential folders,
+  another user (`sudo`, `doas`, `pkexec`), `acli`'s sign-in (`auth login`, `logout`, `switch`),
+  sensitive places (`.env` files, credential folders,
   Flottille's own folders, another process's `/proc`), publishing, a merge whose checks are
   waived, a change of the project's tracker or of its rules, and the project's `never` list.
   They are looked for in every line a wrapper, an option or `git rebase --exec` runs, and in
@@ -712,7 +734,10 @@ whatever agent of it is named); no tool of an agent does, and a session an agent
 user (`agent_launch` with `kind` `led` or `handed`) takes the mode of the tree that started it, Full included, never
 above it: an agent in Full can already do what the session would do, the session caps still apply,
 and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
-switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
+switch of the launcher's tree does not reach it. It is kept when the session resumes. A session an
+agent starts in another project (`agent_launch` with `project`) takes the mode that project gives a
+new session, Auto, never above the caller's tree's: Ask stays Ask, and Full is never carried to
+another project. An agent
 reads its mode, never sets it: `session_read` with no `session` (its own id is not told to it)
 answers with its id, its role and its tree's mode, and the text Flottille starts every session
 with says so. Reading another session says the mode of that session's tree too.
@@ -724,8 +749,9 @@ with says so. Reading another session says the mode of that session's tree too.
   passes at once, base calls included (a forced push, a workspace removed with what it would
   lose, inline interpreter code, a script the agent wrote), with no request and no judge, but for
   the first message of a session to another it did not start, whose leave only the user gives
-  (§7.2), and a tracker change that would send the worklog's token to another site or name
-  another entry for it (`docs/tickets.md`, "Logging time"). Bare mode
+  (§7.2), a tracker change that would send the worklog's token to another site or name
+  another entry for it (`docs/tickets.md`, "Logging time"), and a worklog deleted
+  (`docs/tickets.md`, "Correcting a worklog"). Bare mode
   stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
   keep the user's logins and Flottille itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
@@ -838,7 +864,14 @@ line names, every program a wrapper or a runner runs included:
   (`agent-folders/.guarded`) tells the user's inbox at the daemon's next start; the files also
   exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
-  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
+  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program and
+  the build staged beside it (`flottille.next/`, which the daemon's next start makes the program)
+  and the folder a download is unpacked in before it is staged (`.flottille-update-*` beside the
+  program); the program is the file at its path even once an update replaced it under the running
+  daemon (`/proc/self/exe` then ends in ` (deleted)`). `~/.curlrc` and `$XDG_CONFIG_HOME/curlrc`
+  are startup files: every `curl` of the user reads them (the update's reads none, `curl -q`).
+  This covers the file tools and the literal command lines the gate reads; a command an agent
+  runs is not confined by the system away from the program's folder.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
   secrets masked and the user may want an agent to read a log;
 - **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,
@@ -937,7 +970,11 @@ who asked:
   reaches the judge; allowing it delivers the message and lets that session write to the other
   from then on, one way, each message then judged as a write is, until either session ends or
   the user withdraws it where the session's rights are shown (`docs/tools.md`, "Sessions that
-  talk to each other").
+  talk to each other"). Across projects the leave is asked even of a session the caller started,
+  and the first read of another project's session it did not start asks it too: one leave, to
+  read and write, per pair.
+  **A launch in another project** (`agent_launch` with `project`) is held for the user the same
+  way, in every mode, Full included, never judged, and every time.
   Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
   way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
   another session"). The one exception is a session the agent itself started as `led`, which it
@@ -963,9 +1000,13 @@ a command grants nothing, each call the session makes goes through its mode like
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
-per-session part, then the project layer, frozen per session. The base has two parts. **What
+per-session part, then the project layer, frozen per session. The base has three parts. **What
 Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
-it for its own discipline. **How to work** is the user's: a default text, the user's own for all
+it for its own discipline. **About the user** is what the user says of themselves (`about.toml` in
+the configuration folder, edited in the window's Settings, "About you"): their name, how to refer
+to them and anything every agent should know, each optional; none set, no block. It comes before
+the rules, in the part every project shares, so that every agent and every child has it, and what
+a lead writes for another agent follows it. **How to work** is the user's: a default text, the user's own for all
 projects, with a project's own added after them (`projects.md`, "Rules"). The global rules sit in
 the base, before the boundary, where every project shares them; a project's own sit just after the
 per-session part,
@@ -996,15 +1037,31 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 GPUI Fast with gpui-kit, English only (no translation layer). Screens of the milestone "The window":
 
-- a top bar with a search field and a bell counting what waits for the user (each request, each
-  question) and what a session did to a ticket or a pull request (opened, merged, edited or
-  commented a pull request; created, edited, commented, closed or reopened a ticket, as
-  `agent.tool_served` says a write of `forge` or `tickets` was done), until that session is
-  opened; each item says why it is there (`Request #3 waits for you`, `Asks you a question`,
-  `Opened a pull request`), a short excerpt (what is asked, the question, the title or the start
-  of the text posted) and its session, each on one line cut with an ellipsis. What a session
-  changes while its page is open is in sight, and rings nothing; what is changed lives as long
-  as the window;
+- a top bar with a search field and a bell, which opens the **notification centre**: one list of
+  what the user is told, **kept by the daemon** (`docs/protocol.md`, `notifications.list`), so that
+  a notification seen on one client is seen on every client and closing the window forgets nothing.
+  A notification is a request that waits (`Request #3 waits for you`), a question (`Asks you a
+  question`), a vault entry asked for, what a session did to a ticket or a pull request (opened,
+  merged, edited or commented a pull request; created, edited, commented, closed or reopened a
+  ticket, as `agent.tool_served` says a write of `forge` or `tickets` was done), a report, a
+  failure, a pause and what the daemon says of a run's agent folders or a dropped message. Each
+  says why it is there, a short excerpt (what is asked, the question, the title or the start of the
+  text posted) and when, each on one line cut with an ellipsis. The bell opens a panel of the kit
+  (not a page), which rises and fades in and out: the notifications **grouped by session**, the
+  session's title and project once and its notifications under it, the sessions with something
+  unread first and under each its unread notifications first; a click opens the session and marks
+  its notifications read; **Mark all read** marks every one; an empty state says "No
+  notifications." The bell's badge counts what is unread, and the panel says it apart, what needs
+  the user (a request, a question, a vault entry) and the rest: `2 need you · 5 new`. Opening a
+  session marks its notifications read; what arrives in the session that is open stays unread
+  until the user opens it again, clicks the row or marks all read, the window being perhaps open
+  with nobody looking. A row answered says so (`Request #3 answered`), its glyph cross-fading to a
+  check; a request or a question answered anywhere (the window, the command line,
+  an agent that holds it) is resolved, and so read. A row read or unread fades between its two
+  looks, a row arriving unfolds and one forgotten folds away. The centre keeps 30 days, or 1,000,
+  whichever is less; a second window shows the same list and the same marks, following
+  `notifications.changed`. What a session changes while its page is open is in sight, and rings
+  nothing;
   the search field, "Search  Ctrl K", is a **quick switcher**: Ctrl K anywhere in the window or a
   click on the field opens it over the page (the modal layer, near the top), its own text field
   focused; Escape, a click outside, the mouse's back button or choosing a result closes it, and
@@ -1024,7 +1081,50 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
-- left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
+- left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
+  machine of the user together (a session of another machine carries that machine's name on its
+  second line, `server`, greyed with `server offline since 22:14` while it is off,
+  `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
+  Add project choosing which, a page of another machine naming it once in its path line, `server /
+  Settings / Agents`, `docs/remote.md`, "Built (#1182)"). **Each project row says where it lives**: with
+  another machine paired, a mark after its name for every machine that has it (at the end of the row,
+  before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
+  included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
+  machine`. **A project several machines have is one row**: two projects are the same when the
+  remotes of their repositories are the same (normalised: scheme, user, port, `.git` and the
+  case of the host do not count; a project of several repositories matches when all of them
+  match), whatever their names; a repository with no remote matches none. Two projects of one
+  name but other repositories stay two rows, the second saying its machine in small at the end
+  of its row. A project that only machines that are off have is greyed and says `offline since
+  14:02` under its row, its ink fading as the machine goes and comes back. The Projects header's
+  "⋯" holds **Group by machine**, a switch (off, with "One machine" as its reason, until there is
+  another machine; the menu is built once, so a machine that comes or goes never closes it): the list
+  becomes one foldable section per machine (its icon, its name and its state, `this machine` for
+  this one), each with the projects that machine has and its own sessions only, a project several
+  machines have under each of them; switched off, the one list comes back, and the rows move
+  between the two over the sidebar's motion. The choice and each section's fold are kept by the
+  daemon with the sidebar's folds (`window.get`, `sidebar`: `by_machine`, `machines`,
+  `on_machines`), so every window of the machine shows the same arrangement. **The list is the
+  user's to arrange** (#1229): a project row is dragged to its place (the row lifts and follows
+  the pointer over a dashed slot, the rows around slide aside, the dropped row settles; Escape, or
+  a drop beside the list, puts everything back). The Projects header's "⋯" (always there) holds
+  **New group…**, a dialog with one field: a group is a foldable heading with its name and its
+  count, made at the end of the groups and unfolded, which comes before the projects outside any
+  group. Projects are dragged into it (onto its heading: first place) and out of it, and groups
+  are dragged among themselves by their heading; a folded group says nothing of its rows but its
+  count (the strongest mark of its rows beside it comes with #1265). A group that is made unfolds
+  and fades in, with its space; the rows that go into it from the list slide there, and when the
+  stored arrangement reaches a window after its first rows they slide into their groups rather
+  than jump. A project that is new, or newly seen on a machine, is at the end of the list, outside
+  any group, and unfolds there. The order and the groups are the user's, so they are kept by the
+  daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
+  sidebar's folds so that one window's fold never erases another's groups, read by a window when
+  it opens and again at each change it makes (applied to what the daemon holds, so that a window
+  that was open before another made a group does not erase it), never in a project; a project is
+  dragged from its own row, never from the sessions and buttons it holds; New group… is not offered while the projects are shown by machine
+  (the entry says "Shown by machine"), and a project that a machine does not give for now keeps its
+  place and group for when it is back; Group by machine shows the sections instead of
+  them (the list folds away and fades) and switched off they come back as they were. Sessions are sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
@@ -1169,7 +1269,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   time the window takes the focus back while the tab is shown, in silence (only a line that changes
   moves). Under them, its **Tracker** ("Where the project's tickets come from."): **Tickets from**,
   `Nowhere`, `GitHub issues` or `Jira`, its fields, the state of `gh` or `acli` said as a
-  repository's forge says it, and Log time with (`projects.md`). **Workspaces** holds its
+  repository's forge says it, and Jira API access with (`projects.md`). **Workspaces** holds its
   **Folder**, with no sentence: **Where**, `As in Settings` (its line the folder it gives, relative
   to `~`) or `A folder for this project`, whose field unfolds under it; its **Branches** ("How new
   workspaces name their branch."): **Prefix** (its line `New workspaces get feat/<name>.`) and
@@ -1194,17 +1294,21 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. **Vault**
   (the last of the six, Usage later) lists the entries the project sees, its own first, then every
   project's marked "Every project", each the row of Settings, Vault (its name, its project, what
-  it is for, never a value; one list pattern), with **New entry**, which opens Settings, Vault's
-  own dialog with "Seen by agents of" set to the project (still changeable), and a click on a row,
-  which edits the entry in that same dialog (an entry of every project says so on it); closed, the
-  dialog brings the window back to this tab. The list follows the vault's changes live, its rows
+  it is for, never a value; one list pattern), with **New entry**, which opens the vault's
+  own dialog over this tab with "Seen by agents of" set to the project (still changeable), and a
+  click on a row, which edits the entry in that same dialog (an entry of every project says so on
+  it); the tab is never left, so closing the dialog leaves the user on it. The list follows the vault's changes live, its rows
   unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
-  **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
-  opens on Agents; a link to a section opens its tab with the section in view; Usage will be the
-  sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns on or
-  off is a row of Features.
+  **Features**, **Vault**, **Machines** and **General**, one shown at a time, as in a project's
+  settings. It opens on Agents; a link to a section opens its tab with the section in view (an old
+  link to General's machines section, `general#machines`, opens Machines); Usage will be a
+  seventh tab and the last. A part of Flottille gets a tab of its own when it fits: a subject the
+  user goes to on its own, with several sections of its own (Machines now; Usage and
+  Notifications later). A smaller part stays a row of Features, which the user turns on or off,
+  or a section of the tab of its subject. The limit is the mess, not a number: when the tabs are
+  no longer readable at a glance the structure is reviewed (#1145).
   **Agents** holds five sections. **Providers** (a count; "The agent programs Flottille can
   start. Each signs in with its own login."): one row per provider, its switch labelled with its
   name (`Claude`), its version as a tag (the path of its program in the version's tooltip), and
@@ -1250,24 +1354,45 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its page in place of the list, under the path `Features / Review` (`docs/extensions.md`, "In
   the window").
   **Vault** holds the entries (`vault.md`).
-  **General** holds **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
+  **General** holds first **About you** ("What every agent is told about you, before the rules, and
+  what an agent writes for another one follows. Each field is optional."): **Name** ("What agents
+  call you."), **How to refer to you** ("One line: he/him, she/her, they.") and **Anything every
+  agent should know** (free text, at most 8,000 characters, its placeholder invented examples), each
+  labelled and marked optional; Reset forgets all three, Save unfolds beside it once a field changed,
+  and a save or a reset is a toast ("About you saved · Agents started from now on read it."); the
+  section enters with the page. Then **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
   Flottille **Shade**, Light or Dark, unfolding under it, each a segmented choice; off an Omarchy
   desktop the Omarchy choice is shown disabled, its tooltip saying why. Then **Workspaces folder**
   ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In
   Flottille's data folder`, `Beside each project` and `A folder you choose`, each line the folder
   it gives relative to `~`, and the **Folder** field unfolding under the last (`docs/projects.md`,
-  "Where the workspaces go"). Later **Machines** (§12) comes under it. Last **Developer mode**,
+  "Where the workspaces go"). Then **Developer mode**,
   with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
   refused, one JSON line each, secrets masked. For working on Flottille."), off by default
-  (`developer.md`), and the path of its log unfolding under it;
+  (`developer.md`), and the path of its log unfolding under it. Last **Version** (`releases.md`,
+  "Updating"): the build, the **Channel** as a Stable or Beta choice that acts at once (an alpha
+  said with its branch and a way back), the update and its actions.
+  **Machines** is Remote (`remote.md`), and nothing of it is typed on the page: a section says the
+  state and holds the buttons, and what is typed, or what a request shows, is a dialog of the
+  window's host. First whether remote is on: off, a notice ("Remote is off. This machine can join
+  a hub and link to your other machines.")
+  and **Turn on**; on, a **Remote** switch ("Turn it off and the links close; this machine stays paired with
+  your hub."), whose off asks once, in the one confirmation dialog. The notice folds away and the
+  settings unfold, and back. Nothing listens and no address is given: every link goes through the
+  hub (`remote.md`, decision 3). While this machine is in no hub,
+  **Connect to your hub** opens its dialog (the code `flottille-hub pair` printed and the card this
+  machine proposes, the refusal under its fields, a toast when it is done); a device is added on
+  the hub's host, never from a device. Then the hub's state and **Devices** (Rename is a dialog);
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
-  their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
+  their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, `started the session "<title>"` (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there; the rail's own row for a command of the root
   agent does not name it, the conversation being the page it is on), one line for each request that reached the
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
-  answered, the outcome), each picture sent inside the bubble of its message, above its words, a
+  answered, the outcome), one quiet line, with no button, for each request of the agent for a vault
+  entry (`asked for the vault entry hippocampe-key · waiting for you`, then `… · saved` or `… ·
+  dismissed`, staying in sight: it is the conversation's record of what the user decided), each picture sent inside the bubble of its message, above its words, a
   message another session sent with `session_send` marked with its sender ("from <session>") and
   folded to its first line until a click unfolds it (the card keeps one width while it folds and
   unfolds), and
@@ -1317,7 +1442,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root's turn and hands it this message next), Edit (takes it back into the composer, text and
   pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
   not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root (it carries 20 pictures at most; a refusal, of a picture or of a message, is a toast and never changes the composer's height; what appears in it unfolds and what leaves folds away), with the session's mode
-  (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
+  (an Ask, Auto or Full select with each mode's line, with a warning icon when Auto has no judge, its pill in the
   alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
   `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
@@ -1332,7 +1457,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `[Image 1: photo.png]`, and the agent reads each picture right after its marker (the ACP blocks
   interleave: text, image, text); a message in the conversation, and one that waits, shows the
   chips in its text, a click on a picture's chip opening it as its thumbnail does. A draft keeps
-  its chips (the composer of a session lives as long as the window), and a message taken back
+  its chips (and survives the window, "What survives a close" below), and a message taken back
   comes back with them, its markers read back as chips. A long text pasted (more than 4,000
   characters or more than 80 lines) is not put in the field: it is attached as a text file, a chip
   `pasted-text.txt` with its size where it was pasted (removed as one, like the others), and a
@@ -1357,9 +1482,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, at the right of the name's line so that the second line has the whole row's width and is cut, with its whole text in a tooltip, only when it cannot fit; the session's own
   agent says only what it runs on, the others their name over their model, their effort (by name, `Sonnet 5.5 · medium`) and what they do; a review is one such row, `Review, round 1` over `3/4 checks · 2 findings`, with a chevron at its right end that folds its checks and its findings, unfolded while it runs and folded once it is done; the composer's bar does not say
-  it; under the composer's field, the provider is named and not changeable, and the model and
-  effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
-  and a dot on its picker says it until the agent took it, its menu saying when it applies,
+  it; under the composer's field, one picker says the provider (not changeable), the model and the
+  effort, the start composer's own: a change chosen while a turn runs waits for its end,
+  and a dot on the picker says it until the agent took it, saying when it applies,
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as its place's on the project page, with
@@ -1371,10 +1496,21 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
-  why it always comes back), and Deny and Allow; a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
+  why it always comes back), and Deny and Allow; an agent's request for a vault entry is a card
+  of the same section (its entry, where the secret goes, its project and its reason on lines,
+  "Details" for what it is for, what it is bound to and who asked, and Dismiss and New entry in
+  the place of Deny and Allow), counted in the section's number, marking its session's row and
+  ringing the bell as a held request does; a card arriving unfolds and one leaving folds away;
+  a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
-  and its tree, after a confirmation that counts the agents that end. An ended session leaves its
+  and its tree, after a confirmation that counts the agents that end. When the session is a pilot,
+  the same confirmation lists the led sessions that end with it, in its project and in others,
+  by title and project, each saying what its workspace holds that is not saved (`uncommitted
+  changes`, `commits not pushed`, `cannot be checked`), and its button counts the sessions
+  (`End 3 sessions`): one confirmation, never one per session. The list is read once the dialog
+  is open (`agent.ending`) and unfolds in it; the ended rows leave the project's level for the
+  "Ended" group with their animation. An ended session leaves its
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
   whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
   it takes at most eight rows, or 35% of the window's height when that is less, and its rows
@@ -1417,11 +1553,47 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the
   palette's in the panel (the stored output keeps the program's bytes, masked); a call that came
   back through an approval is the same line with "allowed by you", never the daemon's raw text;
+- **a dialog opens over the page it is asked from**, whichever page that is (#1018): the window
+  never goes to a page only to open a dialog there. An agent's request for a vault entry, **New
+  entry**, an agent's request to write a connection, **Edit** or **Review**, a project's
+  Tracker or Vault tab, and the pages of Settings all open the same dialogs (the vault's entry,
+  a connection's server and its review), and the user is on the page they were on when the dialog
+  closes, the session, its conversation and the request they were answering as they were. One
+  host of dialogs in the shell draws them above the page, each the kit's modal over its own
+  scrim, in the order they were opened: a dialog that opens another (the request's dialog, then
+  the vault's form for the entry it names) has it stacked over it, Escape and Cancel close the
+  one on top and the focus returns to the one below, which reads again what changed (the request
+  reads itself again once the entry is saved). A page that really is a destination (a project's
+  settings from "Set up Jira API access", Settings from a notice) is a navigation, and opens no
+  dialog;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
   as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and
   forward buttons and `Alt+Left` / `Alt+Right` move in it; an open list, modal or drawer takes
   the button first and closes; a page that no longer exists is skipped.
+- **what survives a close of the window** (#1070): the draft of each composer, and what the
+  sidebar has folded, both kept by the daemon (`draft.*` and `window.*`, `docs/protocol.md`, "The
+  draft and window methods"), so that they survive the window, a restart of the daemon and are the
+  same in every window of the machine. A draft is the text a session's composer or a project's
+  first message holds and did not send, with its pictures (the picture strip and the markers'
+  chips; a large pasted text, attached as a file, is not kept): the window writes it 500 ms after
+  the last change, at once when the message is sent, which forgets it, as emptying the composer
+  does, and when the program ends however it ends (the window closed, the desktop's quit, a
+  signal); it reads it when the composer is made, which takes it only if the user has not typed
+  meanwhile (what they typed is then written over it), and without taking the focus. What the
+  daemon did not answer is asked again, later (a wait that doubles up to 30 s): a write the daemon
+  did not take is not taken as kept, a read it did not answer is not taken as "no draft", so that
+  nothing is written over a draft the window never saw, and the text typed before the read
+  answered is written once it does, or at the close once the daemon answers a read of its own.
+  The row of a session says its pencil as soon as the window opens (`draft.list`), without its
+  page being opened. A session that is forgotten and a
+  project that is removed take their drafts with them; the pictures are files of the daemon's
+  state folder (mode 0700) that go with the draft. A draft is the user's own words: never given to
+  an agent, never logged, in no event, and drawn nowhere but in its composer. The sidebar keeps
+  which projects, which leads (the chevron of a pilot's row) and whether the "Ended" group are
+  unfolded or folded; read before the first snapshot, so that the tree is made as it was left:
+  **nothing animates at opening**, and every fold or unfold afterwards is animated as always. A
+  project or a lead that no longer exists is forgotten.
 
 Motion: **everything that moves is animated**, with the grammar of `reference/gpui.md` (ease-out
 cubic, the durations of the kit's `src/motion.rs`, `gpui-design-system`: hover 140 ms, press 90 ms,
@@ -1438,6 +1610,14 @@ Omarchy theme's colours followed live, or **Flottille**, Flottille's own palette
 **Dark**, even on an Omarchy desktop. Until the user chooses, Omarchy when an Omarchy theme is
 found, Flottille Dark otherwise; Omarchy chosen and no theme that can be used, Flottille in its
 shade. A change applies at once: the colours cross-fade, as when the Omarchy theme changes. The
+daemon owns the choice and the window cannot ask it before its first frame, so the window keeps a
+copy of its own, `window-appearance.json` in its state folder, in the words of `appearance.show`
+(`theme`, `shade`): written when the user chooses and when the daemon says what it keeps, read
+before anything is drawn. The first frame is in the chosen theme (Omarchy's read from the desktop
+at that moment, the copy holds the choice, not the colours), the daemon's answer only confirms it,
+and nothing switches at start-up when the choice did not change; a choice made from another
+client changes it with the usual cross-fade. With no copy, or one that cannot be read, the window
+draws in the default above, as it always did. The
 light palette has the dark one's roles, its surfaces a step toward the ink from a near-white page
 (never white cards), every text at WCAG AA on each surface it is drawn on. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
 gets a light palette: the body and the bars are shaded toward the foreground (below the background in lightness), and
@@ -1460,10 +1640,10 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (a control plane: the signed member list, invitations, presence and addresses;
-it never carries a link's bytes), linked peer to peer, directly, by their own keys over an
-end-to-end encrypted transport, over whatever network the user has (Flottille handles no network
-channel: no relay, no NAT traversal), each with a
+of their own hub (the signed member list, pair mode, presence, and the links' packets, which it
+forwards between members and can neither read nor change), linked by their own keys over an
+end-to-end encrypted transport through that hub, so that only the hub needs to be reachable (no
+NAT traversal, no relay of anyone else's), each with a
 role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
 `agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
 tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and

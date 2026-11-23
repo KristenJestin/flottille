@@ -54,10 +54,10 @@ pub fn card(
         .flex()
         .justify_end()
         .child(
-            Button::primary(id("review-open"), "Review").on_click(move |_, window, cx| {
+            Button::primary(id("review-open"), "Review").on_click(move |_, _, cx| {
                 let name = name.clone();
                 shell
-                    .update(cx, |shell, cx| shell.review_connection(&name, window, cx))
+                    .update(cx, |shell, cx| shell.review_connection(&name, cx))
                     .ok();
             }),
         );

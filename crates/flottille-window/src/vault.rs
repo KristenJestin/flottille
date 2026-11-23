@@ -12,15 +12,16 @@ use gpui_design_system::{
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
+    px,
 };
 use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, spaced};
-use crate::project_settings::Reveal as ProjectReveal;
+use crate::modals::Modals;
 use crate::shell::Shell;
 
 /// What the section says the vault is for.
@@ -65,6 +66,8 @@ pub struct VaultEntry {
     /// Its connection's server is given it, which serves every project's agents: the daemon
     /// would refuse it a project.
     pub every_project_only: bool,
+    /// The machine of the user's it was shared from: a copy of that machine's entry.
+    pub shared_from: Option<String>,
 }
 
 impl VaultEntry {
@@ -78,6 +81,7 @@ impl VaultEntry {
             project: text("project"),
             bound: text("for"),
             every_project_only: value["every_project_only"] == true,
+            shared_from: text("shared_from"),
         }
     }
 }
@@ -106,8 +110,24 @@ enum Writing {
     Removed(String),
 }
 
+/// The id of the entry's dialog, the one the window's host holds.
+pub const MODAL: &str = "vault-modal";
+
+/// The id of the dialog that shares an entry with another machine.
+pub const SHARE_MODAL: &str = "vault-share-modal";
+
+/// What the sharing dialog says of what happens.
+pub const SHARE_SENTENCE: &str = "Its secret goes from this machine's keyring into the keyring of \
+                                  the machine you choose, signed by this device. It is a copy: \
+                                  share it again to replace it.";
+
+/// What the sharing dialog says when no other machine is online.
+pub const NO_MACHINE: &str = "No other machine of yours is online.";
+
 pub struct VaultSection {
     shell: WeakEntity<Shell>,
+    /// The window's host of dialogs: the entry's form opens through it, over any page.
+    modals: Entity<Modals>,
     listed: Option<Vec<VaultEntry>>,
     /// The rows as drawn: a removed entry folds away before it is gone.
     rows: Listing<VaultEntry>,
@@ -136,16 +156,22 @@ pub struct VaultSection {
     writing: Option<Writing>,
     form_error: Option<SharedString>,
     confirming: Option<String>,
-    /// The project page the dialog was opened from (its Tracker, or its Vault tab): once it is
-    /// closed, the window goes back there.
-    come_back: Option<(String, ProjectReveal)>,
     /// The agent's request to write a connection the dialog was opened from, its missing entry:
-    /// once it is saved or closed, the request's dialog is back.
+    /// its dialog stays open under this one, and reads the request again once the entry is saved.
     request_back: Option<u64>,
     /// The entry opened from a project's Vault tab is every project's: the form says so.
     every_project: bool,
     /// The entry the confirmation names, kept while it fades away.
     asked: String,
+    /// The entry the sharing dialog is open for.
+    sharing: Option<String>,
+    /// The entry it named, kept while it fades away.
+    shared_name: String,
+    /// The machines it offers: the user's others that are online, `None` until they are read.
+    machines: Option<Result<Vec<String>, String>>,
+    machine_rows: Listing<String>,
+    /// A share the daemon has not answered yet.
+    share_busy: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -188,6 +214,28 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
         (Some(used), None) => format!("For {used} alone"),
         (None, line) => line.unwrap_or_else(|| "No description".to_owned()),
     };
+    let mute = p.mute;
+    // Where a copy came from unfolds under the row's line once the daemon says it.
+    let shared = presence_of(
+        SharedString::from(format!("vault-shared-block-{}", entry.name)),
+        entry
+            .shared_from
+            .as_ref()
+            .map(|machine| SharedString::from(format!("Shared from {machine}"))),
+        {
+            let name = entry.name.clone();
+            move |said| {
+                div()
+                    .id(SharedString::from(format!("vault-shared-{name}")))
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(mute)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            }
+        },
+    );
     ListRow::new(id, SharedString::from(entry.name.clone()))
         .mono()
         .leading(icon(Icon::Key).size(px(14.)).text_color(p.faint))
@@ -198,12 +246,14 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
                 .unwrap_or_else(|| EVERY_PROJECT.to_owned()),
         ))
         .line(SharedString::from(line))
+        .below(shared)
 }
 
 impl VaultSection {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, modals: Entity<Modals>) -> Self {
         Self {
             shell,
+            modals,
             listed: None,
             rows: Listing::default(),
             menus: HashMap::new(),
@@ -220,10 +270,14 @@ impl VaultSection {
             writing: None,
             form_error: None,
             confirming: None,
-            come_back: None,
             request_back: None,
             every_project: false,
             asked: String::new(),
+            sharing: None,
+            shared_name: String::new(),
+            machines: None,
+            machine_rows: Listing::default(),
+            share_busy: false,
             _subscriptions: Vec::new(),
         }
     }
@@ -343,13 +397,11 @@ impl VaultSection {
 
     /// "New entry", the dialog on `prefill` (its name, metadata, project and use) with the secret
     /// to type: what a project's Tracker or Vault tab, or an agent's request, already knows of it.
-    /// `why` is an agent's reason, said under what it is for; `back` is the project page to go
-    /// back to once the dialog is closed.
+    /// `why` is an agent's reason, said under what it is for. It opens over the page shown.
     pub fn add_prefilled(
         &mut self,
         prefill: &VaultEntry,
         why: Option<String>,
-        back: Option<(String, ProjectReveal)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -357,26 +409,15 @@ impl VaultSection {
         self.form = Form::Editing(None);
         self.bound = prefill.bound.clone();
         self.why = why;
-        self.come_back = back;
     }
 
-    /// A row of a project's Vault tab: the entry in the same dialog, and back to that tab once it
-    /// is closed. An entry of every project says so on the form. Whether it opened: the entry may
-    /// be gone since the row was drawn.
-    pub fn replace_in(
-        &mut self,
-        project: &str,
-        name: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    /// A row of a project's Vault tab: the entry in the same dialog, over the tab. An entry of
+    /// every project says so on the form.
+    pub fn replace_of_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.replace(name, window, cx);
-        let opened = self.is_open();
-        if opened {
+        if self.is_open() {
             self.every_project = self.project.is_none();
-            self.come_back = Some((project.to_owned(), ProjectReveal::Vault));
         }
-        opened
     }
 
     /// "New entry" from an agent's request (`vault_ask.rs`): `entry` prefilled, `why` under what it
@@ -392,7 +433,7 @@ impl VaultSection {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.add_prefilled(entry, Some(why), None, window, cx);
+        self.add_prefilled(entry, Some(why), window, cx);
         self.host = host.zip(entry.url.clone());
         self.connection = connection;
     }
@@ -412,23 +453,15 @@ impl VaultSection {
             url: host.clone(),
             ..VaultEntry::default()
         };
-        self.add_prefilled(&prefill, None, None, window, cx);
+        self.add_prefilled(&prefill, None, window, cx);
         self.host = host.zip(prefill.url);
         self.request_back = Some(number);
     }
 
-    /// The request whose dialog to open again, once the entry made for it is saved.
+    /// The request whose dialog reads it again, once the entry made for it is saved.
     pub fn take_request_return(&mut self) -> Option<u64> {
         match self.form {
             Form::Closed => self.request_back.take(),
-            Form::Editing(_) => None,
-        }
-    }
-
-    /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
-    pub fn take_return(&mut self) -> Option<(String, ProjectReveal)> {
-        match self.form {
-            Form::Closed => self.come_back.take(),
             Form::Editing(_) => None,
         }
     }
@@ -447,7 +480,6 @@ impl VaultSection {
     }
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
-        self.come_back = None;
         self.request_back = None;
         self.every_project = false;
         self.bound = None;
@@ -493,7 +525,16 @@ impl VaultSection {
         .read(cx)
         .focus_handle(cx);
         window.focus(&focus, cx);
+        // Over whatever page is shown, above the dialogs already open.
+        self.modals.update(cx, |modals, cx| modals.open(MODAL, cx));
         cx.notify();
+    }
+
+    /// Where the focus goes when this dialog is the one on top: its first field.
+    pub fn focus_handle(&self, cx: &App) -> Option<FocusHandle> {
+        self.fields
+            .as_ref()
+            .map(|fields| fields.name.read(cx).focus_handle(cx))
     }
 
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -501,19 +542,9 @@ impl VaultSection {
         self.form_error = None;
         self.sent_secret = None;
         self.clear_secret(window, cx);
+        // Closed unsaved, the request's dialog under it has nothing to read again.
+        self.request_back = None;
         cx.notify();
-        if let Some((project, at)) = self.come_back.take() {
-            self.shell
-                .update(cx, |shell, cx| {
-                    shell.open_project_settings_at(&project, at, window, cx)
-                })
-                .ok();
-        }
-        if let Some(number) = self.request_back.take() {
-            self.shell
-                .update(cx, |shell, cx| shell.open_connection_request(number, cx))
-                .ok();
-        }
     }
 
     /// The secret leaves the field as soon as it is sent, or the dialog closed.
@@ -635,11 +666,158 @@ impl VaultSection {
         cx.notify();
     }
 
+    pub fn is_sharing(&self) -> bool {
+        self.sharing.is_some()
+    }
+
+    /// The machines the sharing dialog offers, once read.
+    pub fn machines(&self) -> Option<&Result<Vec<String>, String>> {
+        self.machines.as_ref()
+    }
+
+    /// Opens the dialog that shares the entry `name` with another machine, and reads which are
+    /// online.
+    pub fn share_with(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.sharing = Some(name.to_owned());
+        self.shared_name = name.to_owned();
+        self.machines = None;
+        self.share_busy = false;
+        perform_later(&self.shell, Command::ShareMachines, cx);
+        self.modals
+            .update(cx, |modals, cx| modals.open(SHARE_MODAL, cx));
+        cx.notify();
+    }
+
+    /// The machines online, as the daemon read them.
+    pub fn share_machines(&mut self, listed: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+        if self.sharing.is_some() {
+            self.machines = Some(listed);
+            cx.notify();
+        }
+    }
+
+    fn share_to(&mut self, machine: &str, cx: &mut Context<Self>) {
+        let Some(name) = self.sharing.clone() else {
+            return;
+        };
+        if self.share_busy {
+            return;
+        }
+        self.share_busy = true;
+        perform_later(
+            &self.shell,
+            Command::VaultShare {
+                name,
+                machine: machine.to_owned(),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn close_share(&mut self, cx: &mut Context<Self>) {
+        self.sharing = None;
+        self.share_busy = false;
+        cx.notify();
+    }
+
+    /// The daemon's answer to a share: the dialog closes and a toast says it.
+    pub fn shared(
+        &mut self,
+        name: String,
+        machine: String,
+        refused: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.share_busy = false;
+        self.sharing = None;
+        let said = match refused {
+            None => Toast::success(format!("Entry {name} shared with {machine}"))
+                .detail(format!("Its secret is in the keyring of {machine}.")),
+            Some(why) => Toast::failure(format!("Entry {name} was not shared")).detail(why),
+        };
+        toast(said, cx);
+        cx.notify();
+    }
+
+    /// The dialog that shares an entry: the user's other machines that are online, one row each;
+    /// choosing one shares the entry with it.
+    pub fn share_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
+        let this = cx.entity().downgrade();
+        let modal = Modal::new(
+            SHARE_MODAL,
+            format!("Share the entry {} with…", self.shared_name),
+        )
+        .open(self.sharing.is_some())
+        .on_close(move |_, cx| {
+            this.update(cx, |this, cx| this.close_share(cx)).ok();
+        })
+        .sentence(SHARE_SENTENCE);
+        let names = match &self.machines {
+            Some(Ok(names)) => names.clone(),
+            _ => Vec::new(),
+        };
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.machine_rows.sync(
+            names.into_iter().map(|name| (name.clone(), name)),
+            now,
+            reduce,
+        );
+        let drawn: Vec<_> = self
+            .machine_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let faint = palette(cx).faint;
+        let mut list = ListCard::new("vault-share-machines");
+        for (key, placement, machine) in drawn {
+            let to = machine.clone();
+            let row = ListRow::new(
+                ElementId::Name(format!("share-to-{machine}").into()),
+                SharedString::from(machine.clone()),
+            )
+            .leading(icon(Icon::Service).size(px(14.)).text_color(faint))
+            .line("Online")
+            .on_click(cx.listener(move |this, _, _, cx| this.share_to(&to, cx)));
+            list = list.item(
+                ElementId::Name(format!("share-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let none = matches!(&self.machines, Some(Ok(names)) if names.is_empty());
+        let problem = match &self.machines {
+            Some(Err(why)) => Some(SharedString::from(why.clone())),
+            _ => None,
+        };
+        modal.cancel_label("Close").child(
+            div()
+                .flex()
+                .flex_col()
+                .child(presence(
+                    "vault-share-list-block",
+                    !self.machine_rows.is_empty(),
+                    list,
+                ))
+                .child(
+                    presence(
+                        "vault-share-none-block",
+                        none,
+                        EmptyLine::new("vault-share-none", Icon::Service, NO_MACHINE),
+                    )
+                    .space(space::MD),
+                )
+                .child(problem_line("vault-share-problem", problem, space::MD, cx)),
+        )
+    }
+
     fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
         let this = cx.entity().downgrade();
         menu_of(&mut self.menus, "vault", name, cx, move |name, menu| {
-            let (replace, remove) = (this.clone(), this.clone());
-            let (to_replace, to_remove) = (name.to_owned(), name.to_owned());
+            let (replace, share, remove) = (this.clone(), this.clone(), this.clone());
+            let (to_replace, to_share, to_remove) =
+                (name.to_owned(), name.to_owned(), name.to_owned());
             menu.entry(
                 format!("replace-vault-{name}"),
                 "Edit",
@@ -647,6 +825,16 @@ impl VaultSection {
                 move |window, cx| {
                     replace
                         .update(cx, |this, cx| this.replace(&to_replace, window, cx))
+                        .ok();
+                },
+            )
+            .entry(
+                format!("share-vault-{name}"),
+                "Share with…",
+                None,
+                move |_, cx| {
+                    share
+                        .update(cx, |this, cx| this.share_with(&to_share, cx))
                         .ok();
                 },
             )
@@ -815,12 +1003,13 @@ impl VaultSection {
         .space(space::XS)
     }
 
-    fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
+    /// The entry's dialog, open or closing: the window's host draws it over the page shown.
+    pub fn dialog(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let open = self.form != Form::Closed;
         let title = self.form_title().unwrap_or_else(|| "New entry".to_owned());
-        let modal = Modal::new("vault-modal", title)
+        let modal = Modal::new(MODAL, title)
             .open(open)
             .on_close(move |window, cx| {
                 this.update(cx, |this, cx| this.close(window, cx)).ok();
@@ -969,7 +1158,7 @@ impl VaultSection {
 }
 
 impl Render for VaultSection {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         if let Some(listed) = self.listed.clone() {
             let now = cx.background_executor().now();
@@ -993,7 +1182,6 @@ impl Render for VaultSection {
         }
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
-        let modal = self.modal(window, cx);
         let section = Section::new("vault", "Vault")
             .count(count.to_string())
             .sentence(SENTENCE)
@@ -1031,7 +1219,6 @@ impl Render for VaultSection {
         div()
             .text_color(p.text)
             .child(section)
-            .child(modal)
             .child(self.confirm(cx))
     }
 }

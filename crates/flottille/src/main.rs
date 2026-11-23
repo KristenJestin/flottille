@@ -1,7 +1,9 @@
 // The tool schemas are large `json!` literals: the default limit of 128 is too low for them.
 #![recursion_limit = "256"]
 
+mod about;
 mod acp;
+mod across;
 mod actions;
 mod adf;
 mod agent_command;
@@ -11,6 +13,7 @@ mod appearance;
 mod approval_command;
 mod approvals;
 mod bridge;
+mod changes_command;
 mod chat;
 mod children;
 mod claude;
@@ -27,8 +30,10 @@ mod deliveries;
 mod desktop;
 mod developer;
 mod display;
+mod drafts;
 mod extensions;
 mod files;
+mod findings;
 mod follow;
 mod forge;
 mod gate;
@@ -41,13 +46,17 @@ mod inbox_command;
 mod items;
 mod judge;
 mod landlock;
+mod launches;
 mod leaves;
 mod link;
 mod locks;
 mod mcp;
 mod message_checks;
 mod models;
+mod mounts;
 mod nofollow;
+mod notifications;
+mod notifications_command;
 mod opencode;
 mod people;
 mod pictures;
@@ -59,12 +68,15 @@ mod programs;
 mod project_command;
 mod projects;
 mod providers;
+mod push_folder;
+mod pushed;
 mod quota;
 mod read_commands;
 mod reads;
 mod ready;
 mod remote;
 mod remote_command;
+mod remote_config;
 mod results;
 mod roles;
 mod rules;
@@ -77,21 +89,31 @@ mod session_name;
 mod session_read;
 mod setup;
 mod show;
+mod sign_in;
 mod skill_command;
 mod skills;
 mod ssh_agent;
 mod subscriptions;
 mod sweep;
 mod tasks;
+mod test_time;
 mod tickets;
 mod titles;
+mod travel;
+mod travelled;
+mod travelled_folder;
 mod tree;
+mod tunnel;
+mod tunnel_command;
 mod turn_failures;
 mod update;
+mod updates;
+mod uploads;
 mod vault;
 mod vault_command;
 mod watchdog;
 mod web;
+mod whatsnew;
 mod workspace_command;
 mod workspaces;
 mod workspaces_folder;
@@ -112,6 +134,7 @@ use crate::remote_command::RemoteAction;
 use crate::runs_command::RunsAction;
 use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
+use crate::tunnel_command::TunnelAction;
 use crate::vault_command::VaultAction;
 use crate::workspace_command::WorkspaceAction;
 
@@ -120,6 +143,10 @@ pub const VERSION: &str = env!("FLOTTILLE_VERSION");
 #[derive(Parser)]
 #[command(name = "flottille", version = VERSION, about = "Runs coding agents on your own machine")]
 struct Cli {
+    /// Drive the user's machine of this name: each request is signed with this device's key and
+    /// carried by this machine's daemon (`FLOTTILLE_MACHINE` too)
+    #[arg(long, global = true, value_name = "NAME")]
+    machine: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -153,7 +180,7 @@ enum Command {
         #[command(subcommand)]
         action: VaultAction,
     },
-    /// Flottille on the user's other machines: this machine's addresses
+    /// Flottille on the user's other machines: the hub, the members, remote on and off
     Remote {
         #[command(subcommand)]
         action: RemoteAction,
@@ -184,6 +211,12 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: RunsAction,
+    },
+    /// A run's port on another machine reached on a local port (`--machine`): opened, listed,
+    /// closed
+    Tunnel {
+        #[command(subcommand)]
+        action: TunnelAction,
     },
     /// The services of the machine, shared by every project: listed, written, started, stopped
     Service {
@@ -225,6 +258,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The notifications Flottille keeps for you, read and unread (`read` marks them read)
+    Notifications {
+        /// Only the unread ones
+        #[arg(long)]
+        unread: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<NotificationsAction>,
+    },
     /// Serve the pilot MCP door on standard input and output, for an agent outside Flottille
     Mcp,
     /// Speak ACP on standard input and output in front of an agent CLI: what the daemon starts
@@ -240,7 +283,11 @@ enum Command {
     ReadPage { kind: String, url: String },
     /// Open the window: your projects, where their work happens, their sessions, and what waits
     /// for you
-    Window,
+    Window {
+        /// The page to open, as a window that started again from a new build names it
+        #[arg(long, hide = true)]
+        open: Option<String>,
+    },
     /// Replace Flottille with the latest build of a channel, its sum checked first
     Update {
         /// stable, beta or alpha; the one last chosen, or this build's, by default
@@ -255,8 +302,20 @@ enum Command {
         #[arg(long, value_name = "X.Y.Z[-PRE]", conflicts_with_all = ["channel", "branch"])]
         version: Option<String>,
         /// Install it even when it is this version, or an older one
-        #[arg(long)]
+        #[arg(long, conflicts_with = "stage")]
         force: bool,
+        /// Download it beside the binary, applied at the daemon's next start, without touching
+        /// what runs
+        #[arg(long)]
+        stage: bool,
+    },
+    /// What changed since the version you last ran, or since one you name
+    Changes {
+        /// Count from this version instead of the one last run
+        #[arg(long, value_name = "X.Y.Z[-PRE]")]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Print the daemon's events, one JSON object per line
     Watch {
@@ -270,6 +329,19 @@ enum Command {
     },
     #[command(flatten)]
     Extensions(extensions::Command),
+}
+
+#[derive(Subcommand)]
+enum NotificationsAction {
+    /// Mark a notification read, or all of them
+    Read {
+        /// The notification's number, as `flottille notifications` gives it
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<u64>,
+        /// Mark every notification read
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -309,6 +381,28 @@ enum DeveloperAction {
     On,
     /// Stop logging
     Off,
+    /// The findings agents filed about Flottille itself, with their occurrences
+    Reports {
+        /// The findings as JSON: the export the lead agent reads
+        #[arg(long)]
+        json: bool,
+        /// Write them to a file of the state folder, and say where
+        #[arg(long)]
+        export: bool,
+        #[command(subcommand)]
+        action: Option<ReportsAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReportsAction {
+    /// Mark a finding filed, with the address of its issue
+    Filed {
+        /// The finding's number
+        id: u64,
+        /// The issue's address
+        issue: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -344,6 +438,45 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // What runs here, or is this machine's own process, drives no other: it refuses the flag
+    // and ignores the variable, which a shell may have exported for the commands it aims.
+    let here = match &cli.command {
+        Command::Daemon { action: None } => Some("daemon"),
+        Command::Window { .. } => Some("window"),
+        Command::Update { .. } => Some("update"),
+        Command::Mcp => Some("mcp"),
+        Command::Bridge { .. } => Some("bridge"),
+        Command::Remote { .. } => Some("remote"),
+        // These check this machine alone (its `claude`, its keyring's login, its page reader).
+        Command::Doctor { .. } => Some("doctor"),
+        Command::Vault {
+            action: VaultAction::Provide { .. },
+        } => Some("vault provide"),
+        Command::ReadPage { .. } => Some("read-page"),
+        _ => None,
+    };
+    let flagged = cli.machine.clone().filter(|name| !name.is_empty());
+    // `vault share` and `connection share` are this machine's requests: their --machine names
+    // where the entry or the connection goes.
+    let mut cli = cli;
+    let sharing = match &mut cli.command {
+        Command::Vault {
+            action: VaultAction::Share { machine, .. },
+        }
+        | Command::Extensions(extensions::Command::Connection {
+            action: extensions::ConnectionAction::Share { machine, .. },
+        }) => {
+            *machine = flagged.clone();
+            true
+        }
+        _ => false,
+    };
+    if let (Some(command), Some(_)) = (here, &flagged) {
+        return Err(format!(
+            "flottille {command} is this machine's own: it drives no other (leave out --machine)"
+        )
+        .into());
+    }
     // The page's reader runs with no environment: it needs no folder of Flottille's.
     if let Command::ReadPage { kind, url } = &cli.command {
         return Ok(web::read_page(kind, url));
@@ -357,8 +490,32 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(extensions::vault_provide(socket));
     }
     let paths = Paths::from_env()?;
+    let machine = flagged.or_else(|| {
+        std::env::var("FLOTTILLE_MACHINE")
+            .ok()
+            .filter(|name| !name.is_empty())
+    });
+    // A tunnel's list and closing are this machine's own: the flag only filters them.
+    let own_tunnels =
+        matches!(&cli.command, Command::Tunnel { action } if tunnel_command::is_local(action));
+    if here.is_none()
+        && !sharing
+        && !own_tunnels
+        && let Some(machine) = machine.clone()
+    {
+        client::aim(machine);
+    }
     match cli.command {
         Command::Daemon { action: None } => daemon::run(&paths)?,
+        Command::Daemon {
+            action: Some(DaemonAction::Stop),
+        } if client::aimed().is_some() => {
+            Client::connect_or_start(&paths)?.request("daemon.stop", json!({}))?;
+            println!(
+                "The daemon of {} is stopping.",
+                client::aimed().unwrap_or_default()
+            );
+        }
         Command::Daemon {
             action: Some(DaemonAction::Stop),
         } => match Client::connect(&paths)? {
@@ -443,6 +600,38 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     client.request("developer.set", json!({"log": false}))?,
                     false,
                 ),
+                DeveloperAction::Reports {
+                    json,
+                    export,
+                    action,
+                } => {
+                    match (action, export) {
+                        (Some(ReportsAction::Filed { id, issue }), _) => {
+                            client.request(
+                                "developer.report_filed",
+                                json!({"id": id, "issue": issue}),
+                            )?;
+                            println!("Finding #{id} is marked filed: {issue}");
+                        }
+                        (None, true) => {
+                            let said = client.request("developer.reports_export", json!({}))?;
+                            println!(
+                                "{} finding(s) written to {}",
+                                said["count"],
+                                said["file"].as_str().unwrap_or_default()
+                            );
+                        }
+                        (None, false) => {
+                            let said = client.request("developer.reports", json!({}))?;
+                            if json {
+                                println!("{said}");
+                            } else {
+                                print!("{}", findings::listing(&said));
+                            }
+                        }
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
             };
             if json {
                 println!("{answer}");
@@ -455,19 +644,32 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Runs { action } => runs_command::run(&paths, action)?,
+        Command::Tunnel { action } => tunnel_command::run(&paths, action, machine)?,
         Command::Service { action } => service_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
+        Command::Notifications {
+            unread,
+            json,
+            action,
+        } => match action {
+            Some(NotificationsAction::Read { id, all }) => {
+                notifications_command::read(&paths, id, all)?
+            }
+            None => notifications_command::list(&paths, unread, json)?,
+        },
         Command::Mcp => pilot::run(&paths)?,
         Command::Extensions(command) => return extensions::run(&paths, command),
+        Command::Changes { since, json } => changes_command::run(&paths, since, json)?,
         Command::Update {
             channel,
             branch,
             version,
             force,
-        } => return update::run(&paths, channel, branch, version, force),
+            stage,
+        } => return update::run(&paths, channel, branch, version, force, stage),
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),
@@ -475,7 +677,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             agent: BridgeAgent::Codex,
         } => return codex_bridge::run(&paths),
         Command::ReadPage { .. } => unreachable!("the page's reader returns before the paths"),
-        Command::Window => {
+        Command::Window { open } => {
             // One window: a second command brings the open one to the front and leaves. When
             // that cannot be told (no runtime folder to hold the place), another window is
             // better than none.
@@ -490,6 +692,24 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     None
                 }
             };
+            let device = remote_command::window_device(&paths);
+            // What only the user's device may ask (`vault.share`) is signed with its key, read
+            // when it is asked, as the command line reads it.
+            let signing = paths.clone();
+            flottille_window::link::sign_with(std::sync::Arc::new(move |machine, request| {
+                let key = remote_command::device_key(&signing)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let signed = flottille_link::Request::sign(
+                    &key,
+                    &request.id,
+                    machine,
+                    &request.method,
+                    &request.params,
+                    std::time::SystemTime::now(),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                serde_json::to_value(signed).map_err(std::io::Error::other)
+            }));
             let paths = paths.clone();
             flottille_window::run(
                 std::sync::Arc::new(move || {
@@ -497,14 +717,24 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         .map(Client::into_stream)
                         .map_err(|error| std::io::Error::other(error.to_string()))
                 }),
+                Some(device),
                 instance,
+                flottille_window::Build {
+                    full: VERSION.to_owned(),
+                    reexec: std::sync::Arc::new(window_again),
+                    open,
+                },
             );
+        }
+        Command::Watch { after, forge } if client::aimed().is_some() => {
+            return watch_another(&paths, after, &forge);
         }
         Command::Watch { after, forge } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.watch(WatchParams {
                 after,
                 client: None,
+                forge: None,
             })?;
             // Not waited for: its answer is not an event, and the events of its read come
             // meanwhile.
@@ -525,6 +755,82 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The window becomes `flottille window` of the binary that replaced its own (`docs/releases.md`,
+/// "Updating"), on `page`: false, and nothing done, when the binary was not replaced.
+fn window_again(page: Option<String>) -> bool {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let new = client::program_to_start(exe.clone());
+    if new == exe {
+        return false;
+    }
+    let mut command = std::process::Command::new(&new);
+    command.arg("window");
+    if let Some(page) = page {
+        command.args(["--open", &page]);
+    }
+    let error = command.exec();
+    eprintln!(
+        "flottille: the window cannot start again from {}: {error}",
+        new.display()
+    );
+    false
+}
+
+/// `flottille watch` of another machine: its events, carried by this machine's daemon. When the
+/// link drops, or the machine is off, the watch waits and resumes after the last event it printed,
+/// each time with a request signed again.
+fn watch_another(
+    paths: &Paths,
+    after: Option<u64>,
+    forge: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mut after = after;
+    let mut said: Option<String> = None;
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        let mut client = Client::connect_or_start(paths)?;
+        // The forge is asked for on the watch's own stream: the other machine ends each request
+        // of its own at its answer, and a watch of a workspace lasts as long as its stream.
+        match client.watch(WatchParams {
+            after,
+            client: None,
+            forge: match forge {
+                [project, name] => Some([project.clone(), name.clone()]),
+                _ => None,
+            },
+        }) {
+            Ok(answer) => {
+                said = None;
+                // Without `after`, the stream starts after the number it answered: a resume
+                // starts there too.
+                after = after.or_else(|| answer["after"].as_u64());
+                while let Ok(Some(event)) = client.next_event() {
+                    after = Some(event.seq);
+                    if writeln!(stdout, "{}", serde_json::to_string(&event)?).is_err() {
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                }
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<client::DaemonError>()
+                    .is_some_and(|error| error.code == "unavailable") =>
+            {
+                let error = error.to_string();
+                if said.as_deref() != Some(error.as_str()) {
+                    eprintln!("flottille: {error}; the watch resumes once it is back");
+                    said = Some(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn print_status(status: &Value) {

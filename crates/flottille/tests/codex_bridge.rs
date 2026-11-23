@@ -1,7 +1,7 @@
 //! Flottille's Codex bridge (`flottille bridge codex`), driven over ACP as the daemon drives it,
 //! in front of the fake `codex` (`crates/flottille-fake-codex`). No real `codex` ever runs here.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};

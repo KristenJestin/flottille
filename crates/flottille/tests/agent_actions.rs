@@ -5,7 +5,7 @@
 //! sessions, driven through their MCP server as their client would, on throwaway repositories and
 //! temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

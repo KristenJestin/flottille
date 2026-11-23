@@ -4,8 +4,8 @@
 //! real daemon in temporary folders, its agents the fake ACP agent, its forge the fake `gh`, and
 //! rmcp's client in place of the writing session's own. No window opens on a screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1382,4 +1382,197 @@ fn a_sessions_section_with_no_session_ends_under_its_sentence(cx: &mut TestAppCo
         EMPTY_SESSIONS_BELOW_SENTENCE,
         "blocks that are all folded take no room in their section"
     );
+}
+
+#[gpui_kit::test]
+fn a_spec_section_is_edited_in_the_window(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Sign in with a link"}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    let page = open_spec(&shell, cx, spec);
+    assert!(page.read_with(cx, |p, _| p.can_edit()), "a Draft is edited");
+
+    // The Problem is a text: the editor opens on it, and Save writes it whole.
+    click(cx, "spec-problem-edit");
+    until(&shell, cx, "the editor opens", |cx| {
+        found(cx, "spec-edit-modal")
+    });
+    click(cx, "spec-edit-text");
+    cx.simulate_input("A link sent by mail signs the user in.");
+    click(cx, "spec-edit-save");
+    until(&shell, cx, "the editor closes", |cx| {
+        !found(cx, "spec-edit-modal")
+    });
+    assert_eq!(
+        show(&user, spec)["problem"],
+        "A link sent by mail signs the user in."
+    );
+    until(&shell, cx, "the page says it", |cx| {
+        label(cx, "spec-problem-text").as_deref() == Some("A link sent by mail signs the user in.")
+    });
+
+    // A list is written as the daemon takes it: an item with no identifier is a new one.
+    click(cx, "spec-behaviour-edit");
+    until(&shell, cx, "the editor opens on the list", |cx| {
+        found(cx, "spec-edit-modal")
+    });
+    click(cx, "spec-edit-text");
+    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_input(r#"[{"text": "A link signs the user in once."}]"#);
+    click(cx, "spec-edit-save");
+    until(&shell, cx, "the editor closes again", |cx| {
+        !found(cx, "spec-edit-modal")
+    });
+    let written = show(&user, spec);
+    assert_eq!(written["behaviour"][0]["id"], "C1");
+    assert_eq!(
+        written["behaviour"][0]["text"],
+        "A link signs the user in once."
+    );
+
+    // What the daemon refuses, or cannot read, is said in the dialog, which stays open.
+    click(cx, "spec-behaviour-edit");
+    until(&shell, cx, "the editor opens a third time", |cx| {
+        found(cx, "spec-edit-modal")
+    });
+    click(cx, "spec-edit-text");
+    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_input("[");
+    click(cx, "spec-edit-save");
+    until(&shell, cx, "the dialog says why", |cx| {
+        found(cx, "spec-edit-error")
+    });
+    assert!(found(cx, "spec-edit-modal"));
+    assert_eq!(
+        show(&user, spec)["behaviour"][0]["id"],
+        "C1",
+        "nothing was written"
+    );
+    click(cx, "spec-edit-modal-cancel");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !found(cx, "spec-edit-modal")
+    });
+
+    // Past Draft nothing is edited: the daemon refuses it, so the buttons wait.
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    until(&shell, cx, "the page is Ready", |cx| {
+        label(cx, "spec-status").as_deref() == Some("Ready")
+    });
+    settle(cx);
+    assert!(!page.read_with(cx, |p, _| p.can_edit()));
+}
+
+#[gpui_kit::test]
+fn a_ticket_is_linked_to_a_spec_and_unlinked(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Fix the sign in", "tickets": ["#5"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_spec(&shell, cx, spec);
+    assert!(found(cx, "spec-ticket-row-5"), "the ticket it covers");
+    assert_eq!(
+        label(cx, "spec-link-ticket").as_deref(),
+        Some("Link a ticket…")
+    );
+
+    // A search among the project's tickets: the one it covers is not offered again.
+    click(cx, "spec-link-ticket");
+    until(&shell, cx, "the tickets are offered", |cx| {
+        found(cx, "spec-link-pick-6")
+    });
+    assert!(!found(cx, "spec-link-pick-5"));
+    click(cx, "spec-link-search");
+    cx.simulate_input("typo");
+    until(&shell, cx, "the search keeps what matches", |cx| {
+        found(cx, "spec-link-pick-6")
+    });
+    click(cx, "spec-link-pick-6");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !found(cx, "spec-link-modal")
+    });
+    assert_eq!(show(&user, spec)["tickets"], json!(["#5", "#6"]));
+    until(&shell, cx, "its row unfolds", |cx| {
+        found(cx, "spec-ticket-row-6")
+    });
+    settle(cx);
+
+    // Unlink is in the row's ⋯.
+    click(cx, "spec-ticket-row-6-more");
+    click(cx, "spec-ticket-row-6-unlink");
+    until(&shell, cx, "its row folds away", |cx| {
+        !found(cx, "spec-ticket-row-6")
+    });
+    assert_eq!(show(&user, spec)["tickets"], json!(["#5"]));
+
+    // The last ticket of such a spec stays: the daemon refuses, and a toast says it.
+    click(cx, "spec-ticket-row-5-more");
+    click(cx, "spec-ticket-row-5-unlink");
+    until(&shell, cx, "a refusal is said", |cx| {
+        toasts(&shell, cx).iter().any(|(failure, _, _)| *failure)
+    });
+    assert_eq!(show(&user, spec)["tickets"], json!(["#5"]));
+    assert!(found(cx, "spec-ticket-row-5"));
+}
+
+#[gpui_kit::test]
+fn the_specs_list_filters_by_status_and_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let new = |title: &str| {
+        user.call("spec.new", json!({"project": "app", "title": title}))
+            .unwrap()["spec"]
+            .as_u64()
+            .unwrap()
+    };
+    let (drafted, ready) = (new("Sign in with a link"), new("Sign out"));
+    user.call(
+        "spec.write",
+        json!({"spec": ready, "section": "behaviour",
+            "content": [{"text": "The session ends at once."}]}),
+    )
+    .unwrap();
+    user.call("spec.ready", json!({"spec": ready})).unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    open_project(&shell, cx);
+    until(&shell, cx, "the Specs tab counts them", |cx| {
+        label(cx, "project-tabs-specs-count").as_deref() == Some("2")
+    });
+    click(cx, "project-tabs-specs");
+    at_rest(cx);
+    // One chip per status, each with how many specs it holds; the list is that project's.
+    assert_eq!(label(cx, "specs-filter-all").as_deref(), Some("All 2"));
+    assert_eq!(label(cx, "specs-filter-draft").as_deref(), Some("Draft 1"));
+    assert_eq!(label(cx, "specs-filter-ready").as_deref(), Some("Ready 1"));
+    assert!(found(cx, &format!("spec-{drafted}")) && found(cx, &format!("spec-{ready}")));
+
+    click(cx, "specs-filter-ready");
+    until(&shell, cx, "the draft folds away", |cx| {
+        !found(cx, &format!("spec-{drafted}"))
+    });
+    assert!(found(cx, &format!("spec-{ready}")));
+    // The chosen chip clicked again goes back to all.
+    click(cx, "specs-filter-ready");
+    until(&shell, cx, "the draft is back", |cx| {
+        found(cx, &format!("spec-{drafted}"))
+    });
+    assert!(found(cx, &format!("spec-{ready}")));
 }

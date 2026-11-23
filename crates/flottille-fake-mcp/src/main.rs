@@ -453,6 +453,11 @@ fn call(
         }
     } else if let Some(name) = answer["env"].as_str() {
         std::env::var(name).unwrap_or_else(|_| format!("{name} is not set"))
+    } else if let Some(path) = answer["connect"].as_str() {
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => "connected".to_owned(),
+            Err(error) => format!("{:?}", error.kind()),
+        }
     } else if answer["echo"] == true {
         arguments.to_string()
     } else if let Some(text) = answer["text"].as_str() {

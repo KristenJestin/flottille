@@ -12,7 +12,7 @@ use gpui_design_system::drawer::Closed;
 use gpui_design_system::motion::HOVER;
 use gpui_design_system::{
     Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
-    Menu, Modal, PageHeader, Palette, Placement, Section, Switch, Toast, Type, enter, fade,
+    Menu, Modal, PageHeader, Palette, Placement, Section, Switch, Toast, Type, enter, fade, icon,
     palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -27,13 +27,13 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::{
-    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+    boxed, line_field, menu_of, optional_line, perform_later, problem_line, section_blocks, spaced,
+    stack,
 };
 use crate::runs::{CommandOutput, CommandPanel, address_link, ready_mark};
 use crate::shell::Shell;
 use crate::tasks::{
-    AddressKind, ReadyFields, ReadyKind, TaskInfo, names_of, needs_field, needs_line,
-    ready_and_url, toggle_name,
+    AddressKind, ReadyFields, ReadyKind, TaskInfo, names_of, needs_field, needs_line, ready_and_url,
 };
 
 /// How often the open output is read again.
@@ -182,6 +182,8 @@ struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
     folder: Entity<InputState>,
+    /// What the picker of needs searches the services with.
+    needs: Entity<InputState>,
     ready: ReadyFields,
 }
 
@@ -194,8 +196,8 @@ pub struct ServiceForm {
     /// The flags, the needs and the kinds of ready and address the form shows.
     shown: ServiceInfo,
     fields: Option<Fields>,
-    /// The other services, which it may need.
-    services: Vec<String>,
+    /// The other services, which it may need, each with its command line.
+    services: Vec<(String, String)>,
     saving: bool,
     form_error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -235,6 +237,16 @@ impl ServiceForm {
         self.fields.as_ref().map(|f| &f.folder)
     }
 
+    /// The field the picker of needs searches the services with.
+    pub fn needs_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.needs)
+    }
+
+    /// The services the form says it needs, in the order they were added.
+    pub fn needs(&self) -> &[String] {
+        &self.shown.needs
+    }
+
     pub fn ready_field(&self, kind: ReadyKind) -> Option<&Entity<InputState>> {
         let at = ReadyKind::ALL.iter().position(|k| *k == kind)?;
         self.fields.as_ref().map(|f| &f.ready.ready[at])
@@ -250,6 +262,7 @@ impl ServiceForm {
             let name = line_field("mongo", window, cx);
             let line = line_field("docker compose up", window, cx);
             let folder = line_field("~/tools/docker/mongo", window, cx);
+            let needs = line_field("Add a service…", window, cx);
             let ready = ReadyFields::new(true, window, cx);
             // Typing clears what a refusal said.
             for input in [&name, &line, &folder].into_iter().chain(ready.inputs()) {
@@ -264,6 +277,7 @@ impl ServiceForm {
                 name,
                 line,
                 folder,
+                needs,
                 ready,
             });
         }
@@ -274,7 +288,7 @@ impl ServiceForm {
     fn open(
         &mut self,
         info: Option<&ServiceInfo>,
-        services: Vec<String>,
+        services: Vec<(String, String)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -293,6 +307,7 @@ impl ServiceForm {
             field.update(cx, |f, cx| f.set_value(text, window, cx));
         }
         fields.ready.fill(&shown.ready, &shown.url, window, cx);
+        fields.needs.update(cx, |f, cx| f.set_value("", window, cx));
         let focus = if info.is_some() {
             &fields.line
         } else {
@@ -320,8 +335,8 @@ impl ServiceForm {
         cx.notify();
     }
 
-    fn toggle_need(&mut self, service: &str, cx: &mut Context<Self>) {
-        toggle_name(&mut self.shown.needs, service);
+    fn set_needs(&mut self, needs: Vec<String>, cx: &mut Context<Self>) {
+        self.shown.needs = needs;
         cx.notify();
     }
 
@@ -425,6 +440,7 @@ impl Render for ServiceForm {
         )
         .hint("Each start by an agent waits for you, or for the judge in Auto.")
         .on_click(cx.listener(|this, _, _, cx| this.toggle_ask(cx)));
+        let needs = fields.needs.clone();
         let body = div()
             .id("service-form")
             .flex()
@@ -435,29 +451,44 @@ impl Render for ServiceForm {
                     .flex_col()
                     .gap(space::LG)
                     .child(
-                        Field::new("service-name-field", "Name", name)
-                            .hint("Tasks and agents name it by this name."),
+                        Section::new("service-section-run", "What it runs")
+                            .tag("required")
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(space::LG)
+                                    .child(
+                                        Field::new("service-name-field", "Name", name)
+                                            .hint("Tasks and agents name it by this name."),
+                                    )
+                                    .child(Field::new(
+                                        "service-line-field",
+                                        "Command line",
+                                        boxed("service-line", Input::new(&fields.line), cx),
+                                    )),
+                            ),
                     )
-                    .child(Field::new(
-                        "service-line-field",
-                        "Command line",
-                        boxed("service-line", Input::new(&fields.line), cx),
-                    ))
+                    .child(optional_line("service-optional", cx))
                     .child(
-                        Field::new(
-                            "service-folder-field",
-                            "Folder",
-                            boxed("service-folder", Input::new(&fields.folder), cx),
-                        )
-                        .optional()
-                        .hint("Where it runs: absolute, or ~/…. The home when left empty."),
+                        Section::new("service-section-where", "Where it runs")
+                            .sentence("The home folder when left empty.")
+                            .child(
+                                Field::new(
+                                    "service-folder-field",
+                                    "Folder",
+                                    boxed("service-folder", Input::new(&fields.folder), cx),
+                                )
+                                .hint("Absolute, or ~/…"),
+                            ),
                     )
                     .child(needs_field(
                         "service",
+                        &needs,
                         Some(Ok(&self.services)),
                         original.as_deref().or(Some(self.shown.name.as_str())),
                         &self.shown.needs,
-                        |this: &mut Self, name, cx| this.toggle_need(name, cx),
+                        |this: &mut Self, needs, cx| this.set_needs(needs, cx),
                         cx,
                     ))
                     .child(ready_and_url(
@@ -470,16 +501,12 @@ impl Render for ServiceForm {
                         |this: &mut Self, kind, cx| this.choose_url(kind, cx),
                         cx,
                     ))
-                    .child(Field::new("service-kind", "When an agent starts it", ask)),
+                    .child(Section::new("service-section-agents", "Agents").child(ask)),
             )
-            .child(problem_line(
-                "service-error",
-                self.form_error.clone(),
-                space::LG,
-                cx,
-            ))
             .test_support();
-        modal.child(body).action(
+        // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
+        let error = problem_line("service-error", self.form_error.clone(), px(0.), cx);
+        modal.child(body).kept(error).action(
             Button::primary(
                 "save-service",
                 if original.is_some() { "Save" } else { "Add" },
@@ -526,6 +553,9 @@ pub struct ServicesPage {
     ticker: Option<Task<()>>,
     narrow: bool,
     scroll: ScrollHandle,
+    /// Every tunnel this machine carries to the runs of other machines, once the daemon said.
+    tunnels: Option<Vec<crate::tunnels::Tunnel>>,
+    tunnel_rows: Listing<crate::tunnels::Tunnel>,
 }
 
 impl ServicesPage {
@@ -556,6 +586,8 @@ impl ServicesPage {
             ticker: None,
             narrow: false,
             scroll: ScrollHandle::new(),
+            tunnels: None,
+            tunnel_rows: Listing::default(),
         }
     }
 
@@ -623,7 +655,137 @@ impl ServicesPage {
     pub fn opened(&mut self, cx: &mut Context<Self>) {
         self.rows = Listing::default();
         self.read(cx);
+        self.read_tunnels(cx);
         cx.notify();
+    }
+
+    /// Asks the daemon for the tunnels this machine carries: a command line or another window
+    /// opens some too.
+    fn read_tunnels(&self, cx: &mut App) {
+        crate::commands::perform_later(
+            &self.shell,
+            Command::Ask {
+                method: "tunnel.list".to_owned(),
+                params: json!({}),
+                then: crate::extensions::Then::Tunnels(crate::tunnels::Then::Listed),
+            },
+            cx,
+        );
+    }
+
+    /// Close: the daemon closes it, whoever opened it.
+    fn close_tunnel(&self, id: &str, cx: &mut App) {
+        crate::commands::perform_later(
+            &self.shell,
+            Command::Ask {
+                method: "tunnel.close".to_owned(),
+                params: json!({"tunnel": id}),
+                then: crate::extensions::Then::Tunnels(crate::tunnels::Then::Closed {
+                    id: id.to_owned(),
+                }),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered about the tunnels.
+    pub fn tunnels_answered(
+        &mut self,
+        then: crate::tunnels::Then,
+        answer: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match (then, answer) {
+            (crate::tunnels::Then::Listed, Ok(listed)) => {
+                let all: Vec<crate::tunnels::Tunnel> = listed["tunnels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(crate::tunnels::Tunnel::listed)
+                    .collect();
+                self.tunnel_rows.sync(
+                    all.iter().map(|tunnel| (tunnel.id.clone(), tunnel.clone())),
+                    cx.background_executor().now(),
+                    cx.reduce_motion(),
+                );
+                self.tunnels = Some(all);
+            }
+            (crate::tunnels::Then::Listed, Err(_)) => {}
+            (crate::tunnels::Then::Closed { .. }, Ok(_)) => self.read_tunnels(cx),
+            (crate::tunnels::Then::Closed { .. }, Err(why)) => {
+                toast(Toast::failure("Tunnel not closed").detail(why), cx);
+                self.read_tunnels(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Tunnels section: what this machine carries, by machine, each with Close.
+    fn tunnels_section(&self, cx: &mut Context<Self>) -> Section {
+        let p = palette(cx);
+        let drawn: Vec<(String, Placement, crate::tunnels::Tunnel)> = self
+            .tunnel_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let mut machines: Vec<String> = Vec::new();
+        for (_, _, tunnel) in &drawn {
+            if !machines.contains(&tunnel.machine) {
+                machines.push(tunnel.machine.clone());
+            }
+        }
+        let mut groups = stack(space::MD);
+        for machine in machines {
+            let mut list = ListCard::new(format!("tunnels-list-{machine}"));
+            for (key, placement, tunnel) in drawn.iter().filter(|(_, _, t)| t.machine == machine) {
+                let (this, id) = (cx.entity().downgrade(), tunnel.id.clone());
+                let row = ListRow::new(
+                    ElementId::Name(format!("tunnels-row-{key}").into()),
+                    tunnel.said(),
+                )
+                .mono()
+                .leading(icon(Icon::Service).size(px(14.)).text_color(p.faint))
+                .line(format!("Run {}, port {}", tunnel.run, tunnel.port))
+                .trailing(
+                    Button::quiet(
+                        ElementId::Name(format!("tunnels-row-{key}-close").into()),
+                        "Close",
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        this.update(cx, |this, cx| this.close_tunnel(&id, cx)).ok();
+                    }),
+                );
+                list = list.item(
+                    ElementId::Name(format!("tunnels-item-{key}").into()),
+                    *placement,
+                    row,
+                );
+            }
+            groups = groups.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("tunnels-machine-{machine}").into()))
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .aria_label(SharedString::from(machine.clone()))
+                            .child(SharedString::from(machine.clone()))
+                            .test_support(),
+                    )
+                    .child(list),
+            );
+        }
+        Section::new("tunnels", "Tunnels")
+            .count(self.tunnel_rows.len().to_string())
+            .sentence(
+                "What this machine carries to the runs of your other machines. Close one to free \
+                 its port.",
+            )
+            .child(groups)
     }
 
     /// Asks the daemon for the list.
@@ -649,9 +811,12 @@ impl ServicesPage {
     pub fn edit(&mut self, name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let listed = self.listed.clone().unwrap_or_default();
         let info = name.and_then(|name| listed.iter().find(|s| s.name == name));
-        let names = listed.iter().map(|s| s.name.clone()).collect();
+        let services = listed
+            .iter()
+            .map(|s| (s.name.clone(), s.line.clone()))
+            .collect();
         self.form
-            .update(cx, |form, cx| form.open(info, names, window, cx));
+            .update(cx, |form, cx| form.open(info, services, window, cx));
     }
 
     fn write(&mut self, method: &'static str, params: Value, writing: Writing, cx: &mut App) {
@@ -880,13 +1045,6 @@ impl ServicesPage {
         }
     }
 
-    /// Opens an address with the system's default handler.
-    pub fn open_link(&self, url: &str, cx: &App) {
-        if let Some(shell) = self.shell.upgrade() {
-            shell.read(cx).open_link(url);
-        }
-    }
-
     fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
         let this = cx.entity().downgrade();
         menu_of(&mut self.menus, "service", name, cx, move |name, menu| {
@@ -1030,10 +1188,9 @@ impl ServicesPage {
             );
         }
         // What comes and goes with its state unfolds and folds away.
-        let page = cx.entity().downgrade();
         let link_id = id("link");
         let address = info.address.as_ref().map(|url| {
-            let page = page.clone();
+            let run = info.run.clone();
             LabelledLine::new(
                 id("address"),
                 Icon::OpenInEditor,
@@ -1044,11 +1201,7 @@ impl ServicesPage {
                 link_id.clone(),
                 url,
                 12.,
-                move |url, cx| {
-                    if let Some(page) = page.upgrade() {
-                        page.read(cx).open_link(url, cx);
-                    }
-                },
+                move |url, cx| crate::tunnels::open_address(run.as_deref(), url, cx),
                 window,
                 cx,
             ))
@@ -1376,14 +1529,16 @@ impl Render for ServicesPage {
             ));
         let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-services-{part}").into());
+        let has_tunnels = !self.tunnel_rows.is_empty();
+        let tunnels = self.tunnels_section(cx);
         let column = div()
             .w_full()
             .max_w(space::COLUMN)
             .flex()
             .flex_col()
-            .gap(space::XXL)
             .child(enter(key("header"), 0, header))
-            .child(enter(key("list"), 1, section));
+            .child(spaced(space::XXL, enter(key("list"), 1, section)))
+            .child(presence("tunnels-section-block", has_tunnels, tunnels).space(space::XXL));
         div()
             .id("services-page-frame")
             .relative()

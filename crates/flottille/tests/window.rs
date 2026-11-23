@@ -2,7 +2,7 @@
 //! whose agents are the fake ACP agent, with a throwaway user (temporary home and XDG folders).
 //! No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use flottille_window::state::AgentState;
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use common::mcp::Mcp;
 use flottille_core::workspace::StepState;
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
-use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
+use flottille_window::composer::{Choice, Composer, PlaceChoice};
 use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
@@ -408,7 +408,7 @@ fn a_root_s_question_marks_its_session_and_rings_the_bell_until_the_user_writes(
     });
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 1);
     let item = shell.read_with(cx, |s, _| s.snapshot().bell[0].clone());
-    assert_eq!(item.session, id);
+    assert_eq!(item.session.as_deref(), Some(id.as_str()));
     assert_eq!(item.detail, "Which database?");
 
     send(&user, &id, "postgres");
@@ -2467,7 +2467,7 @@ fn mode_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (Option<Stri
 }
 
 #[gpui_kit::test]
-fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_judge(
+fn the_mode_is_a_compact_select_with_a_warning_icon_when_auto_has_no_judge(
     cx: &mut TestAppContext,
 ) {
     let user = team_user();
@@ -2480,8 +2480,7 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     );
     settle(cx);
     cx.update(|window, _| {
-        assert_eq!(window.find("reply-mode-auto").selected(), Some(true));
-        assert_eq!(window.find("reply-mode-ask").selected(), Some(false));
+        assert_eq!(window.find("reply-mode").label(), Some("Auto"));
         // No sentence: the long line is gone, a small icon with a tooltip stands for it.
         assert!(window.try_find("reply-mode-said").is_none());
         let warning = window.find("reply-mode-warning");
@@ -2491,7 +2490,7 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
             "an icon, not a sentence"
         );
         let control = window.find("reply-mode").bounds();
-        // Three short words, Ask | Auto | Full.
+        // One short word, in a pill.
         assert!(
             control.size.width < px(170.),
             "a compact control: {control:?}"
@@ -2515,6 +2514,8 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     settle(cx);
 
     // Choosing Ask puts the session in Ask: no judge is needed, no warning.
+    cx.update(|window, cx| window.click("reply-mode", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("reply-mode-ask", cx));
     eventually("the daemon puts the session in Ask", || {
         user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["gate_mode"] == "ask"
@@ -2524,7 +2525,7 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     });
     settle(cx);
     cx.update(|window, _| {
-        assert_eq!(window.find("reply-mode-ask").selected(), Some(true));
+        assert_eq!(window.find("reply-mode").label(), Some("Ask"));
         assert!(window.try_find("reply-mode-warning").is_none());
     });
 
@@ -2544,10 +2545,16 @@ fn the_composer_shows_full_in_the_alarm_colour(cx: &mut TestAppContext) {
         mode_shown(&shell, cx).0.as_deref() == Some("auto")
     });
     settle(cx);
+    // Open, the select says each mode in a line, Full among them.
+    cx.update(|window, cx| window.click("reply-mode", cx));
+    settle(cx);
     cx.update(|window, _| {
         assert_eq!(window.find("reply-mode-full").selected(), Some(false));
         assert_eq!(window.find("reply-mode-full").label(), Some("Full"));
+        assert!(window.find("reply-mode-full-line").label().is_some());
     });
+    cx.update(|window, cx| window.click("reply-mode", cx));
+    settle(cx);
     let alarm = |cx: &mut VisualTestContext| {
         let page = session_page(&shell, cx);
         page.read_with(cx, |page, cx| {
@@ -2557,6 +2564,8 @@ fn the_composer_shows_full_in_the_alarm_colour(cx: &mut TestAppContext) {
     assert!(!alarm(cx), "Auto is not drawn in the alarm colour");
 
     // The user chooses Full: the session is in Full, drawn in the alarm colour.
+    cx.update(|window, cx| window.click("reply-mode", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("reply-mode-full", cx));
     eventually("the daemon puts the session in Full", || {
         user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["gate_mode"] == "full"
@@ -2566,7 +2575,7 @@ fn the_composer_shows_full_in_the_alarm_colour(cx: &mut TestAppContext) {
     });
     settle(cx);
     cx.update(|window, _| {
-        assert_eq!(window.find("reply-mode-full").selected(), Some(true));
+        assert_eq!(window.find("reply-mode").label(), Some("Full"));
         let control = window.find("reply-mode").bounds();
         assert!(
             control.size.width < px(170.),
@@ -4026,7 +4035,7 @@ fn opening_settings_shows_the_agents_tab_alone(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
@@ -4034,6 +4043,7 @@ fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
             ("approvals", "Approvals"),
             ("features", "Features"),
             ("vault", "Vault"),
+            ("machines", "Machines"),
             ("general", "General"),
         ]
     );
@@ -4049,7 +4059,7 @@ fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 5);
+        assert_eq!(lefts.len(), 6);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -4186,7 +4196,8 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
         let wanted: &[&str] = match *key {
             "agents" => &["providers", "rules", "tool-results", "sessions"],
             "approvals" => &["judge", "guidance"],
-            "features" => &[],
+            // Machines, remote off: a notice and a button, no section title (`window_machines.rs`).
+            "features" | "machines" => &[],
             "vault" => &["vault"],
             _ => &["appearance", "workspaces", "developer"],
         };
@@ -4393,14 +4404,13 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
         composer.read_with(cx, |c, _| c.pick().provider.as_deref() == Some("claude"))
     });
 
-    cx.update(|window, cx| window.click("provider-picker", cx));
-    cx.update(|window, cx| window.click("provider-choice-opencode", cx));
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-open/small", cx));
-    // The effort picker's room opens as the model's efforts come.
+    // One picker: the provider, then its model, then its effort, in one menu.
+    cx.update(|window, cx| window.click("agent-picker", cx));
+    cx.update(|window, cx| window.click("agent-picker-provider-opencode", cx));
+    cx.update(|window, cx| window.click("agent-picker-model-opencode-open-small", cx));
+    // The efforts' section opens as the model's efforts come.
     settle(cx);
-    cx.update(|window, cx| window.click("effort-picker", cx));
-    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    cx.update(|window, cx| window.click("agent-picker-effort-high", cx));
     type_task("Please launch a helper", cx);
     cx.simulate_keystrokes("enter");
     until(&shell, cx, "the session's page opens", |cx| {
@@ -4577,11 +4587,112 @@ fn the_pickers_start_on_the_project_s_default_then_on_the_last_ones_used(cx: &mu
     });
 }
 
+/// The scenario of #1202: the provider, the model, the effort and the mode, each chosen in the
+/// one picker and the one select, are what the session starts with.
+#[gpui_kit::test]
+fn choosing_provider_model_effort_and_mode_in_the_new_controls_starts_the_session_with_them(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    learn_models(&user, "atlas", "opencode", "open/small");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer starts on the first ready", |cx| {
+        composer.read_with(cx, |c, _| c.pick().provider.as_deref() == Some("claude"))
+    });
+
+    // The picker: the provider, its model, its effort, in one menu; the label says them.
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-provider-opencode", cx));
+    cx.update(|window, cx| window.click("agent-picker-model-opencode-open-small", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("agent-picker-effort-high", cx));
+    settle(cx);
+    assert_eq!(picker_said(cx), "OpenCode · open/small · high");
+    // The select: the mode, with its line.
+    cx.update(|window, cx| window.click("start-mode", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("start-mode-ask", cx));
+    settle(cx);
+    cx.update(|window, _| assert_eq!(window.find("start-mode").label(), Some("Ask")));
+
+    type_task("Look around", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(shown["provider"], "opencode");
+    assert_eq!(shown["chosen"]["model"], "open/small");
+    assert_eq!(shown["chosen"]["effort"], "high");
+    assert_eq!(shown["gate_mode"], "ask");
+}
+
 // Providers' follow-ups (#48).
 
-/// What the composer's model picker shows.
-fn model_shown(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> String {
-    composer.read_with(cx, |c, _| c.model_shown())
+/// The efforts the fake agents offer, in the order a label ends on one of them.
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// What the composer's one agent picker says closed: `Provider · Model · effort`.
+fn picker_said(cx: &mut VisualTestContext) -> String {
+    cx.update(|window, _| {
+        window
+            .try_find("agent-picker")
+            .and_then(|found| found.label().map(str::to_owned))
+            .unwrap_or_default()
+    })
+}
+
+/// The model the picker names: its label less the provider and the effort.
+fn model_shown(cx: &mut VisualTestContext) -> String {
+    let said = picker_said(cx);
+    let mut parts: Vec<&str> = said.split(" · ").skip(1).collect();
+    if parts.len() > 1 && parts.last().is_some_and(|last| EFFORTS.contains(last)) {
+        parts.pop();
+    }
+    parts.join(" · ")
+}
+
+/// The effort the picker names, none when its label has none.
+fn effort_shown(cx: &mut VisualTestContext) -> String {
+    let said = picker_said(cx);
+    said.rsplit(" · ")
+        .next()
+        .filter(|last| EFFORTS.contains(last))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Whether the picker already names a model (it says the models are to be learnt before).
+fn models_known(cx: &mut VisualTestContext) -> bool {
+    let said = picker_said(cx);
+    !said.is_empty() && !said.contains("learnt")
+}
+
+/// Opens the picker's menu.
+fn open_picker(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("agent-picker", cx));
+    settle(cx);
+}
+
+/// Closes the picker's menu when it is open (a model with efforts leaves it open).
+fn close_picker(cx: &mut VisualTestContext) {
+    if cx.update(|window, _| window.try_find("agent-picker-backdrop").is_some()) {
+        cx.update(|window, cx| {
+            window.click_at("agent-picker-backdrop", gpui_kit::point(px(4.), px(4.)), cx)
+        });
+        settle(cx);
+    }
+}
+
+/// Whether the entry of the open menu is the one chosen.
+fn chosen_in_menu(id: &str, cx: &mut VisualTestContext) -> Option<bool> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.try_find(id).and_then(|found| found.selected()))
 }
 
 /// Starts a session on that provider and model and waits for its first turn: its sessions then
@@ -4626,24 +4737,28 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
             })
         },
     );
-    assert_eq!(model_shown(&composer, cx), "fake-large · the project's");
-    cx.update(|window, cx| window.click("model-picker", cx));
+    assert_eq!(model_shown(cx), "fake-large · the project's");
+    open_picker(cx);
     cx.update(|window, _| {
-        assert!(window.try_find("model-choice-fake-large").is_some());
+        assert!(
+            window
+                .try_find("agent-picker-model-claude-fake-large")
+                .is_some()
+        );
     });
-    cx.update(|window, cx| window.click("model-choice-fake-large", cx));
-    // The effort picker's room opens as the model's efforts come.
+    cx.update(|window, cx| window.click("agent-picker-model-claude-fake-large", cx));
+    // The efforts' section opens as the model's efforts come.
     settle(cx);
-    cx.update(|window, cx| window.click("effort-picker", cx));
-    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    cx.update(|window, cx| window.click("agent-picker-effort-high", cx));
 
     // Another provider is not the one the project's model goes to: its own default there.
-    cx.update(|window, cx| window.click("provider-picker", cx));
-    cx.update(|window, cx| window.click("provider-choice-opencode", cx));
-    assert_eq!(model_shown(&composer, cx), "model not known yet");
-    cx.update(|window, cx| window.click("provider-picker", cx));
-    cx.update(|window, cx| window.click("provider-choice-claude", cx));
-    assert_eq!(model_shown(&composer, cx), "fake-large · the project's");
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-provider-opencode", cx));
+    assert_eq!(model_shown(cx), "models learnt at its first session");
+    // The menu stays open after a provider: the next section is chosen in it.
+    cx.update(|window, cx| window.click("agent-picker-provider-claude", cx));
+    assert_eq!(model_shown(cx), "fake-large · the project's");
+    close_picker(cx);
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -4654,6 +4769,51 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
     let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
     assert_eq!(shown["provider"], "claude");
+    assert_eq!(shown["chosen"]["model"], "fake-large");
+}
+
+/// A project's model the agent's list dropped (#1076): the composer picks the model of its family
+/// a session starts on, its row is the one picked and the project's, and nothing is refused.
+#[gpui_kit::test]
+fn a_project_model_the_list_dropped_is_picked_as_the_model_of_its_family(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    learn_models(&user, "atlas", "claude", "fake-large");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("model = \"large\"\n{text}")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(
+        &shell,
+        cx,
+        "the composer starts on the model of the family",
+        |cx| {
+            composer.read_with(cx, |c, _| c.pick().model.as_deref() == Some("fake-large"))
+                && models_known(cx)
+        },
+    );
+    assert_eq!(model_shown(cx), "fake-large · the project's");
+    assert!(composer.read_with(cx, |c, _| c.model_refused()).is_none());
+    open_picker(cx);
+    assert_eq!(
+        chosen_in_menu("agent-picker-model-claude-fake-large", cx),
+        Some(true),
+        "the row of the model it runs on is picked"
+    );
+    close_picker(cx);
+
+    // A pick the list dropped is the model of its family too.
+    composer.update(cx, |c, cx| c.pick_model(Some("small".into()), cx));
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("fake-small")
+    );
+    composer.update(cx, |c, cx| c.pick_model(Some("large".into()), cx));
+    let shown = start_from_composer(&shell, &user, cx);
     assert_eq!(shown["chosen"]["model"], "fake-large");
 }
 
@@ -4673,10 +4833,8 @@ fn composer_on_setting<'a>(
     let composer = composer_of(&shell, "atlas", cx);
     until(&shell, cx, "the composer starts on the setting", |cx| {
         composer.read_with(cx, |c, _| {
-            c.pick().provider.as_deref() == Some("claude")
-                && c.pick().model == model
-                && c.entries(Menu::Model).len() > 1
-        })
+            c.pick().provider.as_deref() == Some("claude") && c.pick().model == model
+        }) && models_known(cx)
     });
     settle(cx);
     (shell, composer, cx)
@@ -4691,15 +4849,6 @@ fn click_when_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str)
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
-}
-
-/// The effort the composer marks recommended for the model picked.
-fn recommended_effort(composer: &Composer) -> Option<String> {
-    composer
-        .entries(Menu::Effort)
-        .into_iter()
-        .find(|e| e.note.as_deref() == Some("recommended"))
-        .map(|e| e.label)
 }
 
 /// Sends a task from the composer: what the session started on, as the daemon shows it.
@@ -4730,11 +4879,12 @@ fn picking_the_recommended_model_in_the_composer_wins_over_the_setting(cx: &mut 
         Some("fake-large")
     );
     // Claude's recommended model, picked: the session starts on it, not on the setting's.
-    click_when_drawn(&shell, cx, "model-picker");
-    click_when_drawn(&shell, cx, "model-choice-fake-small");
+    click_when_drawn(&shell, cx, "agent-picker");
+    click_when_drawn(&shell, cx, "agent-picker-model-claude-fake-small");
     until(&shell, cx, "the composer shows the model", |cx| {
-        model_shown(&composer, cx) == "fake-small"
+        model_shown(cx) == "fake-small"
     });
+    close_picker(cx);
     let shown = start_from_composer(&shell, &user, cx);
     assert_eq!(shown["taken"]["model"], "fake-small");
 }
@@ -4743,31 +4893,26 @@ fn picking_the_recommended_model_in_the_composer_wins_over_the_setting(cx: &mut 
 fn picking_the_recommended_effort_in_the_composer_wins_over_the_setting(cx: &mut TestAppContext) {
     let user = providers_user();
     // The setting's effort is the one the model does not run with by itself.
-    let (shell, composer, cx) = composer_on_setting(
+    let (shell, _composer, cx) = composer_on_setting(
         &user,
         json!({"provider": "claude", "model": "fake-small", "effort": "high"}),
         cx,
     );
-    let own = composer
-        .read_with(cx, |c, _| recommended_effort(c))
-        .unwrap();
-    assert_ne!(
-        own, "high",
-        "the setting's effort is not the recommended one"
-    );
+    // The middle of the two efforts the fake offers is what its model runs with by itself.
+    let own = "low";
     assert_eq!(
-        composer.read_with(cx, |c, _| c.effort_shown()),
+        effort_shown(cx),
         "high",
         "the composer starts on the setting's effort"
     );
-    click_when_drawn(&shell, cx, "effort-picker");
-    click_when_drawn(&shell, cx, &format!("effort-choice-{own}"));
+    click_when_drawn(&shell, cx, "agent-picker");
+    click_when_drawn(&shell, cx, &format!("agent-picker-effort-{own}"));
     until(&shell, cx, "the composer shows the effort", |cx| {
-        composer.read_with(cx, |c, _| c.effort_shown()) == own
+        effort_shown(cx) == own
     });
     let shown = start_from_composer(&shell, &user, cx);
     assert_eq!(shown["taken"]["model"], "fake-small");
-    assert_eq!(shown["chosen"]["effort"], own.as_str());
+    assert_eq!(shown["chosen"]["effort"], own);
 }
 
 #[gpui_kit::test]
@@ -4810,8 +4955,9 @@ fn a_project_model_its_provider_is_known_not_to_offer_is_said_instead_of_dropped
     assert!(!composer.read_with(cx, |c, _| c.is_sending()));
 
     // Another model picked, it starts.
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-open/medium", cx));
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-model-opencode-open-medium", cx));
+    close_picker(cx);
     assert!(composer.read_with(cx, |c, _| c.model_refused()).is_none());
     cx.update(|window, cx| window.click("composer-field", cx));
     cx.simulate_keystrokes("enter");
@@ -5105,15 +5251,13 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mu
     open_project(&shell, "atlas", cx);
     let composer = composer_of(&shell, "atlas", cx);
     until(&shell, cx, "the efforts are known", |cx| {
-        composer.read_with(cx, |c, _| !c.entries(Menu::Effort).is_empty())
+        !effort_shown(cx).is_empty()
     });
     settle(cx);
 
     for (picker, menu) in [
         ("place-picker", "place-picker-menu"),
-        ("provider-picker", "provider-picker-menu"),
-        ("model-picker", "model-picker-menu"),
-        ("effort-picker", "effort-picker-menu"),
+        ("agent-picker", "agent-picker-menu"),
     ] {
         cx.update(|window, cx| window.click(picker, cx));
         settle(cx);
@@ -5142,10 +5286,10 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mu
 
     // The effort's list opens over the places' cards and the new-workspace card: what is under
     // the pointer is the entry, not the card.
-    cx.update(|window, cx| window.click("effort-picker", cx));
+    cx.update(|window, cx| window.click("agent-picker", cx));
     settle(cx);
     let covers = cx.update(|window, _| {
-        let list = window.find("effort-picker-menu").bounds();
+        let list = window.find("agent-picker-menu").bounds();
         ["project-tabs", "place-main", "place-login"]
             .iter()
             .any(|card| {
@@ -5155,7 +5299,7 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mu
             })
     });
     assert!(covers, "the list is drawn over a card");
-    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    cx.update(|window, cx| window.click("agent-picker-effort-high", cx));
     assert_eq!(
         composer
             .read_with(cx, |c, _| c.pick().effort.clone())
@@ -5171,25 +5315,24 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mu
     );
 }
 
-/// The labels of a picker's list.
-fn menu_labels(composer: &Entity<Composer>, menu: Menu, cx: &mut VisualTestContext) -> Vec<String> {
-    composer.read_with(cx, |c, _| {
-        c.entries(menu).into_iter().map(|e| e.label).collect()
-    })
+/// No "default model" nor "default effort" in what the picker says, in its label or in the
+/// entries of its open menu.
+fn no_default_wording(cx: &mut VisualTestContext) {
+    assert!(!picker_said(cx).to_lowercase().contains("default"));
+    open_picker(cx);
+    for id in [
+        "agent-picker-model-claude-default",
+        "agent-picker-effort-default",
+    ] {
+        assert!(!has_element(id, cx), "{id}");
+    }
+    close_picker(cx);
 }
 
-/// No "default model" nor "default effort" in what the pickers say: neither on them nor in their
-/// lists, a "default" note aside.
-fn no_default_wording(composer: &Entity<Composer>, cx: &mut VisualTestContext) {
-    let mut said = vec![
-        model_shown(composer, cx),
-        composer.read_with(cx, |c, _| c.effort_shown()),
-    ];
-    said.extend(menu_labels(composer, Menu::Model, cx));
-    said.extend(menu_labels(composer, Menu::Effort, cx));
-    for said in said {
-        assert!(!said.to_lowercase().contains("default"), "{said:?}");
-    }
+/// Whether an element of that id is drawn.
+fn has_element(id: &str, cx: &mut VisualTestContext) -> bool {
+    let id = id.to_owned();
+    cx.update(|window, _| window.try_find(id).is_some())
 }
 
 #[gpui_kit::test]
@@ -5204,30 +5347,39 @@ fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_r
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     let composer = composer_of(&shell, "atlas", cx);
-    until(&shell, cx, "claude's models are known", |cx| {
-        composer.read_with(cx, |c, _| {
-            c.entries(Menu::Model)
-                .iter()
-                .all(|e| e.id != "models-unknown")
-                && !c.entries(Menu::Model).is_empty()
-        })
-    });
+    until(&shell, cx, "claude's models are known", models_known);
 
-    assert_eq!(model_shown(&composer, cx), "Fable");
-    assert_eq!(menu_labels(&composer, Menu::Model, cx), ["Fable", "Haiku"]);
-    let fable = composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].clone());
-    assert!(fable.on, "the default model's row is the selected one");
-    assert_eq!(fable.note.as_deref(), Some("recommended"));
-    no_default_wording(&composer, cx);
+    assert_eq!(model_shown(cx), "Fable");
+    open_picker(cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("agent-picker-model-claude-fable").label(),
+            Some("Fable")
+        );
+        assert_eq!(
+            window.find("agent-picker-model-claude-haiku").label(),
+            Some("Haiku")
+        );
+    });
+    assert_eq!(
+        chosen_in_menu("agent-picker-model-claude-fable", cx),
+        Some(true),
+        "the default model's row is the selected one"
+    );
+    close_picker(cx);
+    no_default_wording(cx);
 
     // Another model, then the default's row again: that is picking none.
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-haiku", cx));
-    assert_eq!(model_shown(&composer, cx), "Haiku");
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-fable", cx));
-    assert_eq!(model_shown(&composer, cx), "Fable");
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-model-claude-haiku", cx));
+    settle(cx);
+    assert_eq!(model_shown(cx), "Haiku");
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-model-claude-fable", cx));
+    settle(cx);
+    assert_eq!(model_shown(cx), "Fable");
     assert_eq!(composer.read_with(cx, |c, _| c.pick().model.clone()), None);
+    close_picker(cx);
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -5252,15 +5404,9 @@ fn a_session_started_with_nothing_picked_names_the_model_shown(cx: &mut TestAppC
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     let composer = composer_of(&shell, "atlas", cx);
-    until(&shell, cx, "claude's models are known", |cx| {
-        composer.read_with(cx, |c, _| {
-            c.entries(Menu::Model)
-                .iter()
-                .any(|e| e.id == "model-choice-fable")
-        })
-    });
+    until(&shell, cx, "claude's models are known", models_known);
     assert_eq!(composer.read_with(cx, |c, _| c.pick().model.clone()), None);
-    assert_eq!(model_shown(&composer, cx), "Fable");
+    assert_eq!(model_shown(cx), "Fable");
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -5303,15 +5449,19 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
         |cx| composer.read_with(cx, |c, _| c.pick().model.as_deref() == Some("haiku")),
     );
 
-    assert_eq!(model_shown(&composer, cx), "Haiku · the project's");
-    let rows = composer.read_with(cx, |c, _| c.entries(Menu::Model));
-    let haiku = rows.iter().find(|e| e.id == "model-choice-haiku").unwrap();
-    assert!(haiku.on);
-    // Haiku has no effort: its row says so, the one place it is said.
-    assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
-    let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
-    assert!(!fable.on);
-    assert_eq!(fable.note.as_deref(), Some("recommended"));
+    assert_eq!(model_shown(cx), "Haiku · the project's");
+    // Haiku has no effort: the label says none.
+    assert_eq!(effort_shown(cx), "");
+    open_picker(cx);
+    assert_eq!(
+        chosen_in_menu("agent-picker-model-claude-haiku", cx),
+        Some(true)
+    );
+    assert_eq!(
+        chosen_in_menu("agent-picker-model-claude-fable", cx),
+        Some(false)
+    );
+    close_picker(cx);
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -5345,15 +5495,7 @@ fn no_picker_ever_says_chosen_by(cx: &mut TestAppContext) {
             assert!(!said.to_lowercase().contains("chosen by"), "{said:?}");
         }
     };
-    let all = |composer: &Entity<Composer>, cx: &mut VisualTestContext| {
-        let mut said = vec![
-            model_shown(composer, cx),
-            composer.read_with(cx, |c, _| c.effort_shown()),
-        ];
-        said.extend(menu_labels(composer, Menu::Model, cx));
-        said.extend(menu_labels(composer, Menu::Effort, cx));
-        said
-    };
+    let all = |cx: &mut VisualTestContext| vec![picker_said(cx)];
     // Before any session said the models.
     let user = providers_user();
     project(&user, "atlas");
@@ -5363,21 +5505,16 @@ fn no_picker_ever_says_chosen_by(cx: &mut TestAppContext) {
     until(&shell, cx, "the composer starts on claude", |cx| {
         composer.read_with(cx, |c, _| c.pick().provider.as_deref() == Some("claude"))
     });
-    never(&all(&composer, cx));
+    never(&all(cx));
     // Once they are known, a `default` that says nothing of what it stands for included.
     learn_models(&user, "atlas", "claude", "fake-small");
-    until(&shell, cx, "the models are known", |cx| {
-        composer.read_with(cx, |c, _| {
-            c.entries(Menu::Model)
-                .iter()
-                .all(|e| e.id != "models-unknown")
-        })
-    });
-    never(&all(&composer, cx));
+    until(&shell, cx, "the models are known", models_known);
+    never(&all(cx));
     // A model picked whose efforts no session said yet.
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-fake-large", cx));
-    never(&all(&composer, cx));
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-model-claude-fake-large", cx));
+    settle(cx);
+    never(&all(cx));
 }
 
 #[gpui_kit::test]
@@ -5400,18 +5537,20 @@ fn picking_the_default_model_s_row_while_the_project_has_its_own_model_names_the
         "the composer starts on the project's model",
         |cx| composer.read_with(cx, |c, _| c.pick().model.as_deref() == Some("haiku")),
     );
-    assert_eq!(model_shown(&composer, cx), "Haiku · the project's");
+    assert_eq!(model_shown(cx), "Haiku · the project's");
 
     // The default's row names its model: left unnamed, the project's would be taken instead.
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-fable", cx));
-    assert_eq!(model_shown(&composer, cx), "Fable");
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-model-claude-fable", cx));
+    settle(cx);
+    assert_eq!(model_shown(cx), "Fable");
     assert_eq!(
         composer
             .read_with(cx, |c, _| c.pick().model.clone())
             .as_deref(),
         Some("fable")
     );
+    close_picker(cx);
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -5432,22 +5571,23 @@ fn the_effort_shown_is_the_one_the_model_runs_with(cx: &mut TestAppContext) {
     start(&user, "atlas", None, "hello");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
-    let composer = composer_of(&shell, "atlas", cx);
     until(&shell, cx, "the efforts are known", |cx| {
-        composer.read_with(cx, |c, _| !c.entries(Menu::Effort).is_empty())
+        !effort_shown(cx).is_empty()
     });
 
     // Claude does not say which effort a model runs with: the middle of those it offers, the one
     // Flottille applies.
-    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "high");
-    assert_eq!(
-        menu_labels(&composer, Menu::Effort, cx),
-        ["low", "medium", "high", "xhigh", "max"]
-    );
-    let high = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[2].clone());
-    assert!(high.on);
-    assert_eq!(high.note.as_deref(), Some("recommended"));
-    no_default_wording(&composer, cx);
+    assert_eq!(effort_shown(cx), "high");
+    open_picker(cx);
+    for level in ["low", "medium", "high", "xhigh", "max"] {
+        assert_eq!(
+            chosen_in_menu(&format!("agent-picker-effort-{level}"), cx),
+            Some(level == "high"),
+            "{level}"
+        );
+    }
+    close_picker(cx);
+    no_default_wording(cx);
 }
 
 #[gpui_kit::test]
@@ -5459,28 +5599,30 @@ fn the_effort_a_model_runs_with_is_shown_selected_with_a_recommended_note(cx: &m
     open_project(&shell, "atlas", cx);
     let composer = composer_of(&shell, "atlas", cx);
     until(&shell, cx, "the efforts are known", |cx| {
-        composer.read_with(cx, |c, _| !c.entries(Menu::Effort).is_empty())
+        !effort_shown(cx).is_empty()
     });
     settle(cx);
 
-    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "low");
-    assert_eq!(menu_labels(&composer, Menu::Effort, cx), ["low", "high"]);
-    let low = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[0].clone());
-    assert!(low.on);
-    assert_eq!(low.note.as_deref(), Some("recommended"));
-    no_default_wording(&composer, cx);
+    assert_eq!(effort_shown(cx), "low");
+    open_picker(cx);
+    assert_eq!(chosen_in_menu("agent-picker-effort-low", cx), Some(true));
+    assert_eq!(chosen_in_menu("agent-picker-effort-high", cx), Some(false));
+    close_picker(cx);
+    no_default_wording(cx);
 
-    cx.update(|window, cx| window.click("effort-picker", cx));
-    cx.update(|window, cx| window.click("effort-choice-high", cx));
-    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "high");
-    cx.update(|window, cx| window.click("effort-picker", cx));
-    cx.update(|window, cx| window.click("effort-choice-low", cx));
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-effort-high", cx));
+    settle(cx);
+    assert_eq!(effort_shown(cx), "high");
+    open_picker(cx);
+    cx.update(|window, cx| window.click("agent-picker-effort-low", cx));
+    settle(cx);
     assert_eq!(composer.read_with(cx, |c, _| c.pick().effort.clone()), None);
-    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "low");
+    assert_eq!(effort_shown(cx), "low");
 }
 
 #[gpui_kit::test]
-fn before_a_session_said_its_models_the_picker_says_they_are_not_known_yet(
+fn before_a_session_said_its_models_the_picker_says_they_are_learnt_at_the_first(
     cx: &mut TestAppContext,
 ) {
     let user = providers_user();
@@ -5492,12 +5634,8 @@ fn before_a_session_said_its_models_the_picker_says_they_are_not_known_yet(
         composer.read_with(cx, |c, _| c.pick().provider.as_deref() == Some("claude"))
     });
 
-    assert_eq!(model_shown(&composer, cx), "model not known yet");
-    assert_eq!(
-        menu_labels(&composer, Menu::Model, cx),
-        ["Claude's models are known once one of its sessions opened"]
-    );
-    no_default_wording(&composer, cx);
+    assert_eq!(model_shown(cx), "models learnt at its first session");
+    no_default_wording(cx);
 }
 
 /// A secret the daemon knows through its environment (#63).
@@ -7208,12 +7346,12 @@ fn back_with_a_dropdown_open_closes_it_and_goes_nowhere(cx: &mut TestAppContext)
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     open_project(&shell, "bravo", cx);
-    cx.update(|window, cx| window.click("provider-picker", cx));
+    cx.update(|window, cx| window.click("agent-picker", cx));
     settle(cx);
-    assert!(cx.update(|window, _| window.try_find("provider-picker-menu").is_some()));
+    assert!(cx.update(|window, _| window.try_find("agent-picker-menu").is_some()));
 
     back(cx);
-    assert!(cx.update(|window, _| window.try_find("provider-picker-menu").is_none()));
+    assert!(cx.update(|window, _| window.try_find("agent-picker-menu").is_none()));
     assert_eq!(
         selected(&shell, cx),
         Some(Selection::Project("bravo".into())),
@@ -7305,13 +7443,13 @@ fn alt_left_with_a_dropdown_open_closes_it_and_goes_nowhere(cx: &mut TestAppCont
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     open_project(&shell, "bravo", cx);
-    cx.update(|window, cx| window.click("provider-picker", cx));
+    cx.update(|window, cx| window.click("agent-picker", cx));
     settle(cx);
-    assert!(cx.update(|window, _| window.try_find("provider-picker-menu").is_some()));
+    assert!(cx.update(|window, _| window.try_find("agent-picker-menu").is_some()));
 
     cx.simulate_keystrokes("alt-left");
     settle(cx);
-    assert!(cx.update(|window, _| window.try_find("provider-picker-menu").is_none()));
+    assert!(cx.update(|window, _| window.try_find("agent-picker-menu").is_none()));
     assert_eq!(
         selected(&shell, cx),
         Some(Selection::Project("bravo".into())),
@@ -9504,6 +9642,46 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn the_task_dialog_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    assert_eq!(
+        text_of("task-section-run-tag", cx).as_deref(),
+        Some("required")
+    );
+    assert_eq!(
+        text_of("task-optional", cx).as_deref(),
+        Some("Optional: everything below can stay empty")
+    );
+    cx.update(|window, _| {
+        let line = window.find("task-optional").bounds();
+        for required in ["task-name-field-label", "task-line-field-label"] {
+            assert!(
+                window.find(required).bounds().bottom() <= line.top(),
+                "{required}"
+            );
+        }
+        for optional in [
+            "task-section-kind-title",
+            "task-needs",
+            "task-section-ready-title",
+            "task-section-address-title",
+            "task-section-agents-title",
+        ] {
+            assert!(
+                window.find(optional).bounds().top() >= line.bottom(),
+                "{optional}"
+            );
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn a_task_s_kinds_read_as_what_they_are(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
@@ -11181,14 +11359,18 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
     cx.update(|window, _| {
-        assert!(window.find("task-ready-field-label").visible());
-        assert!(window.find("task-url-field-label").visible());
-        assert!(
-            window
-                .try_find("task-ready-line-block")
-                .is_none_or(|b| !b.visible()),
-            "no field while nothing is said"
-        );
+        assert!(window.find("task-ready-switch-label").visible());
+        assert!(window.find("task-url-switch-label").visible());
+        for hidden in [
+            "task-ready-line-block",
+            "task-ready-line",
+            "task-url-command",
+        ] {
+            assert!(
+                window.try_find(hidden).is_none_or(|b| !b.visible()),
+                "{hidden}: nothing while nothing is said"
+            );
+        }
     });
     let (name, line) = section.read_with(cx, |s, _| {
         (
@@ -11200,6 +11382,9 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
         name.update(cx, |f, cx| f.set_value("web", window, cx));
         line.update(cx, |f, cx| f.set_value("npm run dev", window, cx));
     });
+    cx.update(|window, cx| window.click("task-ready-switch", cx));
+    cx.update(|window, cx| window.click("task-url-switch", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("task-ready-line", cx));
     cx.update(|window, cx| window.click("task-url-command", cx));
     settle(cx);
@@ -11209,7 +11394,7 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
         // Each field is `space::MD` under the choice that asks for it, not against it.
         for (choice, field) in [
             ("task-ready-command", "task-ready-line-block"),
-            ("task-url-field-hint", "task-url-command-block"),
+            ("task-url-command", "task-url-command-block"),
         ] {
             assert_eq!(
                 window.find(field).bounds().top() - window.find(choice).bounds().bottom(),
@@ -11261,9 +11446,17 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(shown, (Some(ReadyKind::Line), "ready in".to_owned()));
-    cx.update(|window, cx| window.click("task-ready-none", cx));
+    cx.update(|window, cx| window.click("task-ready-switch", cx));
     settle(cx);
     assert_eq!(section.read_with(cx, |s, _| s.ready_kind()), None);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find("task-ready-line-block")
+                .is_none_or(|b| !b.visible()),
+            "its field folds away with the switch"
+        );
+    });
     cx.update(|window, cx| window.click("task-url-address", cx));
     let url = section.read_with(cx, |s, _| {
         s.url_field(AddressKind::Address).unwrap().clone()
@@ -12758,6 +12951,79 @@ fn type_folder(
 }
 
 #[gpui_kit::test]
+fn the_folder_for_projects_from_other_machines_is_chosen_in_settings_general(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let atlas = project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("general", cx);
+    let section = settings.read_with(cx, |page, _| page.travelled_folder().clone());
+    until(&shell, cx, "the folder is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    settle(cx);
+    // The data folder, its field filled, nothing to save nor to undo.
+    let shown = section.read_with(cx, |s, _| s.shown().cloned()).unwrap();
+    assert_eq!(
+        shown.folder,
+        user.path("data/flottille/projects").to_str().unwrap()
+    );
+    assert!(shown.own.is_none());
+    cx.update(|window, _| {
+        assert!(window.find("travelled-folder-path").visible());
+        assert!(window.try_find("travelled-folder-save").is_none());
+        assert!(window.try_find("travelled-folder-default").is_none());
+        let made = window
+            .find("travelled-folder-made")
+            .label()
+            .unwrap()
+            .to_owned();
+        assert!(made.contains("nothing is moved"), "{made}");
+    });
+    let typed = |text: &str, cx: &mut VisualTestContext| {
+        let field = section
+            .read_with(cx, |section, _| section.field().cloned())
+            .expect("the field is made once the section is drawn");
+        field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+        settle(cx);
+    };
+
+    // A folder inside a project's is refused, under the field.
+    typed(atlas.join("others").to_str().unwrap(), cx);
+    cx.update(|window, cx| window.click("travelled-folder-save", cx));
+    until(&shell, cx, "the refusal", |cx| {
+        section.read_with(cx, |s, _| s.problem().is_some())
+    });
+    settle(cx);
+    let said = section.read_with(cx, |s, _| s.problem().unwrap().to_owned());
+    assert!(said.contains("the project atlas"), "{said}");
+    cx.update(|window, _| assert!(window.find("travelled-folder-problem").visible()));
+
+    // A folder of the user's: kept in its file, and the data folder offered back.
+    typed("~/from-others", cx);
+    cx.update(|window, cx| window.click("travelled-folder-save", cx));
+    until(&shell, cx, "the folder kept", |cx| {
+        section.read_with(cx, |s, _| s.shown().is_some_and(|s| s.own.is_some()))
+    });
+    settle(cx);
+    // The refusal folded away with the save that went through.
+    cx.update(|window, _| assert!(window.try_find("travelled-folder-problem").is_none()));
+    let text = std::fs::read_to_string(user.path("config/flottille/travelled.toml")).unwrap();
+    assert!(text.contains("from-others"), "{text}");
+    cx.update(|window, _| assert!(window.find("travelled-folder-default").visible()));
+
+    cx.update(|window, cx| window.click("travelled-folder-default", cx));
+    until(&shell, cx, "the data folder again", |cx| {
+        section.read_with(cx, |s, _| s.shown().is_some_and(|s| s.own.is_none()))
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("travelled-folder-default").is_none()));
+    assert!(!user.path("config/flottille/travelled.toml").exists());
+}
+
+#[gpui_kit::test]
 fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut TestAppContext) {
     use flottille_window::workspaces_folder::Place;
 
@@ -13349,7 +13615,9 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
         true => connector(),
         false => std::os::unix::net::UnixStream::connect(&socket),
     });
-    // Before the window asks anything.
+    // Before the window asks anything. It gives up on a Flottille after two seconds, not thirty.
+    let limit = Duration::from_secs(2);
+    link::not_answering_after_on_this_thread(limit);
     let asked = Instant::now();
     let (shell, cx) = window(&user, connect, 1280., cx);
     let restarted = Arc::new(AtomicUsize::new(0));
@@ -13378,7 +13646,7 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
         &shell,
         cx,
         "the window says Flottille does not answer",
-        || asked.elapsed() < link::NOT_ANSWERING + Duration::from_secs(20),
+        || asked.elapsed() < limit + Duration::from_secs(20),
         |cx| {
             assert!(
                 text_of("add-first-project", cx).is_none(),
@@ -13387,11 +13655,7 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
             text_of("not-answering-title", cx).is_some()
         },
     );
-    assert!(
-        asked.elapsed() >= link::NOT_ANSWERING,
-        "{:?}",
-        asked.elapsed()
-    );
+    assert!(asked.elapsed() >= limit, "{:?}", asked.elapsed());
     assert_eq!(
         text_of("not-answering-title", cx).as_deref(),
         Some("Flottille is not answering")

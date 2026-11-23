@@ -104,6 +104,12 @@ impl Paths {
         self.config.join("rules.md")
     }
 
+    /// What the user says of themselves, which every agent reads (`docs/design.md` §8); absent
+    /// while they said nothing.
+    pub fn about(&self) -> PathBuf {
+        self.config.join("about.toml")
+    }
+
     /// How the user wants the Auto judge to judge (`docs/design.md` §7.1); absent while they
     /// keep Flottille's default.
     pub fn judge(&self) -> PathBuf {
@@ -113,6 +119,18 @@ impl Paths {
     /// The images the user sent to an agent, one folder per agent: never the project's.
     pub fn images(&self, agent: &str) -> PathBuf {
         self.data.join("images").join(agent)
+    }
+
+    /// The pictures and pasted texts of messages that came in chunks and wait for their message
+    /// (`agent.upload`), one folder per upload: never the project's.
+    pub fn uploads(&self) -> PathBuf {
+        self.data.join("uploads")
+    }
+
+    /// The places Review reads the pull requests it reviews in, one folder each: never a
+    /// workspace's, never the project's.
+    pub fn reviews(&self) -> PathBuf {
+        self.data.join("reviews")
     }
 
     /// One TOML file per project.

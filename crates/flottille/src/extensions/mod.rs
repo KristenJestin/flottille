@@ -10,6 +10,8 @@ mod guidance;
 mod review;
 mod specs;
 
+pub use connections::command::ConnectionAction;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -238,6 +240,7 @@ pub struct Live {
 /// Closes what a daemon that died left running for the extensions, before anything starts them.
 pub async fn close_left_at_start(daemon: &Daemon) {
     connections::close_left_at_start(daemon).await;
+    review::close_left_at_start(daemon).await;
 }
 
 /// Stops what the extensions keep running, as the daemon stops.
@@ -761,6 +764,24 @@ pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
     connections::provide(socket)
 }
 
+/// The sign-in of the connection `name` waiting for the browser on this machine, if one does: what
+/// a tunnel of another machine's client may reach (`tunnel.rs`).
+pub fn sign_in_waiting(daemon: &Daemon, name: &str) -> Option<connections::SignInWaiting> {
+    connections::sign_in_waiting(daemon, name)
+}
+
+/// A connection another machine of the user's shared with this one (`docs/remote.md`,
+/// "Connections"), its user's request checked already.
+pub async fn receive_connection(
+    daemon: &std::sync::Arc<Daemon>,
+    connection: &serde_json::Value,
+    entries: &[flottille_link::SharedEntry],
+    from: &str,
+    here: &str,
+) -> Result<(), String> {
+    connections::receive(daemon, connection, entries, from, here).await
+}
+
 /// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
 /// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
 pub fn bound_possible(bound: &str) -> bool {
@@ -963,6 +984,7 @@ pub fn launch(
     brief: &str,
     instructions: String,
     slot: crate::providers::Asked,
+    at: Option<std::path::PathBuf>,
     before: impl FnOnce(&Agent) -> Result<(), String>,
 ) -> Result<Agent, Failure> {
     crate::tree::launch_for_extension(
@@ -974,6 +996,7 @@ pub fn launch(
         brief,
         instructions,
         slot,
+        at,
         before,
     )
 }
@@ -1042,7 +1065,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Opt
         .read(|store| store.agent(&grant.agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none());
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
     let launched = launched(daemon, &grant.agent).map(|(by, kind)| (by.name, kind));
     Some(verdict(tool, owner.name, root, launched, args, || {
         (tool.gate)(daemon, grant, args)
@@ -1123,6 +1146,7 @@ pub fn start_session(
             preparing: workspace.is_some(),
             role,
             parent: None,
+            remote_parent_depth: None,
             title: Some(title.to_owned()),
             brief: message.to_owned(),
             provider: None,

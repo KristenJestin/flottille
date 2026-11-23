@@ -17,7 +17,8 @@ use flottille_core::pasted;
 use flottille_core::paths::ensure_private_dir;
 use flottille_core::project::Project;
 use flottille_core::protocol::{
-    AgentAnswer, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload, TextUpload,
+    AgentAnswer, AgentFile, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
+    TextUpload,
 };
 use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
@@ -110,9 +111,9 @@ type Task = (mpsc::UnboundedSender<Order>, JoinHandle<()>);
 #[derive(Default)]
 pub struct Live {
     tasks: crate::locks::Lock<HashMap<String, Task>>,
-    /// The processes this daemon started that have not ended, with their start times: the only
-    /// ones it kills when it stops, whatever the shared table holds.
-    processes: crate::locks::Lock<HashMap<u32, u64>>,
+    /// The processes this daemon started that have not ended, with their start times and their
+    /// agents: the only ones it kills when it stops, whatever the shared table holds.
+    processes: crate::locks::Lock<HashMap<u32, (u64, String)>>,
     /// The agents whose tools the user reloads: their process goes between turns, and the next
     /// one says what changed (`mcp::mint`).
     reloads: crate::locks::Lock<HashSet<String>>,
@@ -125,6 +126,12 @@ impl Live {
     /// Whether a process of an agent runs: a session of some project is at work.
     pub fn any_process(&self) -> bool {
         !self.processes.lock().unwrap().is_empty()
+    }
+
+    /// The agents whose process runs: those a stop of the daemon stops.
+    pub fn with_process(&self) -> HashSet<String> {
+        let processes = self.processes.lock().unwrap();
+        processes.values().map(|(_, agent)| agent.clone()).collect()
     }
 }
 
@@ -183,11 +190,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     match method {
         // `agent.run` is the name it had before the pilot door; both stay.
         "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?).await,
+        "agent.upload" => crate::uploads::chunk(daemon, params).await,
         "agent.send" => {
-            let asked: AgentSend = serde_json::from_value(params)?;
+            let mut asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "writes to it")?;
+            refuse_remote_child(daemon, &agent)?;
             refuse_final(&agent)?;
+            let upload = asked.upload.take();
+            take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
             // `/<word>` of an active extension is Flottille's to run, never the agent's to read.
             if asked.images.is_empty()
                 && asked.texts.is_empty()
@@ -281,6 +292,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 .ok_or_else(|| Failure::new("not-found", format!("no image {}", asked.name)))?;
             Ok(json!({"mime": mime, "data": data}))
         }
+        "agent.file" => {
+            let mut asked: AgentFile = serde_json::from_value(params)?;
+            asked.agent = find(daemon, &asked.agent)?.id;
+            crate::show::serve_file(daemon, asked).await
+        }
         "agent.stop" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -365,6 +381,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             refuse_child(daemon, &agent, "names it, with agent_launch")?;
             crate::titles::rename(daemon, &agent, &asked.title)
         }
+        "agent.ending" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            tree::ending(daemon, &agent.id).await
+        }
         "agent.detach" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let mut agent = tree::detach(daemon, &asked.agent)?;
@@ -392,8 +413,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             })?;
             // A tree has one mode, its root's.
             let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
+            // A switch to Full the user signed from a device is kept, for a launch on another
+            // machine to start in Full there; any other switch forgets it.
+            let signed = match mode {
+                GateMode::Full => crate::daemon::asked().map(|asked| asked.signed.clone()),
+                _ => None,
+            };
             // Only the user's door reaches this method: no tool of an agent changes a mode.
             daemon.write(|store| {
+                store.set_full_switch(&agent.id, signed.as_deref())?;
                 let (_, event) = store.change_agent(
                     &agent.id,
                     flottille_core::store::AgentChange {
@@ -509,6 +537,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();
             shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
+            shown["launched_from"] = crate::launches::launched_from_shown(daemon, &agent.id);
             shown["quota"] = crate::quota::shown(daemon, &agent);
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
@@ -541,6 +570,19 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
          stops its root, agent {root}",
         agent.id
     )))
+}
+
+/// A child an agent of another machine launched here belongs to that agent: only it writes to
+/// it. The user still answers its questions and stops it, the ways out while that machine is off
+/// (`docs/remote.md`, "Where a question goes when the parent is off").
+fn refuse_remote_child(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+    match crate::launches::launched_from(daemon, &agent.id) {
+        Some((caller, machine, kind)) if kind == "child" => Err(Failure::refused(format!(
+            "agent {} is a child of agent {caller} of {machine}: only its parent writes to it",
+            agent.id
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn refuse_final(agent: &Agent) -> Result<(), Failure> {
@@ -726,8 +768,29 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
+/// The pictures and texts of the upload a message names, as if it carried them inline
+/// (`uploads`): with an upload, the message carries none of its own.
+async fn take_upload(
+    daemon: &Arc<Daemon>,
+    (images, texts): (&mut Vec<ImageUpload>, &mut Vec<TextUpload>),
+    upload: Option<String>,
+) -> Result<(), Failure> {
+    let Some(upload) = upload else {
+        return Ok(());
+    };
+    if !images.is_empty() || !texts.is_empty() {
+        return Err(Failure::refused(
+            "a message carries its pictures and texts inline or in an upload, not both",
+        ));
+    }
+    (*images, *texts) = crate::uploads::take(daemon, &upload).await?;
+    Ok(())
+}
+
+async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
+    let upload = asked.upload.take();
+    take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
     // Pictures alone are a first message, as they are a later one.
     if asked.images.is_empty() && asked.texts.is_empty() {
         refuse_empty(&asked.message)?;
@@ -818,6 +881,7 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             preparing: false,
             role,
             parent: None,
+            remote_parent_depth: None,
             title: None,
             brief: message.text.clone(),
             provider: asked.provider,
@@ -858,6 +922,9 @@ pub struct New {
     pub role: &'static Role,
     /// Its parent, with the parent's depth; `None` for a root.
     pub parent: Option<(String, u32)>,
+    /// For a child an agent of another machine launched, that agent's depth there: it has no
+    /// parent here, and is a child all the same (`docs/remote.md`, "A tree across machines").
+    pub remote_parent_depth: Option<u32>,
     pub title: Option<String>,
     pub brief: String,
     /// Its provider, model and effort as asked: each checked, and the defaults taken for those
@@ -885,6 +952,8 @@ pub struct Launched {
     pub kind: &'static str,
     /// The extension's text, after the role's: what it is and what it may do.
     pub instructions: String,
+    /// The folder it works in when that is not its parent's place: a pull request's copy.
+    pub at: Option<std::path::PathBuf>,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -899,6 +968,15 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
 pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     crate::projects::refuse_removing(daemon, &project.name)?;
     let (place, folder, repositories) = match &new.workspace {
+        // An extension's agent that reads a place of the extension's own (a pull request's copy).
+        None if new.launched.as_ref().is_some_and(|l| l.at.is_some()) => {
+            let at = new.launched.as_ref().and_then(|l| l.at.clone()).unwrap();
+            (
+                "the copy of a pull request".to_owned(),
+                at.clone(),
+                vec![(".".to_owned(), at.clone(), at)],
+            )
+        }
         None => {
             let repositories: Vec<_> = project
                 .repositories
@@ -963,13 +1041,20 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
     )?;
     let now = now_ms();
-    let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
+    let depth = match (
+        new.parent.as_ref().map(|(_, depth)| *depth),
+        new.remote_parent_depth,
+    ) {
+        (Some(depth), _) | (None, Some(depth)) => depth + 1,
+        (None, None) => 0,
+    };
     let at_depth_limit = depth >= DEPTH_LIMIT;
     let tools = tools_of(
         daemon,
         provider,
         project,
-        new.parent.is_none(),
+        // Only a root is at depth 0: a child of another machine's agent has no parent here.
+        depth == 0,
         depth,
         crate::vault::listed_to(daemon, project),
         new.launched
@@ -998,6 +1083,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     if new.launched.is_some() {
         rules.own.clear();
     }
+    let about = crate::about::effective(&daemon.paths);
     let mut instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -1009,6 +1095,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
             at_depth_limit: at_depth_limit && new.launched.is_none(),
             skills: &skills,
             rules: &rules,
+            about: &about,
         },
         &files,
     );
@@ -1228,6 +1315,11 @@ fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64, failed: Opti
 
 /// Hands an order to the agent's task, starting the task when it has none.
 pub fn order(daemon: &Arc<Daemon>, id: &str, order: Order) {
+    // A caller of another machine stood in for here is no agent of this machine's: nothing is
+    // ever started for it.
+    if crate::across::is_stand_in(id) {
+        return;
+    }
     let mut tasks = daemon.agents.tasks.lock().unwrap();
     let sender = match tasks.get(id) {
         Some((sender, _)) if !sender.is_closed() => sender.clone(),
@@ -1261,7 +1353,7 @@ pub async fn stop_all(daemon: &Daemon) {
         // killed while their leader is alive (the task is aborted after, which kills it too).
         let left: Vec<_> = daemon.agents.processes.lock().unwrap().drain().collect();
         let _ = daemon.read(|store| {
-            for (pid, started) in left {
+            for (pid, (started, _)) in left {
                 kill_left(store, pid, started);
             }
             Ok(())
@@ -1309,6 +1401,7 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
         (provider.forget_agent)(&daemon.paths, &agent.id);
     }
     deliveries::forget_images(&daemon.paths, &id);
+    crate::drafts::forget_session(&daemon, &id);
 }
 
 /// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
@@ -1339,6 +1432,7 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
         else {
             continue;
         };
+        crate::drafts::forget_session(daemon, &agent.id);
         let paths = daemon.paths.clone();
         tokio::task::spawn_blocking(move || {
             (provider.forget_session)(&paths, &native);
@@ -1546,7 +1640,8 @@ async fn process(
         }
     };
     if let Some(started) = start_time(pid) {
-        daemon.agents.processes.lock().unwrap().insert(pid, started);
+        let process = (started, agent.id.clone());
+        daemon.agents.processes.lock().unwrap().insert(pid, process);
         let _ = daemon
             .read(|store| store.add_process(pid, started, &agent.id, crate::children::boot()));
     }
@@ -2472,6 +2567,29 @@ impl acp::Events for Recorder {
         }
     }
 
+    fn effort_dropped(&self) {
+        let result = self.daemon.write(|store| {
+            let Some(agent) = store.agent(&self.agent)? else {
+                return Ok(((), None));
+            };
+            let (_, event) = store.change_agent(
+                &self.agent,
+                AgentChange {
+                    chosen: Some(Choices {
+                        effort: None,
+                        ..agent.chosen
+                    }),
+                    ..AgentChange::default()
+                },
+                None,
+            )?;
+            Ok(((), event))
+        });
+        if let Err(error) = result {
+            eprintln!("flottille daemon: agent {}: {error}", self.agent);
+        }
+    }
+
     fn pump(&self) -> Option<deliveries::Prompt> {
         crate::compaction::before_turn(&self.daemon, &self.agent);
         deliveries::pump(&self.daemon, &self.agent)
@@ -2667,7 +2785,8 @@ fn kill_left(store: &Store, pid: u32, started: u64) {
 /// session is kept (the next process resumes it, which keeps what it knew), and every agent with
 /// something queued is rung. A working agent's prompt was sent (it is working once its prompt is
 /// asked): it is in the session's history, so it is taken as sent, never sent again, and the
-/// agent is told its turn was cut. A starting agent's was not sent yet: it is given back.
+/// agent is told its turn was cut. Any other agent's was not sent yet (a starting one's, or one
+/// taken by a daemon killed before its process started): it is given back.
 pub fn settle_at_start(daemon: &Arc<Daemon>) {
     let agents = match daemon.read(Store::agents) {
         Ok(agents) => agents,
@@ -2685,9 +2804,7 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
                 None,
                 Some(("agent.released", json!({"reason": "restart"}))),
             );
-            if agent.state == AgentState::Starting {
-                let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
-            } else {
+            if agent.state == AgentState::Working {
                 let _ = daemon.read(|store| store.deliveries_taken(&agent.id));
                 deliveries::deliver(
                     daemon,
@@ -2699,6 +2816,9 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
                     approval::BETWEEN_TURNS,
                 );
             }
+        }
+        if !agent.state.is_final() && agent.state != AgentState::Working {
+            let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
         }
         if !agent.state.is_final()
             && daemon
@@ -2713,6 +2833,16 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nothing_is_started_for_a_stand_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::tests::a_daemon(dir.path(), false);
+
+        order(&daemon, "c0@aa", Order::Ring);
+
+        assert!(!daemon.agents.tasks.lock().unwrap().contains_key("c0@aa"));
+    }
 
     #[test]
     fn a_poisoned_saying_lock_still_keeps_the_pieces_after_it_masked() {

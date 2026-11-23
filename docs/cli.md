@@ -11,10 +11,25 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
 - **Exit code**: 0 when the command did what it was asked, 1 when it did not. The reason is one
   sentence on the standard error, `flottille: <sentence>`: the sentence of the daemon's refusal
   when it refused. Nothing was done then.
+- **`--machine <name>`** (or `FLOTTILLE_MACHINE`), on every command: drive the user's machine of
+  that name (`docs/remote.md`, "Requests from another machine's clients"). Each request is signed
+  with this device's key and carried by this machine's daemon; the answers and the events come
+  back as if that machine's daemon were here. A path typed is that machine's
+  (`flottille --machine server project add ~/code/app`). A machine that is off is refused at once,
+  `flottille: server is offline since 22:14`; nothing is kept for it. `flottille daemon`,
+  `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide` and `read-page` are this
+  machine's own and refuse the flag; they ignore the variable, which a shell may have exported for
+  the commands it aims, and the daemon a command starts never reads it. `vault share` is this
+  machine's too, and takes the flag as the machine the entry is shared with.
 - **Agents are named by their id**, twelve hexadecimal digits, as `agent list` shows them.
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
 - The examples below use invented projects and paths.
+- **Each command has its place in the window**, except the few a script alone has a use for
+  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `mcp`): the
+  screen, dialog or menu entry that calls the same daemon method. The table is
+  `crates/flottille/tests/window_parity.rs`, and the test `every_cli_command_has_its_place_in_the_window`
+  refuses a command heading of this file that is in neither list.
 
 ## The `flot` name
 
@@ -75,7 +90,10 @@ Prints the daemon's events (`docs/events.md`), one JSON object per line, until i
 `--after <n>` prints the stored events numbered after `n` first: a client that lost its connection
 resumes with the number of the last event it saw. `--forge <project> <workspace>` watches that
 workspace too: while it runs, the daemon reads its pull requests again about once a minute, and
-`workspace.forge` says when they changed ([`forges.md`](forges.md)).
+`workspace.forge` says when they changed ([`forges.md`](forges.md)). With `--machine`, a link
+that drops or a machine that goes off does not end it: it says so once, and resumes after the
+last event it printed when the machine is back, and `--forge` goes with the watch's own stream,
+which that machine ends when the watch ends: a watch interrupted ends there too, at once.
 
 ```
 $ flottille watch --after 0
@@ -107,6 +125,12 @@ command), never a failure, and `ready` stays the providers'. `--json` adds `"for
 and trackers that use it (`"shop: api"`, `"shop: tracker"`) and its `warning` (`null` when
 nothing is wrong), the warnings also being in `"warnings"`.
 
+The sandbox's state is the daemon's, asked of it; doctor starts no daemon (one that will not start
+is what it may be run to find out about). `--json` adds `"sandbox"`, as `daemon.status` gives it
+(`docs/protocol.md`), and each gap it says (no private mount namespace, or a probe of it that
+concluded nothing, the SSH agent lent to no push and why, with how to fix it) is a warning. With no daemon running, doctor's own process probes what one would find, and
+`"sandbox"` says so: `"probed": "no daemon running: probed by doctor"`.
+
 ```
 $ flottille doctor
 ok   claude: 2.1.300 (/usr/bin/claude)
@@ -118,6 +142,9 @@ ok   gh: 2.60.0 (/usr/bin/gh), signed in to github.com
 warn acli is not on PATH, and example.atlassian.net (shop: tracker) needs it: install it from https://developer.atlassian.com/cloud/acli/guides/install-acli/; the rest of Flottille works without it
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
+
+The window's **Settings › General › Check Flottille** shows the same checks (`provider.list`, `daemon.status`, `project.programs`), with *Check again*, and *Turn on* for a provider that is off.
+
 
 ### `flottille provider list [--json]`
 
@@ -194,6 +221,24 @@ Developer mode is on. Its log: ~/.local/state/flottille/developer.log
 
 Turns it off: nothing more is written. The log stays where it is.
 
+### `flottille developer reports [--json] [--export]`
+
+The findings agents filed about Flottille itself, with their occurrences (`docs/developer.md`, "The
+findings"): the open ones first, one block each. `--json` prints the export, `{"findings": [...]}`
+(`developer.reports`); `--export` writes it to `findings.json` in the state folder and says where.
+
+```
+$ flottille developer reports
+#1 Tickets list answers empty — 2 occurrences, open
+  expected: the open tickets
+  - 3f2a called tickets {"action": "list"}: an empty answer with no error
+```
+
+### `flottille developer reports filed <id> <address>`
+
+Marks a finding filed, with the address of its issue: it leaves the findings agents search, and the
+list says where it went.
+
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): the one published
@@ -212,6 +257,10 @@ one is refused, unless `--force`, which says that the store is not migrated down
 `flottille --version` says the channel installed. It also writes the launcher entry and the icon
 again when they changed, and points the entry at the binary it ran from (`docs/releases.md`, "The
 launcher entry").
+`--stage` downloads the same build and stages it beside the binary instead, while Flottille
+runs: nothing that runs is touched, and the daemon's next start applies it (`docs/releases.md`,
+"Updating"); it stages only a build newer than this one. A plain `flottille update` while a build
+is staged installs the channel's latest and removes the staged one.
 
 ```
 $ flottille update --channel beta
@@ -222,51 +271,151 @@ $ flottille update --version 0.3.0-beta.11
 0.3.0-beta.11 is older than this 0.3.0-beta.12: --force goes back to it (the store is not migrated down, and an older build refuses a store a newer one migrated).
 $ flottille update --channel alpha --branch feat/specs
 ~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
+$ flottille update --stage
+0.3.1-alpha.feat-specs.5 is staged beside ~/.local/bin/flottille: applied at the next start of the daemon.
 ```
 
-### `flottille remote setup <hub URL> [--name <name>] [--replace] [--json]`
+### `flottille changes [--since <version>] [--json]`
 
-Makes this machine the first member of a new hub (`docs/remote.md`, "The first member"), with the
-setup code the hub printed in its log (or `flottille-hub setup-code` on the hub's machine), read on
-the standard input, asked for on a terminal: never an argument, which other users of the machine
-and the shell's history would see. The command makes this user session's device key (in the
-session's keyring, or `remote/device.key` when there is no Secret Service; any other failure of
-the keyring is said, and stops it), signs its own entry as the root of the member list, a
-`runner` named `--name` (the host's name by default), and the declaration of this machine's key;
-the daemon claims it with the machine's key, reaches the hub, proves the code without sending it,
-pins the hub's key once the hub proved it too, and keeps a session to it. A machine set up already
-is refused unless `--replace` is given. `remote.setup`.
-
-```
-$ flottille remote setup https://hub.example.net --name pc
-The hub's setup code: 7KQ2-M4XP-9TRW-H3CD
-pc is the first member of the hub at https://hub.example.net:443/, whose key is 3f2a-91bc-0d4e-77a1: the root every device that joins pins
-```
-
-### `flottille remote address list [--json]`
-
-With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
-one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
-until `[remote] listen` is set), and those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
-machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's to arrange.
-`remote.machines` (`docs/protocol.md`).
+What changed since the version you last ran, the list the window's **What's new** page shows
+(`docs/releases.md`, "What's new"): what you can do now, in a sentence each, as the release notes
+say it, grouped by area (the **Highlights** of a release when it has some, then Remote, Window,
+Agents, Tools, Projects, Other, the fixes under **Fixed**), each note once and with its pull
+request's number. The raw list of subjects, which the window keeps in a fold, is `--json`'s
+(`all`). `--since <version>` counts from that version instead, reading the notes now whatever the
+check for updates says (the daemon makes no request of its own with the check off). When the notes
+of the version last run were not read yet (a build installed by hand reads them at its first
+start), the command reads them. `--json` prints what `whatsnew.show` answers (`docs/protocol.md`).
+When nothing is new (the first version run, the same one again), it says so.
 
 ```
-$ flottille remote address list
-192.168.1.20:7447  found
-100.64.0.7:7447  declared
+$ flottille changes
+What's new since 0.4.0-beta.103 (now 0.4.0-beta.105)
+
+Window
+  - See what is new from the sidebar. (#1120)
+
+Other
+  - Read what is new from the command line. (#1120)
+
+Fixed
+  - A link opens. (#1103)
+$ flottille changes --since 0.4.0-beta.104
 ```
 
-### `flottille remote address add <address> [--json]`
+### `flottille remote on [--json]`
 
-Declares an address of this machine: a VPN address, a DNS name, a forwarded port, with its port
-when it is not the link's own (`100.64.0.7`, `server.example.net:7447`). It is told at once to the
-machines linked to this one. `remote.address.add`.
+Remote is off until it is turned on (`docs/remote.md`, "Identity and keys"): `remote on` turns
+it on, and `remote off` closes the links and keeps this machine paired with its hub, as Settings,
+Machines does. Every link goes through the hub: nothing listens, and no address is given. The
+daemon writes `daemon.toml` itself, keeping every other key and comment, and takes the change at
+once, with no restart. `--json` prints what `remote.settings` answers (`protocol.md`, "The remote
+methods"). `remote.configure`.
 
-### `flottille remote address remove <address> [--json]`
+```
+$ flottille remote on
+Remote is on: its links go through the hub.
+$ flottille remote off
+Remote is off: the links are closed, this machine stays paired with its hub.
+```
 
-Removes an address declared by hand, and tells the machines linked to this one.
-`remote.address.remove`.
+### `flottille remote off [--json]`
+
+As `remote on` above: closes the links and keeps this machine paired with its hub.
+
+### `flottille remote pair [--name <name>] [--role runner|controller|viewer] [--icon <icon>] [--colour <colour>] [--replace] [--json]`
+
+Pairs this machine with the user's hub (`docs/remote.md`, "Pairing"), the first machine and the
+others alike, with the code `flottille-hub pair` printed on the hub's host, read on the standard
+input, asked for on a terminal: never an argument, which other users of the machine and the shell's
+history would see. The code holds the hub's address and key: nothing else is typed, and a hub that
+answers with another key is refused. The command uses this user session's device key, made once
+(in the session's keyring, or `remote/device.key` when there is no Secret Service; any other
+failure of the keyring is said, and stops it), and proposes this device's card, which the options
+change: its name (the host's), its role (`runner` with an agent signed in or with no screen, a server, `controller`
+otherwise), said on the standard error before the hub is asked (with `--role`, the way to choose
+another, when it was not given), its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`: a laptop with a battery, a desktop with
+a screen, a server without either) and its colour (`grey`, `red`, `orange`, `yellow`, `green`,
+`teal`, `blue`, `purple`: one of its key's). The daemon proves the code without sending it; once
+the hub paired the device, the command signs the declaration of this machine, which the daemon
+claims with the machine's key, and the machine pins the hub. A device that is a member already
+keeps its entry and its card. A machine paired already is refused unless `--replace` is given.
+`remote.machines`, `remote.pair`, `remote.declare`.
+
+```
+$ flottille remote pair --role runner
+The pair code: 0ZJ7X3K2M9QH4V…
+pairing as a runner
+server is paired with the hub at https://hub.example.net as a runner
+```
+
+### `flottille remote members [--json]`
+
+The members of the hub's list, as this machine last checked it back to the root and the hub's key
+it pinned: each one's name, role, fingerprint and who added it, this machine's own marked; with
+`--json`, each one's card too (`docs/protocol.md`, `remote.members`). `remote.members`.
+
+```
+$ flottille remote members
+pc  runner  3f2a-91bc-0d4e-77a1  added by the hub  (this machine)
+server  runner  8c41-77d0-a2e9-5b13  added by the hub
+```
+
+### `flottille remote members --runners [--project <name> [--agent <provider>]] [--json]`
+
+The runners instead, this machine first when it is one, with what each offers over its link: its
+projects and their free slots (the project's children cap minus the children that run), and the
+agents signed in there (`docs/remote.md`, "Roles"). With `--project`, only the runners linked that
+would take a session of that project (on `--agent`, or any agent signed in): the project there,
+the agent signed in (a session for the user counts in no children cap). `remote.machines`.
+
+```
+$ flottille remote members --runners --project app --agent claude
+server  projects: app (12 free), site (none free)  agents: claude
+```
+
+### `flottille remote rename <name> <new name> [--json]`
+
+Renames a member: a change signed by this session's device key. `remote.change`.
+
+### `flottille remote icon <name> <icon> [--json]`
+
+### `flottille remote colour <name> <colour> [--json]`
+
+Changes how a member is drawn, its icon or its colour, the other kept: a change signed by this
+session's device key. A role is changed on the hub's host only (`flottille-hub role`).
+`remote.change`.
+
+### `flottille remote remove <name> [--json]`
+
+Removes a member: a change signed by this session's device key. Every machine that hears it cuts
+its links to the removed member's machine at once; a machine that was off hears it from the hub
+before it links to anything. The device comes back only paired again on the hub. `remote.change`.
+
+## Tunnels
+
+### `flottille tunnel open <run> [--port <port>] [--json]`
+
+Reaches a run's port on another machine on a local port, so it takes `--machine <name>`
+(`docs/remote.md`, "Tunnels"). The machine checks that the run is one it started and still runs, and that the port is the one the run
+reports as its address or one its processes listen on (`--port` says which when it listens on
+several); any other port is refused. This machine listens on `127.0.0.1` (the run's port when it is
+free, another otherwise), prints where, and keeps the tunnel open until the run ends or you press
+Ctrl+C. A viewer is refused. `tunnel.open`.
+
+```
+$ flottille --machine server tunnel open 3f9a1c0b7d2e
+Run 3f9a1c0b7d2e of server, port 3000, is on 127.0.0.1:41873. It stays open until the run ends or you press Ctrl+C.
+```
+
+### `flottille tunnel list [--machine <name>] [--json]`
+
+The tunnels this machine carries, with their local address and connections; with `--machine`, the
+ones to that machine only (the flag is a filter here, no request is carried). `tunnel.list`.
+
+### `flottille tunnel close <tunnel>`
+
+Closes one of them: the command that opened it says it is closed. `tunnel.close`.
 
 ## Extensions and specs
 
@@ -350,6 +499,33 @@ again when the connection is signed out (`connection list` says so, and the inbo
 $ flottille connection login notes
 Opening https://auth.example.com/authorize?… in your browser to sign in to the connection notes.
 Signed in to the connection notes.
+```
+
+With `--machine`, it signs in a connection of that machine (`docs/remote.md`, "Connections"): that
+machine's daemon runs the sign-in and keeps the tokens; this machine opens a tunnel on the port of
+its redirect on `127.0.0.1`, which carries the browser's redirect there, for as long as the sign-in
+waits.
+
+```
+$ flottille --machine server connection login notes
+Opening https://auth.example.com/authorize?… in your browser to sign in to the connection notes on server.
+Signed in to the connection notes on server.
+```
+
+### `flottille connection share <name> --machine <machine> [--entry <entry>]... [--json]`
+
+Shares an `https://` connection with another machine of the user's, a runner (`docs/remote.md`,
+"Connections"): here `--machine` names where it goes, not a machine this command drives. The
+request is this machine's, signed with this device's key. Each `--entry` is a vault entry the
+connection names, shared with it as `vault share` shares one; its sign-in's tokens never go, and
+that machine signs in for itself (`flottille --machine <machine> connection login <name>`). Refused
+for a command or a URL of this machine, an entry the connection does not name, a machine that is
+off or runs no agent, or one that has a connection of that name already. `--json` prints
+`connection.share`.
+
+```
+$ flottille connection share notes --machine server --entry notes-key
+Shared the connection notes with server, with notes-key; it signs in there for itself (`flottille --machine server connection login notes`).
 ```
 
 ### `flottille connection accept <name> [--set ACTION=SETTING]...`
@@ -753,6 +929,20 @@ Removes the entry and its secret from the keyring. An entry bound to a feature t
 refused, naming the feature and what stops working, unless `--confirmed`. `--json` prints
 `vault.remove`.
 
+### `flottille vault share <name> --machine <machine>`
+
+Shares the entry with another machine of the user's, a runner (`docs/vault.md`, "Shared with
+another machine"): here `--machine` names where the entry goes, not a machine this command drives.
+The request is this machine's, signed with this device's key; the secret goes from this machine's
+keyring into that machine's, with the entry's metadata, and never into a file. Sharing again
+replaces the copy. Refused for a machine that is off, runs no agent, has no keyring, or lacks the
+project of a worklog's entry, saying so. `--json` prints `vault.share`.
+
+```
+$ flottille vault share jira --machine server
+Shared jira with server: its keyring holds it now.
+```
+
 ### `flottille vault provide <socket>`
 
 Not a command for the user: the credential plugin agent-browser starts during a `login` of its
@@ -1117,7 +1307,9 @@ with the way to the new list: reload its tools (`flottille agent reload-tools`, 
 
 ### `flottille agent stop <agent>`
 
-Stops a root agent and its whole tree, the deepest first. Their workspaces stay. `--json` prints
+Stops a root agent and its whole tree, the deepest first, and the sessions it leads (in its
+project and in others, and those they lead in turn: `docs/tools.md`, "The pilot ends"). Their
+workspaces stay. It asks nothing: detach a led session first to keep it. `--json` prints
 `{"agent": {...}}`, the root once ended. Refused for a child, and for an agent that is in a final
 state.
 
@@ -1290,6 +1482,33 @@ $ flottille inbox
     2. Title of the pull request?
 Answer a question with `flottille agent answer <agent> --question <n> --answer "1=…"`, one --answer per question; `flottille inbox --after <n>` lists what came since.
 ```
+
+### `flottille notifications [--unread] [--json]`
+
+The notifications Flottille keeps for you, one list read and unread whichever client you read it
+from (`docs/protocol.md`, `notifications.list`): a request that waits, a question asked, what a
+session did to a ticket or a pull request, a report, a failure. Oldest first, each with its number,
+`new`, `read` or `done` (answered), its title, its project and its excerpt. The first line counts
+the unread: `1 need you · 4 new`, those that wait for you (a request, a question, a vault entry)
+and the others, apart. `--unread` lists only the unread ones; `--json` prints `notifications.list`:
+`{"notifications": [{"id", "at", "kind", "session", "project", "workspace", "title", "excerpt",
+"read_at", "resolved", "needs_you"}], "unread": {"needs_you", "new"}}`.
+
+```
+$ flottille notifications --unread
+1 need you · 1 new
+#12 new Request #3 waits for you (shop/login): Read .env
+#13 new Opened a pull request (shop/login): Add the login page
+Mark one read with `flottille notifications read <id>`, all with `--all`.
+```
+
+A request answered with `flottille approve` or `flottille deny`, or from the window, is `done` here
+at once. `flottille inbox` stays what it was: the agents' view of the stored events.
+
+### `flottille notifications read <id|--all>`
+
+Marks a notification read by its number, or all of them with `--all`, and says how many changed.
+The window's bell follows (`notifications.changed`). Reading a request does not answer it.
 
 ### `flottille runs list [project]`
 

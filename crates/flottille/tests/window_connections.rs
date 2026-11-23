@@ -5,8 +5,8 @@
 //! daemon with the fake ACP agent and the fake MCP server (`crates/flottille-fake-mcp`): no real
 //! server, the in-memory keyring, temporary folders, no window on a screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -231,7 +231,23 @@ fn selected(cx: &mut VisualTestContext, id: &str) -> bool {
     })
 }
 
+/// Lets the motions that run end, frame by frame, and stops at the first frame where none does.
+fn calm(cx: &mut VisualTestContext) {
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        let moving = cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if moving == 0 {
+            break;
+        }
+    }
+}
+
+/// A click on an element that has come in, then the window settled. What a test waited for with
+/// `until` is drawn from the frame the daemon's answer came in on, which a loaded machine reaches
+/// late: its list may still be unfolding, and a click on a row that unfolds is lost.
 fn click(cx: &mut VisualTestContext, id: &str) {
+    calm(cx);
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
@@ -955,6 +971,109 @@ fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
         label(cx, "connection-url-field-label").as_deref(),
         Some("URL")
     );
+}
+
+#[gpui_kit::test]
+fn the_form_scrolls_once_in_the_dialog_and_its_footer_stays_in_view(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    click(cx, "connection-new-variable");
+    cx.simulate_resize(size(px(1280.), px(480.)));
+    settle(cx);
+
+    let bounds = |cx: &mut VisualTestContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let (panel, title, form, save) = (
+        bounds(cx, "connection-modal"),
+        bounds(cx, "connection-modal-title"),
+        bounds(cx, "connection-form"),
+        bounds(cx, "save-connection"),
+    );
+    assert!(
+        panel.top() >= px(0.) && panel.bottom() <= viewport.height,
+        "the dialog fits the window: {panel:?} in {viewport:?}"
+    );
+    assert!(
+        save.bottom() <= panel.bottom() && save.top() >= title.bottom(),
+        "the buttons are in it: {save:?}"
+    );
+    // One scroll, the dialog's: the form is as tall as what it holds, and goes on under the
+    // buttons instead of scrolling inside a box of its own.
+    assert!(
+        form.bottom() > save.top(),
+        "the form is cut by the dialog's scroll: {form:?} against {save:?}"
+    );
+
+    cx.update(|window, cx| {
+        window.scroll(
+            "connection-name-field-label",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
+    assert_eq!(bounds(cx, "save-connection"), save, "Save stays");
+    let last = bounds(cx, "connection-limits-field-label");
+    assert!(
+        last.bottom() <= save.top() && last.top() >= title.bottom(),
+        "the last field is now between the title and the buttons: {last:?}"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing is redrawn at rest"
+    );
+}
+
+#[gpui_kit::test]
+fn the_form_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "connection-optional").as_deref(),
+        Some("Optional: everything below can stay empty")
+    );
+    let bounds = |cx: &mut VisualTestContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let line = bounds(cx, "connection-optional");
+    for required in [
+        "connection-name-field-label",
+        "connection-reach",
+        "connection-command-field-label",
+    ] {
+        assert!(
+            bounds(cx, required).bottom() <= line.top(),
+            "{required} is above the line"
+        );
+    }
+    for optional in [
+        "connection-variables-field-label",
+        "connection-limits-field-label",
+    ] {
+        assert!(
+            bounds(cx, optional).top() >= line.bottom(),
+            "{optional} is below the line"
+        );
+    }
+    // The first part says it is required, once.
+    assert_eq!(
+        label(cx, "connection-section-what-tag").as_deref(),
+        Some("required")
+    );
+    assert!(!visible(cx, "connection-section-reach-tag"));
 }
 
 // ── The form of a browser ────────────────────────────────────────────────────────────────────
@@ -4039,5 +4158,133 @@ fn a_secret_s_name_and_prefix_fold_away_where_they_do_not_apply(cx: &mut TestApp
             {"in": "cookie", "name": "session", "entry": "notes-basic"},
         ]),
         "{after}"
+    );
+}
+
+// ── A dialog opens over the page it is asked from (#1018) ─────────────────────────────────────
+
+fn stack(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<&'static str> {
+    shell.read_with(cx, |s, cx| s.modal_stack(cx))
+}
+
+#[gpui_kit::test]
+fn the_vault_page_and_the_connections_page_open_their_forms_through_the_host(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    assert!(stack(&shell, cx).is_empty(), "nothing is open yet");
+
+    // Connections' own "New server": the host holds its form.
+    click(cx, "new-connection");
+    until(&shell, cx, "the form opens", |cx| {
+        visible(cx, "connection-modal")
+    });
+    assert_eq!(stack(&shell, cx), ["connection-modal"]);
+    click(cx, "connection-modal-cancel");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert!(stack(&shell, cx).is_empty(), "closed, it leaves the host");
+
+    // The vault page's "New entry", then a row's Edit: the host holds the entry's dialog.
+    user.call(
+        "vault.set",
+        json!({"name": "jira", "secret": "pa55-for-the-test"}),
+    )
+    .unwrap();
+    click(cx, "settings-tabs-vault");
+    until(&shell, cx, "the vault page is shown", |cx| {
+        present(cx, "add-vault-entry")
+    });
+    click(cx, "add-vault-entry");
+    until(&shell, cx, "the dialog opens", |cx| {
+        visible(cx, "vault-modal")
+    });
+    assert_eq!(stack(&shell, cx), ["vault-modal"]);
+    click(cx, "vault-modal-cancel");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "vault-modal")
+    });
+    assert!(stack(&shell, cx).is_empty());
+    until(&shell, cx, "the entry is listed", |cx| {
+        present(cx, "vault-jira")
+    });
+    click(cx, "vault-jira");
+    until(&shell, cx, "its dialog opens", |cx| {
+        visible(cx, "vault-modal")
+    });
+    assert_eq!(stack(&shell, cx), ["vault-modal"]);
+}
+
+#[gpui_kit::test]
+fn a_connection_s_client_id_is_set_in_its_dialog(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    // Only a URL signs in with OAuth: a program's dialog has no such field.
+    assert!(!visible(cx, "connection-client-id"));
+    click(cx, "connection-reach-url");
+    until(&shell, cx, "the client id's field unfolds", |cx| {
+        visible(cx, "connection-client-id")
+    });
+    assert_eq!(
+        label(cx, "connection-client-id-field-label").as_deref(),
+        Some("OAuth client id")
+    );
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.name, "remote", cx);
+    type_in(&fields.about, "A notes server elsewhere.", cx);
+    type_in(&fields.url, "https://notes.example.com/mcp", cx);
+    type_in(&fields.client_id, "client-123", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    // The daemon holds what the command line's `--client-id` writes.
+    assert_eq!(
+        connection(&user, "remote").unwrap()["client_id"],
+        "client-123"
+    );
+
+    // Edited: the field holds what is saved, so that saving another field keeps it...
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-remote"));
+    click(cx, "connection-more-remote");
+    click(cx, "edit-connection-remote");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.about, "A notes server, said again.", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes again", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let kept = connection(&user, "remote").unwrap();
+    assert_eq!(kept["about"], "A notes server, said again.");
+    assert_eq!(kept["client_id"], "client-123");
+    // ... and emptying it takes it away.
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-remote"));
+    click(cx, "connection-more-remote");
+    click(cx, "edit-connection-remote");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.client_id, "", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes a last time", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(
+        connection(&user, "remote").unwrap()["client_id"],
+        Value::Null
     );
 }

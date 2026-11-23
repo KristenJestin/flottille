@@ -163,7 +163,7 @@ pub(crate) const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
 const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"];
 /// What runs at the user's next login or command, or starts a process later, from the home
 /// folder (`docs/design.md` §7.1): an agent never writes it.
-const STARTUP: [&str; 20] = [
+const STARTUP: [&str; 21] = [
     ".bashrc",
     ".bash_profile",
     ".bash_login",
@@ -184,9 +184,13 @@ const STARTUP: [&str; 20] = [
     ".local/share/systemd/user",
     ".local/bin",
     "bin",
+    // Read by every `curl` of the user, the update's included (`update::curl_command` reads
+    // none, but the user's own do).
+    ".curlrc",
 ];
 /// What is read from the user's configuration folder, wherever it is: [`STARTUP`]'s.
-const CONFIG_STARTUP: [&str; 8] = [
+const CONFIG_STARTUP: [&str; 9] = [
+    "curlrc",
     "fish",
     "git",
     "autostart",
@@ -523,6 +527,30 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// Why a launch in another project comes to the user, every time: it starts a lead in a project
+/// the caller does not work in, with that project's tools, settings and vault entries.
+pub const LAUNCH_ELSEWHERE: &str = "it starts a session in another project, a lead there with \
+    that project's tools: the user decides, every time, in every mode, Full included";
+
+/// `agent_launch` of a session in another project: base, never judged, and held in Full
+/// (`asks_launch_elsewhere`). Its first message is shown whole to the user.
+pub fn launch_elsewhere(grant: &Grant, args: &Value) -> Verdict {
+    let mut found = Found::default();
+    found.base(LAUNCH_ELSEWHERE.into());
+    if grant.launched {
+        found.base(LAUNCHED_LAUNCH.into());
+    }
+    if let Err(refused) = texts(grant, args, &["brief"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call starts a session in another project: only the user answers it.
+pub fn asks_launch_elsewhere(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == LAUNCH_ELSEWHERE)
+}
+
 /// Why the gate holds `session_send`.
 pub const SESSION_SEND: &str = "it writes to another session, the user's, as this agent: what it \
     sends steers that session's work";
@@ -531,6 +559,21 @@ pub const SESSION_SEND: &str = "it writes to another session, the user's, as thi
 /// mode: what the user allows with it is every later one of the pair.
 pub const LEAVE: &str = "this session has not written to that one before: the user lets it, \
     once for the pair and one way, in every mode, Full included";
+
+/// Why the first read of another project's session the caller did not start comes to the user,
+/// in every mode: what the user allows with it is every later read and message of the pair.
+pub const READ_LEAVE: &str = "this session has not reached that one, of another project, \
+    before: the user lets it read and write to it, once for the pair and one way, in every mode, \
+    Full included";
+
+/// The first read of another project's session the caller did not start: the user's leave,
+/// which never reaches the judge and which Full does not let through (`asks_leave`).
+pub fn read_leave() -> Verdict {
+    let mut found = Found::default();
+    found.base(READ_LEAVE.into());
+    found.judge(SESSION_READ.into());
+    found.verdict(Kind::Action)
+}
 
 /// Why the gate holds `session_read`: each read of another session is judged.
 pub const SESSION_READ: &str = "it reads another session's conversation: what the user said to \
@@ -545,6 +588,19 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
         return refused;
     }
     found.verdict(Kind::Action)
+}
+
+/// What the reason of a line that runs a pull request's code in the copy its review reads ends
+/// with: `asks_pull_request_code` finds it, and Full does not let it through.
+pub const PULL_REQUEST_CODE: &str = "in the copy its review reads: only the user lets a review run \
+    it, in every mode, Full included";
+
+/// Whether a held call runs the code of a pull request in its review's copy: held for the user in
+/// every mode, Full included, and never decided by the judge.
+pub fn asks_pull_request_code(ask: &Ask) -> bool {
+    ask.reasons
+        .iter()
+        .any(|reason| reason.contains(PULL_REQUEST_CODE))
 }
 
 /// What every reason of a verdict on a pull request ends with, whichever way it is given (the
@@ -575,6 +631,27 @@ pub fn creates_in_a_milestone(tool: &str, args: &Value) -> bool {
 /// a comment edited before the user allows it is not posted with words they never read.
 pub fn replies_to_a_comment(tool: &str, args: &Value) -> bool {
     tool == "tickets" && args["action"] == "reply"
+}
+
+/// Why `tickets worklog_delete` comes to the user, every time: a worklog deleted cannot be got
+/// back, and its time may already be billed.
+pub const WORKLOG_DELETE: &str = "a deleted worklog cannot be got back: only the user deletes \
+    one, in every mode, Full included";
+
+/// Whether a held call deletes a worklog: held for the user in every mode, Full included, and
+/// never decided by the judge.
+pub fn asks_worklog_delete(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == WORKLOG_DELETE)
+}
+
+/// Whether a call of `tickets` changes or deletes a worklog: its card says the worklog as it
+/// stood, and one changed in Jira before the user allows it is not written over unseen.
+pub fn changes_a_worklog(tool: &str, args: &Value) -> bool {
+    tool == "tickets"
+        && matches!(
+            args["action"].as_str(),
+            Some("worklog_edit" | "worklog_delete")
+        )
 }
 
 /// Whether a call of `forge` approves a pull request or requests changes on it.
@@ -633,7 +710,9 @@ pub fn asks_end(ask: &Ask) -> bool {
 
 /// Whether a held call asks the user's leave for a pair of sessions: only the user answers it.
 pub fn asks_leave(ask: &Ask) -> bool {
-    ask.reasons.iter().any(|reason| reason == LEAVE)
+    ask.reasons
+        .iter()
+        .any(|reason| reason == LEAVE || reason == READ_LEAVE)
 }
 
 /// The texts a write posts or sends, which the user's card and the judge show whole: one longer
@@ -680,6 +759,9 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
                 ("title", _) => "edit and create",
                 ("comment", _) => "close and reopen",
                 ("message", _) => "a merge by squash",
+                ("body", "tickets") if action.starts_with("worklog_") => {
+                    "create, comment and log_time (a worklog's new text is comment)"
+                }
                 (_, "forge") => "create, comment, edit, reply and review",
                 _ => "create, comment and edit",
             };
@@ -853,19 +935,21 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, fields, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
-     comment_delete, milestone_create, milestone_edit, log_time, time_spent and worklogs";
+     comment_delete, milestone_create, milestone_edit, log_time, worklog_edit, worklog_delete, \
+     time_spent and worklogs";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 8] = [
-    ("duration", "log_time"),
-    ("started", "log_time"),
-    ("to", "worklogs"),
-    ("author", "worklogs"),
-    ("reason", "close"),
-    ("remove_labels", "edit"),
-    ("assignees", "edit"),
-    ("remove_assignees", "edit"),
+const TICKET_ONLY: [(&str, &[&str]); 9] = [
+    ("duration", &["log_time", "worklog_edit"]),
+    ("started", &["log_time", "worklog_edit"]),
+    ("worklog", &["worklog_edit", "worklog_delete"]),
+    ("to", &["worklogs"]),
+    ("author", &["worklogs"]),
+    ("reason", &["close"]),
+    ("remove_labels", &["edit"]),
+    ("assignees", &["edit"]),
+    ("remove_assignees", &["edit"]),
 ];
 
 /// `tickets`: its reads are harmless, and so is waiting for what happens to a ticket; its writes
@@ -888,6 +972,16 @@ fn tickets(call: &Call) -> Verdict {
                 || "that long before it is logged".to_owned(),
                 |_| shown("started")
             )
+        ),
+        "worklog_edit" => format!(
+            "it changes the worklog {} of {} on the tracker",
+            shown("worklog"),
+            shown("ticket")
+        ),
+        "worklog_delete" => format!(
+            "it deletes the worklog {} of {} on the tracker",
+            shown("worklog"),
+            shown("ticket")
         ),
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
@@ -944,7 +1038,8 @@ fn tickets(call: &Call) -> Verdict {
     };
     let none: &[&str] = match action {
         "comment" | "reply" | "comment_edit" | "log_time" => &["title"],
-        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "worklog_edit"
+        | "worklog_delete" => &["title", "body"],
         // A milestone's text is its description.
         "milestone_create" | "milestone_edit" => &["body"],
         _ => &[],
@@ -953,9 +1048,10 @@ fn tickets(call: &Call) -> Verdict {
         return refused;
     }
     for (key, takers) in TICKET_ONLY {
-        if takers != action && call.args.get(key).is_some_and(|value| !value.is_null()) {
+        if !takers.contains(&action) && call.args.get(key).is_some_and(|value| !value.is_null()) {
             return Verdict::Deny(format!(
-                "refused: tickets {action} takes no {key}: {key} is for {takers}"
+                "refused: tickets {action} takes no {key}: {key} is for {}",
+                takers.join(" and ")
             ));
         }
     }
@@ -977,10 +1073,18 @@ fn tickets(call: &Call) -> Verdict {
     }
     let mut found = Found::default();
     found.judge(said);
+    if action == "worklog_delete" {
+        found.base(WORKLOG_DELETE.into());
+    }
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "description", "status", "kind"],
+        // A worklog's new text is its `comment`: read like a body, as `log_time`'s is.
+        if action == "worklog_edit" {
+            &["title", "body", "description", "status", "kind", "comment"]
+        } else {
+            &["title", "body", "description", "status", "kind"]
+        },
         &mut found,
     ) {
         return refused;
@@ -1279,6 +1383,18 @@ fn run(call: &Call) -> Verdict {
             }
         }
     }
+    // The copy of a pull request a review reads is someone else's code: a line that does more
+    // than read there runs it, which only the user lets a review do, in every mode.
+    let copy = call
+        .paths
+        .first()
+        .and_then(|folder| pull_request_copy(call.own, folder))
+        .filter(|_| !reads || files);
+    if let Some((number, _)) = &copy {
+        found.base(format!(
+            "it runs the code of pull request #{number}, {PULL_REQUEST_CODE}"
+        ));
+    }
     if let Some((name, command)) = call.command {
         // A service runs in its own folder, never the project's.
         let service = call.tool == "services";
@@ -1325,6 +1441,14 @@ fn run(call: &Call) -> Verdict {
                 found.base(why);
                 continue;
             }
+            // Inside the copy of the pull request it runs in, Flottille's data folder holds the
+            // pull request's files: what the line does there is already held for the user.
+            if copy
+                .as_ref()
+                .is_some_and(|(_, folder)| inside_copy(folder, path))
+            {
+                continue;
+            }
             if let Some(why) = forbidden(call.own, call.grant.place.home.as_deref(), path, true) {
                 return Verdict::Deny(why);
             }
@@ -1365,6 +1489,42 @@ fn run(call: &Call) -> Verdict {
         }
     }
     found.verdict(Kind::Call)
+}
+
+/// The pull request whose copy `folder` is in, and the copy's folder: a place of Review's in
+/// Flottille's data folder, named after the pull request it holds (`reviews/pr<number>-…`).
+fn pull_request_copy(own: &[PathBuf], folder: &Resolved) -> Option<(u64, PathBuf)> {
+    let reviews = own.first()?.join("reviews");
+    let real = place::real_path(&reviews).ok();
+    [&folder.path, &folder.written]
+        .into_iter()
+        .find_map(|path| {
+            let (top, rest) = match path.strip_prefix(&reviews) {
+                Ok(rest) => (&reviews, rest),
+                Err(_) => (real.as_ref()?, path.strip_prefix(real.as_ref()?).ok()?),
+            };
+            let name = rest.iter().next()?;
+            let number = name
+                .to_str()?
+                .strip_prefix("pr")?
+                .split('-')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((number, top.join(name)))
+        })
+}
+
+/// Whether `path`, both as written and where it leads, is inside the copy `folder` (never the
+/// copy itself).
+fn inside_copy(folder: &Path, path: &Resolved) -> bool {
+    let real = place::real_path(folder).ok();
+    [&path.path, &path.written].into_iter().all(|path| {
+        [Some(folder), real.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|folder| path.starts_with(folder) && path != folder)
+    })
 }
 
 /// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and
@@ -1896,11 +2056,16 @@ fn program(call: &Call, layer: &[String]) -> Line {
             "{program} runs a program as another user, root by default, with an environment of \
              its own, without the wall that keeps git from pushing behind the gate"
         )),
-        "acli" => Line::Base(
-            "acli is Atlassian's command line, signed in as the user to Jira: whatever it runs, \
-             it runs with the user's own sign-in"
+        "acli" if acli_signs_in(args) => Line::Base(
+            "acli's sign-in is the user's own: what logs in, out or to another site, or shows the \
+             sign-in, is theirs to run"
                 .into(),
         ),
+        "acli" if acli_reads(args) => Line::Reads,
+        "acli" => Line::Judge(format!(
+            "{} writes to the tracker signed in as the user, or is not one of its reads",
+            shown_words(layer)
+        )),
         "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "poetry" | "flit" | "hatch" | "uv"
             if any(&["publish", "unpublish"]) =>
         {
@@ -3426,6 +3591,66 @@ fn forge_reads(program: &str, args: &[String]) -> bool {
     }
 }
 
+/// The words of an `acli` line that name its command: those before its first option.
+fn acli_path<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    words
+        .iter()
+        .copied()
+        .take_while(|w| !w.starts_with('-'))
+        .collect()
+}
+
+/// Whether an `acli` line only asks for the help of its command: nothing but the command's words,
+/// then `--help`. A `--help` after another option may be that option's value (`--body --help`).
+fn acli_help(words: &[&str]) -> bool {
+    words.split_last().is_some_and(|(last, before)| {
+        ["-h", "--help"].contains(last) && acli_path(before).len() == before.len()
+    })
+}
+
+/// Whether an `acli` line has to do with its sign-in: every `auth` command but `status` (`login`,
+/// `logout`, `switch`, and whatever a version adds, which may show a token), `status` itself given
+/// anything but help, and an option that shows a token.
+fn acli_signs_in(args: &[String]) -> bool {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if acli_help(&words) {
+        return false;
+    }
+    match acli_path(&words).as_slice() {
+        [_, "auth", "status"] => words.len() > 3,
+        [_, "auth", ..] => true,
+        _ => words.contains(&"--show-token"),
+    }
+}
+
+/// Whether an `acli` line only shows or lists, from the commands of its reference
+/// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each on its own page: the
+/// work item, project, board, sprint, dashboard and filter commands that view, search or list,
+/// the status of a sign-in, and the help of any command. `--web` (`-w`) opens a browser on the
+/// desktop: no read.
+fn acli_reads(args: &[String]) -> bool {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if acli_help(&words) || words == ["--version"] {
+        return true;
+    }
+    if words.iter().any(|w| ["--web", "-w"].contains(w)) {
+        return false;
+    }
+    matches!(
+        acli_path(&words).as_slice(),
+        ["jira" | "admin" | "rovodev", "auth", "status"]
+            | ["jira", "workitem", "view" | "search", ..]
+            | ["jira", "workitem", "comment", "list" | "visibility", ..]
+            | ["jira", "workitem", "attachment", "list", ..]
+            | ["jira", "workitem", "link", "list" | "type", ..]
+            | ["jira", "project", "list" | "view", ..]
+            | ["jira", "board", "search" | "list-sprints", ..]
+            | ["jira", "sprint", "list-workitems", ..]
+            | ["jira", "dashboard", "search", ..]
+            | ["jira", "filter", "list" | "search", ..]
+    )
+}
+
 fn base(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
@@ -4530,10 +4755,10 @@ pub fn forbidden(
         ));
     }
     if let Ok(program) = std::env::current_exe() {
-        let program = [place::real_path(&program).ok(), Some(program)];
+        let program = programs(&program);
         if seen(path)
             .iter()
-            .any(|path| program.iter().flatten().any(|program| program == path))
+            .any(|path| program.iter().any(|program| program == path))
         {
             return Some(format!(
                 "refused: {} is Flottille's own program: an agent never writes it, in any mode; \
@@ -4541,16 +4766,47 @@ pub fn forbidden(
                 path.shown
             ));
         }
+        // What is staged beside it becomes the program at the daemon's next start.
+        let staging: Vec<PathBuf> = program
+            .iter()
+            .map(|program| crate::update::staging_of(program))
+            .collect();
+        // And the folder a download is unpacked in beside it, before it is staged.
+        let unpacking = |path: &Path| {
+            program.iter().filter_map(|p| p.parent()).any(|dir| {
+                path.strip_prefix(dir).is_ok_and(|rest| {
+                    rest.components().next().is_some_and(|first| {
+                        first
+                            .as_os_str()
+                            .to_string_lossy()
+                            .starts_with(crate::update::WORK_PREFIX)
+                    })
+                })
+            })
+        };
+        if seen(path)
+            .iter()
+            .any(|path| staging.iter().any(|staging| path.starts_with(staging)) || unpacking(path))
+        {
+            return Some(format!(
+                "refused: {} is where a build of Flottille is staged, which becomes its program at \
+                 the next start: an agent never writes there, in any mode; nothing was done",
+                path.shown
+            ));
+        }
     }
-    // A project's workspaces may sit in Flottille's data folder, the first of its own: they are
-    // the project's, not Flottille's.
+    // A project's workspaces may sit in Flottille's data folder, the first of its own, and so
+    // does a project made for another machine's launches (`docs/remote.md`, "Which project"):
+    // they are the project's, not Flottille's.
     let folders = own_folders(own);
     let data = own_folders(&own[..own.len().min(1)]);
     let flottille_s = |path: &Path| {
         folders.iter().any(|own| path.starts_with(own))
             && !data.iter().any(|data| {
-                path.strip_prefix(data.join("workspaces"))
-                    .is_ok_and(|rest| rest.components().count() >= 2)
+                ["workspaces", "projects"].iter().any(|projects_s| {
+                    path.strip_prefix(data.join(projects_s))
+                        .is_ok_and(|rest| rest.components().count() >= 2)
+                })
             })
     };
     if seen(path).iter().any(|path| flottille_s(path)) {
@@ -4571,6 +4827,19 @@ pub fn forbidden(
             path.shown
         )
     })
+}
+
+/// The paths of the daemon's program, which runs from `exe`: once an update renamed a build
+/// over it, `/proc/self/exe` names it with ` (deleted)`, and the program is the file at its path.
+fn programs(exe: &Path) -> Vec<PathBuf> {
+    let exe = exe
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+        .map_or_else(|| exe.to_owned(), PathBuf::from);
+    [place::real_path(&exe).ok(), Some(exe)]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// A path as written and where it leads, each also without a leading `/proc/<process>/root`
@@ -4918,7 +5187,10 @@ mod tests {
             std::fs::create_dir_all(base.join("home")).unwrap();
             let bin = base.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
-            for program in READS.iter().chain(&["git", "gh", "glab", "less", "more"]) {
+            for program in READS
+                .iter()
+                .chain(&["git", "gh", "glab", "acli", "less", "more"])
+            {
                 installed(&bin.join(program));
             }
             let grant = Grant {
@@ -4965,6 +5237,27 @@ mod tests {
 
         fn workspace() -> Fixture {
             Fixture::new(Some("w"))
+        }
+
+        /// The place of a review of pull request 7: a copy in Flottille's data folder, beside
+        /// another's (`pr8-x`) and the vault's folder, with a link in it to that folder.
+        fn copy() -> Fixture {
+            let mut fixture = Fixture::new(None);
+            let data = fixture.own[0].clone();
+            let copy = data.join("reviews/pr7-x");
+            for folder in [
+                copy.join("sub"),
+                data.join("reviews/pr8-x"),
+                data.join("vault"),
+            ] {
+                std::fs::create_dir_all(folder).unwrap();
+            }
+            std::os::unix::fs::symlink(&data, copy.join("link")).unwrap();
+            let copy = std::fs::canonicalize(copy).unwrap();
+            fixture.grant.place.root = copy.clone();
+            fixture.grant.place.repositories = vec![(".".into(), copy.clone())];
+            fixture.root = copy;
+            fixture
         }
 
         fn main() -> Fixture {
@@ -5093,6 +5386,50 @@ mod tests {
 
     fn base_class(verdict: &Verdict) -> bool {
         matches!(verdict, Verdict::Ask(ask) if ask.class == Class::Base && !ask.reasons.is_empty())
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_another_copy() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm ../pr8-x/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_flottille_s_folder_through_a_link() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm link/vault/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_climbs_out_of_it_by_dots() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm sub/../../../vault");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_removes_the_copy_itself() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm .");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_that_runs_in_a_pull_request_s_copy_is_held_as_base() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("make");
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(reasons(&verdict).contains("pull request #7"), "{verdict:?}");
+        let verdict = fixture.run("rm sub/f");
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_read_in_a_pull_request_s_copy_passes() {
+        let fixture = Fixture::copy();
+        assert_eq!(fixture.run("git diff"), Verdict::Allow);
     }
 
     #[test]
@@ -5341,6 +5678,156 @@ mod tests {
                 Some(&fixture.never),
             );
             assert!(to_judge(&verdict), "{action}");
+        }
+    }
+
+    /// What `acli`'s reference lists as only showing or listing
+    /// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each command from its
+    /// own page, with the flags its page gives.
+    const ACLI_READS: [&str; 26] = [
+        "acli jira workitem view ABC-1",
+        "acli jira workitem view ABC-1 --json --fields summary,comment",
+        "acli jira workitem search --jql 'project = TEAM' --json --paginate",
+        "acli jira workitem search --filter 10001 --count",
+        "acli jira workitem comment list --key ABC-1 --json",
+        "acli jira workitem comment visibility --group",
+        "acli jira workitem attachment list --key ABC-1",
+        "acli jira workitem link list --key ABC-1 --json",
+        "acli jira workitem link type",
+        "acli jira project list --paginate",
+        "acli jira project view --key TEAM --json",
+        "acli jira board search --project TEAM --json",
+        "acli jira board list-sprints --id 123 --state active,closed",
+        "acli jira sprint list-workitems --sprint 1 --board 6",
+        "acli jira dashboard search --name report",
+        "acli jira filter list --my",
+        "acli jira filter search --owner someone@example.com --json",
+        "acli jira auth status",
+        "acli admin auth status",
+        "acli rovodev auth status",
+        "acli --help",
+        "acli jira --help",
+        "acli jira workitem -h",
+        "acli jira workitem delete --help",
+        "acli jira workitem comment create --help",
+        "acli --version",
+    ];
+
+    #[test]
+    fn acli_reads_pass_as_reads() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in ACLI_READS {
+                assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn acli_writes_are_judged_with_a_card_that_says_who_writes() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "acli jira workitem create --project TEAM --type Task --summary x",
+                "acli jira workitem create-bulk --from-json items.json",
+                "acli jira workitem edit --key ABC-1 --summary x --yes",
+                "acli jira workitem transition --key ABC-1 --status Done --yes",
+                "acli jira workitem assign --key ABC-1 --assignee someone@example.com",
+                "acli jira workitem comment create --key ABC-1 --body x",
+                "acli jira workitem comment update --key ABC-1 --id 1 --body x",
+                "acli jira workitem comment delete --key ABC-1 --id 1",
+                "acli jira workitem delete --key ABC-1 --yes",
+                "acli jira workitem archive --key ABC-1",
+                "acli jira workitem clone --key ABC-1",
+                "acli jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes",
+                "acli jira workitem link delete --id 10000 --yes",
+                "acli jira workitem attachment delete --id 1",
+                "acli jira workitem watcher remove --key ABC-1 --user someone@example.com",
+                "acli jira project create --key TEAM --name x",
+                "acli jira project delete --key TEAM",
+                "acli jira filter add-favourite --id 1",
+                "acli jira field delete --id customfield_1",
+                "acli admin user deactivate --email someone@example.com",
+                "acli feedback --summary x",
+                "acli",
+                "acli jira workitem frobnicate ABC-1",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+                let said = reasons(&verdict);
+                assert!(
+                    said.contains("acli") && said.contains("writes to the tracker"),
+                    "{line}: {said}"
+                );
+                assert!(said.contains("signed in as the user"), "{line}: {said}");
+            }
+        }
+    }
+
+    #[test]
+    fn acli_reads_that_open_a_browser_or_take_more_than_a_read_are_judged() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "acli jira workitem view ABC-1 --web",
+            "acli jira workitem search --filter 10001 -w",
+            // A flag after a help flag is a value, not a help: the body is `--help`.
+            "acli jira workitem comment create --key ABC-1 --body --help",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn acli_auth_login_stays_base() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "acli jira auth login",
+                "acli jira auth login --site example.atlassian.net --web",
+                "acli jira auth logout",
+                "acli jira auth switch --site example.atlassian.net",
+                "acli admin auth login",
+                "acli admin auth logout",
+                "acli admin auth switch",
+                "acli rovodev auth login",
+                "acli rovodev auth logout",
+                "acli jira auth token",
+                "acli jira auth status --show-token",
+                "env acli jira auth login",
+                "xargs acli jira auth logout",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_acli_the_agent_wrote_is_judged() {
+        let fixture = Fixture::workspace();
+        let root = fixture.root.display().to_string();
+        let bin = fixture.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        installed(&bin.join("acli"));
+        let mut inside = Fixture::workspace();
+        let system = PathBuf::from(&inside.search);
+        inside.search = std::env::join_paths([inside.root.join("bin"), system]).unwrap();
+        std::fs::create_dir_all(inside.root.join("bin")).unwrap();
+        installed(&inside.root.join("bin/acli"));
+        for (fixture, line) in [
+            (&fixture, "./acli jira workitem view ABC-1".to_owned()),
+            (&fixture, "bin/acli jira project list".to_owned()),
+            (
+                &fixture,
+                format!("{root}/bin/acli jira workitem view ABC-1"),
+            ),
+            (&inside, "acli jira workitem view ABC-1".to_owned()),
+            (&inside, "acli --version".to_owned()),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("agent's own file"),
+                "{line}: {verdict:?}"
+            );
         }
     }
 
@@ -6076,7 +6563,6 @@ mod tests {
             fixture.run("docker compose down"),
             fixture.run("nice deploy now"),
             fixture.run("bkt pr list"),
-            fixture.run("acli jira workitem view ABC-1"),
             fixture.judge(
                 "forge",
                 json!({"action": "merge", "repository": ".", "waive": "ship it"}),
@@ -6671,6 +7157,23 @@ mod tests {
         assert_eq!(fixture.file("fs_write", "notes.md"), Verdict::Allow);
         // The folder that holds every workspace is Flottille's.
         assert!(denied(&fixture.run("rm -r ../../../workspaces")));
+    }
+
+    #[test]
+    fn a_project_made_for_another_machine_in_flottille_s_data_folder_is_the_project_s() {
+        // A session the user starts in its main folder.
+        let mut fixture = Fixture::main();
+        let data = fixture.root.parent().unwrap().to_owned();
+        fixture.own = vec![data.clone()];
+        let main = data.join("projects/app");
+        std::fs::create_dir_all(&main).unwrap();
+        fixture.root = main.clone();
+        fixture.grant.place.root = main.clone();
+        fixture.grant.place.repositories = vec![(".".into(), main)];
+        // Judged as a write in any project's main folder is, never refused as Flottille's.
+        assert!(to_judge(&fixture.file("fs_write", "notes.md")));
+        // The folder that holds every such project is Flottille's.
+        assert!(denied(&fixture.run("rm -r ../../projects")));
     }
 
     #[test]
@@ -8097,6 +8600,8 @@ mod tests {
             ".config/hypr/hyprland.conf",
             ".config/sway/config",
             ".config/niri/config.kdl",
+            // What every `curl` of the user reads, the update's included.
+            ".curlrc",
         ] {
             let path = home.join(entry).display().to_string();
             let verdict = workspace.file("fs_write", &path);
@@ -8114,6 +8619,38 @@ mod tests {
         let exe = std::env::current_exe().unwrap().display().to_string();
         assert!(denied(&workspace.file("fs_write", &exe)));
         assert!(denied(&workspace.run(&format!("cp README.md {exe}"))));
+        // And the build staged beside it, which the next start makes the program.
+        let staged = format!("{exe}.next/flottille");
+        assert!(denied(&workspace.file("fs_write", &staged)));
+        assert!(denied(&workspace.file("fs_write", &format!("{exe}.next"))));
+        assert!(denied(&workspace.run(&format!("cp README.md {staged}"))));
+        // And the folder a download is unpacked in beside it, before it is staged.
+        let dir = std::path::Path::new(&exe).parent().unwrap();
+        let work = dir.join(".flottille-update-4242-0/flottille-99.0.0/flottille");
+        let work = work.display().to_string();
+        assert!(denied(&workspace.file("fs_write", &work)));
+        assert!(denied(&workspace.run(&format!("cp README.md {work}"))));
+        // A folder of the same name elsewhere is not the program's.
+        let elsewhere = workspace.root.join(".flottille-update-4242-0/x");
+        assert!(!denied(
+            &workspace.file("fs_write", &elsewhere.display().to_string())
+        ));
+    }
+
+    #[test]
+    fn the_program_replaced_under_the_daemon_is_still_its_own() {
+        // After an update renamed a build over it, `/proc/self/exe` names the old file so.
+        let programs = programs(Path::new("/opt/x/flottille (deleted)"));
+        assert!(
+            programs.iter().any(|p| p == Path::new("/opt/x/flottille")),
+            "{programs:?}"
+        );
+        assert!(
+            !programs
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with("(deleted)")),
+            "{programs:?}"
+        );
     }
 
     #[test]

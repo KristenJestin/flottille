@@ -2,7 +2,7 @@
 //! starts", "Where a question goes"): a launch names its kind, never guessed, and a question goes
 //! where the daemon says for the caller. The fake ACP agent, temporary folders, no real agent.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 
@@ -504,22 +504,6 @@ fn a_paused_following_sends_the_question_to_the_user() {
 }
 
 #[test]
-fn a_pilot_that_ends_with_a_question_open_hands_it_to_the_user() {
-    let user = User::with_fake_agent();
-    let (lead, _, session) = asked_its_pilot(&user);
-
-    user.call("agent.stop", json!({"agent": lead})).unwrap();
-
-    reached_the_user(&user, &session);
-    eventually("the session told", || {
-        !delivered(&user, &session, "handed").is_empty()
-    });
-    let told = delivered(&user, &session, "handed");
-    assert_eq!(told.len(), 1, "{told:?}");
-    assert!(told[0].contains("went to the user"), "{}", told[0]);
-}
-
-#[test]
 fn detaching_a_session_hands_its_open_question_to_the_user() {
     let user = User::with_fake_agent();
     let (_, _, session) = asked_its_pilot(&user);
@@ -616,38 +600,158 @@ fn the_user_talks_to_a_led_session_directly() {
     );
 }
 
+// A led session ends with its pilot (#1089, `docs/tools.md`, "The pilot ends").
+
+/// A session the lead leads, titled `title`: its id and MCP session.
+fn led_titled(user: &User, mcp: &Mcp, title: &str) -> (String, Mcp) {
+    let (answer, session) = launch(
+        user,
+        mcp,
+        json!({"kind": "led", "title": title, "brief": "Do it."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    session.unwrap()
+}
+
+fn has_ended(user: &User, id: &str) -> bool {
+    shown(user, id)["state"] == "ended"
+}
+
 #[test]
-fn a_led_session_goes_on_when_its_pilot_ends_and_is_handed() {
+fn ending_a_pilot_ends_the_sessions_it_leads() {
     let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [
-        {"when": "Ask now", "do": [asks("Ship it?"), {"say": "Asked."}]}
-    ]}));
     let (lead, mcp) = lead(&user);
-    let (session, _) = led(&user, &mcp, "Fix the login.");
-    eventually("its first turn", || turns(&user, &session) == 1);
-    assert_eq!(shown(&user, &session)["led_by"], lead.as_str());
+    let (login, _) = led_titled(&user, &mcp, "Login");
+    let (docs, _) = led_titled(&user, &mcp, "Docs");
+    eventually("their first turns", || {
+        turns(&user, &login) == 1 && turns(&user, &docs) == 1
+    });
 
     user.call("agent.stop", json!({"agent": lead})).unwrap();
 
-    eventually("handed", || shown(&user, &session)["led_by"].is_null());
-    let session_now = shown(&user, &session);
-    assert_eq!(session_now["launched_by"], lead.as_str());
-    assert!(
-        !["ended", "failed"].contains(&session_now["state"].as_str().unwrap()),
-        "{session_now}"
-    );
-    eventually("the session told once", || {
-        delivered(&user, &session, "handed").len() == 1
+    eventually("the led sessions ended", || {
+        has_ended(&user, &login) && has_ended(&user, &docs)
     });
-    // Its questions now reach the user.
+    let reason = &store(&user)
+        .last_agent_events(&login, "agent.ended", 1)
+        .unwrap()[0]
+        .data["reason"];
+    assert!(reason.as_str().unwrap().contains("pilot"), "{reason}");
+}
+
+#[test]
+fn ending_a_pilot_ends_the_sessions_its_led_sessions_lead() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (login, login_mcp) = led_titled(&user, &mcp, "Login");
+    eventually("its first turn", || turns(&user, &login) == 1);
+    let opened = user.received_requests("session/new").len();
+    let answer = login_mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": "Tests", "brief": "Write the tests."}),
+    );
+    let (tests, _) = allowed_launch(&user, answer, "Tests", opened);
+    assert_eq!(shown(&user, &tests)["led_by"], login.as_str());
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the whole chain ended", || {
+        has_ended(&user, &login) && has_ended(&user, &tests)
+    });
+}
+
+#[test]
+fn a_detached_session_does_not_end_with_its_former_pilot() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (kept, _) = led_titled(&user, &mcp, "Login");
+    let (led, _) = led_titled(&user, &mcp, "Docs");
+    eventually("their first turns", || {
+        turns(&user, &kept) == 1 && turns(&user, &led) == 1
+    });
+    detach(&user, &kept);
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the led session ended", || has_ended(&user, &led));
+    let kept = shown(&user, &kept);
+    assert!(
+        !["ended", "failed"].contains(&kept["state"].as_str().unwrap()),
+        "{kept}"
+    );
+    assert!(kept["launched_by"].is_null(), "{kept}");
+}
+
+#[test]
+fn a_pilot_s_turn_that_ends_ends_no_led_session() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led_titled(&user, &mcp, "Login");
+    eventually("its first turn", || turns(&user, &session) == 1);
+
     user.call(
         "agent.send",
-        json!({"agent": session, "message": "Ask now"}),
+        json!({"agent": lead, "message": "Another turn."}),
     )
     .unwrap();
-    eventually("the question in the inbox", || {
-        questions_in_inbox(&user, &session) == ["Ship it?"]
+    eventually("the pilot's second turn", || turns(&user, &lead) == 2);
+    settle();
+
+    let session = shown(&user, &session);
+    assert!(
+        !["ended", "failed"].contains(&session["state"].as_str().unwrap()),
+        "{session}"
+    );
+    assert_eq!(session["led_by"], lead.as_str(), "{session}");
+}
+
+#[test]
+fn agent_ending_lists_the_led_sessions_a_pilot_s_end_would_end_and_their_unsaved_work() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "offline": true}),
+        )
+        .unwrap();
+    let (login, login_mcp) = launch(
+        &user,
+        &mcp,
+        json!({"kind": "led", "title": "Login", "brief": "Do it.", "workspace": "login"}),
+    )
+    .1
+    .unwrap();
+    let (docs, _) = led_titled(&user, &mcp, "Docs");
+    eventually("their first turns", || {
+        turns(&user, &login) == 1 && turns(&user, &docs) == 1
     });
+    let opened = user.received_requests("session/new").len();
+    let answer = login_mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": "Tests", "brief": "Write the tests."}),
+    );
+    let (tests, _) = allowed_launch(&user, answer, "Tests", opened);
+    let folder = workspace["folder"].as_str().unwrap();
+    std::fs::write(std::path::Path::new(folder).join("notes.txt"), "draft\n").unwrap();
+
+    let ending = user.call("agent.ending", json!({"agent": lead})).unwrap();
+
+    let listed = ending["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = listed.iter().map(|s| s["id"].as_str().unwrap()).collect();
+    for id in [&login, &docs, &tests] {
+        assert!(ids.contains(&id.as_str()), "{id}: {ending}");
+    }
+    assert_eq!(ids.len(), 3, "{ending}");
+    let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap();
+    assert_eq!(of(&login)["title"], "Login");
+    assert_eq!(of(&login)["project"], "app");
+    assert_eq!(of(&login)["workspace"], "login");
+    assert_eq!(of(&login)["state"], "uncommitted", "{ending}");
+    assert!(!of(&login)["losses"].as_array().unwrap().is_empty());
+    assert_eq!(of(&docs)["state"], "clean", "{ending}");
+    // Nothing ended by reading it.
+    assert!(!has_ended(&user, &login));
 }
 
 // Detach.

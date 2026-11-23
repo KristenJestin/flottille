@@ -3,7 +3,7 @@
 //! bell keep the title of its brief and say, small, which agent started it. No window opens on a
 //! screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -193,11 +193,29 @@ fn the_bell_item_of_a_session_an_agent_started_says_who_started_it(cx: &mut Test
         shell.read_with(cx, |s, cx| s.top().read(cx).count()) == 1
     });
 
-    let session = shell.read_with(cx, |s, _| s.snapshot().bell[0].session.clone());
-    assert_eq!(session, launched);
-    assert_eq!(
-        shell.read_with(cx, |s, cx| s.bell_sessions(cx)),
-        ["Write the docs · started by begin the docs session"]
+    // The launch the user allowed is answered before the session's own request counts alone.
+    until(&shell, cx, "the bell is the launched session's", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .bell
+                .iter()
+                .filter(|item| !item.read)
+                .all(|item| item.session.as_deref() == Some(launched.as_str()))
+        })
+    });
+    let session = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .bell
+            .iter()
+            .find(|item| !item.read)
+            .and_then(|item| item.session.clone())
+    });
+    assert_eq!(session.as_deref(), Some(launched.as_str()));
+    // The answered launch stays in the centre, read; the session's own request says who started it.
+    assert!(
+        shell
+            .read_with(cx, |s, cx| s.bell_sessions(cx))
+            .contains(&"Write the docs · started by begin the docs session".to_owned())
     );
 }
 
@@ -288,6 +306,8 @@ fn a_session_title_quoted_in_the_conversation_never_wraps_in_a_narrow_window(
     cx.simulate_resize(size(px(300.), px(800.)));
     let cut = gpui_design_system::quoted_title(LONG);
     assert!(cut.ends_with('…'), "the title is cut: {cut}");
+    // The notice quotes the cut title (`started the session "…"`).
+    let cut = format!("\"{cut}\"");
     // The notice sits among the steps of the turn that launched it, folded: a click opens them.
     until(&shell, cx, "the steps of the turn", |cx| {
         (0..30).any(|at| cx.update(|window, _| window.try_find(format!("group-{at}")).is_some()))

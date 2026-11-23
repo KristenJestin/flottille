@@ -109,8 +109,10 @@ The kit has one helper for each thing that moves; a screen uses them and invents
 | a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
 | the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
 | the sessions a session leads, under its row | the sidebar's `Level` draws them as `Item`s that unfold from nothing and fold away (`framed` leaves `.rising()` to the rows that arrive at full size); each is tied to the row above by `tree_tie(row, &Tie, first_line, shown, cx)`, a thin line in `p.line` that comes down and turns right into the row (├ with a line going on below, └ for the last one, a line past it for each ancestor with a sibling below), drawn inside the row so it folds and fades with it; `<row>-tie` says `Branch` or `Last branch` |
+| how far a download or a transfer has come | `Progress::new(id, share)` (`indeterminate(id)` when the size is not known): the fill eases to each reading over `PANEL`, never back; shown and hidden in a `presence`, the bar filling before it folds away |
 | a level that folds | `Fold` (a view) or `fold_frame` |
 | a part that waits for a slow read, then shows it | `awaiting(id, pending, Skeleton, content)`: the skeleton fades out and the content in at the same place, the height easing from one to the other (to nothing when nothing came); build it on every frame |
+| the sidebar's rows and the page, until the daemon first answered | `loading::sidebar()` in a `presence` (it folds away when the projects arrive, which rise in) and `loading::veil(..)` over the page (`fade`: the page under it is drawn at once, the skeleton fades out over `PANEL`); both stop when the link cannot reach the daemon, the top bar then says it reconnects |
 | a panel over the page (a menu, a drawer, a modal, the bell's list) | rises a little and fades in, fades out, and stays drawn until it has |
 
 Never in a screen: `.hover(..)` or `.group_hover(..)` (they switch at once; `tests/the_rule.rs`
@@ -169,6 +171,15 @@ the wrong code first).
    the action cannot be done, the dialog says why and its button is disabled. Never a button that
    turns into other buttons in place. **[test]** `Confirm`, and a scan refusing the
    inline-confirmation ids.
+   **A dialog opens over the page it is asked from** (#1018): a form or a review is the kit's
+   `Modal`, drawn by the shell's one host of dialogs (`modals.rs`) above whichever page is shown,
+   never by the page that happens to hold its state, and never after a change of page. The
+   section that holds the form's state (`VaultSection`, `ConnectionsSection`) gives its modal to
+   the host (`Modals::add`) and opens it through `Modals::open`, whoever asked; a dialog opened
+   from a dialog is stacked over it, Escape and Cancel close the top one (the window's root asks
+   the kit for the topmost overlay) and the focus goes back to the one below. **[test]**
+   `crates/flottille-window/tests/no_dialog_is_opened_by_changing_page.rs`, a scan refusing a
+   function that changes page and opens a dialog in the same body.
 3. **An action's result is a toast**: bottom right, 360 px, an icon, one line and an optional
    second; it rises and fades in, folds away with its gap; a success leaves after 4 s (held while
    hovered), a failure stays until dismissed; several stack, the newest on top. Never a line
@@ -185,7 +196,12 @@ the wrong code first).
    "Claude"), never its state ("On", "Enabled", "Use"): the switch already draws whether it is
    on. A setting that only means something for one choice (a switch on, a radio chosen) unfolds
    right under it, its label read after the choice's ("Compact automatically", then "When the
-   context reaches"), never shown greyed elsewhere on the page. A field saved on its own shows
+   context reaches"), never shown greyed elsewhere on the page. A choice that may be left unsaid
+   is a switch ("Wait until it is ready", "Link to it on its run") that unfolds its kinds, never a
+   radio with a "None" row; a list that grows with the data is a `ChipPicker`, never a switch per
+   item. A long form is sections with a heading and one sentence each: what is required first,
+   then one line ("Optional: everything below can stay empty", `commands::optional_line`) instead
+   of the word after each label. A field saved on its own shows
    no Save at rest: a secondary Save unfolds beside it once its value differs from the saved one,
    and folds away after it is saved or set back.
 5. **A state is said once per view**: an agent's state by its icon on its own row, "needs you" in
@@ -246,14 +262,19 @@ the wrong code first).
     controls, and animates in, so that nothing moves; a short row (under 740 px) gives the chips
     their icons, never an overflow. **[test]** `window_compaction.rs`, `window_quota.rs` (a 1280
     px window), `window_rules.rs`.
-13. **Tabs by subject; a feature is a row, never a tab.** Settings has five tabs (Agents,
-    Approvals, Features, Vault, General) and six at most, Usage the last; a project's settings
-    have six (Repositories, Workspaces, Tasks, Instructions, Features, Vault); the project page
-    four at most and room for a fifth (Progress, for a project with a tracker). A new part of Flottille adds no tab: a part the user turns on or
-    off (Specs, Review, the compaction, Connections, later the handbook) is a row of the
-    Features tab, which opens its page in place of the list (`Subpage`); a setting every agent
-    shares is a section of a tab that exists. A tab with a single control is a section of
-    another.
+13. **Tabs by subject; a part gets a tab of its own when it fits.** A tab holds one subject,
+    the one the user goes to on its own, with several sections of its own: Machines (Remote:
+    whether it is on, the hub, the devices, the addresses) is one,
+    and Usage and Notifications will be. Settings has six tabs (Agents, Approvals, Features,
+    Vault, Machines, General), Usage later; a project's settings have six (Repositories,
+    Workspaces, Tasks, Instructions, Features, Vault); the project page four at most and room for
+    a fifth (Progress, for a project with a tracker). The limit is the mess, not a number: the
+    tabs stay few enough to read at a glance, and when they are no longer the structure is
+    reviewed (#1145). A smaller part stays a row of the Features tab, which opens its page in
+    place of the list (`Subpage`), when the user turns it on or off (Specs, Review, the
+    compaction, Connections, later the handbook), or a section of the tab of its subject; a
+    setting every agent shares is a section of a tab that exists. A tab with a single control is a
+    section of another.
 14. **A feature's page, one pattern.** It starts with the same block, in this order: its switch,
     labelled with what it does ("Review changes", "Write specs before building", "Compact long
     conversations", "Let a model decide in Auto"); its hint, one sentence of what it does and
@@ -301,16 +322,19 @@ The components that hold them:
 | `Button::{primary, secondary, quiet, danger, icon}` | rule 1; `.leading(Icon)`, `.icon_only(bool)` (a short row gives a chip its icon), `.disabled(bool)`, `.badge(Badge)` |
 | `PageHeader::new(id, title)` | `.path(p)`, `.crumb(el)`, `.below(el)`, `.action(id, label, Option<Icon>, f)` twice at most, `.more(Entity<Menu>)` |
 | `Section::new(id, title)` | `.count(c)`, `.sentence(s)`, `.action(Button)`, then its children |
-| `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |
+| `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line; `.disabled(reason)` makes the entry before it inert while something it needs is missing: its ink fades to the faint one, its second line says why |
+| `Swatches::new(id, label).swatch(Swatch::new(key, title, colour))`, `.chosen(i)`, `.on_choose(f)` | a few colours to choose among (a device's): round buttons `<id>-<key>`, the chosen one ringed, the ring moving over `PANEL`; in a `Field` |
 | `Confirm::new(id, question)` | `.sentence(s)`, `.action(label)`, `.refused(Option<why>)`, `.open(bool)`, `.on_confirm(f)`, `.on_cancel(f)`; ids `<id>-action`, `<id>-cancel`, `<id>-scrim` |
 | `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal). `.large()` makes it nearly the whole window (a 32 px margin) for looking at something at length: the title and sentence left in the header, `.action(..)`s and a close button (`<id>-close`) on its right, no Cancel and no footer, and the body takes the height left (its owner scrolls it); `.fitting()` is that header around a body of its owner's size: the dialog wraps it (at least `space::DIALOG_FIT_MIN`, 400 px, wide so that the header fits; at most the window less its margin), and its owner keeps the body within the window and animates its size (the picture viewer); `.takes_focus()` so that Escape reaches it. `.search()` makes it a search over the page (the quick switcher): near the top, 640 px, no title drawn (it is its label) and no Cancel, `.above(field)` over the results, `.scroll(&handle)` for the body, `.on_key(f)` for the arrows. While a dialog or a list is open, `keys_held(cx)` says so and the window's shortcuts wait |
 | `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack`; `.action(label, f)` adds one secondary button under the lines (`toast-<n>-action`), whose click runs `f` and closes the toast: for something the user may do with what the toast says (Open a link an agent shares), never for a result; `.keyed(key)` names what it says, so that a toast pushed with the key of one on screen replaces its lines instead of adding a second (`toast::shown(key, cx)` says whether one is on screen): the links an agent shares in a row |
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |
 | `Tag::new(id, text)` | the small bordered mono word after a title (a state, a kind): the element `<id>`, cut at 160 px with its whole text as a tooltip, fading in when its text changes. `ListRow::tag` and `Section::tag` draw theirs through it; a tag anywhere else (the Changed / New mark of a block of a review) is a `Tag`, never a styled div |
+| `ChipPicker::new(id, label, &input, options, chosen)` | a list that grows with the data (a service's or a task's needs, a repository's dependencies) is never a switch per item: it is this multi-select of keys. `ChipOption::new(key, label).detail(line)`, `.placeholder(p)`, `.on_change(f)` (given the whole list, in the order added); chips (`RemovableChip`, each its label, a detail and a remove button) unfold in and fold away, a count after the label, a line when none, a field that opens a menu of what is not chosen yet (searched with `fuzzy`, arrows and Enter add, Backspace removes the last); ids `<id>-chip-<key>`, `<id>-chip-<key>-remove`, `<id>-search`, `<id>-menu`, `<id>-item-<key>`, `<id>-count`, `<id>-none` |
 | `Segmented::new(id, label, choices, chosen)` | at most three choices, never in a dialog; `.unavailable(i)` shows a choice that cannot be taken here, faded over `HOVER` and with no hover, a line beside it saying why |
 | `RadioChoices::new(id, label)` | `.choice(key, title, line)`, `.leading(Icon)`, `.chosen(i)`, `.on_choose(f)`; two to four |
-| `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.fit()`, `.disabled(b)`, `.on_choose(f)` |
+| `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.tone(t)`, `.compact()`, `.fit()`, `.disabled(b)`, `.on_choose(f)`; the composer's mode (`start-mode`, `reply-mode`) is a compact one, Full in `Tone::Fail` |
+| `ModelPicker::new(id, chosen)` | provider, model and effort in one menu, one label (`Provider · Model · effort`): `.models(entries)`, `.effort(e)`, `.on_choose(f)`; ids `<id>-provider-<key>`, `<id>-model-<provider>-<model>`, `<id>-effort-<level>`; the composer (`agent-picker`) and the Reply dock (`session-agent-picker`, its provider only) build it through `composer::agent_picker` |
 | `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
 | `Card::new().id(id).block(Block)` | a card whose separators are drawn only between blocks with content |
 | `ListCard::new(id).row(ListRow)` | rule 7's list; `.scrolling(&ScrollHandle, max_height)` makes a long one scroll inside its card (the screen keeps the handle: it holds the place and takes it back to the top); `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item`; a search's result has `.pieces(..)` (what matched, in the accent), `.marked(bool)` (the row the keys move to, its fill moving over `HOVER`) and `.on_enter(f)` (the pointer entered it) |
@@ -318,6 +342,7 @@ The components that hold them:
 | `Subpage::new(id, label)` | rule 13: a list that opens, in place of itself and inside its tab, the page of one of its rows. `.entry(key, icon, title, tag, line)` draws a row of a `ListCard` (its icon, its name, its state as a tag, said once: `On`, `Off`, `2 on`, and its one line, what it is for, never its state); `.open(Option<key>)`, `.on_open(f)`, `.page(el)`. Above the open page, a path line, `Features / Review`, whose first word is a link back to the list, as Escape is. The page enters sliding from the right while the list leaves to the left, over `PANEL` with a fade; going back does the reverse. The tab keeps the page open while another tab is shown, and a link (a notice, a mode's "unavailable" line, an action of the quick switcher) opens `Settings › Features › Review` directly with the setting in view; ids `<id>-<key>`, `<id>-back` |
 | `ModelChoice::new(id, label, choice)` | rule 15: `.follows()` where nothing chosen is a rule (the first recommended model applies, and choosing it back clears), `ModelEntry::recommended()` and `.proposes(effort)` for the values that apply, `.effort(Option<effort>)`, `.compact()` for a line of a card, `.cost(line)`, `.inherited(gives)` in a project (its first option `As in Settings`), `.on_choose(f)`; the options come from the providers enabled and ready, their models and efforts as the daemon knows them |
 | `Skeleton::new(id)` | rule 11: `.w(px)` (all the room without), `.h(px)` (12 px without), a block in the faint fill that pulses once every `PULSE`, in its own small view; `awaiting(id, pending, skeleton, content)` crossfades it into the content |
+| `Progress::new(id, share)`, `Progress::indeterminate(id)`, `.w(px)` | a download or a transfer: a bar 6 px high (all the room without `.w`) whose fill eases to each new share over `PANEL` and never goes back (a lower reading is ignored: a new transfer has a new id), or, with no known size, a stripe that travels along it; reduced motion jumps the fill and stops the stripe; at rest it asks for no frame; `<id>` is the bar, `<id>-fill` the fill or the stripe. The amount received and Cancel are the screen's (`Button::quiet`, text in `p.mute`) |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
 | `fuzzy::find(query, title, context)` | a search's matching (the window's quick switcher): each word typed in the title, else as a whole in the context, ignoring case, accents and ligatures; a score and the marks, `Match::pieces(title)` for a `ListRow` |
 | `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
@@ -326,6 +351,14 @@ The components that hold them:
 `--drawer`, `--menu` open one of them), for a capture in a headless compositor.
 
 ## Pitfalls
+
+- **The first frame is drawn before the daemon answers**, so what the daemon owns and the window
+  needs at once is copied into a file of the window's (`look.rs`: the theme, `window-appearance.json`
+  in the state folder). It is applied before the window opens with reduced motion on for that one
+  call (`App::set_reduce_motion`), because the kit's `appear` cross-fades from its default palette
+  over `COVER`; the daemon's answer then finds the choice already made and changes nothing. A test
+  that starts the window with `flottille_window::start(env, Some(memory), cx)` draws as the program
+  does; `init_with` alone starts from the kit's default.
 
 - `use gpui_kit::prelude::*` brings `ParentElement`, `StatefulInteractiveElement`, `AppContext`,
   `FluentBuilder`; `h_flex`/`v_flex` are in `gpui_kit::base`. `.on_click` needs an `.id(..)`.

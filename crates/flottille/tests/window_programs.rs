@@ -5,7 +5,7 @@
 //! own, throwaway repositories and temporary XDG folders. No window opens on a screen, no real
 //! `gh`, `bkt` nor `acli` is run, none of their folders is read.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};

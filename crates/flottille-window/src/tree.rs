@@ -5,24 +5,26 @@
 
 use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
-    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, changing, fade, hoverable, meta,
-    palette, presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
+    Button, Fold, Icon, Item, Listing, Menu, Modal, ReorderGroup, Reorderable, Tie, TreeRow,
+    changed, changing, fade, hoverable, meta, palette, presence, presence_of, section_label, space,
+    tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
-use crate::actions::Command;
-use crate::model::{Place, ago};
+use crate::end_led::{self, LedEnd};
+use crate::machines::shade;
+use crate::model::{Home, Place, ago};
 use crate::session::end_sentence;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
@@ -51,6 +53,89 @@ pub fn project_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-{name}").into())
 }
 
+/// The element id of a project's row in a machine's section (Group by machine).
+pub fn project_on_id(name: &str, machine: &str) -> ElementId {
+    ElementId::Name(format!("project-{name}-on-{machine}").into())
+}
+
+/// The element id of the mark of `machine` on a project's row: its icon in its colour, which says
+/// the machine's name and state when it is hovered.
+pub fn project_mark_id(name: &str, machine: &str) -> ElementId {
+    ElementId::Name(format!("project-mark-{name}-{machine}").into())
+}
+
+/// The element id of the machine's name a project row says after its own, in small, when it
+/// shares its name with a project of another repository.
+pub fn project_apart_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-apart-{name}").into())
+}
+
+/// The element id of the line under a project's row that says since when its machine is off.
+pub fn project_offline_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-offline-{name}").into())
+}
+
+/// The element id of a machine's section header (Group by machine).
+pub fn machine_id(machine: &str) -> ElementId {
+    ElementId::Name(format!("machine-{machine}").into())
+}
+
+/// The element id of the icon of a machine's section header.
+pub fn machine_mark_id(machine: &str) -> ElementId {
+    ElementId::Name(format!("machine-mark-{machine}").into())
+}
+
+/// The element id of the state a machine's section header says.
+pub fn machine_state_id(machine: &str) -> ElementId {
+    ElementId::Name(format!("machine-state-{machine}").into())
+}
+
+/// The element id of the projects' list: its rows and groups are parts of it.
+pub fn projects_list_id() -> ElementId {
+    ElementId::Name("projects-list".into())
+}
+
+/// The element id of a project's place in the list (the row, and its fold, as the list moves
+/// it).
+pub fn project_slot_id(name: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-row-{name}").into())
+}
+
+/// The element id of a group of the user's.
+pub fn group_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}").into())
+}
+
+/// The element id of a group's heading, which folds it and is dragged.
+pub fn group_header_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}-header").into())
+}
+
+/// The element id of the number of projects a group holds.
+pub fn group_count_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}-count").into())
+}
+
+/// Why New group… cannot be picked while the projects are shown by machine.
+const SHOWN_BY_MACHINE: &str = "Shown by machine";
+/// Why Group by machine cannot be switched on: there is nothing to group by.
+const ONE_MACHINE: &str = "One machine";
+
+/// The element id of New group… in the Projects header's menu.
+pub fn new_group_id() -> ElementId {
+    ElementId::Name("projects-new-group".into())
+}
+
+/// The element id of the Projects header's "⋯" menu.
+pub fn projects_menu_id() -> ElementId {
+    ElementId::Name("projects-menu".into())
+}
+
+/// The element id of Group by machine in that menu: a switch.
+pub fn by_machine_id() -> ElementId {
+    ElementId::Name("projects-by-machine".into())
+}
+
 /// The element id of the "Ended" group, at the bottom of the tree.
 pub fn ended_id() -> ElementId {
     ElementId::Name("ended".into())
@@ -59,6 +144,12 @@ pub fn ended_id() -> ElementId {
 /// The element id of the block inside the "Ended" group that holds its rows and scrolls.
 pub fn ended_scroll_id() -> ElementId {
     ElementId::Name("ended-sessions".into())
+}
+
+/// The element id of the machine a session on another machine runs on, and its state, on its
+/// row's second line: `server · running`.
+pub fn session_machine_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-machine-{id}").into())
 }
 
 /// The element id of the "⋯" menu a session's row offers.
@@ -254,19 +345,45 @@ impl Mark {
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
-    /// The rows as drawn: a project that went folds away before it is gone.
+    /// The rows as drawn: a project that went folds away before it is gone. Fed in the order the
+    /// daemon lists them, never the user's: a row the user moved is the reorderable list's to
+    /// slide.
     list: Listing<Entity<ProjectNode>>,
+    /// The projects as the user arranged them: the groups, then the rows outside any group.
+    arranged: Arranged,
+    /// The places of the rows as last drawn (a project's name and its group), so that a row that
+    /// is going stays where it was while it folds away.
+    drawn: Vec<(String, Option<String>)>,
+    /// The rows the list opened with: they rise into place, the rows that come after unfold.
+    opening: Option<HashSet<String>>,
+    /// The machines' sections, which replace the projects' list while they are shown by machine.
+    sections: Vec<Entity<MachineNode>>,
+    section_list: Listing<Entity<MachineNode>>,
+    /// The projects are shown by machine, one section each.
+    by_machine: bool,
+    /// The Projects header's "⋯": Group by machine, offered once there are machines to group by.
+    arrange: Option<Entity<Menu>>,
+    offered: bool,
     /// The "Ended" group, and whether it holds a session: it folds away when it holds none.
     ended: Option<(Entity<EndedNode>, bool)>,
     /// The session whose ending the user is asked to confirm, and how many agents end.
     ending: Option<(String, usize)>,
     /// The count the confirmation said last, which it still shows while it fades out.
     said: usize,
+    /// The led sessions that end with the session asked, as the daemon read them; they stay while
+    /// the confirmation fades out.
+    led: Vec<LedEnd>,
     /// The sessions asked of the daemon from here: an answer that refuses is said here only for
     /// them (the session's page says its own).
     asked: HashSet<String>,
     /// What the daemon refused of what was asked from a row.
     refused: Option<SharedString>,
+    /// Whether the daemon has not told yet what the tree shows: its rows are skeletons until then.
+    loading: bool,
+    /// What the foot says of an update of Flottille, when there is one to act on.
+    version_line: Option<SharedString>,
+    /// The quiet mark of what is new since the version last run, until its page is opened.
+    whats_new: Option<SharedString>,
 }
 
 impl Sidebar {
@@ -275,21 +392,141 @@ impl Sidebar {
             shell,
             projects: Vec::new(),
             list: Listing::default(),
+            arranged: Arranged::default(),
+            drawn: Vec::new(),
+            opening: None,
+            sections: Vec::new(),
+            section_list: Listing::default(),
+            by_machine: false,
+            arrange: None,
+            offered: false,
             ended: None,
             ending: None,
             said: 0,
+            led: Vec::new(),
             asked: HashSet::new(),
             refused: None,
+            loading: true,
+            version_line: None,
+            whats_new: None,
         }
+    }
+
+    /// The projects' rows as the user arranged them.
+    pub fn arranged(&self) -> &Arranged {
+        &self.arranged
     }
 
     pub fn projects(&self) -> &[Entity<ProjectNode>] {
         &self.projects
     }
 
+    /// The projects as the user arranged them: while the projects are shown by machine, the list
+    /// keeps what it was, folding away as a whole.
+    pub fn set_arranged(&mut self, arranged: Arranged, cx: &mut Context<Self>) {
+        if !self.by_machine && self.arranged != arranged {
+            self.arranged = arranged;
+            cx.notify();
+        }
+    }
+
     pub fn set_projects(&mut self, projects: Vec<Entity<ProjectNode>>, cx: &mut Context<Self>) {
-        if self.projects != projects {
+        if !self.by_machine && self.projects != projects {
             self.projects = projects;
+            cx.notify();
+        }
+    }
+
+    pub fn sections(&self) -> &[Entity<MachineNode>] {
+        &self.sections
+    }
+
+    pub fn set_sections(&mut self, sections: Vec<Entity<MachineNode>>, cx: &mut Context<Self>) {
+        if self.sections != sections {
+            self.sections = sections;
+            cx.notify();
+        }
+    }
+
+    /// Whether the projects are shown by machine.
+    pub fn is_by_machine(&self) -> bool {
+        self.by_machine
+    }
+
+    /// Whether the Projects header's menu is made.
+    pub fn has_menu(&self) -> bool {
+        self.arrange.is_some()
+    }
+
+    /// Whether the header offers Group by machine now.
+    pub fn offers_grouping(&self) -> bool {
+        self.offered
+    }
+
+    /// How the projects are shown, and whether the user may group them by machine (there is
+    /// another machine): the Projects header's "⋯" menu always offers New group…, and Group by
+    /// machine, a switch that slides, once there is a machine to group by.
+    pub fn set_arrangement(&mut self, by_machine: bool, offered: bool, cx: &mut Context<Self>) {
+        if self.arrange.is_none() {
+            let shell = self.shell.clone();
+            let toggles = self.shell.clone();
+            self.arrange = Some(cx.new(|cx| {
+                let menu = Menu::new(projects_menu_id(), "Arrange projects", cx)
+                    .width(px(210.))
+                    .entry(
+                        new_group_id(),
+                        crate::group_name::NEW_GROUP_LABEL,
+                        Some(Icon::Plus),
+                        move |window, cx| {
+                            shell
+                                .update(cx, |shell, cx| shell.new_group(window, cx))
+                                .ok();
+                        },
+                    );
+                // The groups are the user's own list: shown by machine, there is none to add to.
+                let menu = match by_machine {
+                    true => menu.disabled(SHOWN_BY_MACHINE),
+                    false => menu,
+                };
+                // Always there: a machine that comes or goes enables or disables it in place, so
+                // that a menu that is open stays open.
+                let menu = menu.switch(
+                    by_machine_id(),
+                    "Group by machine",
+                    Some(glyphs::device("desktop")),
+                    by_machine,
+                    move |window, cx| {
+                        toggles
+                            .update(cx, |shell, cx| shell.toggle_by_machine(window, cx))
+                            .ok();
+                    },
+                );
+                // Switched on, it stays one to switch off.
+                match offered || by_machine {
+                    true => menu,
+                    false => menu.disabled(ONE_MACHINE),
+                }
+            }));
+        } else if (self.by_machine != by_machine || self.offered != offered)
+            && let Some(menu) = &self.arrange
+        {
+            menu.update(cx, |menu, cx| {
+                menu.set_disabled(
+                    &new_group_id(),
+                    by_machine.then(|| SHOWN_BY_MACHINE.into()),
+                    cx,
+                );
+                menu.set_disabled(
+                    &by_machine_id(),
+                    (!offered && !by_machine).then(|| ONE_MACHINE.into()),
+                    cx,
+                );
+                menu.set_switch(&by_machine_id(), by_machine, cx);
+            });
+        }
+        if self.by_machine != by_machine || self.offered != offered {
+            self.by_machine = by_machine;
+            self.offered = offered;
             cx.notify();
         }
     }
@@ -310,8 +547,18 @@ impl Sidebar {
     pub fn ask_end(&mut self, session: String, count: usize, cx: &mut Context<Self>) {
         self.ending = Some((session, count));
         self.said = count;
+        self.led.clear();
         self.refused = None;
         cx.notify();
+    }
+
+    /// The daemon read the led sessions ending `session` would end: the confirmation lists them
+    /// if it is still asked for that session.
+    pub fn led_read(&mut self, session: &str, led: Vec<LedEnd>, cx: &mut Context<Self>) {
+        if self.ending() == Some(session) && self.led != led {
+            self.led = led;
+            cx.notify();
+        }
     }
 
     /// The session whose ending is asked.
@@ -325,14 +572,18 @@ impl Sidebar {
         }
     }
 
-    fn confirm_end(&mut self, cx: &mut Context<Self>) {
+    fn confirm_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((session, _)) = self.ending.take() else {
             return;
         };
         self.asked.insert(session.clone());
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::Stop { session }))
-            .ok();
+        let shell = self.shell.clone();
+        // Once this update is done: the shell draws the tree again, this sidebar's included.
+        window.defer(cx, move |window, cx| {
+            shell
+                .update(cx, |shell, cx| shell.end_confirmed(session, window, cx))
+                .ok();
+        });
         cx.notify();
     }
 
@@ -354,6 +605,14 @@ impl Sidebar {
     /// What the daemon refused of what was asked from a row.
     pub fn refused(&self) -> Option<&str> {
         self.refused.as_deref()
+    }
+
+    /// The daemon answered (or cannot be reached): the tree is not waiting for it any more.
+    pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
+        if self.loading != loading {
+            self.loading = loading;
+            cx.notify();
+        }
     }
 }
 
@@ -392,18 +651,225 @@ fn framed<V: Render>(
         .collect()
 }
 
+impl Sidebar {
+    /// What the foot says of an update: it unfolds when there is one, fades when it changes.
+    pub fn set_version_line(&mut self, line: Option<String>, cx: &mut Context<Self>) {
+        let line = line.map(SharedString::from);
+        if self.version_line != line {
+            self.version_line = line;
+            cx.notify();
+        }
+    }
+
+    pub fn version_line(&self) -> Option<&SharedString> {
+        self.version_line.as_ref()
+    }
+
+    /// The mark of what is new: it unfolds and fades in once there is something new that was not
+    /// opened, and folds away and fades out once it was.
+    pub fn set_whats_new(&mut self, mark: Option<String>, cx: &mut Context<Self>) {
+        let mark = mark.map(SharedString::from);
+        if self.whats_new != mark {
+            self.whats_new = mark;
+            cx.notify();
+        }
+    }
+}
+
+/// A group of the user's as the list draws it: its projects' rows, in order.
+#[derive(Clone, PartialEq)]
+pub struct ArrangedGroup {
+    pub id: String,
+    pub name: String,
+    pub open: bool,
+    pub rows: Vec<Entity<ProjectNode>>,
+}
+
+/// The projects' rows as the user arranged them: the groups, then the rows outside any group.
+#[derive(Clone, Default, PartialEq)]
+pub struct Arranged {
+    pub groups: Vec<ArrangedGroup>,
+    pub loose: Vec<Entity<ProjectNode>>,
+}
+
+/// The place the list says a row was dropped at, among the rows of `group` once the row has left
+/// its own, as a place among the rows the arrangement holds: the rows still folding away
+/// (`going`) are drawn, and counted by the list, but are not the arrangement's.
+fn counted(
+    drawn: &[(String, Option<String>)],
+    going: &HashSet<String>,
+    moved: &str,
+    group: Option<&str>,
+    index: usize,
+) -> usize {
+    drawn
+        .iter()
+        .filter(|(key, place)| key != moved && place.as_deref() == group)
+        .take(index)
+        .filter(|(key, _)| !going.contains(key))
+        .count()
+}
+
+impl Sidebar {
+    /// The user's list: the groups and the rows outside any, dragged to their place. The rows
+    /// are the listing's items (one that comes unfolds, one that goes folds away), the list as a
+    /// whole folds away while the projects are shown by machine.
+    fn project_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.list.sync(
+            self.projects
+                .iter()
+                .map(|row| (row.entity_id().as_u64().to_string(), row.clone())),
+            now,
+            reduce,
+        );
+        // Each row by its project's name, which the list keys it by; two rows of one name (one
+        // going, one coming) are told apart by the node. A new row unfolds from nothing, at the
+        // end of the list.
+        let mut items: HashMap<String, gpui_kit::AnyElement> = HashMap::new();
+        let mut canonical: Vec<String> = Vec::new();
+        for row in self.list.rows() {
+            let mut key = row.value.read(cx).name().to_owned();
+            if items.contains_key(&key) {
+                key = format!("{key}~{}", row.key);
+            }
+            let item = Item::new(
+                ElementId::Name(format!("tree-project-{}", row.key).into()),
+                row.placement,
+                row.value.clone(),
+            );
+            // The rows the window opens with rise into place; one that comes later unfolds.
+            let item = match self.opening.as_ref().is_none_or(|rows| rows.contains(&key)) {
+                true => item.rising(),
+                false => item,
+            };
+            canonical.push(key.clone());
+            items.insert(key, item.into_any_element());
+        }
+        let name = |node: &Entity<ProjectNode>| node.read(cx).name().to_owned();
+        let mut order: Vec<(String, Option<String>)> = Vec::new();
+        for group in &self.arranged.groups {
+            for node in &group.rows {
+                order.push((name(node), Some(group.id.clone())));
+            }
+        }
+        for node in &self.arranged.loose {
+            order.push((name(node), None));
+        }
+        // A row that is going stays where it was while it folds away.
+        let last = std::mem::take(&mut self.drawn);
+        for (at, (key, place)) in last.iter().enumerate() {
+            if order.iter().any(|(held, _)| held == key) || !items.contains_key(key) {
+                continue;
+            }
+            let after = last[..at]
+                .iter()
+                .rev()
+                .find_map(|(before, _)| order.iter().position(|(held, _)| held == before));
+            let place = place
+                .clone()
+                .filter(|id| self.arranged.groups.iter().any(|group| &group.id == id));
+            order.insert(after.map_or(0, |at| at + 1), (key.clone(), place));
+        }
+        // What the arrangement does not name is at the end.
+        for key in canonical {
+            if !order.iter().any(|(held, _)| *held == key) {
+                order.push((key, None));
+            }
+        }
+        self.drawn = order.clone();
+        // The list counts the rows that are still folding away; the arrangement does not.
+        let arranged: HashSet<String> = self
+            .arranged
+            .groups
+            .iter()
+            .flat_map(|group| group.rows.iter())
+            .chain(&self.arranged.loose)
+            .map(name)
+            .collect();
+        let going: HashSet<String> = order
+            .iter()
+            .filter(|(key, _)| !arranged.contains(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let drawn = order.clone();
+        if self.opening.is_none() && !order.is_empty() {
+            self.opening = Some(order.iter().map(|(key, _)| key.clone()).collect());
+        }
+        // A project that left is no longer one the window opened with: the same name coming back
+        // is a new row, which unfolds.
+        if let Some(rows) = &mut self.opening {
+            rows.retain(|key| order.iter().any(|(held, _)| held == key));
+        }
+
+        let mut list = Reorderable::new(projects_list_id());
+        for group in &self.arranged.groups {
+            let mut held = ReorderGroup::new(group.id.clone(), group.name.clone()).open(group.open);
+            for (key, place) in &order {
+                if place.as_deref() == Some(group.id.as_str())
+                    && let Some(item) = items.remove(key)
+                {
+                    held = held.row(key.clone(), item);
+                }
+            }
+            list = list.group(held);
+        }
+        for (key, place) in &order {
+            if place.is_none()
+                && let Some(item) = items.remove(key)
+            {
+                list = list.row(key.clone(), item);
+            }
+        }
+        let (moved, groups, toggled) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
+        let list = list
+            .on_move_row(move |row, window, cx| {
+                let name = row.row.to_string();
+                let group = row.group.clone();
+                let index = counted(&drawn, &going, &name, group.as_deref(), row.index);
+                moved
+                    .update(cx, |shell, cx| {
+                        shell.project_moved(&name, group.as_deref(), index, window, cx)
+                    })
+                    .ok();
+            })
+            .on_move_group(move |id, index, window, cx| {
+                groups
+                    .update(cx, |shell, cx| shell.group_moved(id, index, window, cx))
+                    .ok();
+            })
+            .on_toggle(move |id, open, window, cx| {
+                toggled
+                    .update(cx, |shell, cx| shell.group_opened(id, open, window, cx))
+                    .ok();
+            });
+        presence("sidebar-projects-list", !self.by_machine, list)
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let projects = framed(
-            &mut self.list,
-            &self.projects,
-            "tree-project",
+        // Shown by machine, the projects' list folds away and the machines' sections come in, and
+        // back.
+        let projects = self.project_list(cx);
+        let sectioned: &[Entity<MachineNode>] = match self.by_machine {
+            true => &self.sections,
+            false => &[],
+        };
+        let sections = framed(
+            &mut self.section_list,
+            sectioned,
+            "tree-machine",
             |_, _| false,
             cx,
         );
+        let arrange = self.arrange.clone();
         let shell = self.shell.clone();
         let adds = self.shell.clone();
+        let version = self.shell.clone();
+        let whats_new = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
             // At the panel's bottom, under a line; its rows scroll inside their own block, and it
             // folds away when its last session leaves.
@@ -438,15 +904,10 @@ impl Render for Sidebar {
                     .child(SharedString::from(end_sentence(count)))
                     .test_support(),
             )
+            .child(end_led::block("sidebar-end", &self.led, cx))
             .action(
-                Button::danger(
-                    "sidebar-end-confirm",
-                    match count {
-                        0 | 1 => "End session".to_owned(),
-                        n => format!("End {n} agents"),
-                    },
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
+                Button::danger("sidebar-end-confirm", end_led::end_label(count, &self.led))
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_end(window, cx))),
             );
         div()
             .id("sidebar")
@@ -490,15 +951,29 @@ impl Render for Sidebar {
                             .pr(space::XS)
                             .child(section_label("Projects", cx))
                             .child(
-                                Button::icon("add-project", Icon::Plus, "Add a project").on_click(
-                                    move |_, window, cx| {
-                                        adds.update(cx, |shell, cx| shell.add_project(window, cx))
-                                            .ok();
-                                    },
-                                ),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(space::XS)
+                                    .when_some(arrange, |d, menu| d.child(menu))
+                                    .child(
+                                        Button::icon("add-project", Icon::Plus, "Add a project")
+                                            .on_click(move |_, window, cx| {
+                                                adds.update(cx, |shell, cx| {
+                                                    shell.add_project(window, cx)
+                                                })
+                                                .ok();
+                                            }),
+                                    ),
                             ),
                     )
-                    .children(projects),
+                    .child(presence(
+                        "sidebar-loading",
+                        self.loading,
+                        crate::loading::sidebar(),
+                    ))
+                    .child(projects)
+                    .children(sections),
             )
             .children(ended)
             .child(presence_of(
@@ -517,6 +992,78 @@ impl Render for Sidebar {
                         .into_any_element()
                 },
             ))
+            .child(presence_of(
+                "sidebar-whats-new-line",
+                self.whats_new.clone(),
+                move |mark| {
+                    let opens = whats_new.clone();
+                    div()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(p.line)
+                        .px(space::SM)
+                        .py(space::XS)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Button::quiet("sidebar-whats-new", mark)
+                                    .full_width()
+                                    .on_click(move |_, window, cx| {
+                                        opens
+                                            .update(cx, |shell, cx| {
+                                                shell.open(Selection::WhatsNew, window, cx)
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                        )
+                        // The dot says it was not opened yet; it goes with the mark.
+                        .child(
+                            div()
+                                .id("sidebar-whats-new-dot")
+                                .flex_none()
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .bg(p.acc)
+                                .test_support(),
+                        )
+                        .into_any_element()
+                },
+            ))
+            .child(presence_of(
+                "sidebar-version-line",
+                self.version_line.clone(),
+                move |line| {
+                    let opens = version.clone();
+                    div()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(p.line)
+                        .px(space::SM)
+                        .py(space::XS)
+                        // Its one change (downloading, then ready) fades.
+                        .child(changing("sidebar-version-label", line, move |line| {
+                            Button::quiet("sidebar-version", line)
+                                .full_width()
+                                .on_click(move |_, window, cx| {
+                                    opens
+                                        .update(cx, |shell, cx| {
+                                            shell.open_settings_at(
+                                                crate::settings::Reveal::Version,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .ok();
+                                })
+                                .into_any_element()
+                        }))
+                        .into_any_element()
+                },
+            ))
             .child(modal)
             .test_support()
     }
@@ -525,6 +1072,15 @@ impl Render for Sidebar {
 /// A project's row and, folding under it, its sessions in one list.
 pub struct ProjectNode {
     name: String,
+    /// The machine whose section it is in, when the projects are shown by machine: its row then
+    /// holds that machine's sessions only.
+    machine: Option<String>,
+    /// What the row says: the name, without what tells it from another of the same name.
+    title: SharedString,
+    /// The machine that has a project of this name which this is not: said in small after it.
+    apart: Option<SharedString>,
+    /// The machines that have it, each marked after the name; none while this machine is alone.
+    homes: Vec<Home>,
     open: bool,
     mark: Mark,
     /// The strongest mark of what it holds, which it shows only while it is folded: open, the
@@ -538,12 +1094,28 @@ pub struct ProjectNode {
 }
 
 impl ProjectNode {
-    pub fn new(name: String, shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
+    /// The node of a project, unfolded or folded as the user left it: made so, it never animates
+    /// from the other. `machine` is the section it is in, when the projects are shown by machine.
+    pub fn new(
+        name: String,
+        machine: Option<String>,
+        shell: WeakEntity<Shell>,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sessions = cx.new(|_| Level::new());
-        let fold = cx.new(|_| Fold::new(format!("fold-project-{name}"), sessions.clone(), true));
+        let key = match &machine {
+            Some(machine) => format!("{name}-on-{machine}"),
+            None => name.clone(),
+        };
+        let fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), sessions.clone(), open));
         Self {
+            title: name.clone().into(),
             name,
-            open: true,
+            machine,
+            apart: None,
+            homes: Vec::new(),
+            open,
             mark: Mark::new(cx),
             held: None,
             commands: 0,
@@ -553,8 +1125,63 @@ impl ProjectNode {
         }
     }
 
+    /// The project's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What its ids are made from: its name, and its machine in a machine's section.
+    fn key(&self) -> String {
+        match &self.machine {
+            Some(machine) => format!("{}-on-{machine}", self.name),
+            None => self.name.clone(),
+        }
+    }
+
+    /// The machine whose section it is in.
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+
     pub fn mark(&self) -> Option<AgentState> {
         self.mark.shown
+    }
+
+    /// The machines that have it, as the row marks them.
+    pub fn homes(&self) -> &[Home] {
+        &self.homes
+    }
+
+    /// The machine said in small after its name, when it has a namesake that is not it.
+    pub fn apart(&self) -> Option<&str> {
+        self.apart.as_deref()
+    }
+
+    /// Whether every machine that has it is off: the row is greyed.
+    pub fn offline(&self) -> bool {
+        !self.homes.is_empty() && self.homes.iter().all(|home| home.offline)
+    }
+
+    /// Whether it says this already.
+    pub fn says(&self, title: &str, apart: Option<&str>, homes: &[Home]) -> bool {
+        self.title.as_ref() == title && self.apart.as_deref() == apart && self.homes == homes
+    }
+
+    /// What the row says of where the project lives: its title, the machine that tells it from a
+    /// namesake, and the machines that have it.
+    pub fn set_look(
+        &mut self,
+        title: &str,
+        apart: Option<&str>,
+        homes: Vec<Home>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.says(title, apart, &homes) {
+            self.title = title.to_owned().into();
+            self.apart = apart.map(|apart| apart.to_owned().into());
+            self.homes = homes;
+            cx.notify();
+        }
     }
 
     /// How many commands its agents run now.
@@ -623,22 +1250,115 @@ impl ProjectNode {
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         self.show_mark(cx);
         cx.notify();
+        kept_changed(&self.shell, cx);
     }
 }
 
+/// The height of a machine's mark, which its tooltip hangs from.
+const MACHINE_MARK: f32 = 16.;
+
+/// A machine's mark: its icon in its colour, saying its name and state in a tooltip as in its
+/// label, which tells it for the eyes that do not see colours.
+fn machine_mark(
+    id: ElementId,
+    home: &Home,
+    size: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui_kit::AnyElement {
+    let said = SharedString::from(home.said());
+    tipped(
+        div()
+            .id(id)
+            .flex_none()
+            .flex()
+            .items_center()
+            .h(px(MACHINE_MARK))
+            .aria_label(said.clone())
+            .child(
+                gpui_design_system::icon(glyphs::device(&home.icon))
+                    .size(px(size))
+                    .text_color(shade(&home.colour)),
+            ),
+        said,
+        MACHINE_MARK,
+        window,
+        cx,
+    )
+    .into_any_element()
+}
+
 impl Render for ProjectNode {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shell = self.shell.clone();
         let name = self.name.clone();
-        let row = TreeLevel::Project
-            .row(project_id(&self.name), self.name.clone())
-            .expanded(self.open)
-            .trailing(trailing(
-                project_commands_id(&self.name),
+        let key = self.key();
+        let p = palette(cx);
+        let id = match &self.machine {
+            Some(machine) => project_on_id(&self.name, machine),
+            None => project_id(&self.name),
+        };
+        // The machines' marks fade over each other as the machines that have the project change.
+        let marks_said = SharedString::from(
+            self.homes
+                .iter()
+                .map(|home| format!("{}:{}:{}", home.machine, home.icon, home.colour))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let shown = changed(
+            &ElementId::Name(format!("project-marks-{key}").into()),
+            &marks_said,
+            window,
+            cx,
+        );
+        let marks: Vec<_> = self
+            .homes
+            .iter()
+            .map(|home| {
+                machine_mark(
+                    project_mark_id(&self.name, &home.machine),
+                    home,
+                    15.,
+                    window,
+                    cx,
+                )
+                .into_any_element()
+            })
+            .collect();
+        let apart = self.apart.clone().map(|machine| {
+            div()
+                .id(project_apart_id(&self.name))
+                .flex_none()
+                .aria_label(machine.clone())
+                .child(meta(machine, cx))
+                .test_support()
+        });
+        // After the name, before the project's own mark, as the approved prototype draws them.
+        let marks = (!marks.is_empty()).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(space::XS)
+                .opacity(shown)
+                .children(marks)
+        });
+        let trailing = div()
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .children(apart)
+            .children(marks)
+            .child(trailing(
+                project_commands_id(&key),
                 self.commands,
-                self.mark.icon(&format!("project-{}", self.name)),
+                self.mark.icon(&format!("project-{key}")),
                 cx,
-            ))
+            ));
+        let row = TreeLevel::Project
+            .row(id, self.title.clone())
+            .expanded(self.open)
+            .trailing(trailing)
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             // Not a `cx.listener`: that runs inside this node's update, and opening a page may
             // update this node again (#993).
@@ -650,11 +1370,204 @@ impl Render for ProjectNode {
                     })
                     .ok();
             });
+        // A project only machines that are off have: its row fades its ink, and says since when.
+        let greyed = fade(
+            ElementId::Name(format!("project-greyed-fade-{key}").into()),
+            self.offline(),
+            PANEL,
+            window,
+            cx,
+        );
+        let since = match self.homes.as_slice() {
+            [home] => home.state.clone(),
+            _ => "offline".to_owned(),
+        };
+        let offline = presence(
+            ElementId::Name(format!("project-offline-fade-{key}").into()),
+            self.offline(),
+            div()
+                .id(project_offline_id(&self.name))
+                .pl(space::XXL)
+                .pb(space::XS)
+                .text_size(px(11.5))
+                .text_color(p.faint)
+                .aria_label(SharedString::from(since.clone()))
+                .child(SharedString::from(since))
+                .test_support(),
+        );
         div()
             .flex()
             .flex_col()
             .flex_none()
-            .child(row)
+            .child(
+                div()
+                    .opacity(1.0 - GREYED * greyed)
+                    .flex()
+                    .flex_col()
+                    .child(row)
+                    .child(offline),
+            )
+            // A press on what the project holds (a session's row, a button) is that row's own: it
+            // never starts the drag of the whole project, which begins on the project's row.
+            .child(
+                div()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.fold.clone()),
+            )
+    }
+}
+
+/// The projects of a machine's section, on a guide line.
+pub struct Projects {
+    rows: Vec<Entity<ProjectNode>>,
+    list: Listing<Entity<ProjectNode>>,
+}
+
+impl Projects {
+    fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            list: Listing::default(),
+        }
+    }
+
+    fn set(&mut self, rows: Vec<Entity<ProjectNode>>, cx: &mut Context<Self>) {
+        if self.rows != rows {
+            self.rows = rows;
+            cx.notify();
+        }
+    }
+}
+
+impl Render for Projects {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = framed(
+            &mut self.list,
+            &self.rows,
+            "tree-on-machine",
+            |_, _| false,
+            cx,
+        );
+        match rows.is_empty() {
+            true => div().into_any_element(),
+            false => tree_children(rows, cx).into_any_element(),
+        }
+    }
+}
+
+/// A machine's section, when the projects are shown by machine: its icon in its colour, its name
+/// and its state, folding over the projects it has.
+pub struct MachineNode {
+    machine: String,
+    home: Home,
+    open: bool,
+    projects: Entity<Projects>,
+    fold: Entity<Fold>,
+    shell: WeakEntity<Shell>,
+}
+
+impl MachineNode {
+    /// The section of `home`, unfolded or folded as the user left it.
+    pub fn new(home: Home, shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
+        let projects = cx.new(|_| Projects::new());
+        let fold = cx.new(|_| {
+            Fold::new(
+                format!("fold-machine-{}", home.machine),
+                projects.clone(),
+                open,
+            )
+        });
+        Self {
+            machine: home.machine.clone(),
+            home,
+            open,
+            projects,
+            fold,
+            shell,
+        }
+    }
+
+    pub fn machine(&self) -> &str {
+        &self.machine
+    }
+
+    pub fn home(&self) -> &Home {
+        &self.home
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Its projects' rows, in order.
+    pub fn projects(&self, cx: &App) -> Vec<Entity<ProjectNode>> {
+        self.projects.read(cx).rows.clone()
+    }
+
+    pub fn set(&mut self, home: Home, projects: Vec<Entity<ProjectNode>>, cx: &mut Context<Self>) {
+        if self.projects.read(cx).rows != projects {
+            self.projects
+                .update(cx, |level, cx| level.set(projects, cx));
+        }
+        if self.home != home {
+            self.home = home;
+            cx.notify();
+        }
+    }
+
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        self.open = !self.open;
+        let open = self.open;
+        self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
+        cx.notify();
+        kept_changed(&self.shell, cx);
+    }
+}
+
+impl Render for MachineNode {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let state = match self.home.here {
+            true => "this machine".to_owned(),
+            false => self.home.state.clone(),
+        };
+        let mark = machine_mark(machine_mark_id(&self.machine), &self.home, 16., window, cx);
+        let said = changed(
+            &machine_state_id(&self.machine),
+            &SharedString::from(state.clone()),
+            window,
+            cx,
+        );
+        let row = TreeLevel::Project
+            .row(machine_id(&self.machine), self.machine.clone())
+            .expanded(self.open)
+            .leading(mark)
+            .trailing(
+                div()
+                    .id(machine_state_id(&self.machine))
+                    .flex_none()
+                    .aria_label(SharedString::from(state.clone()))
+                    .opacity(said)
+                    .text_size(px(11.5))
+                    .text_color(p.faint)
+                    .child(SharedString::from(state))
+                    .test_support(),
+            )
+            .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
+        // A machine that is off fades its ink, and takes it back when it is online.
+        let greyed = fade(
+            ElementId::Name(format!("machine-greyed-fade-{}", self.machine).into()),
+            self.home.offline,
+            PANEL,
+            window,
+            cx,
+        );
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .child(div().opacity(1.0 - GREYED * greyed).child(row))
             .child(self.fold.clone())
     }
 }
@@ -728,23 +1641,34 @@ impl Render for Level {
     }
 }
 
+/// A node was folded or unfolded: the shell keeps what the sidebar has folded, once the node's
+/// own update is over (the shell reads the nodes).
+fn kept_changed<T: 'static>(shell: &WeakEntity<Shell>, cx: &mut Context<T>) {
+    let shell = shell.clone();
+    cx.defer(move |cx| {
+        shell.update(cx, |shell, cx| shell.sidebar_changed(cx)).ok();
+    });
+}
+
 /// The "Ended" group, at the bottom of the tree: it gathers the ended sessions of every project,
 /// folded until the user opens it.
 pub struct EndedNode {
     open: bool,
     sessions: Entity<Level>,
     fold: Entity<Fold>,
+    shell: WeakEntity<Shell>,
 }
 
 impl EndedNode {
-    /// The group, folded.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// The group, folded unless the user left it unfolded.
+    pub fn new(shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
         let sessions = cx.new(|_| Level::scrolling());
-        let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), false));
+        let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), open));
         Self {
-            open: false,
+            open,
             sessions,
             fold,
+            shell,
         }
     }
 
@@ -776,6 +1700,7 @@ impl EndedNode {
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         cx.notify();
+        kept_changed(&self.shell, cx);
     }
 }
 
@@ -869,8 +1794,16 @@ pub struct SessionRow {
     /// above draws, and the last one it drew, which stays while it fades out.
     tie: Option<Tie>,
     tie_shown: Tie,
+    /// It runs on another machine: its second line says which and its state as last known, and
+    /// opening it shows that machine.
+    elsewhere: Option<crate::model::Elsewhere>,
+    /// The machine it runs on, when it is not this one: its second line says it.
+    tag: Option<SharedString>,
     shell: WeakEntity<Shell>,
 }
+
+/// How far the ink of a session whose machine is off fades.
+const GREYED: f32 = 0.45;
 
 /// What a session's row offers under the pointer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -914,7 +1847,42 @@ impl SessionRow {
             open: true,
             tie: None,
             tie_shown: Tie::default(),
+            elsewhere: None,
+            tag: None,
             shell,
+        }
+    }
+
+    /// The machine it runs on, when it is not this one.
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    pub fn set_tag(&mut self, tag: Option<&str>, cx: &mut Context<Self>) {
+        if self.tag.as_deref() != tag {
+            self.tag = tag.map(|tag| SharedString::from(tag.to_owned()));
+            cx.notify();
+        }
+    }
+
+    /// Its machine is off: the row is greyed, and does not open.
+    pub fn offline(&self) -> bool {
+        self.elsewhere.as_ref().is_some_and(|there| there.offline)
+    }
+
+    /// The machine it runs on and its state, for a session on another machine.
+    pub fn elsewhere(&self) -> Option<&crate::model::Elsewhere> {
+        self.elsewhere.as_ref()
+    }
+
+    pub fn set_elsewhere(
+        &mut self,
+        elsewhere: Option<&crate::model::Elsewhere>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.elsewhere.as_ref() != elsewhere {
+            self.elsewhere = elsewhere.cloned();
+            cx.notify();
         }
     }
 
@@ -984,6 +1952,12 @@ impl SessionRow {
         self.open
     }
 
+    /// Makes its led rows folded or unfolded as the user left them, before it is first listed:
+    /// nothing animates.
+    pub fn restore_open(&mut self, open: bool) {
+        self.open = open;
+    }
+
     /// Folds or unfolds the led sessions under its row: the tree draws its level again.
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
@@ -991,7 +1965,12 @@ impl SessionRow {
         // The level reads this row: it is drawn again once this update is over.
         let (shell, id) = (self.shell.clone(), self.id.clone());
         cx.defer(move |cx| {
-            shell.update(cx, |shell, cx| shell.relist(&id, cx)).ok();
+            shell
+                .update(cx, |shell, cx| {
+                    shell.relist(&id, cx);
+                    shell.sidebar_changed(cx);
+                })
+                .ok();
         });
     }
 
@@ -1052,13 +2031,15 @@ impl SessionRow {
         self.actions = actions;
         self.detach = detach.map(|by| SharedString::from(by.to_owned()));
         let detach = self.detach.clone();
+        // A session another machine lists is renamed there, never from its light row.
+        let renamed = self.elsewhere.is_none();
         self.menu = match actions {
             Actions::None => None,
             offered => {
                 let (shell, id) = (self.shell.clone(), self.id.clone());
                 let menu = cx.new(|cx| {
                     let mut menu = Menu::new(session_menu_id(&id), "Session actions", cx);
-                    {
+                    if renamed {
                         let (shell, id) = (shell.clone(), id.clone());
                         menu = menu.entry(
                             session_rename_id(&id),
@@ -1288,14 +2269,22 @@ impl Render for SessionRow {
         self.renders += 1;
         let shell = self.shell.clone();
         let id = self.id.clone();
+        let elsewhere = self.elsewhere.clone();
         let mut row = TreeLevel::Session
             .row(session_id(&self.id), self.title.clone())
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
+                let elsewhere = elsewhere.clone();
                 shell
-                    .update(cx, |shell, cx| {
-                        shell.open(Selection::Session(session), window, cx)
+                    .update(cx, |shell, cx| match elsewhere {
+                        // Its machine is off: nothing of it can be read now.
+                        Some(there) if there.offline => {}
+                        // This machine's, listed while another is in front: this one comes back.
+                        Some(there) if there.here => shell.open_here(there.agent, cx),
+                        // Another machine's: the window shows that machine, on that session.
+                        Some(there) => shell.open_elsewhere(there.machine, there.agent, cx),
+                        None => shell.open(Selection::Session(session), window, cx),
                     })
                     .ok();
             })
@@ -1382,8 +2371,17 @@ impl Render for SessionRow {
             None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
             Some(_) => 14.,
         };
+        // A session whose machine is off fades its ink, and takes it back when the machine is.
+        let greyed = fade(
+            ElementId::Name(format!("session-greyed-fade-{}", self.id).into()),
+            self.offline(),
+            PANEL,
+            window,
+            cx,
+        );
         div()
             .relative()
+            .opacity(1.0 - GREYED * greyed)
             .pl(space::XL * (self.tie_shown.depth() as f32 * tied))
             .when(tied > 0.0, |d| {
                 d.child(tree_tie(
@@ -1448,7 +2446,7 @@ impl SessionRow {
     /// Under the title, faint: the place's icon and name, then, when there is room, its pull
     /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
     /// under it, out of sight, and the name is cut with an ellipsis. The whole is in a tooltip.
-    fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
         let (name, icon, said) = match &self.place {
             None => ("main".to_owned(), Icon::Folder, "Project folder"),
@@ -1494,6 +2492,12 @@ impl SessionRow {
             .chain(pull.as_ref().map(pull_said))
             .collect::<Vec<_>>()
             .join(" · ");
+        if let Some(there) = self.elsewhere.clone().filter(|there| !there.listed) {
+            return self.machine_line(there, window, cx);
+        }
+        if let Some(tag) = self.tag.clone() {
+            return self.tag_line(tag, window, cx);
+        }
         let place = div()
             .id(session_place_id(&self.id))
             .aria_label(SharedString::from(name.clone()))
@@ -1621,7 +2625,140 @@ impl SessionRow {
                     }))
                     .test_support()
             }));
-        tipped(line, SharedString::from(tip), LINE, window, cx)
+        tipped(line, SharedString::from(tip), LINE, window, cx).into_any_element()
+    }
+
+    /// The mark of the machine a session runs on: its icon in its colour, as the member list signs
+    /// them, a plain mark while that list is not read. It says both in words.
+    fn machine_mark(&self, p: &gpui_design_system::Palette) -> gpui_kit::AnyElement {
+        let look = self.elsewhere.as_ref().and_then(|there| there.look.clone());
+        let (icon, colour) = look
+            .as_deref()
+            .and_then(|look| look.split_once(" in "))
+            .unwrap_or(("", ""));
+        let (glyph, ink) = match look {
+            Some(_) => (crate::glyphs::device(icon), crate::machines::shade(colour)),
+            None => (Icon::Service, p.faint),
+        };
+        div()
+            .id(ElementId::Name(
+                format!("session-machine-icon-{}", self.id).into(),
+            ))
+            .aria_label(SharedString::from(look.unwrap_or_default()))
+            .flex_none()
+            .child(
+                gpui_design_system::icon(glyph)
+                    .size(px(11.))
+                    .text_color(ink),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// The second line of a session of another machine in the one list: the machine's name, and
+    /// since when it is off while it is, whose words fade as they change.
+    fn tag_line(
+        &self,
+        tag: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let p = palette(cx);
+        let off = self
+            .elsewhere
+            .as_ref()
+            .filter(|there| there.offline)
+            .map(|there| there.state.clone());
+        let said = SharedString::from(match &off {
+            Some(state) => format!("{tag} {state}"),
+            None => tag.to_string(),
+        });
+        let line = div()
+            .id(session_machine_id(&self.id))
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(space::XS)
+            .min_w_0()
+            .h(px(LINE))
+            .overflow_hidden()
+            .text_size(px(11.5))
+            .text_color(p.faint)
+            .child(self.machine_mark(&p))
+            .child(div().flex_none().whitespace_nowrap().child(tag))
+            .child(changing(
+                ElementId::Name(format!("session-machine-off-{}", self.id).into()),
+                SharedString::from(off.unwrap_or_default()),
+                move |state| {
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(state)
+                        .into_any_element()
+                },
+            ))
+            .test_support();
+        let tip = div()
+            .id(ElementId::Name(
+                format!("session-machine-tip-{}", self.id).into(),
+            ))
+            .h(px(LINE))
+            .child(line);
+        tipped(tip, said, LINE, window, cx).into_any_element()
+    }
+
+    /// The second line of a session on another machine: the machine's name, then its state as
+    /// last known, whose words fade as they change.
+    fn machine_line(
+        &self,
+        there: crate::model::Elsewhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let p = palette(cx);
+        let said = SharedString::from(format!("{} · {}", there.machine, there.state));
+        let line = div()
+            .id(session_machine_id(&self.id))
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(space::XS)
+            .min_w_0()
+            .h(px(LINE))
+            .overflow_hidden()
+            .text_size(px(11.5))
+            .text_color(p.faint)
+            .child(self.machine_mark(&p))
+            .child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(there.machine.clone())),
+            )
+            .child(div().flex_none().child("·"))
+            .child(changing(
+                ElementId::Name(format!("session-machine-state-{}", self.id).into()),
+                SharedString::from(there.state.clone()),
+                move |state| {
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(state)
+                        .into_any_element()
+                },
+            ))
+            .test_support();
+        let tip = div()
+            .id(ElementId::Name(
+                format!("session-machine-tip-{}", self.id).into(),
+            ))
+            .h(px(LINE))
+            .child(line);
+        tipped(tip, said, LINE, window, cx).into_any_element()
     }
 }
 

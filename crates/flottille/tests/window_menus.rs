@@ -3,7 +3,7 @@
 //! and offers Detach to a led session, and the sidebar's Detach is one short line whatever its
 //! lead's title. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

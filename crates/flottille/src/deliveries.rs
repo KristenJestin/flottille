@@ -178,16 +178,21 @@ fn took(daemon: &Daemon, agent: &str, taken: &[(String, String)]) {
     };
     // A led session's pilot answers with `session_send`, whose key names it; another session's
     // message answers nothing.
+    // A pilot of another machine's too, through its daemon.
+    let remote = crate::across::caller_of(daemon, &found, "led");
+    let pilot = match found.led {
+        true => found.launched_by.clone(),
+        false => remote,
+    };
     let from_pilot = |id: &str| {
-        found
-            .launched_by
+        pilot
             .as_ref()
             .is_some_and(|pilot| id.starts_with(&format!("session-{pilot}-")))
     };
     let answering = found.waiting_on_answer
-        && taken.iter().any(|(k, id)| {
-            k == "parent" || k == "user" || (k == "session" && found.led && from_pilot(id))
-        });
+        && taken
+            .iter()
+            .any(|(k, id)| k == "parent" || k == "user" || (k == "session" && from_pilot(id)));
     let open =
         |to| crate::tree::unanswered_to(daemon, agent, to).is_ok_and(|open| !open.is_empty());
     let still = answering && found.parent.is_none() && (open("user") || open("pilot"));
@@ -359,6 +364,9 @@ pub fn deliver_answer(
 /// Wakes the agent for what is queued: mid-turn, an urgent delivery is pinned as a note and a
 /// redirect cancels the turn; between turns, its task pumps them.
 pub fn ring(daemon: &Arc<Daemon>, agent: &str) {
+    if crate::across::is_stand_in(agent) {
+        return;
+    }
     let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
         return;
     };
@@ -741,6 +749,26 @@ mod tests {
             typed: None,
             commands: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_stand_in_is_never_rung_nor_given_a_note_mid_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::tests::a_daemon(dir.path(), false);
+        let mut stand_in = crate::daemon::tests::an_agent("c0@aa");
+        stand_in.state = AgentState::Working;
+        let mut urgent = delivery("Allowed.");
+        urgent.agent = stand_in.id.clone();
+        daemon
+            .write(|store| {
+                store.create_agent(&stand_in, ("agent.created", json!({})))?;
+                store.deliver(&urgent).map(|_| ((), None))
+            })
+            .unwrap();
+
+        ring(&daemon, &stand_in.id);
+
+        assert!(!daemon.notes.pinned.lock().unwrap().contains_key("c0@aa"));
     }
 
     #[test]

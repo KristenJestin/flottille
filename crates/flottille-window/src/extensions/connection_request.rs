@@ -24,6 +24,9 @@ use crate::actions::Command;
 use crate::commands::{perform_later, problem_line};
 use crate::shell::Shell;
 
+/// The id of the dialog's modal, the one the window's host holds.
+pub const MODAL: &str = "connection-request";
+
 /// What to do with the daemon's answer to a question of the dialog.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Then {
@@ -473,8 +476,8 @@ impl ConnectionRequest {
     }
 
     /// "New entry…" beside the answer that waits for an entry: the vault's own dialog on `entry`,
-    /// its address the `host` the request sends it to. This dialog gives way to it and is back,
-    /// reading the request again, once the entry is saved or the dialog closed.
+    /// its address the `host` the request sends it to, stacked over this one. Escape or Cancel
+    /// returns to this dialog; once the entry is saved it reads the request again.
     fn new_entry(
         &mut self,
         entry: String,
@@ -485,7 +488,6 @@ impl ConnectionRequest {
         let Some(number) = self.number else {
             return;
         };
-        self.open = false;
         self.shell
             .update(cx, |shell, cx| {
                 shell.add_vault_entry_for_request(number, &entry, host, window, cx)
@@ -495,10 +497,10 @@ impl ConnectionRequest {
     }
 
     /// "Review": the connection's review opens over the page, first: the request stays held.
-    fn review(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn review(&mut self, name: String, cx: &mut Context<Self>) {
         self.open = false;
         self.shell
-            .update(cx, |shell, cx| shell.review_connection(&name, window, cx))
+            .update(cx, |shell, cx| shell.review_connection(&name, cx))
             .ok();
         cx.notify();
     }
@@ -1097,7 +1099,7 @@ impl Render for ConnectionRequest {
         let ready = proposal.as_ref().and_then(|p| p.as_ref().ok());
         let title = ready.map_or_else(|| "An agent's request".to_owned(), Proposal::title);
         let this = cx.entity().downgrade();
-        let mut modal = Modal::new("connection-request", title)
+        let mut modal = Modal::new(MODAL, title)
             .wide()
             .open(self.open)
             .sentence(Self::sentence(ready))
@@ -1223,10 +1225,9 @@ impl Render for ConnectionRequest {
                     )
                     .child(
                         Button::secondary("connection-request-review", "Review").on_click(
-                            move |_, window, cx| {
+                            move |_, _, cx| {
                                 let open = open.clone();
-                                this.update(cx, |this, cx| this.review(open, window, cx))
-                                    .ok();
+                                this.update(cx, |this, cx| this.review(open, cx)).ok();
                             },
                         ),
                     )

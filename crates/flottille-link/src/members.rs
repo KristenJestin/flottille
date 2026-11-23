@@ -1,9 +1,16 @@
-//! The member list (`docs/remote.md`, "The hub", "The first member", "Pairing", "Roles"): an
-//! ordered log of changes, each signed by the device key of a member that may make it, each naming
-//! the hash of the change before it. The first change is the root's own entry, signed by itself;
-//! every device pins that root, and accepts a list only if every change checks back to it. The hub
-//! stores and sends the list, and can make no change of it: dropping, reordering or replaying a
-//! change breaks the chain, and changing an entry breaks its signature.
+//! The member list (`docs/remote.md`, "The hub", "Pairing", "Roles"): an ordered log of changes,
+//! each signed by the hub's key or by the device key of a member that may make it, each naming the
+//! hash of the change before it. The first change is the root: the hub's own, naming its key, in a
+//! list made since pair mode; the first member's own entry, signed by itself, in a list made
+//! before. Every device pins the root and the hub's key, and accepts a list only if every change
+//! checks back to them.
+//!
+//! The hub adds the devices (a `pair` change) and changes their roles, behind access to its host
+//! (`flottille-hub pair`, `flottille-hub role`); a member removes, renames and restyles them, and
+//! declares its own machine. A member's `add`, the way in before pair mode, is taken only before
+//! the hub's first change: the entries of a list made then still check, and no member adds a device
+//! after. Dropping, reordering or replaying a change breaks the chain, and changing an entry breaks
+//! its signature.
 //!
 //! What a change's signature covers, its **signed bytes**, is a fixed encoding, never a JSON text
 //! whose key order or spacing could vary:
@@ -11,19 +18,26 @@
 //! ```text
 //! "flottille-member-change-v1" 0x00    the domain: nothing else a device key signs starts so
 //! previous   32 bytes                  the hash of the change before it; for the first, the
-//!                                      list's id: 32 random bytes made at setup
-//! signer     32 bytes                  the signing member's public key
-//! kind        1 byte                   1 add, 2 remove, 3 rename, 4 machine
-//! key        32 bytes                  the member the change is about
+//!                                      list's id: 32 random bytes made with the list
+//! signer     32 bytes                  the signing member's public key, or the hub's
+//! kind        1 byte                   1 add, 2 remove, 3 rename, 4 machine, 5 hub, 6 pair,
+//!                                      7 role, 8 look
+//! key        32 bytes                  the member the change is about; the hub's own for `hub`
 //! add:     name length (4 bytes, big-endian), name (UTF-8), role (1 runner, 2 controller, 3 viewer)
 //! remove:  nothing more
 //! rename:  name length (4 bytes, big-endian), name (UTF-8)
 //! machine: the machine key (32 bytes)
+//! hub:     nothing more
+//! pair:    name length (4 bytes, big-endian), name (UTF-8), role, icon, colour (1 byte each)
+//! role:    role (1 byte)
+//! look:    icon, colour (1 byte each)
 //! ```
 //!
-//! The list's id makes every setup a list of its own: a device that sets a hub up again after a
-//! reset, with the same key, the same name and the same machine, signs another first change, so
-//! that no change of the old list follows on the new one.
+//! An icon is 1 desktop, 2 laptop, 3 server, 4 phone, 5 tablet; a colour 1 grey, 2 red, 3 orange,
+//! 4 yellow, 5 green, 6 teal, 7 blue, 8 purple.
+//!
+//! The list's id makes every list one of its own: the hub, pairing a first device again after a
+//! reset, signs another first change, so that no change of the old list follows on the new one.
 //!
 //! A `machine` change is a member's own declaration of the key its machine's daemon holds: the
 //! list holds the devices' keys, while the link and the control session to the hub run on the
@@ -47,7 +61,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::serial::{from_hex_text, invisible, to_hex};
-use crate::{DeviceKey, KeyError, MachineKey, PublicKey};
+use crate::{DeviceKey, HubKey, KeyError, MachineKey, PublicKey};
 
 /// The start of every change's signed bytes.
 const DOMAIN: &[u8] = b"flottille-member-change-v1\0";
@@ -77,7 +91,7 @@ pub enum Role {
 }
 
 impl Role {
-    fn byte(self) -> u8 {
+    pub(crate) fn byte(self) -> u8 {
         match self {
             Role::Runner => 1,
             Role::Controller => 2,
@@ -90,20 +104,122 @@ impl Role {
         self != Role::Viewer
     }
 
-    fn word(self) -> &'static str {
+    /// The role as the user reads it: `runner`, `controller`, `viewer`.
+    pub fn word(self) -> &'static str {
         match self {
             Role::Runner => "runner",
             Role::Controller => "controller",
             Role::Viewer => "viewer",
         }
     }
+
+    /// The role of its word.
+    pub fn from_word(word: &str) -> Option<Role> {
+        [Role::Runner, Role::Controller, Role::Viewer]
+            .into_iter()
+            .find(|role| role.word() == word)
+    }
 }
 
-/// What a change does. There is no change of a role: a role is changed by removing the device,
-/// which then joins again with a new key.
+/// How a device is drawn (`docs/remote.md`, "A device's card"): a short fixed list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Icon {
+    Desktop,
+    Laptop,
+    Server,
+    Phone,
+    Tablet,
+}
+
+impl Icon {
+    pub const ALL: [Icon; 5] = [
+        Icon::Desktop,
+        Icon::Laptop,
+        Icon::Server,
+        Icon::Phone,
+        Icon::Tablet,
+    ];
+
+    pub(crate) fn byte(self) -> u8 {
+        self as u8 + 1
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Icon::Desktop => "desktop",
+            Icon::Laptop => "laptop",
+            Icon::Server => "server",
+            Icon::Phone => "phone",
+            Icon::Tablet => "tablet",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Icon> {
+        Icon::ALL.into_iter().find(|icon| icon.word() == word)
+    }
+}
+
+/// A device's colour, among a fixed few the clients draw in their own shades.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Colour {
+    Grey,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+}
+
+impl Colour {
+    pub const ALL: [Colour; 8] = [
+        Colour::Grey,
+        Colour::Red,
+        Colour::Orange,
+        Colour::Yellow,
+        Colour::Green,
+        Colour::Teal,
+        Colour::Blue,
+        Colour::Purple,
+    ];
+
+    pub(crate) fn byte(self) -> u8 {
+        self as u8 + 1
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Colour::Grey => "grey",
+            Colour::Red => "red",
+            Colour::Orange => "orange",
+            Colour::Yellow => "yellow",
+            Colour::Green => "green",
+            Colour::Teal => "teal",
+            Colour::Blue => "blue",
+            Colour::Purple => "purple",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Colour> {
+        Colour::ALL.into_iter().find(|colour| colour.word() == word)
+    }
+
+    /// The colour a device proposes for itself: one of its key's, so that two devices paired with
+    /// none chosen are told apart, mostly.
+    pub fn of(key: &PublicKey) -> Colour {
+        Colour::ALL[key.as_bytes()[0] as usize % Colour::ALL.len()]
+    }
+}
+
+/// What a change does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
+    /// A member adds a device: the way in before pair mode, taken only before the hub's first
+    /// change.
     Add {
         key: PublicKey,
         name: String,
@@ -121,6 +237,29 @@ pub enum Action {
         key: PublicKey,
         machine: PublicKey,
     },
+    /// The hub names its key: the first change of a list made since pair mode, signed by that key.
+    Hub {
+        key: PublicKey,
+    },
+    /// The hub pairs a device: its entry, with what the device proposed and the user confirmed.
+    Pair {
+        key: PublicKey,
+        name: String,
+        role: Role,
+        icon: Icon,
+        colour: Colour,
+    },
+    /// The hub changes a member's role (`flottille-hub role`).
+    Role {
+        key: PublicKey,
+        role: Role,
+    },
+    /// A member's icon and colour.
+    Look {
+        key: PublicKey,
+        icon: Icon,
+        colour: Colour,
+    },
 }
 
 impl Action {
@@ -129,7 +268,11 @@ impl Action {
             Action::Add { key, .. }
             | Action::Remove { key }
             | Action::Rename { key, .. }
-            | Action::Machine { key, .. } => key,
+            | Action::Machine { key, .. }
+            | Action::Hub { key }
+            | Action::Pair { key, .. }
+            | Action::Role { key, .. }
+            | Action::Look { key, .. } => key,
         }
     }
 
@@ -139,6 +282,10 @@ impl Action {
             Action::Remove { .. } => "remove",
             Action::Rename { .. } => "rename",
             Action::Machine { .. } => "declare the machine of",
+            Action::Hub { .. } => "name the hub of",
+            Action::Pair { .. } => "pair",
+            Action::Role { .. } => "change the role of",
+            Action::Look { .. } => "change the icon and colour of",
         }
     }
 }
@@ -173,14 +320,27 @@ impl Change {
     /// `action`, after the change whose hash is `previous`, signed with `key`. A `machine` change
     /// is claimed by its machine after (`claimed_by`).
     pub fn sign(previous: ChangeHash, action: Action, key: &DeviceKey) -> Change {
+        Change::signed_with(previous, action, &key.0)
+    }
+
+    /// `action`, after the change whose hash is `previous`, signed with the hub's key.
+    pub fn sign_as_hub(previous: ChangeHash, action: Action, key: &HubKey) -> Change {
+        Change::signed_with(previous, action, &key.0)
+    }
+
+    fn signed_with(
+        previous: ChangeHash,
+        action: Action,
+        key: &ed25519_dalek::SigningKey,
+    ) -> Change {
         let mut change = Change {
             previous,
-            signer: key.public(),
+            signer: PublicKey(key.verifying_key()),
             action,
             signature: Signature([0; 64]),
             claim: None,
         };
-        change.signature = Signature(key.0.sign(&change.signed_bytes()).to_bytes());
+        change.signature = Signature(key.sign(&change.signed_bytes()).to_bytes());
         change
     }
 
@@ -227,6 +387,32 @@ impl Change {
                 bytes.push(4);
                 bytes.extend_from_slice(key.as_bytes());
                 bytes.extend_from_slice(machine.as_bytes());
+            }
+            Action::Hub { key } => {
+                bytes.push(5);
+                bytes.extend_from_slice(key.as_bytes());
+            }
+            Action::Pair {
+                key,
+                name: paired,
+                role,
+                icon,
+                colour,
+            } => {
+                bytes.push(6);
+                bytes.extend_from_slice(key.as_bytes());
+                name(&mut bytes, paired);
+                bytes.extend_from_slice(&[role.byte(), icon.byte(), colour.byte()]);
+            }
+            Action::Role { key, role } => {
+                bytes.push(7);
+                bytes.extend_from_slice(key.as_bytes());
+                bytes.push(role.byte());
+            }
+            Action::Look { key, icon, colour } => {
+                bytes.push(8);
+                bytes.extend_from_slice(key.as_bytes());
+                bytes.extend_from_slice(&[icon.byte(), colour.byte()]);
             }
         }
         bytes
@@ -289,17 +475,26 @@ impl MachineKey {
 pub struct MemberList(Vec<Change>);
 
 impl MemberList {
-    /// A new list: the root, the first member, a `runner`, its entry signed by itself after a
-    /// new list id.
+    /// A list as it was made before pair mode: the root, the first member, a `runner`, its entry
+    /// signed by itself after a new list id. Kept for the lists made then, which still check.
     pub fn start(name: &str, root: &DeviceKey) -> Result<MemberList, KeyError> {
-        let mut id = [0u8; 32];
-        getrandom::fill(&mut id).map_err(|error| KeyError(format!("no random bytes: {error}")))?;
         let entry = Action::Add {
             key: root.public(),
             name: name.to_owned(),
             role: Role::Runner,
         };
-        Ok(MemberList(vec![Change::sign(ChangeHash(id), entry, root)]))
+        Ok(MemberList(vec![Change::sign(list_id()?, entry, root)]))
+    }
+
+    /// A new list, the hub's: its root names the hub's key, signed by it after a new list id. The
+    /// hub makes it when it pairs its first device.
+    pub fn start_hub(hub: &HubKey) -> Result<MemberList, KeyError> {
+        let entry = Action::Hub { key: hub.public() };
+        Ok(MemberList(vec![Change::sign_as_hub(
+            list_id()?,
+            entry,
+            hub,
+        )]))
     }
 
     pub fn from_changes(changes: Vec<Change>) -> MemberList {
@@ -315,7 +510,8 @@ impl MemberList {
         self.0.last().map(Change::hash).unwrap_or_default()
     }
 
-    /// The key the list says is its root, which only a device that has none pinned yet takes.
+    /// The key the list says is its root: the hub's in a list made since pair mode, the first
+    /// member's in one made before.
     pub fn root(&self) -> Option<PublicKey> {
         self.0.first().map(|first| *first.action.key())
     }
@@ -324,6 +520,13 @@ impl MemberList {
     /// caller checks the list before sending the change.
     pub fn sign(&mut self, action: Action, key: &DeviceKey) -> &Change {
         let change = Change::sign(self.head(), action, key);
+        self.0.push(change);
+        self.0.last().expect("just pushed")
+    }
+
+    /// Signs `action` with the hub's key after the last change, and appends it, unchecked.
+    pub fn sign_as_hub(&mut self, action: Action, key: &HubKey) -> &Change {
+        let change = Change::sign_as_hub(self.head(), action, key);
         self.0.push(change);
         self.0.last().expect("just pushed")
     }
@@ -339,10 +542,11 @@ impl MemberList {
         self.0.last().expect("just pushed")
     }
 
-    /// The members, when every change checks back to `root`, the root this device pinned.
-    pub fn check(&self, root: &PublicKey) -> Result<Members, ListError> {
+    /// The members, when every change checks back to `root`, the root this device pinned, and
+    /// `hub`, the key of the hub it pinned: the one key besides the members' that signs a change.
+    pub fn check(&self, root: &PublicKey, hub: &PublicKey) -> Result<Members, ListError> {
         let Some(first) = self.0.first() else {
-            // Emptied on the hub's machine, before a first member joins again.
+            // Emptied on the hub's machine, before a first device pairs again.
             return Err(ListError::Reset);
         };
         if first.action.key() != root {
@@ -357,6 +561,8 @@ impl MemberList {
         }
         let mut members = Members {
             root: *root,
+            hub: *hub,
+            hub_signed: false,
             members: Vec::new(),
             removed: Vec::new(),
             // The first change names the list's id, whatever it is.
@@ -372,14 +578,19 @@ impl MemberList {
 
     /// As `check`, for a list sent to a device that has already checked `known`: the new one must
     /// hold every change of it, in order, so that a hub cannot take back a change it sent.
-    pub fn check_update(&self, root: &PublicKey, known: &MemberList) -> Result<Members, ListError> {
-        // Another first change: another list, set up again after a reset, by this root or not.
+    pub fn check_update(
+        &self,
+        root: &PublicKey,
+        hub: &PublicKey,
+        known: &MemberList,
+    ) -> Result<Members, ListError> {
+        // Another first change: another list, made again after a reset.
         if let (Some(ours), Some(theirs)) = (known.0.first(), self.0.first())
             && ours != theirs
         {
             return Err(ListError::Reset);
         }
-        let members = self.check(root)?;
+        let members = self.check(root, hub)?;
         if !self.0.starts_with(&known.0) {
             return Err(ListError::Refused(
                 "it lacks changes this device has already checked".to_owned(),
@@ -389,24 +600,38 @@ impl MemberList {
     }
 }
 
+/// A new list's id: 32 random bytes, which its first change names.
+fn list_id() -> Result<ChangeHash, KeyError> {
+    let mut id = [0u8; 32];
+    getrandom::fill(&mut id).map_err(|error| KeyError(format!("no random bytes: {error}")))?;
+    Ok(ChangeHash(id))
+}
+
 /// A member of a checked list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub key: PublicKey,
     pub name: String,
     pub role: Role,
-    /// The member whose signature added it; the root's own key for the root.
+    /// The key whose signature added it: the hub's for a device paired, a member's for one added
+    /// before pair mode, the root's own key for the root.
     pub added_by: PublicKey,
     /// The key its machine's daemon holds, as the member itself declared it.
     pub machine: Option<PublicKey>,
+    /// Its icon and colour, once paired with them or chosen; `None` for a member added before.
+    pub icon: Option<Icon>,
+    pub colour: Option<Colour>,
 }
 
 /// The members a checked list leaves, in the order they were added.
 #[derive(Clone, Debug)]
 pub struct Members {
     root: PublicKey,
+    hub: PublicKey,
+    /// Whether the hub signed a change yet: from then on, no member adds a device.
+    hub_signed: bool,
     members: Vec<Member>,
-    /// Every key ever removed: none comes back.
+    /// Every key removed and not paired again: a member's `add` never brings it back.
     removed: Vec<PublicKey>,
     head: ChangeHash,
 }
@@ -414,6 +639,11 @@ pub struct Members {
 impl Members {
     pub fn root(&self) -> PublicKey {
         self.root
+    }
+
+    /// The hub's key, as the device that checked the list pinned it.
+    pub fn hub(&self) -> PublicKey {
+        self.hub
     }
 
     /// The hash of the list's last change.
@@ -429,6 +659,11 @@ impl Members {
         self.members.iter().find(|member| member.key == *key)
     }
 
+    /// Whether `key` was a member once and was removed, and was not paired again since.
+    pub fn was_removed(&self, key: &PublicKey) -> bool {
+        self.removed.contains(key)
+    }
+
     /// The member whose machine holds `machine`.
     pub fn by_machine(&self, machine: &PublicKey) -> Option<&Member> {
         self.members
@@ -437,7 +672,7 @@ impl Members {
     }
 
     /// Applies one change, or says why it is refused, after its number. Past `MOST_CHANGES`, only
-    /// a managing member's change of another member is taken.
+    /// the hub's change or a managing member's change of another member is taken.
     fn apply(&mut self, change: &Change, first: bool, past: bool) -> Result<(), String> {
         if change.previous != self.head {
             return Err("does not follow the change before it".to_owned());
@@ -445,40 +680,122 @@ impl Members {
         if !change.signed() {
             return Err("does not carry its signer's signature".to_owned());
         }
+        if !matches!(change.action, Action::Machine { .. }) && change.claim.is_some() {
+            return Err(
+                "carries a machine's signature, which only a machine change has".to_owned(),
+            );
+        }
         if first {
-            let Action::Add { key, name, role } = &change.action else {
-                return Err("is not the root's own entry as a runner".to_owned());
-            };
-            if *role != Role::Runner || change.signer != *key {
-                return Err("is not the root's own entry as a runner".to_owned());
+            match &change.action {
+                Action::Add {
+                    key,
+                    name,
+                    role: Role::Runner,
+                } if change.signer == *key => {
+                    self.add(*key, name, Role::Runner, *key)?;
+                }
+                Action::Hub { key } if change.signer == *key => {
+                    if *key != self.hub {
+                        return Err(format!(
+                            "names the hub {}, not the hub this device pinned",
+                            key.fingerprint()
+                        ));
+                    }
+                    self.hub_signed = true;
+                }
+                _ => {
+                    return Err(
+                        "is neither the hub's own nor the root's own entry as a runner".to_owned(),
+                    );
+                }
             }
-            if change.claim.is_some() {
-                return Err(
-                    "carries a machine's signature, which only a machine change has".to_owned(),
-                );
-            }
-            self.add(*key, name, Role::Runner, *key)?;
             self.head = change.hash();
             return Ok(());
         }
+        if change.signer == self.hub {
+            self.apply_hub(change)?;
+        } else {
+            self.apply_member(change, past)?;
+        }
+        self.head = change.hash();
+        Ok(())
+    }
+
+    /// A change the hub signed: it pairs a device, changes a role or removes a member.
+    fn apply_hub(&mut self, change: &Change) -> Result<(), String> {
+        match &change.action {
+            Action::Pair {
+                key,
+                name,
+                role,
+                icon,
+                colour,
+            } => {
+                // A device's key is made once: paired again after a removal, it comes back.
+                self.removed.retain(|removed| removed != key);
+                self.add(*key, name, *role, self.hub)?;
+                let at = self.position(key)?;
+                self.members[at].icon = Some(*icon);
+                self.members[at].colour = Some(*colour);
+            }
+            Action::Role { key, role } => {
+                let at = self.position(key)?;
+                self.members[at].role = *role;
+            }
+            Action::Remove { key } => self.remove(key)?,
+            Action::Add { .. }
+            | Action::Rename { .. }
+            | Action::Look { .. }
+            | Action::Machine { .. }
+            | Action::Hub { .. } => {
+                return Err(format!(
+                    "is the hub's and would {} a member: the hub pairs a device, changes a role \
+                     or removes a member, nothing else (what a device says of itself, its name \
+                     and its look, is its members' to change)",
+                    change.action.verb()
+                ));
+            }
+        }
+        self.hub_signed = true;
+        Ok(())
+    }
+
+    /// A change a member signed.
+    fn apply_member(&mut self, change: &Change, past: bool) -> Result<(), String> {
         let Some(signer) = self.get(&change.signer) else {
-            return Err("is signed by a key that is not a member".to_owned());
+            return Err("is signed by a key that is neither a member nor the hub".to_owned());
         };
+        match &change.action {
+            Action::Hub { .. } | Action::Pair { .. } | Action::Role { .. } => {
+                return Err(format!(
+                    "is signed by {}, a member: only the hub may {} a device",
+                    signer.name,
+                    change.action.verb()
+                ));
+            }
+            Action::Add { .. } if self.hub_signed => {
+                return Err(format!(
+                    "adds a device, signed by {}: a device is paired on the hub, and no member \
+                     adds one since the hub paired the first",
+                    signer.name
+                ));
+            }
+            _ => {}
+        }
         let own = match &change.action {
             Action::Remove { key } | Action::Machine { key, .. } => *key == signer.key,
-            Action::Add { .. } | Action::Rename { .. } => false,
+            _ => false,
         };
         if matches!(change.action, Action::Machine { .. }) && !own {
             return Err(
-                "declares another member's machine: a member declares its own machine \
-                        only"
+                "declares another member's machine: a member declares its own machine only"
                     .to_owned(),
             );
         }
         if past && (!signer.role.manages() || change.action.key() == &signer.key) {
             return Err(format!(
-                "would make more than {MOST_CHANGES} changes: past them, a list takes only a \
-                 controller's or a runner's change of another member"
+                "would make more than {MOST_CHANGES} changes: past them, a list takes only the \
+                 hub's change or a controller's or a runner's change of another member"
             ));
         }
         if !signer.role.manages() && !own {
@@ -489,37 +806,26 @@ impl Members {
                 change.action.verb()
             ));
         }
-        match &change.action {
-            Action::Machine { .. } if !change.claimed() => {
-                return Err(
-                    "does not carry its machine's signature: a member declares only a \
-                            machine whose key it holds"
-                        .to_owned(),
-                );
-            }
-            Action::Machine { .. } => {}
-            _ if change.claim.is_some() => {
-                return Err(
-                    "carries a machine's signature, which only a machine change has".to_owned(),
-                );
-            }
-            _ => {}
+        if matches!(change.action, Action::Machine { .. }) && !change.claimed() {
+            return Err(
+                "does not carry its machine's signature: a member declares only a machine whose \
+                 key it holds"
+                    .to_owned(),
+            );
         }
         match &change.action {
             Action::Add { key, name, role } => self.add(*key, name, *role, change.signer)?,
-            Action::Remove { key } => {
-                let at = self.position(key)?;
-                self.members.remove(at);
-                self.removed.push(*key);
-            }
+            Action::Remove { key } => self.remove(key)?,
             Action::Rename { key, name } => {
                 let at = self.position(key)?;
                 self.free(name, Some(key))?;
                 self.members[at].name = name.clone();
             }
+            Action::Look { key, icon, colour } => self.look(key, *icon, *colour)?,
             Action::Machine { key, machine } => {
                 if self.members.iter().any(|member| member.key == *machine)
                     || self.removed.contains(machine)
+                    || *machine == self.hub
                 {
                     return Err("declares a member's key as a machine".to_owned());
                 }
@@ -532,8 +838,24 @@ impl Members {
                 let at = self.position(key)?;
                 self.members[at].machine = Some(*machine);
             }
+            Action::Hub { .. } | Action::Pair { .. } | Action::Role { .. } => {
+                unreachable!("refused above")
+            }
         }
-        self.head = change.hash();
+        Ok(())
+    }
+
+    fn remove(&mut self, key: &PublicKey) -> Result<(), String> {
+        let at = self.position(key)?;
+        self.members.remove(at);
+        self.removed.push(*key);
+        Ok(())
+    }
+
+    fn look(&mut self, key: &PublicKey, icon: Icon, colour: Colour) -> Result<(), String> {
+        let at = self.position(key)?;
+        self.members[at].icon = Some(icon);
+        self.members[at].colour = Some(colour);
         Ok(())
     }
 
@@ -550,6 +872,9 @@ impl Members {
         if self.get(&key).is_some() {
             return Err("adds a key that is a member already".to_owned());
         }
+        if key == self.hub {
+            return Err("adds the hub's key as a member".to_owned());
+        }
         self.free(name, None)?;
         if self.by_machine(&key).is_some() {
             return Err("adds a key that is a member's machine".to_owned());
@@ -560,6 +885,8 @@ impl Members {
             role,
             added_by,
             machine: None,
+            icon: None,
+            colour: None,
         });
         Ok(())
     }
@@ -573,17 +900,7 @@ impl Members {
 
     /// Whether `name` is a name, and no member's but `renamed`'s; names differ in more than case.
     fn free(&self, name: &str, renamed: Option<&PublicKey>) -> Result<(), String> {
-        let length = name.chars().count();
-        if length == 0
-            || length > NAME_LIMIT
-            || name.chars().any(|c| c.is_control() || invisible(c))
-            || name.trim() != name
-        {
-            return Err(format!(
-                "names a device {name:?}: a name is 1 to {NAME_LIMIT} characters, with no control \
-                 character, no invisible character and no space at either end"
-            ));
-        }
+        check_name(name)?;
         let lower = name.to_lowercase();
         let taken = self
             .members
@@ -594,6 +911,23 @@ impl Members {
         }
         Ok(())
     }
+}
+
+/// Whether `name` may name a device: 1 to 64 characters, no control or invisible character, no
+/// space at either end; why not, as a list's refusal goes on.
+pub fn check_name(name: &str) -> Result<(), String> {
+    let length = name.chars().count();
+    if length == 0
+        || length > NAME_LIMIT
+        || name.chars().any(|c| c.is_control() || invisible(c))
+        || name.trim() != name
+    {
+        return Err(format!(
+            "names a device {name:?}: a name is 1 to {NAME_LIMIT} characters, with no control \
+             character, no invisible character and no space at either end"
+        ));
+    }
+    Ok(())
 }
 
 /// Why a device refuses a member list.
@@ -609,7 +943,7 @@ impl fmt::Display for ListError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ListError::Reset => {
-                f.write_str("the hub's member list was reset: set this device up again")
+                f.write_str("the hub's member list was reset: pair this device again")
             }
             ListError::Refused(why) => write!(f, "the hub's member list was refused: {why}"),
         }

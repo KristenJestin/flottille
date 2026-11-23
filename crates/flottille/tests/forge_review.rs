@@ -4,7 +4,7 @@
 //! included**, and the judge never decides them. The forge is the fake `gh` and `bkt`; the
 //! remotes are throwaway bare repositories.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

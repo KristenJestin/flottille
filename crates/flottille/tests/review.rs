@@ -6,7 +6,7 @@
 //! The tests act as the review's agents through each one's own MCP token, as the fake agent
 //! would, while the fake agent keeps each of them mid-turn.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -1918,4 +1918,812 @@ fn the_passes_of_a_child_s_review_count_in_the_children_cap() {
             .iter()
             .all(|agent| state(&user, agent["agent"].as_str().unwrap()) == "ended")
     });
+}
+
+// The review of a pull request (#1091): a pull request of the project's forge, read in a place
+// of its own, its findings given to the caller and nothing posted.
+
+/// A user whose forge is the fake `gh`, and whose git reaches `git@github.com:acme/app.git`
+/// through the fake `ssh`, which serves the bare repository `remotes/app.git`.
+fn forge_user() -> User {
+    let user = User::with_fake_agent().with_fake_gh().with_fake_ssh(&[]);
+    user.fake_script(script());
+    user
+}
+
+/// What a pull request of the project holds: the commits it adds to `main`, oldest first, and
+/// the commit it branched from.
+struct Pulled {
+    commits: Vec<String>,
+    merge_base: String,
+    /// The commit `main` got after the pull request branched.
+    later: String,
+}
+
+/// A project `app` on GitHub's `acme/app`, whose pull request #7 holds three commits (`one.rs`,
+/// `two.rs`, `three.rs`) over `main`, which moved on since (`later.rs`). The remote has the pull
+/// request's head as `refs/pull/7/head`, as GitHub has it.
+fn pulled(user: &User) -> Pulled {
+    project(user);
+    let app = user.path("work/app");
+    let head = |user: &User| {
+        user.git_output(&app, &["rev-parse", "HEAD"])
+            .trim()
+            .to_owned()
+    };
+    let merge_base = head(user);
+    user.git(&app, &["checkout", "--quiet", "-b", "feature"]);
+    let mut commits = Vec::new();
+    for name in ["one.rs", "two.rs", "three.rs"] {
+        std::fs::write(app.join(name), format!("// {name}\n")).unwrap();
+        user.git(&app, &["add", "."]);
+        user.git(&app, &["commit", "--quiet", "-m", name]);
+        commits.push(head(user));
+    }
+    user.git(
+        &app,
+        &["push", "--quiet", "origin", "feature:refs/pull/7/head"],
+    );
+    user.git(&app, &["checkout", "--quiet", "main"]);
+    std::fs::write(app.join("later.rs"), "// later\n").unwrap();
+    user.git(&app, &["add", "."]);
+    user.git(&app, &["commit", "--quiet", "-m", "later"]);
+    let later = head(user);
+    user.git(&app, &["push", "--quiet", "origin", "main"]);
+    user.git(
+        &app,
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}]}),
+    )
+    .unwrap();
+    let mut open = pull(7, "feature");
+    open["headRefOid"] = json!(commits[2]);
+    user.gh_script(json!({"pulls": {"acme/app": {"feature": open}}}));
+    Pulled {
+        commits,
+        merge_base,
+        later,
+    }
+}
+
+/// The places pull request reviews are made in: Flottille's own, never a workspace's.
+fn places(user: &User) -> PathBuf {
+    user.path("data/flottille/reviews")
+}
+
+fn left_in(folder: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The pilot's brief of a review of the pull request.
+fn pull_brief(user: &User) -> String {
+    prompted(user, &["pull request #7", "The change, in each repository"])
+}
+
+#[test]
+fn a_pull_request_is_reviewed_from_its_merge_base() {
+    let user = forge_user();
+    let pulled = pulled(&user);
+    let (lead, mcp) = lead(&user);
+
+    let text = ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+
+    assert!(text.contains("pull request #7"), "{text}");
+    let brief = pull_brief(&user);
+    for file in ["one.rs", "two.rs", "three.rs"] {
+        assert!(brief.contains(file), "{brief}");
+    }
+    // What `main` got after the branch is no part of the pull request.
+    assert!(!brief.contains("later.rs"), "{brief}");
+    assert!(
+        brief.contains(&format!("git diff {}", pulled.merge_base)),
+        "{brief}"
+    );
+    assert_ne!(pulled.later, pulled.merge_base);
+    let all = reviews(&user, &lead);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["pull_request"]["number"], 7, "{all:?}");
+    // The pilot is the caller's child, and works in the pull request's own place: detached at
+    // its head, which is not a workspace and not the project's folder.
+    let pilot = show(&user, all[0]["pilot"].as_str().unwrap())["agent"].clone();
+    assert_eq!(pilot["parent"], lead.as_str());
+    let folder = PathBuf::from(pilot["folder"].as_str().unwrap());
+    assert!(folder.starts_with(places(&user)), "{folder:?}");
+    assert_eq!(
+        user.git_output(&folder, &["rev-parse", "HEAD"]).trim(),
+        pulled.commits[2]
+    );
+    assert!(
+        user.git_output(&folder, &["branch", "--show-current"])
+            .is_empty()
+    );
+    assert!(
+        user.call("workspace.list", json!({"project": "app"}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|workspace| workspace["name"] == "w")
+    );
+}
+
+#[test]
+fn a_pull_request_is_reviewed_from_a_given_commit() {
+    let user = forge_user();
+    let pulled = pulled(&user);
+    let (_, mcp) = lead(&user);
+
+    ok(mcp.call(
+        "review",
+        json!({"action": "start", "pull_request": 7, "from": pulled.commits[0]}),
+    ));
+
+    let brief = pull_brief(&user);
+    assert!(!brief.contains("one.rs"), "{brief}");
+    assert!(
+        brief.contains("two.rs") && brief.contains("three.rs"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains(&format!("git diff {}", pulled.commits[0])),
+        "{brief}"
+    );
+}
+
+#[test]
+fn the_findings_of_a_pull_request_review_go_to_the_caller_and_nothing_is_posted() {
+    let user = forge_user();
+    pulled(&user);
+    let (lead, mcp) = lead(&user);
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+    let pilot = pilot(&user);
+
+    let said = ok(report(
+        &pilot,
+        json!([{"severity": "high", "confidence": "confirmed", "file": "three.rs",
+            "lines": "1", "concerns": "code", "text": "three.rs does nothing",
+            "case": "call it"}]),
+    ));
+
+    assert!(said.contains("1 delivered"), "{said}");
+    let told = delivered(&user);
+    assert!(told.contains("pull request #7"), "{told}");
+    assert!(told.contains("three.rs does nothing"), "{told}");
+    let all = reviews(&user, &lead);
+    assert_eq!(all[0]["state"], "done", "{all:?}");
+    // The forge was read, never written: posting is the caller's, through `forge review`.
+    for call in user.gh_received() {
+        let words: Vec<&str> = call["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            !matches!(
+                words[..words.len().min(2)],
+                [
+                    "pr",
+                    "review" | "comment" | "create" | "merge" | "edit" | "close"
+                ]
+            ) && !words.contains(&"POST"),
+            "{words:?}"
+        );
+    }
+}
+
+#[test]
+fn the_place_of_a_pull_request_review_is_removed_when_it_ends() {
+    let user = forge_user();
+    pulled(&user);
+    let (_, mcp) = lead(&user);
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+    let pilot = pilot(&user);
+    assert_eq!(left_in(&places(&user)).len(), 1);
+    let app = user.path("work/app");
+    assert!(
+        user.git_output(&app, &["worktree", "list"])
+            .contains("reviews")
+    );
+
+    ok(report(&pilot, json!([])));
+
+    eventually("the place removed", || left_in(&places(&user)).is_empty());
+    assert!(
+        !user
+            .git_output(&app, &["worktree", "list"])
+            .contains("reviews")
+    );
+}
+
+#[test]
+fn a_place_a_dead_daemon_left_is_removed_at_the_next_start() {
+    let user = forge_user();
+    pulled(&user);
+    let app = user.path("work/app");
+    // What a daemon killed between making a place and ending its review leaves.
+    let left = places(&user).join("left-behind");
+    std::fs::create_dir_all(places(&user)).unwrap();
+    user.git(
+        &app,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            left.to_str().unwrap(),
+        ],
+    );
+    let daemon = user.status()["pid"].as_u64().unwrap();
+
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::path::Path::new(&format!("/proc/{daemon}")).exists() {
+        assert!(Instant::now() < deadline, "the daemon did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    user.status();
+
+    eventually("the place removed", || !left.exists());
+    assert!(
+        !user
+            .git_output(&app, &["worktree", "list"])
+            .contains("left-behind")
+    );
+}
+
+#[test]
+fn a_pull_request_that_does_not_exist_is_refused_before_any_agent_starts() {
+    let user = forge_user();
+    pulled(&user);
+    let (lead, mcp) = lead(&user);
+    let before = agents(&user).len();
+
+    let why = refused(mcp.call("review", json!({"action": "start", "pull_request": 99})));
+
+    assert!(why.contains("no pull request #99"), "{why}");
+    assert_eq!(agents(&user).len(), before);
+    assert!(reviews(&user, &lead).is_empty());
+    assert!(left_in(&places(&user)).is_empty());
+}
+
+#[test]
+fn a_repository_without_a_declared_forge_is_refused_before_any_agent_starts() {
+    let user = forge_user();
+    pulled(&user);
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".", "forge": null}]}),
+    )
+    .unwrap();
+    let (_, mcp) = lead(&user);
+    let before = agents(&user).len();
+
+    let why = refused(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+
+    assert!(why.contains("no forge"), "{why}");
+    assert_eq!(agents(&user).len(), before);
+    assert!(left_in(&places(&user)).is_empty());
+}
+
+#[test]
+fn a_from_outside_the_pull_request_is_refused() {
+    let user = forge_user();
+    let pulled = pulled(&user);
+    let (lead, mcp) = lead(&user);
+    let before = agents(&user).len();
+
+    // A commit of `main` after the branch, the commit it branched from, and what is no commit.
+    for outside in [
+        pulled.later.as_str(),
+        pulled.merge_base.as_str(),
+        "--output=/tmp/x",
+        "nothing",
+    ] {
+        let why = refused(mcp.call(
+            "review",
+            json!({"action": "start", "pull_request": 7, "from": outside}),
+        ));
+        assert!(
+            why.contains("not a commit of pull request #7"),
+            "{outside}: {why}"
+        );
+    }
+
+    assert_eq!(agents(&user).len(), before);
+    assert!(reviews(&user, &lead).is_empty());
+    assert!(left_in(&places(&user)).is_empty());
+}
+
+#[test]
+fn a_pull_request_with_nothing_after_from_is_refused() {
+    let user = forge_user();
+    let pulled = pulled(&user);
+    let (_, mcp) = lead(&user);
+    let before = agents(&user).len();
+
+    let why = refused(mcp.call(
+        "review",
+        json!({"action": "start", "pull_request": 7, "from": pulled.commits[2]}),
+    ));
+
+    assert!(why.contains("nothing to review"), "{why}");
+    assert_eq!(agents(&user).len(), before);
+    assert!(left_in(&places(&user)).is_empty());
+}
+
+#[test]
+fn a_pull_request_review_at_the_children_cap_is_refused_and_leaves_no_place() {
+    let user = forge_user();
+    pulled(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("max_children = 12", "max_children = 1")).unwrap();
+    let (lead, mcp) = lead(&user);
+    ok(mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "helper", "brief": "HANG and help"}),
+    ));
+
+    let why = refused(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+
+    assert!(why.contains("cap"), "{why}");
+    assert!(reviews(&user, &lead).is_empty());
+    assert!(left_in(&places(&user)).is_empty());
+}
+
+#[test]
+fn the_review_tool_says_how_to_review_a_session_and_a_pull_request() {
+    let user = forge_user();
+    pulled(&user);
+    let (_, mcp) = lead(&user);
+
+    let tool = review_tool(&mcp).expect("the review tool");
+
+    let description = tool["description"].as_str().unwrap();
+    assert!(
+        description.contains(r#"{"action": "start", "pull_request": 7}"#),
+        "{description}"
+    );
+    assert!(
+        description.contains(r#"{"action": "start", "pull_request": 7, "from": "<commit>"}"#),
+        "{description}"
+    );
+    assert!(
+        description.contains(r#"{"action": "start", "agent": "<session>"}"#),
+        "{description}"
+    );
+}
+
+#[test]
+fn the_review_tool_says_the_order_to_choose_in() {
+    let user = forge_user();
+    pulled(&user);
+    let (_, mcp) = lead(&user);
+
+    let tool = review_tool(&mcp).expect("the review tool");
+
+    let description = tool["description"].as_str().unwrap();
+    // The three cases, in that order: a led session, the caller's own change, a pull request.
+    let led = description
+        .find("still alive")
+        .expect("the led session case");
+    let own = description[led..]
+        .find("a change of your own")
+        .map(|at| at + led)
+        .expect("the own change case");
+    let pull_request = description[own..]
+        .find("Otherwise")
+        .map(|at| at + own)
+        .expect("the pull request case");
+    assert!(led < own && own < pull_request, "{description}");
+    // The rule comes before the order: only when the user asks, or says yes to an offer.
+    let before = description.find("this order").expect("this order");
+    let rule = description
+        .find("only when the user asks for one")
+        .expect("the rule");
+    let offer = description
+        .find("never start one without the user's yes")
+        .expect("the offer");
+    assert!(rule < before && offer < before, "{description}");
+    // The user's words and the project's instructions come before the order too.
+    assert!(
+        description[..before].contains("user's words")
+            && description[..before].contains("project's instructions"),
+        "{description}"
+    );
+}
+
+// Round 2 of #1091: the review reads the pull request and nothing of the user's, runs none of
+// the user's filters on it, leaves nothing behind, and runs its code only with the user.
+
+/// `forge_user`, its escalation programs fakes first in its `PATH`: a test that sends a line.
+fn forge_user_sending_lines(user: User) -> User {
+    let user = user
+        .with_fake_gh()
+        .with_fake_ssh(&[])
+        .with_fake_escalation();
+    user.fake_script(script());
+    user
+}
+
+/// A project `app` of the two repositories `api` and `lib`, each on GitHub as `acme/<name>` and
+/// holding `x.rs`; pull request #7 of `lib` rewrites `x.rs`.
+fn pulled_in_the_second_of_two(user: &User) {
+    let folder = user.path("work/app");
+    let mut text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\n",
+        folder.display(),
+        user.path("work/app-work").display()
+    );
+    for name in ["api", "lib"] {
+        let repository = folder.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("x.rs"), format!("// main of {name}\n")).unwrap();
+        user.git(&repository, &["add", "."]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+        let remote = user.path(&format!("remotes/{name}.git"));
+        user.git(
+            &user.path(""),
+            &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+        );
+        user.git(
+            &repository,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        user.git(&repository, &["push", "--quiet", "origin", "main"]);
+        text.push_str(&format!(
+            "[[repositories]]\npath = \"{name}\"\nforge = {{ kind = \"github\", repository = \
+             \"acme/{name}\" }}\n"
+        ));
+    }
+    let lib = folder.join("lib");
+    user.git(&lib, &["checkout", "--quiet", "-b", "feature"]);
+    std::fs::write(lib.join("x.rs"), "// the pull request's x.rs\n").unwrap();
+    user.git(&lib, &["commit", "--quiet", "-am", "x"]);
+    let head = user
+        .git_output(&lib, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    user.git(
+        &lib,
+        &["push", "--quiet", "origin", "feature:refs/pull/7/head"],
+    );
+    user.git(&lib, &["checkout", "--quiet", "main"]);
+    for name in ["api", "lib"] {
+        user.git(
+            &folder.join(name),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("git@github.com:acme/{name}.git"),
+            ],
+        );
+    }
+    user.write_project_file("app", &text);
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    let mut open = pull(7, "feature");
+    open["headRefOid"] = json!(head);
+    user.gh_script(json!({"pulls": {"acme/lib": {"feature": open}}}));
+}
+
+#[test]
+fn a_pull_request_of_the_second_of_two_repositories_is_read_in_its_place_both_ways() {
+    let user = forge_user();
+    pulled_in_the_second_of_two(&user);
+    let (_, mcp) = lead(&user);
+
+    ok(mcp.call(
+        "review",
+        json!({"action": "start", "pull_request": 7, "repository": "lib"}),
+    ));
+
+    // The files are said from the top of the place, which is the repository's copy.
+    let brief = pull_brief(&user);
+    assert!(brief.contains("\n- x.rs"), "{brief}");
+    assert!(!brief.contains("lib/x.rs"), "{brief}");
+    let pilot = pilot(&user);
+    // The file as the brief names it, and in the place's repository given by name.
+    for args in [
+        json!({"path": "x.rs"}),
+        json!({"repository": ".", "path": "x.rs"}),
+    ] {
+        let read = ok(pilot.call("fs_read", args.clone()));
+        assert!(read.contains("the pull request's x.rs"), "{args}: {read}");
+    }
+    // The user's checkout of the repository is not the place's: never read for it.
+    let answer = pilot.call("fs_read", json!({"repository": "lib", "path": "x.rs"}));
+    assert!(!answer.text.contains("main of lib"), "{}", answer.text);
+}
+
+#[test]
+fn a_worktree_of_the_user_whose_folder_is_away_stays_registered_after_a_review() {
+    let user = forge_user();
+    pulled(&user);
+    let app = user.path("work/app");
+    // A worktree on a drive that is not mounted now: its folder is not where git knows it.
+    let other = user.path("work/other");
+    user.git(
+        &app,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            other.to_str().unwrap(),
+        ],
+    );
+    std::fs::rename(&other, user.path("work/other-unmounted")).unwrap();
+    let (_, mcp) = lead(&user);
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+    let pilot = pilot(&user);
+
+    ok(report(&pilot, json!([])));
+
+    eventually("the place removed", || left_in(&places(&user)).is_empty());
+    std::thread::sleep(Duration::from_millis(300));
+    let listed = user.git_output(&app, &["worktree", "list", "--porcelain"]);
+    assert!(
+        listed.contains(other.to_str().unwrap()),
+        "the user's worktree was pruned: {listed}"
+    );
+}
+
+/// What a daemon killed between the fetch of a review and the deletion of its refs leaves in
+/// the repository.
+fn leave_the_refs_of_a_fetch(user: &User, app: &std::path::Path) {
+    for end in ["head", "base"] {
+        user.git(
+            app,
+            &[
+                "update-ref",
+                &format!("refs/flottille/review/pr7-1-0-{end}"),
+                "HEAD",
+            ],
+        );
+    }
+}
+
+/// Kills the daemon and starts it again.
+fn kill_and_restart(user: &User) {
+    let daemon = user.status()["pid"].as_u64().unwrap();
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::path::Path::new(&format!("/proc/{daemon}")).exists() {
+        assert!(Instant::now() < deadline, "the daemon did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    user.status();
+}
+
+#[test]
+fn the_fetch_refs_a_dead_daemon_left_are_removed_at_the_next_start() {
+    let user = forge_user();
+    pulled(&user);
+    let app = user.path("work/app");
+    leave_the_refs_of_a_fetch(&user, &app);
+    // A review makes its folder before its fetch: the daemon that died had made it.
+    std::fs::create_dir_all(user.path("data/flottille/reviews")).unwrap();
+
+    kill_and_restart(&user);
+
+    eventually("the refs removed", || {
+        user.git_output(&app, &["for-each-ref", "refs/flottille/review/"])
+            .trim()
+            .is_empty()
+    });
+    // The user's own refs are left as they are.
+    assert!(
+        !user
+            .git_output(&app, &["for-each-ref", "refs/heads/feature"])
+            .trim()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_start_with_review_never_used_reads_no_repository_of_the_user() {
+    let user = forge_user();
+    pulled(&user);
+    let app = user.path("work/app");
+    // A ref under the name Review uses, though no review ever made its folder: the start does
+    // not look in the repository at all.
+    leave_the_refs_of_a_fetch(&user, &app);
+
+    kill_and_restart(&user);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    assert!(
+        !user
+            .git_output(&app, &["for-each-ref", "refs/flottille/review/"])
+            .trim()
+            .is_empty(),
+        "the start of a daemon whose Review was never used went through the repository"
+    );
+}
+
+#[test]
+fn the_place_of_a_review_whose_pilot_ended_unheard_is_removed_when_it_is_failed() {
+    let user = forge_user();
+    pulled(&user);
+    let (lead, mcp) = lead(&user);
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+    let first = reviews(&user, &lead)[0]["pilot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pilot(&user);
+    let left = left_in(&places(&user));
+    assert_eq!(left.len(), 1, "{left:?}");
+    // A pilot whose end the daemon never heard: its review is an orphan, still running.
+    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let changed = store
+        .execute(
+            "UPDATE agents SET state = 'ended' WHERE id = ?1",
+            rusqlite::params![first],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(store);
+
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+
+    let all = reviews(&user, &lead);
+    assert!(
+        all.iter()
+            .any(|review| review["pilot"] == first.as_str() && review["state"] == "failed"),
+        "{all:?}"
+    );
+    eventually("the orphan's place removed", || {
+        !places(&user).join(&left[0]).exists()
+    });
+    assert_eq!(left_in(&places(&user)).len(), 1);
+}
+
+#[test]
+fn a_pull_request_is_checked_out_without_the_user_s_filters() {
+    let user = forge_user();
+    let pulled = pulled(&user);
+    let app = user.path("work/app");
+    // The pull request's last commit asks for a filter on its files, one of them Large File
+    // Storage's.
+    user.git(
+        &app,
+        &["checkout", "--quiet", "--detach", &pulled.commits[2]],
+    );
+    std::fs::write(
+        app.join(".gitattributes"),
+        "*.rs filter=mark\n*.md filter=lfs\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("notes.md"), "notes\n").unwrap();
+    user.git(&app, &["add", "."]);
+    user.git(&app, &["commit", "--quiet", "-m", "attributes"]);
+    let head = user
+        .git_output(&app, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let remote = user.path("remotes/app.git");
+    user.git(
+        &app,
+        &[
+            "push",
+            "--quiet",
+            "--force",
+            remote.to_str().unwrap(),
+            "HEAD:refs/pull/7/head",
+        ],
+    );
+    user.git(&app, &["checkout", "--quiet", "main"]);
+    let mut open = pull(7, "feature");
+    open["headRefOid"] = json!(head);
+    user.gh_script(json!({"pulls": {"acme/app": {"feature": open}}}));
+    // The user's filters, which would write a marker on the files they smudge.
+    let marker = user.path("a-filter-ran");
+    let smudge = format!("touch '{}'; cat", marker.display());
+    for driver in ["mark", "lfs"] {
+        user.git(
+            &app,
+            &["config", &format!("filter.{driver}.smudge"), &smudge],
+        );
+    }
+    // And one that would write a marker when it reads a file back: files just written are
+    // racily clean, so a `git diff` or `git status` of the working tree runs it.
+    let cleaned = user.path("a-clean-filter-ran");
+    user.git(
+        &app,
+        &[
+            "config",
+            "filter.mark.clean",
+            &format!("touch '{}'; cat", cleaned.display()),
+        ],
+    );
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&cleaned);
+    let (lead, mcp) = lead(&user);
+
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+
+    let pilot = reviews(&user, &lead)[0]["pilot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let folder = PathBuf::from(show(&user, &pilot)["agent"]["folder"].as_str().unwrap());
+    assert!(folder.join("notes.md").exists());
+    assert!(folder.join("three.rs").exists());
+    assert!(
+        !marker.exists(),
+        "a filter of the user ran on the pull request"
+    );
+    assert!(
+        !cleaned.exists(),
+        "a clean filter of the user ran in the pull request's copy"
+    );
+}
+
+/// A pilot of a pull request's review, in `mode`, runs a line in its place.
+fn a_run_of_the_pull_request_s_code_waits_for_the_user(user: User, mode: &str) {
+    pulled(&user);
+    let (lead, mcp) = lead(&user);
+    user.call("agent.mode", json!({"agent": lead, "mode": mode}))
+        .unwrap();
+    ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
+    let brief = pull_brief(&user);
+    assert!(
+        brief.contains("Run none of the pull request's code"),
+        "{brief}"
+    );
+    let pilot = pilot(&user);
+
+    let held = ok(pilot.call("run", json!({"line": "make test"})));
+
+    assert!(held.contains("user's approval"), "{held}");
+    let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    let request = requests
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["tool"] == "run")
+        .unwrap_or_else(|| panic!("{requests}"))
+        .clone();
+    assert_eq!(request["held_by"], "user", "{request}");
+    assert_eq!(request["class"], "base", "{request}");
+    assert!(
+        request
+            .to_string()
+            .contains("it runs the code of pull request #7"),
+        "{request}"
+    );
+    assert!(user.escalations().is_empty());
+}
+
+#[test]
+fn a_run_in_the_place_of_a_pull_request_waits_for_the_user_even_in_full() {
+    a_run_of_the_pull_request_s_code_waits_for_the_user(
+        forge_user_sending_lines(User::with_fake_agent()),
+        "full",
+    );
+}
+
+#[test]
+fn a_run_in_the_place_of_a_pull_request_is_never_decided_by_the_judge_in_auto() {
+    a_run_of_the_pull_request_s_code_waits_for_the_user(
+        forge_user_sending_lines(User::with_fake_agent().with_allowing_judge()),
+        "auto",
+    );
 }

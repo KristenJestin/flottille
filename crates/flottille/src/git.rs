@@ -4,8 +4,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -55,8 +56,405 @@ pub async fn run_with<S: AsRef<OsStr>>(
 ) -> Result<Output, String> {
     let mut command = command(dir, args);
     command.envs(env.iter().copied());
+    crate::landlock::confined(&mut command);
     bounded(command, dir, args, class.limit(), OUTPUT_LIMIT, None).await
 }
+
+/// [`output`] of `git <subcommand> <args>` that reaches `remote` (`ls-remote`, `fetch`): only the
+/// protocol its URL uses, as git resolves it, and only one of [`FETCHED`], git's own upload
+/// command over the remote's, and the user's SSH agent lent when that protocol is SSH
+/// (`docs/vault.md`, "The runtime folder").
+pub async fn output_remote(
+    dir: &Path,
+    remote: &str,
+    subcommand: &str,
+    args: &[&str],
+    class: Class,
+) -> Result<String, String> {
+    let url = output(
+        dir,
+        &["ls-remote", "--get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await?;
+    let protocol = protocol(url.trim());
+    if !FETCHED.contains(&protocol) {
+        return Err(format!(
+            "{remote} is reached through {protocol}, which runs a program the remote names: \
+             Flottille's own git reaches a remote over {} only",
+            FETCHED.join(", ")
+        ));
+    }
+    // The line's own option, since the first `remote.<name>.uploadpack` git reads is the one it
+    // takes: the repository's, before any given in the environment. No maintenance after it: one
+    // that goes to the background would keep the lent agent past the call.
+    let args: Vec<&str> = [
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
+        subcommand,
+        "--upload-pack=git-upload-pack",
+    ]
+    .into_iter()
+    .chain(args.iter().copied())
+    .collect();
+    // Not lent while what its `ssh` reads could have been written by a confined command, and
+    // only to the `git` found at the start, never one a run put first in the `PATH`.
+    let lent = crate::ssh_agent::socket()
+        .filter(|_| protocol == "ssh" && crate::pushed::ssh_unlent().is_none())
+        .zip(program());
+    let mut git = match lent {
+        Some((_, program)) => command_of(program.as_os_str(), dir, &args),
+        None => command(dir, &args),
+    };
+    git.env("GIT_ALLOW_PROTOCOL", protocol);
+    let lent = lent.map(|(socket, _)| socket);
+    match lent {
+        Some(socket) => crate::landlock::confined_lent(git.env(crate::ssh_agent::VARIABLE, socket)),
+        None => crate::landlock::confined(&mut git),
+    };
+    said(bounded(git, dir, &args, class.limit(), OUTPUT_LIMIT, None).await?)
+}
+
+/// The credential helpers of the user's own settings (the system's, then the user's), each as
+/// its setting's name and the helper it names, read at the daemon's start: never a credential.
+static HELPERS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// The credential helpers the user's own settings give one forge alone, read at the daemon's
+/// start: each `includeIf "hasconfig:remote.*.url:…"` condition (its key) with the helpers of the
+/// file it includes. Git includes such a file only where a repository's remotes match, which no
+/// read without a repository says.
+static FORGE_HELPERS: OnceLock<Vec<ForgeHelpers>> = OnceLock::new();
+
+/// An `includeIf "hasconfig:…"` condition of the user's settings, and the credential helpers of
+/// the file it includes.
+pub type ForgeHelpers = (String, Vec<(String, String)>);
+
+/// The settings `args` of `git config` lists, read at the daemon's start by its own git, confined:
+/// a git only root may change is not always found, and the one of the `PATH` may be a run's.
+pub(crate) fn start_read<S: AsRef<OsStr>>(args: &[S]) -> String {
+    let mut command = command_of(own(), Path::new("/"), args);
+    crate::landlock::confined(&mut command);
+    let mut command = command.into_std();
+    command.stderr(Stdio::null());
+    crate::children::spawn_std(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The entries of `git config --null --get-regexp`, each its key and its value.
+pub(crate) fn entries(listed: &str) -> Vec<(String, String)> {
+    listed
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n'))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
+/// Reads the user's credential helpers, before the daemon reads any repository: git sends a
+/// sign-in to `store` on every helper it knows, a repository's own too.
+pub fn find_helpers() {
+    const HELPER: &str = r"^credential\.(.*\.)?helper$";
+    HELPERS.get_or_init(|| {
+        ["--system", "--global"]
+            .into_iter()
+            .flat_map(|scope| {
+                entries(&start_read(&[
+                    "config",
+                    scope,
+                    "--includes",
+                    "--null",
+                    "--get-regexp",
+                    HELPER,
+                ]))
+            })
+            .collect()
+    });
+    FORGE_HELPERS.get_or_init(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut found = Vec::new();
+        for scope in ["--system", "--global"] {
+            let listed = start_read(&[
+                "config",
+                scope,
+                "--includes",
+                "--null",
+                "--show-origin",
+                "--get-regexp",
+                r"^includeif\.hasconfig:.*\.path$",
+            ]);
+            let mut parts = listed.split('\0');
+            while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+                let Some((condition, value)) = entry.split_once('\n') else {
+                    continue;
+                };
+                let file = match value.strip_prefix("~/") {
+                    Some(rest) => home.as_ref().map(|home| home.join(rest)),
+                    None => origin
+                        .strip_prefix("file:")
+                        .and_then(|file| Path::new(file).parent())
+                        .map(|folder| folder.join(value)),
+                };
+                let Some(file) = file else { continue };
+                let file = file.to_string_lossy().into_owned();
+                let helpers = entries(&start_read(&[
+                    "config",
+                    "--file",
+                    &file,
+                    "--includes",
+                    "--null",
+                    "--get-regexp",
+                    HELPER,
+                ]));
+                if !helpers.is_empty() {
+                    found.push((condition.to_owned(), helpers));
+                }
+            }
+        }
+        found
+    });
+}
+
+/// [`FORGE_HELPERS`].
+pub fn forge_helpers() -> &'static [ForgeHelpers] {
+    FORGE_HELPERS.get().map(Vec::as_slice).unwrap_or_default()
+}
+
+/// A settings file of git's that holds `helpers` (each a setting's name, `credential.helper` or
+/// `credential.<url>.helper`, and its value), and nothing else.
+pub fn helpers_file(helpers: &[(String, String)]) -> String {
+    let quoted = |text: &str| {
+        text.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+    };
+    let mut file = String::new();
+    for (name, helper) in helpers {
+        let Some(middle) = name
+            .strip_prefix("credential.")
+            .and_then(|rest| rest.strip_suffix("helper"))
+        else {
+            continue;
+        };
+        match middle.strip_suffix('.') {
+            Some(url) if !url.contains('\n') => {
+                file.push_str(&format!("[credential \"{}\"]\n", quoted(url)));
+            }
+            Some(_) => continue,
+            None if middle.is_empty() => file.push_str("[credential]\n"),
+            None => continue,
+        }
+        file.push_str(&format!("\thelper = \"{}\"\n", quoted(helper)));
+    }
+    file
+}
+
+/// The protocols a push the gate let through may use outside the sandbox
+/// (`GIT_ALLOW_PROTOCOL`): git's own network transports, as for the daemon's fetch, never `ext::`
+/// nor a remote helper a run's settings name; not a path, whose receiving git runs the hooks and
+/// settings of a repository a run may have made (`runs::to_paths`); and not SSH where the user's
+/// agent is `lent` to no push (`pushed::unlent`).
+pub fn push_protocols(lent: bool) -> String {
+    let allowed: Vec<&str> = FETCHED
+        .into_iter()
+        .filter(|protocol| *protocol != "file")
+        .filter(|protocol| lent || *protocol != "ssh")
+        .collect();
+    allowed.join(":")
+}
+
+/// The settings that leave git the user's own credential helpers alone: an empty
+/// `credential.helper` empties the list read so far, and the command's scope is read last.
+pub fn helper_settings() -> Vec<(String, String)> {
+    std::iter::once(("credential.helper".to_owned(), String::new()))
+        .chain(HELPERS.get().into_iter().flatten().cloned())
+        .collect()
+}
+
+/// [`helper_settings`], as `-c` options.
+fn helpers() -> Vec<String> {
+    helper_settings()
+        .into_iter()
+        .flat_map(|(name, helper)| ["-c".to_owned(), format!("{name}={helper}")])
+        .collect()
+}
+
+/// The `git` a push the gate let through runs: the one of the daemon's `PATH` that only root may
+/// change, found at its start, its links followed. Never one a run put first in the `PATH` since
+/// (`~/.local/bin` is the user's, so a run's to write).
+static GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Why a push the gate let through is refused where no such `git` was found.
+pub const UNFOUND: &str = "no git of the daemon's PATH is owned by root in a folder owned by \
+     root, and a push goes outside the sandbox only through one: install git from the system's \
+     packages, then restart the daemon";
+
+/// The `git` the daemon runs for itself (statuses, worktrees, its fetch), confined: the one
+/// only root may change when there is one, else the first of its `PATH`, found at its start and
+/// its links followed. Never one a run put in the `PATH` since. `None` where none was found.
+static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The `git` a test build runs for itself in place of [`OWN`]'s, to watch what the daemon asks
+/// of it. Never read by a release build, never the git of a push the gate let through.
+const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
+
+/// Finds the `git` of [`GIT`] and [`OWN`] at the daemon's start, before anything runs.
+pub fn find_git() {
+    let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
+    GIT.get_or_init(|| {
+        let found = chosen
+            .clone()
+            .filter(|(_, rooted)| *rooted)
+            .map(|(git, _)| git);
+        if found.is_none() {
+            eprintln!("flottille daemon: {UNFOUND}");
+        }
+        found
+    });
+    OWN.get_or_init(|| {
+        if cfg!(debug_assertions)
+            && let Some(git) = std::env::var_os(TEST_GIT)
+        {
+            return Some(PathBuf::from(git));
+        }
+        chosen.map(|(git, _)| git)
+    });
+}
+
+/// The `PATH` that finds nothing: a path to no folder. An empty one is the current folder to
+/// `execvp` and to some shells, where git runs from.
+pub const NO_PATH: &str = "/nonexistent/flottille-no-path";
+
+/// Makes `folder`, in the daemon's runtime folder (out of every confined command's reach), the
+/// one folder of the `PATH` of a push the gate let through, made for each push (`push_folder`):
+/// a link to each program of the daemon's `PATH` that only root may change, under its name, in
+/// the folders the `PATH` names that only root may change (each, and every folder on the way, is
+/// root's, and no one else may write it). A program the user's settings name by a bare name (a
+/// credential helper's `!gh auth git-credential`, `ssh` in a wrapper) is then never one a run
+/// put first. A name whose first program is not only root's (a file of the user's in
+/// `/usr/local/bin`, a link to one, a link that leads nowhere) has none. Each link names the
+/// program under its own name, not where it leads now: a versioned link (`python3`) follows an
+/// upgrade, which only root makes. [`NO_PATH`] where the folder cannot be made.
+pub fn rooted_folder(folder: &Path) -> PathBuf {
+    let _ = std::fs::remove_dir_all(folder);
+    use std::os::unix::fs::DirBuilderExt;
+    let made = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder);
+    if let Err(error) = made {
+        eprintln!(
+            "flottille daemon: cannot make {}, so a push the gate lets through finds no program \
+             by its bare name: {error}",
+            folder.display()
+        );
+        return PathBuf::from(NO_PATH);
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut named: std::collections::BTreeSet<OsString> = Default::default();
+    for dir in std::env::split_paths(&path).filter_map(|dir| dir.canonicalize().ok()) {
+        if !only_root_may_change(&dir) {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let target = entry.path().canonicalize();
+            if target.as_ref().is_ok_and(|target| target.is_dir()) || !named.insert(name.clone()) {
+                continue;
+            }
+            match target {
+                Ok(target) if only_root_may_change(&target) => {
+                    let _ = std::os::unix::fs::symlink(entry.path(), folder.join(&name));
+                }
+                _ => eprintln!(
+                    "flottille daemon: {} is not only root's to change, so a push the gate lets \
+                     through does not run it by its bare name",
+                    entry.path().display()
+                ),
+            }
+        }
+    }
+    folder.to_owned()
+}
+
+/// Whether only root may change `path`, a program or a folder: it and every folder on the way to
+/// it are root's, and neither their group nor others may write them. The one rule of what a
+/// push the gate let through, or the daemon's own git, may run.
+pub(crate) fn only_root_may_change(path: &Path) -> bool {
+    path.ancestors().all(root_s_alone)
+}
+
+/// Whether `path` is root's, and neither its group nor others may write it.
+fn root_s_alone(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(folder).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+}
+
+/// The `git` the daemon runs for itself: [`OWN`]'s, `git` of the `PATH` where nothing was
+/// searched (the command line, the crate's own tests), and none where the daemon found none.
+pub fn own() -> &'static OsStr {
+    match OWN.get() {
+        None => OsStr::new("git"),
+        Some(Some(git)) => git.as_os_str(),
+        // A path that is no program: the call says git is missing, and nothing planted since
+        // in the `PATH` runs.
+        Some(None) => OsStr::new("/nonexistent/flottille-found-no-git"),
+    }
+}
+
+/// The `git` found at the start, if one only root may change was.
+pub fn program() -> Option<&'static Path> {
+    GIT.get()?.as_deref()
+}
+
+/// The protocols the daemon's own git reaches a remote with: git's own transports. Any other
+/// (`ext::`, a `git-remote-<name>` of the `PATH`) runs a program the remote's URL names.
+const FETCHED: [&str; 5] = ["ssh", "https", "http", "git", "file"];
+
+/// The name `GIT_ALLOW_PROTOCOL` knows the transport of `url` by, read as git reads it: a
+/// helper's `<name>::`, a scheme (`ssh` for its other spellings), `ssh` for `host:path`, `file`
+/// for a path.
+fn protocol(url: &str) -> &str {
+    let scheme = url
+        .find(|c: char| !(c.is_ascii_alphanumeric() || "+.-".contains(c)))
+        .map_or(url, |end| &url[..end]);
+    let rest = &url[scheme.len()..];
+    if !scheme.is_empty() && rest.starts_with("::") {
+        return scheme;
+    }
+    if !scheme.is_empty() && rest.starts_with("://") {
+        return match scheme {
+            "git+ssh" | "ssh+git" => "ssh",
+            scheme => scheme,
+        };
+    }
+    match url.find(':') {
+        Some(colon) if !url[..colon].contains('/') => "ssh",
+        _ => "file",
+    }
+}
+
+/// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
+/// `GIT_SSH_COMMAND` with, and its [`SSH_OPTIONS`].
+pub fn ssh_command() -> OsString {
+    let ssh = match crate::ssh_agent::ssh() {
+        Some(ssh) => {
+            let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");
+            format!("'{quoted}'")
+        }
+        None => "ssh".into(),
+    };
+    format!("{ssh} {SSH_OPTIONS}").into()
+}
+
+/// The options every `ssh` the daemon's git runs is given first, which win over the
+/// configuration's and the later options': no connection shared through a master socket (one in
+/// the read-only `~/.ssh` cannot be made, one elsewhere any run could use), and the agent
+/// forwarded to no host.
+pub const SSH_OPTIONS: &str = "-o ControlMaster=no -o ControlPath=none -o ForwardAgent=no";
 
 /// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
 /// no other, `input` on its standard input: a git line of an agent's, read before it runs, in
@@ -77,16 +475,18 @@ pub async fn run_in<S: AsRef<OsStr>>(
     bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
-/// [`run_in`] outside the sandbox: for what a push the gate let through reads of its remote
-/// before it goes (its dry run), which signs in as the push itself does (`runs::lifted`).
+/// [`run_in`] outside the sandbox: for what a push the gate let through reads before it goes (its
+/// dry run, what its remote has, the commits it sends), from the folder it runs from and signed
+/// in as the push itself is (`runs::lifted`).
 pub async fn run_outside<S: AsRef<OsStr>>(
     dir: &Path,
     words: &[S],
     env: &BTreeMap<OsString, OsString>,
+    input: Option<Vec<u8>>,
 ) -> Result<Output, String> {
-    let command = read_in(dir, words, env, false);
+    let command = read_in(dir, words, env, input.is_some());
     let limit = Class::Read.limit();
-    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, None).await
+    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
 /// The command of [`run_in`] and [`run_outside`]: never a prompt, nowhere to answer it.
@@ -112,8 +512,20 @@ fn read_in<S: AsRef<OsStr>>(
     command
 }
 
+/// [`command`] of the program `git`, confined, for a caller that cannot wait on the runtime (the
+/// gate, while it judges a line): its caller bounds it in time.
+pub fn blocking<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> std::process::Command {
+    let mut command = command_of(git, dir, args);
+    crate::landlock::confined(&mut command);
+    command.into_std()
+}
+
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("git");
+    command_of(own(), dir, args)
+}
+
+fn command_of<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(git);
     command
         .arg("-C")
         .arg(dir)
@@ -124,11 +536,28 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "fetch.recurseSubmodules=false",
+            "-c",
+            "submodule.recurse=false",
         ])
+        .args(helpers())
         .args(args)
         // A fetch that needs credentials fails at once; stored credentials still work.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        // No SSH agent but where `output_remote` lends it, and the `ssh` found at the start, over
+        // a repository's `core.sshCommand`.
+        .env_remove(crate::ssh_agent::VARIABLE)
+        .env("GIT_SSH_COMMAND", ssh_command())
+        // No remote reached but by `output_remote`, which names its one protocol: not the
+        // promisor remote a partial clone asks for a missing object while it reads.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        // Set and empty, they win over the `core.gitProxy` and `core.askPass` a repository's
+        // settings name, and name no program.
+        .env("GIT_PROXY_COMMAND", "")
+        .env("GIT_ASKPASS", "")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -222,7 +651,11 @@ pub async fn output_with<S: AsRef<OsStr>>(
     class: Class,
     env: &[(&str, &OsStr)],
 ) -> Result<String, String> {
-    let output = run_with(dir, args, class, env).await?;
+    said(run_with(dir, args, class, env).await?)
+}
+
+/// What a call that ran to its end gave on success, or its error in git's own words, masked.
+fn said(output: Output) -> Result<String, String> {
     if output.success {
         return Ok(output.stdout);
     }
@@ -279,6 +712,43 @@ async fn kill(child: &mut tokio::process::Child) {
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn a_bare_name_links_to_the_program_of_its_own_name_in_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let folder = rooted_folder(&dir.path().join("path"));
+
+        // `sh` is a link to another program almost everywhere (`dash`, `bash`): the link to the
+        // name, not to what it leads to now, follows an upgrade that moves it.
+        let sh = std::fs::read_link(folder.join("sh")).unwrap();
+        assert_eq!(sh.file_name(), Some(OsStr::new("sh")), "{sh:?}");
+    }
+
+    #[test]
+    fn a_link_folder_that_cannot_be_made_is_a_path_that_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+
+        let folder = rooted_folder(&file.join("path"));
+
+        // An empty one is the current folder to `execvp`: where git runs from.
+        assert!(folder.is_absolute(), "{folder:?}");
+        assert!(!folder.exists(), "{folder:?}");
+    }
+
+    #[test]
+    fn the_ssh_git_runs_shares_no_connection_and_forwards_no_agent() {
+        // First, so that neither `~/.ssh/config` nor a later option sets them: a master socket
+        // in the read-only `~/.ssh` could not be made, and one made elsewhere any run could use.
+        let ssh = ssh_command();
+        assert!(
+            ssh.to_string_lossy()
+                .ends_with(" -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no"),
+            "{ssh:?}"
+        );
+    }
+
     /// An empty home of the tests' own, for every git they run.
     pub(crate) fn home() -> &'static Path {
         static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
@@ -309,6 +779,68 @@ pub(crate) mod tests {
         .unwrap();
         assert!(output.success, "{args:?}: {}", output.stderr);
         output.stdout.trim().to_owned()
+    }
+
+    #[test]
+    fn the_protocol_of_a_remote_is_read_as_git_reads_its_url() {
+        for (url, protocol) in [
+            ("git@forge.invalid:acme/app.git", "ssh"),
+            ("forge.invalid:acme/app.git", "ssh"),
+            ("ssh://git@forge.invalid/acme/app.git", "ssh"),
+            ("git+ssh://forge.invalid/acme/app.git", "ssh"),
+            ("https://forge.invalid/acme/app.git", "https"),
+            ("http://127.0.0.1:8080/app.git", "http"),
+            ("git://forge.invalid/app.git", "git"),
+            ("file:///srv/app.git", "file"),
+            ("/srv/app.git", "file"),
+            ("../app.git", "file"),
+            ("./a:b", "file"),
+            ("ext::ssh -W %h:%p forge.invalid", "ext"),
+            ("foo::forge.invalid/app", "foo"),
+            ("foo://forge.invalid/app", "foo"),
+        ] {
+            assert_eq!(super::protocol(url), protocol, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_helper_s_protocol_is_never_fetched() {
+        for url in [
+            "ext::sh -c true",
+            "foo::forge.invalid/app",
+            "foo://forge.invalid",
+        ] {
+            assert!(!FETCHED.contains(&super::protocol(url)), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_helpers_of_one_forge_are_written_as_git_reads_them() {
+        let helpers = vec![
+            (
+                "credential.helper".to_owned(),
+                "!f() { echo \"a\\b\"; }; f".to_owned(),
+            ),
+            (
+                "credential.https://forge.invalid/a\"b.helper".to_owned(),
+                "store --file ~/.forge\tcredentials".to_owned(),
+            ),
+            ("credential.helper".to_owned(), String::new()),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("helpers");
+        std::fs::write(&file, helpers_file(&helpers)).unwrap();
+
+        let read = std::process::Command::new("git")
+            .args(["config", "--null", "--file"])
+            .arg(&file)
+            .args(["--get-regexp", "^credential"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(entries(&String::from_utf8_lossy(&read.stdout)), helpers);
     }
 
     #[tokio::test]

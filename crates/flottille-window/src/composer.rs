@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use gpui_design_system::color::mix;
-use gpui_design_system::motion::{HOVER, PANEL};
+use gpui_design_system::motion::HOVER;
 use gpui_design_system::{
-    Align, Button, Dropdown, Icon, MenuItem, Skeleton, Toast, TokenEvent, TokenField, Type, enter,
-    fade, hoverable, palette, presence_of, space, toast,
+    Button, Chosen, Dropdown, Icon, MenuItem, ModelEntry, ModelPicker, Toast, TokenEvent,
+    TokenField, Type, enter, fade, hoverable, palette, presence_of, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, RopeExt as _, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,6 +19,7 @@ use gpui_kit::{
 
 use crate::actions::{Command, Pick, Target};
 use crate::attachments::{Attachments, STILL_SCALING};
+use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::mode::ModeSwitch;
 use crate::providers::{Provider, Providers};
 use crate::settings::Reveal;
@@ -37,24 +38,12 @@ pub struct PlaceChoice {
     pub ready: bool,
 }
 
-/// The list a picker of the composer opens.
+/// The list a picker of the composer opens: the place's. The agent's is the kit's `ModelPicker`,
+/// which keeps its own menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
     Place,
-    Provider,
-    Model,
-    Effort,
-}
-
-/// An entry of a picker's list: picked by a click, or a sentence when it picks nothing.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Entry {
-    pub id: String,
-    pub label: String,
-    pub note: Option<String>,
-    /// It is the one picked now.
-    pub on: bool,
-    pub pick: Option<Pick>,
+    Machine,
 }
 
 /// The provider and the model a project's file gives its agents, each when it gives it.
@@ -74,13 +63,20 @@ fn project_provider<'a>(providers: &'a Providers, project: ProjectDefault<'a>) -
 
 /// The project's model, when a session started on `provider` without a model takes it.
 fn project_model<'a>(
-    providers: &Providers,
+    providers: &'a Providers,
     project: ProjectDefault<'a>,
     provider: &str,
 ) -> Option<&'a str> {
-    project
+    let model = project
         .1
-        .filter(|_| project_provider(providers, project) == Some(provider))
+        .filter(|_| project_provider(providers, project) == Some(provider))?;
+    // A model the list dropped is the one of its family its session starts on.
+    Some(
+        providers
+            .get(provider)
+            .and_then(|p| p.resolved_model(model))
+            .map_or(model, |m| m.id.as_str()),
+    )
 }
 
 /// The provider, the model and the effort a new session starts on, when the user has not picked
@@ -146,6 +142,13 @@ impl Pick {
             return Pick::default();
         };
         let projects = project_model(providers, project, &provider.name);
+        // A model picked that the list dropped is the one of its family a session starts on.
+        if let Some(model) = &self.model
+            && provider.model(model).is_none()
+            && let Some(resolved) = provider.resolved_model(model)
+        {
+            self.model = Some(resolved.id.clone());
+        }
         if let (Some(model), Some(_)) = (&self.model, &provider.models)
             && provider.model(model).is_none()
             && projects != Some(model.as_str())
@@ -176,24 +179,6 @@ pub fn efforts_of<'a>(provider: &'a Provider, model: Option<&str>) -> Option<&'a
     model.efforts.as_ref()
 }
 
-/// What the composer's effort slot holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EffortSlot {
-    /// The model's efforts are known: the picker.
-    Picker,
-    /// They are being learned: the picker's skeleton.
-    Learning,
-    /// The model has none, or nothing will say them now: nothing.
-    Gone,
-}
-
-/// The room the effort picker takes besides its words (padding, gap and chevron), what a mono
-/// letter takes, and the width of its skeleton: how wide its slot is while it opens, folds or
-/// crossfades.
-const EFFORT_FRAME: f32 = 34.;
-const EFFORT_CHAR: f32 = 7.2;
-const EFFORT_SKELETON: f32 = 72.;
-
 /// What the composer picks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -212,8 +197,12 @@ pub struct Composer {
     focused: bool,
     /// The pictures that go with the first message.
     attached: Attachments,
+    /// What the daemon keeps of the draft, and the wait before it is written.
+    keeping: Keeping,
     places: Vec<PlaceChoice>,
     choice: Choice,
+    /// The machine the composer starts on is off: nothing is started on it.
+    machine_off: bool,
     /// A workspace made from the picker, which becomes the place once the daemon lists it.
     wanted: Option<String>,
     menu: Option<Menu>,
@@ -234,9 +223,6 @@ pub struct Composer {
     /// The mode the next session starts in: Auto each time the composer is shown and after each
     /// start, so that Full is never on by mistake.
     mode: Entity<ModeSwitch>,
-    /// What the effort slot showed last while it was there, the picker or its skeleton: what it
-    /// folds away with when the model has no effort.
-    effort_known: bool,
     /// How many times it was drawn: the tests count them.
     renders: usize,
     _subscriptions: Vec<Subscription>,
@@ -267,13 +253,15 @@ impl Composer {
         let mode = cx.new(|_| ModeSwitch::local(shell.clone()));
         let subscriptions = vec![
             cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
-                this.attached.chip_changed(event, cx)
+                this.attached.chip_changed(event, cx);
+                this.draft_changed(cx);
             }),
             cx.subscribe_in(
                 &field,
                 window,
                 |this, field, event, window, cx| match event {
                     InputEvent::Change => {
+                        this.draft_changed(cx);
                         let has_text = !field.read(cx).value().trim().is_empty();
                         this.set_flag(|this| &mut this.has_text, has_text, cx);
                         this.attached.follow(cx);
@@ -287,6 +275,7 @@ impl Composer {
         ];
         Self {
             shell,
+            keeping: Keeping::new(DraftKey::Project(project.clone())),
             project,
             attached: Attachments::new(tokens.clone()),
             tokens,
@@ -295,9 +284,9 @@ impl Composer {
             focused: false,
             places: Vec::new(),
             choice: Choice::Main,
+            machine_off: false,
             wanted: None,
             menu: None,
-            effort_known: false,
             providers: Providers::default(),
             default: (None, None),
             pick: Pick::default(),
@@ -309,6 +298,90 @@ impl Composer {
             mode,
             renders: 0,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// How many times the draft was written to the daemon.
+    pub fn drafts_sent(&self) -> usize {
+        self.keeping.sent()
+    }
+
+    fn draft_now(&self, cx: &App) -> Draft {
+        let (text, pictures) = self.attached.draft(cx);
+        Draft { text, pictures }
+    }
+
+    /// The draft changed: it is written 500 ms after the last change.
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.changed(cx, Self::keep_draft_now);
+    }
+
+    /// Writes the draft to the daemon now, when it does not hold it already. Asked once this
+    /// update is over: the shell is the one updating when a session started.
+    fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(write) = self.draft_to_write(cx, false) {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, _| shell.perform(write)).ok();
+            });
+        }
+    }
+
+    /// What the daemon must be asked to keep the draft as it is now, if it does not hold it
+    /// (`closing`: the window is closing, `Keeping::write`).
+    pub fn draft_to_write(&mut self, cx: &mut Context<Self>, closing: bool) -> Option<Command> {
+        let now = self.draft_now(cx);
+        self.keeping.write(now, closing)
+    }
+
+    /// Whether the daemon answered the read of the draft.
+    pub fn draft_was_read(&self) -> bool {
+        self.keeping.was_read()
+    }
+
+    /// The daemon answered the read of the draft: a composer still empty takes it, a field the
+    /// user typed in meanwhile keeps their words, and is written.
+    pub fn draft_read(
+        &mut self,
+        found: Option<Draft>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = !self.draft_now(cx).is_empty();
+        self.keeping.answered(found.clone());
+        match found {
+            Some(Draft { text, pictures }) if !typed => {
+                let restored = self.attached.restore_with(&text, pictures, Vec::new(), cx);
+                self.tokens
+                    .update(cx, |field, cx| field.set_value(restored, window, cx).ok());
+                let end = self.field.read(cx).value().len();
+                self.field
+                    .update(cx, |field, cx| field.set_selected_range(end..end, cx));
+                self.has_text = !self.field.read(cx).value().trim().is_empty();
+                cx.notify();
+            }
+            _ if typed => self.draft_changed(cx),
+            _ => {}
+        }
+    }
+
+    /// The daemon did not answer the read of the draft: nothing is written, and it is asked
+    /// again.
+    pub fn draft_read_failed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.read_failed(cx, Self::read_draft_again);
+    }
+
+    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+        let key = self.keeping.key().clone();
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
+            .ok();
+    }
+
+    /// The daemon answered a write of the draft.
+    pub fn draft_written(&mut self, result: Written, cx: &mut Context<Self>) {
+        if self.keeping.wrote(result) {
+            self.draft_changed(cx);
         }
     }
 
@@ -405,25 +478,9 @@ impl Composer {
         }
     }
 
-    /// What the model picker shows (`Pickers::model_shown`).
-    pub fn model_shown(&self) -> String {
-        self.pickers().model_shown()
-    }
-
-    /// What the effort picker shows (`Pickers::effort_shown`).
-    pub fn effort_shown(&self) -> String {
-        self.pickers().effort_shown()
-    }
-
-    /// What the provider, model or effort picker's list offers, in order.
-    pub fn entries(&self, menu: Menu) -> Vec<Entry> {
-        self.pickers().entries(menu)
-    }
-
     /// Picks the provider; its model and effort go back to its defaults (the project's model, when
     /// it is the provider the daemon gives it to).
     pub fn pick_provider(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.menu = None;
         if self.providers.get(name).is_some_and(Provider::offered) {
             self.picked = true;
             if self.pick.provider.as_deref() != Some(name) {
@@ -439,7 +496,6 @@ impl Composer {
 
     /// Picks the model, `None` for the provider's default; an effort it does not offer goes.
     pub fn pick_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
-        self.menu = None;
         self.picked = true;
         self.pick.model = model;
         self.pick = self
@@ -451,7 +507,6 @@ impl Composer {
 
     /// Picks the effort, `None` for the model's default.
     pub fn pick_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
-        self.menu = None;
         self.picked = true;
         self.pick.effort = effort;
         cx.notify();
@@ -583,6 +638,15 @@ impl Composer {
         cx.notify();
     }
 
+    /// The place is `main` again: another machine's places are not this one's.
+    fn back_to_main(&mut self, cx: &mut Context<Self>) {
+        self.wanted = None;
+        self.choice = Choice::Main;
+        self.error = None;
+        self.set_blocked();
+        cx.notify();
+    }
+
     /// Puts the caret at the end of what the field holds and gives it the focus: where "New
     /// session" lands, a draft kept or not.
     pub fn focus_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -631,6 +695,7 @@ impl Composer {
 
     fn can_send(&self) -> bool {
         self.blocked.is_none()
+            && !self.machine_off
             // Before the daemon listed the providers, it picks one itself, or says why not.
             && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
             && self.model_refused().is_none()
@@ -703,6 +768,8 @@ impl Composer {
             .update(cx, |field, cx| field.set_value(Vec::new(), window, cx).ok());
         self.has_text = false;
         self.attached.clear();
+        // Started: its draft goes now, not 500 ms later.
+        self.keep_draft_now(cx);
         self.reset_mode(cx);
         cx.notify();
         used
@@ -751,8 +818,8 @@ impl Composer {
             )
             .child(Attachments::button(cx, Self::attached_of))
             .child(div().flex_1())
-            .children(self.render_agent_pickers(cx))
-            .children(self.render_effort(window, cx))
+            .children(self.machine_picker(window, cx))
+            .children(self.render_agent_picker(cx))
             .child(self.mode.clone())
             .child(
                 Button::round("send", Icon::Send, "Start")
@@ -761,138 +828,122 @@ impl Composer {
             )
     }
 
-    /// The provider and model pickers, once a provider is picked.
-    fn render_agent_pickers(&self, cx: &mut Context<Self>) -> Vec<Dropdown> {
-        let Some(provider) = self.provider() else {
+    /// The machines that have the project, when there are several: this one first, each with its
+    /// state.
+    fn machine_choices(&self, cx: &App) -> Vec<crate::machines::Choice> {
+        let Some(shell) = self.shell.upgrade() else {
             return Vec::new();
         };
-        vec![
-            self.agent_picker(
-                "provider-picker",
-                Menu::Provider,
-                provider.title.clone(),
-                cx,
-            ),
-            self.agent_picker("model-picker", Menu::Model, self.model_shown(), cx),
-        ]
+        let shown = crate::machines::shown_machine(cx);
+        shell
+            .read(cx)
+            .machines()
+            .read(cx)
+            .machines()
+            .map(|read| crate::machines::project_choices(read, &self.project, shown.as_deref()))
+            .unwrap_or_default()
     }
 
-    fn agent_picker(
-        &self,
-        id: &'static str,
-        menu: Menu,
-        label: String,
-        cx: &mut Context<Self>,
-    ) -> Dropdown {
-        let picker = Dropdown::new(id, label)
-            .align(Align::End)
-            .width(px(280.))
-            .open(self.menu == Some(menu))
-            .on_toggle(Self::handler(cx, move |this, _, cx| {
-                this.toggle_menu(menu, cx)
-            }))
-            .items(self.agent_items(menu, cx));
-        match menu {
-            Menu::Provider => picker.strong(),
-            _ => picker.mono(),
-        }
-    }
-
-    /// What the effort slot holds for the pick.
-    pub fn effort_slot(&self) -> EffortSlot {
-        let Some(provider) = self.provider() else {
-            return EffortSlot::Gone;
-        };
-        match efforts_of(provider, self.pick.model.as_deref()) {
-            Some(efforts) if levels(efforts).next().is_some() => EffortSlot::Picker,
-            Some(_) => EffortSlot::Gone,
-            None if provider.models_learning => EffortSlot::Learning,
-            None => EffortSlot::Gone,
-        }
-    }
-
-    /// The effort picker, its skeleton while the model's efforts are being learned, or nothing
-    /// for a model without effort. Its room opens and it fades in, folds and fades out; the
-    /// skeleton crossfades into the picker. At rest it is its natural width.
-    fn render_effort(
+    /// The picker of the machine the session starts on, beside the agent's: only a project that
+    /// is on several machines has one. Choosing another brings it in front, on this project's
+    /// page, the place back on `main`.
+    fn machine_picker(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let slot = self.effort_slot();
-        let shown = fade(
-            "effort-slot-shown",
-            slot != EffortSlot::Gone,
-            PANEL,
-            window,
-            cx,
-        );
-        let known = fade("effort-slot-known", self.effort_known, PANEL, window, cx);
-        if slot == EffortSlot::Gone && shown == 0.0 {
+    ) -> Option<gpui_kit::AnyElement> {
+        // Once the project is on one machine only, the picker narrows and fades away with the
+        // choices it had.
+        let (choices, present) =
+            crate::machines::kept("machine-picker-kept", self.machine_choices(cx), window, cx);
+        if choices.is_empty() {
             return None;
         }
-        let label = self.effort_shown();
-        let picker_wide = EFFORT_FRAME + EFFORT_CHAR * label.chars().count() as f32;
-        let wide = EFFORT_SKELETON + (picker_wide - EFFORT_SKELETON) * known;
-        // Each is drawn from the frame it is wanted, transparent at first, until it has faded out.
-        let with_picker = self.effort_known || known > 0.0;
-        let with_skeleton = !self.effort_known || known < 1.0;
-        let moving = shown < 1.0 || (with_picker && with_skeleton);
-        let picker = with_picker.then(|| {
-            div()
-                .opacity(known)
-                .child(self.agent_picker("effort-picker", Menu::Effort, label, cx))
-        });
-        let skeleton = with_skeleton.then(|| {
-            let waiting = div()
-                .id("effort-picker-waiting")
-                .h(px(28.))
-                .px(space::SM)
-                .flex()
-                .items_center()
-                .aria_label(SharedString::from("The model's efforts are being learned"))
-                .child(
-                    Skeleton::new("effort-picker-skeleton").w(px(EFFORT_SKELETON) - space::SM * 2.),
-                )
-                .test_support();
-            // Under the picker while one crossfades into the other.
-            div()
-                .when(with_picker, |d| d.absolute().top_0().left_0())
-                .opacity(1.0 - known)
-                .child(waiting)
-        });
-        Some(
-            div()
-                .flex_none()
-                .relative()
-                .opacity(shown)
-                .when(moving, |d| d.w(px(wide * shown)).overflow_hidden())
-                .children(picker)
-                .children(skeleton),
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let (this, shell, project) = (
+            cx.entity().downgrade(),
+            self.shell.clone(),
+            self.project.clone(),
+        );
+        let picker = crate::machines::picker(
+            "machine-picker",
+            "machine-choice",
+            &choices,
+            chosen,
+            self.open_of(Menu::Machine),
+            Self::handler(cx, |this, _, cx| this.toggle_menu(Menu::Machine, cx)),
+            move |name, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.menu = None;
+                    this.back_to_main(cx);
+                })
+                .ok();
+                let project = project.clone();
+                shell
+                    .update(cx, |shell, cx| shell.choose_machine_for(name, &project, cx))
+                    .ok();
+            },
+        );
+        // It enters when the project turns out to be on several machines, and leaves when it is
+        // not any more.
+        crate::machines::narrowing(
+            "machine-picker-fold",
+            present,
+            enter("machine-picker-enter", 0, picker).into_any_element(),
+            window,
+            cx,
         )
     }
 
-    fn agent_items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<MenuItem> {
-        self.entries(menu)
-            .into_iter()
-            .map(|entry| {
-                let item = MenuItem::new(entry.id, entry.label).selected(entry.on);
-                let item = match entry.note {
-                    Some(note) => item.note(note),
-                    None => item,
-                };
-                match entry.pick {
-                    Some(pick) => item.on_click(Self::handler(cx, move |this, _, cx| match menu {
-                        Menu::Provider => {
-                            this.pick_provider(pick.provider.as_deref().unwrap_or_default(), cx)
-                        }
-                        Menu::Model => this.pick_model(pick.model.clone(), cx),
-                        _ => this.pick_effort(pick.effort.clone(), cx),
-                    })),
-                    None => item,
-                }
-            })
-            .collect()
+    /// Whether the list of `menu` is open.
+    fn open_of(&self, menu: Menu) -> bool {
+        self.menu == Some(menu)
+    }
+
+    /// The one picker of the agent, once a provider is picked.
+    fn render_agent_picker(&self, cx: &mut Context<Self>) -> Option<ModelPicker> {
+        let this = cx.entity().downgrade();
+        agent_picker(
+            "agent-picker",
+            &self.pickers(),
+            false,
+            move |chosen, effort, _, cx| {
+                this.update(cx, |this, cx| this.choose_agent(chosen, effort, cx))
+                    .ok();
+            },
+        )
+    }
+
+    /// The user chose in the agent picker: another provider (its model and effort go back to its
+    /// defaults), another model, or the effort of the model.
+    fn choose_agent(
+        &mut self,
+        chosen: Chosen,
+        effort: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let Chosen::Model(provider, model) = chosen else {
+            return;
+        };
+        if self.pick.provider.as_deref() != Some(provider.as_ref()) {
+            return self.pick_provider(&provider, cx);
+        }
+        // The recommended model is reported as none: what runs is its own, which a model the
+        // project gives would replace, so it is named then.
+        let own = self
+            .provider()
+            .and_then(Provider::default_model)
+            .map(|m| m.id.clone());
+        let model = model.map(|model| model.to_string());
+        if model.clone().or(own.clone()) != self.pick.model.clone().or(own.clone()) {
+            let named = self.pickers().projects_model().is_some();
+            return self.pick_model(model.or(own.filter(|_| named)), cx);
+        }
+        self.pick_effort(effort.map(|effort| effort.to_string()), cx);
     }
 
     /// No provider is ready to start a session: one line, and the way to the providers' settings.
@@ -1034,18 +1085,9 @@ impl Pickers<'_> {
         }
     }
 
-    /// What the effort picker shows: the effort picked, else the one the model runs with, else
-    /// that its efforts are not known yet.
-    pub fn effort_shown(&self) -> String {
-        self.picked_effort()
-            .cloned()
-            .or_else(|| self.own_effort().cloned())
-            .unwrap_or_else(|| "effort not known yet".to_owned())
-    }
-
     /// The effort picked. A `default` that a daemon reported or a store kept is none: the
     /// model's own effort is shown by its name, as the model's label is.
-    fn picked_effort(&self) -> Option<&String> {
+    pub fn picked_effort(&self) -> Option<&String> {
         self.pick.effort.as_ref().filter(|e| e.as_str() != DEFAULT)
     }
 
@@ -1072,141 +1114,54 @@ impl Pickers<'_> {
             .map_or_else(|| "the provider".to_owned(), |p| p.title.clone())
     }
 
-    /// What the provider, model or effort picker's list offers, in order.
-    pub fn entries(&self, menu: Menu) -> Vec<Entry> {
-        let item =
-            |id: String, label: String, note: Option<String>, on: bool, pick: Option<Pick>| Entry {
-                id,
-                label,
-                note,
-                on,
-                pick,
-            };
-        let pick = |provider: Option<&str>, model: Option<&str>, effort: Option<&str>| Pick {
-            provider: provider.map(str::to_owned),
-            model: model.map(str::to_owned),
-            effort: effort.map(str::to_owned),
-        };
-        let mut items = Vec::new();
-        let provider = self.provider();
-        let projects = self.projects_model();
-        match (menu, provider) {
-            (Menu::Provider, _) => {
-                for offered in self.providers.offered() {
-                    items.push(item(
-                        format!("provider-choice-{}", offered.name),
-                        offered.title.clone(),
-                        Some(offered.name.clone()),
-                        self.pick.provider.as_deref() == Some(offered.name.as_str()),
-                        Some(pick(Some(&offered.name), None, None)),
-                    ));
-                }
-            }
-            (Menu::Model, Some(provider)) => match &provider.models {
-                Some(models) => {
-                    let default = provider.default_model().map(|m| m.id.as_str());
-                    // An alias picked is the model it stands for; the provider's own `default`,
-                    // the model Flottille applies for it.
-                    let picked = self.pick.model.as_deref().map(|picked| match picked {
-                        DEFAULT => default,
-                        _ => Some(
-                            provider
-                                .model(picked)
-                                .and_then(|m| m.stands_for.as_deref())
-                                .unwrap_or(picked),
-                        ),
-                    });
-                    // The provider's own `default` is a row only when it runs a model no other
-                    // row does.
-                    for model in models
-                        .iter()
-                        .filter(|m| m.stands_for.is_none() && (m.id != DEFAULT || m.default))
-                    {
-                        let is_default = default == Some(model.id.as_str());
-                        let on = match picked {
-                            Some(picked) => picked == Some(model.id.as_str()),
-                            None => is_default,
-                        };
-                        let note = if projects == Some(model.id.as_str()) {
-                            Some("the project's".to_owned())
-                        } else {
-                            is_default.then(|| "recommended".to_owned())
-                        };
-                        // A model without effort says so here, the one place it is said: the
-                        // effort picker is not there for it.
-                        let none = model
-                            .efforts
-                            .as_ref()
-                            .is_some_and(|efforts| levels(efforts).next().is_none());
-                        let note = match (note, none) {
-                            (Some(note), true) => Some(format!("{note} · no effort")),
-                            (None, true) => Some("no effort".to_owned()),
-                            (note, false) => note,
-                        };
-                        // The default's row names no model: the daemon applies the default by
-                        // its name. Unless the project's model would then be taken instead.
-                        let asked = (!is_default || projects.is_some()).then_some(&model.id);
-                        items.push(item(
-                            format!("model-choice-{}", model.id),
-                            model.label(),
-                            note,
-                            on,
-                            Some(pick(None, asked.map(String::as_str), None)),
-                        ));
-                    }
-                }
-                // No agent is run just to list them: the first session of the provider says them.
-                None => {
-                    if let Some(model) = &self.pick.model {
-                        items.push(item(
-                            format!("model-choice-{model}"),
-                            model.clone(),
-                            (projects == Some(model.as_str())).then(|| "the project's".into()),
-                            true,
-                            Some(pick(None, Some(model), None)),
-                        ));
-                    }
-                    items.push(item(
-                        "models-unknown".into(),
-                        format!(
-                            "{}'s models are known once one of its sessions opened",
-                            provider.title
-                        ),
-                        None,
-                        false,
-                        None,
-                    ));
-                }
-            },
-            (Menu::Effort, Some(provider)) => {
-                let own = self.own_effort();
-                for effort in efforts_of(provider, self.pick.model.as_deref())
-                    .into_iter()
-                    .flat_map(|efforts| levels(efforts))
-                {
-                    let default = own == Some(effort);
-                    let on = match self.picked_effort() {
-                        Some(picked) => picked == effort,
-                        None => default,
-                    };
-                    // The model's own effort's row asks none: the model's default is followed.
-                    items.push(item(
-                        format!("effort-choice-{effort}"),
-                        effort.clone(),
-                        default.then(|| "recommended".to_owned()),
-                        on,
-                        Some(pick(None, None, (!default).then_some(effort.as_str()))),
-                    ));
-                }
-            }
-            _ => {}
-        }
-        items
-    }
-
     pub fn provider(&self) -> Option<&Provider> {
         self.providers.get(self.pick.provider.as_deref()?)
     }
+}
+
+/// The one control that picks the agent, provider, model and effort, for `pickers`' pick: the
+/// composer that starts a session and a session's Reply dock build it here, never twice. With
+/// `own` the provider of the pick is the only one offered (a session never changes its provider).
+/// `None` while no provider is picked or offered, or when it offers no model. A model the
+/// provider does not list (the project's) is offered too, so that the picker says what runs.
+pub fn agent_picker(
+    id: &'static str,
+    pickers: &Pickers,
+    own: bool,
+    on_choose: impl Fn(Chosen, Option<SharedString>, &mut Window, &mut App) + 'static,
+) -> Option<ModelPicker> {
+    let provider = pickers.provider().filter(|p| p.offered())?;
+    let projects = pickers
+        .projects_model()
+        .map(|model| (provider.name.as_str(), model));
+    let mut models = pickers
+        .providers
+        .agent_entries(own.then_some(provider.name.as_str()), projects);
+    let model = pickers
+        .pick
+        .model
+        .as_deref()
+        .filter(|model| *model != DEFAULT)
+        .map(|model| provider.model(model).map_or(model, |m| m.id.as_str()));
+    if let Some(model) = model
+        && provider.model(model).is_none()
+    {
+        models.push(ModelEntry::new(
+            provider.name.clone(),
+            provider.title.clone(),
+            Some(model.to_owned().into()),
+            pickers.model_shown(),
+        ));
+    }
+    if models.is_empty() {
+        return None;
+    }
+    Some(
+        ModelPicker::new(id, pickers.providers.chosen(&provider.name, model))
+            .models(models)
+            .effort(pickers.picked_effort().cloned().map(Into::into))
+            .on_choose(on_choose),
+    )
 }
 
 /// The provider's own `default` entry, a model or an effort: the window shows what it stands for,
@@ -1240,12 +1195,15 @@ pub fn agents_label(n: usize) -> String {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
-        match self.effort_slot() {
-            EffortSlot::Picker => self.effort_known = true,
-            EffortSlot::Learning => self.effort_known = false,
-            EffortSlot::Gone => {}
-        }
         let p = palette(cx);
+        // The machine in front is off: what it says, and the way out, which is the picker.
+        let machine_off = crate::machines::held(cx)
+            .filter(|holding| holding.offline)
+            .map(|holding| {
+                let (name, state) = holding.line.split_once(' ').unwrap_or((&holding.line, ""));
+                format!("{name} is {state}: pick another machine, or wait for it.")
+            });
+        self.machine_off = machine_off.is_some();
         let focus = fade("composer-focus", self.focused, HOVER, window, cx);
         self.attached.place(window, cx);
         let strip = self.attached.strip(window, cx, |this, at, window, cx| {
@@ -1299,6 +1257,23 @@ impl Render for Composer {
         )
         .child(self.render_pickers(window, cx).into_any_element())
         .children(self.render_not_ready(cx))
+        .child(presence_of(
+            "composer-machine-off-line",
+            machine_off.map(SharedString::from),
+            move |why| {
+                div()
+                    .id("composer-machine-off")
+                    .aria_label(why.clone())
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(why)
+                    .test_support()
+                    .into_any_element()
+            },
+        ))
         .child(presence_of(
             "composer-model-refused-line",
             self.model_refused().map(SharedString::from),

@@ -689,6 +689,13 @@ or without a spec. Project-scoped.
   one, or when the project's instructions say to), not on withholding the tool: withheld, a lead
   asked by the user for a review of a session it leads answered it had no review tool and built a
   review of its own with `agent_launch`.
+- **A pull request** (#1091): a root asked by the user to review a pull request (a colleague's, or
+  one of theirs already pushed, possibly only its last commits) calls `review {action: start,
+  pull_request, repository?, from?}`. It needs no session's workspace: the daemon fetches the pull
+  request's head into a detached worktree of its own (`tools.md`, "Review"), the pilot is the
+  caller's child, and the findings are delivered to the caller, never posted on the forge. A lead
+  asked for this answered, before the tool said so, that it had no review tool and read the diff by
+  hand with `forge` and `run`.
 - **A session a lead leads** (`agent_launch` `led`, `tools.md`, "Sessions an agent starts") is a
   root of its own, in its own workspace, which the window shows under its lead: every door reviews
   it as any session (`/review` in its composer, `flottille review <session>`, its pull request),
@@ -756,6 +763,12 @@ As built (#338):
   kept. `review.finding` marks one. They show under the review's row of the session's rail and,
   for a spec's development, on the spec's page.
 - **Guidance**: `review.md`, 4,000 characters, edited on Review's page.
+- **A pull request's review** (#1091) is a review whose row names the pull request (`pull_request`:
+  its repository, number, head and place) and whose `session` is the caller; it has no workspace,
+  no round after the first and no spec. The agents of it have the place as their own folder (the
+  frame's `launch` takes it, `Launched.at`), so that the gate sees their commands inside their
+  place. Its findings are kept under the caller's identifiers (`F1`, `F2`…) beside those of the
+  caller's own change, which they never count as a round of.
 - **Data**: `ext_review_reviews`, `ext_review_agents`, `ext_review_findings`. The core's scan
   looks for `extensions::review` alone, `review` being the forge's word too (`forge::review`).
 
@@ -1295,7 +1308,7 @@ entry the declaration names, with the entry's host (its `url`, or "no address") 
 differ, under a warning (an entry that names no address is said as such, `bound to no address`, and
 tagged `No address`, not as another host), and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
 once, as the rail's Deny: it writes nothing, so nothing is confirmed). **Edit** opens the server's
-form with the agent's values, the secrets of its requests among them, and says it answers the
+form over the page the user is on (the session: it is not left) with the agent's values, the secrets of its requests among them, and says it answers the
 request `#N`: its Save writes the user's values and answers the request, its Cancel leaves it
 waiting (`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
 writes: a request accepted meanwhile is refused to the Save, and only one of them writes. That Save
@@ -1308,8 +1321,9 @@ unfold under **Where its secrets go**, and fold away once the user mended it. Wh
 shows a **New entry…** button per missing entry beside that answer (only that one: no other
 failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
 dialog on the entry's name and, as its address, the host the request sends it to, the secret left
-for the user to type there (the request's dialog never holds it); saved or closed, the request's
-dialog is back, and Accept goes through once the entry exists. **Accepting a request whose write needs a review leads into that review** (#1031). The edit is
+for the user to type there (the request's dialog never holds it); it opens over the request's
+dialog, which stays under it: Escape or Cancel returns to it, and once the entry is saved it
+reads the request again, and Accept goes through once the entry exists. **Accepting a request whose write needs a review leads into that review** (#1031). The edit is
 pinned only once read, so an accepted `add` or `edit` whose server now announces an action nobody
 read (a new one, or one that changed) is written and then waits **awaiting review**. The daemon's
 answer to the Accept says so (`approval.approve` waits for a connection's write, as the user's own
@@ -1372,6 +1386,18 @@ browser is opened by the client the user asked from, with the system's default h
   the server's, not the sign-in's, and no review is asked.
 - Not signed in, the server's `401` makes a review or a call fail saying to sign in.
   `client_id` is not part of what trust is given to: changing it asks for no review.
+
+**Shared with another machine** (#833, `docs/remote.md`, "Connections"). An `https://` connection
+goes to another machine of the user's, a runner, with **Share with…** in its row's menu (or
+`flottille connection share <name> --machine <m>`): its declaration, and the vault entries it names
+when the user turns on **Share its vault entries too** in the dialog, which lists the runners
+online. A command, an `http://` URL and an `https://` URL of this machine are this machine's own and
+are not offered (`refused` by the daemon). The tokens of a sign-in never go: each machine signs in
+for itself. The toast of a share offers **Sign in on <machine>**, and so does the row's menu while
+the window runs; it signs in the copy there, its redirect carried back through a tunnel, and a
+line under the row says the copy's state (`On server: not signed in yet`, `signing in, finish it in
+your browser`, `signed in`): it unfolds when the connection is shared, and its words fade from one
+state to the next. The dialog rises and fades as every dialog does.
 
 **As built (#560, the daemon).** The frame gained `Scope::Global` (no switch nor setting of a
 project: a project's `[extensions.connections]` is refused), `declared` (the extension's own
@@ -1534,8 +1560,9 @@ way in:
   the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. That folder is the one part of
   the user's runtime folder Landlock leaves within the server's and its login's reach
   (`docs/vault.md`, "The runtime folder"); the bus's address is not given, and the rest of the
-  runtime folder is denied where Landlock allows it. Below Landlock's ninth ABI a process that
-  guesses the bus's path can still connect to it, a gap of every run's (#976). When the folder cannot be made
+  runtime folder is denied where Landlock allows it, and is an empty folder in the server's
+  private mount namespace, with its display folder alone put back in it, so no process of its
+  connects to the bus by its path (`docs/vault.md`, "The runtime folder"). When the folder cannot be made
   (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
   daemon says why, in its log, in the answer of the call that asked (`Flottille: the browser is
   not shown, it runs headless: …`) and in the connection's `headless` (kept there while a call

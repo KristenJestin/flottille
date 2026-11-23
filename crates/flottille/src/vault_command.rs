@@ -70,6 +70,17 @@ pub enum VaultAction {
         /// The socket of the login that runs
         socket: std::path::PathBuf,
     },
+    /// Share an entry with another machine of yours (--machine): its secret goes, signed by this
+    /// device, from this machine's keyring into that machine's, never into a file
+    Share {
+        name: String,
+        /// The machine it goes to: the command's --machine, which here names the machine the
+        /// entry is shared with, not one this command drives.
+        #[arg(skip)]
+        machine: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove an entry and its secret from the keyring
     Remove {
         name: String,
@@ -82,6 +93,14 @@ pub enum VaultAction {
 }
 
 pub fn run(paths: &Paths, action: VaultAction) -> Result<ExitCode> {
+    if let VaultAction::Share {
+        name,
+        machine,
+        json,
+    } = action
+    {
+        return share(paths, &name, machine, json);
+    }
     // Read before the daemon is reached: a prompt is the first thing the user sees.
     let secret = match &action {
         VaultAction::Set { name, .. } => Some(read_secret(name)?),
@@ -158,11 +177,42 @@ pub fn run(paths: &Paths, action: VaultAction) -> Result<ExitCode> {
             (removed, json, text)
         }
         VaultAction::Provide { .. } => unreachable!("answered before any folder is read"),
+        VaultAction::Share { .. } => unreachable!("shared above"),
     };
     if json {
         println!("{answer}");
     } else {
         println!("{text}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `flottille vault share <name> --machine <machine>`: a request of this machine's, signed with
+/// this device's key, which the daemon never holds, and which goes with the secret for the other
+/// machine to check (`docs/remote.md`, "Vault entries").
+fn share(paths: &Paths, name: &str, machine: Option<String>, json: bool) -> Result<ExitCode> {
+    let Some(machine) = machine else {
+        return Err(
+            "name the machine to share it with: flottille vault share <name> --machine \
+                    <machine>"
+                .into(),
+        );
+    };
+    let said = |error: Box<dyn std::error::Error>| in_full(paths, &error.to_string());
+    let this = Client::connect_or_start(paths)?
+        .request("remote.machines", json!({}))
+        .map_err(said)?["this"]["name"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or("this machine is no member of the user's yet: flottille remote pair")?;
+    crate::client::aim(this);
+    let shared = Client::connect_or_start(paths)?
+        .request("vault.share", json!({"name": name, "machine": machine}))
+        .map_err(said)?;
+    if json {
+        println!("{shared}");
+    } else {
+        println!("Shared {name} with {machine}: its keyring holds it now.");
     }
     Ok(ExitCode::SUCCESS)
 }

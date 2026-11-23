@@ -2,7 +2,7 @@
 //! row shows when it is clicked, and the rows no longer drawn keep nothing. On GPUI's test
 //! platform with no daemon; no window opens on a screen.
 
-mod kit_common;
+use crate::kit_common;
 
 use kit_common::{Desktop, init};
 

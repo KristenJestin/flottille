@@ -30,6 +30,14 @@ pub fn repositories(folder: &Path) -> io::Result<Vec<String>> {
     Ok(found)
 }
 
+/// The folders inside `folder` a client may open or pick, by name, in alphabetical order: hidden
+/// folders and links are left out, as for [`repositories`].
+pub fn folders(folder: &Path) -> io::Result<Vec<String>> {
+    let mut names = subfolders(folder)?;
+    names.sort();
+    Ok(names)
+}
+
 fn holds_git(folder: &Path) -> bool {
     folder.join(".git").symlink_metadata().is_ok()
 }

@@ -36,7 +36,6 @@ use crate::locks::{Guard, Lock};
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::providers;
-use crate::rules;
 use crate::run_methods;
 use crate::runs;
 use crate::setup;
@@ -47,6 +46,7 @@ use crate::tickets;
 use crate::tree;
 use crate::watchdog;
 use crate::workspaces;
+use crate::{about, rules};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -67,6 +67,50 @@ const VAULT_LOAD: Duration = Duration::from_secs(5);
 /// How long a refused client is answered before it is let go.
 const REFUSED_FOR: Duration = Duration::from_secs(10);
 
+tokio::task_local! {
+    /// The member whose device signed the request being served, for a client of another
+    /// machine: the events its serving emits name it (`docs/remote.md`, "Requests from another
+    /// machine's clients").
+    static ASKED_BY: Arc<Asked>;
+}
+
+/// A request a device of the user's signed, being served.
+pub(crate) struct Asked {
+    /// The member whose device signed it.
+    pub device: String,
+    /// The public key that signed it: what tells that device from another one given its name.
+    pub key: flottille_link::PublicKey,
+    /// The request as the device signed it, checked already: what a method that carries the
+    /// user's consent further sends on (`vault.share`), for the next machine to check it again.
+    pub signed: String,
+}
+
+/// The request a device signed that is being served, when it is one.
+pub(crate) fn asked() -> Option<Arc<Asked>> {
+    ASKED_BY.try_with(Arc::clone).ok()
+}
+
+/// `future` run as the member `asked_by` asked, when one did.
+async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<Asked>>, future: F) -> F::Output {
+    match asked_by {
+        Some(device) => ASKED_BY.scope(device, future).await,
+        None => future.await,
+    }
+}
+
+/// `data` naming `device` (`device`), unless it names one already.
+fn naming(data: Value, device: &str) -> Value {
+    match data {
+        Value::Object(mut object) => {
+            object
+                .entry("device")
+                .or_insert_with(|| Value::String(device.to_owned()));
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
 pub fn run(paths: &Paths) -> Result<()> {
     // What the daemon's descendants leave behind when their parent ends is taken in by the
     // daemon, not by init: a process an agent started stays its descendant, however it detached,
@@ -78,11 +122,44 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
+    // Before anything else, holding the lock: no other daemon runs from the binary it replaces.
+    match crate::update::apply_staged(paths) {
+        crate::update::Staged::Nothing => {}
+        crate::update::Staged::Refused(why) => {
+            eprintln!("flottille daemon: {why}");
+            crate::updates::refused_at_start(why);
+        }
+        // An update that was applied leaves this behind it: the log says it, the window does not.
+        crate::update::Staged::Leftover(why) => eprintln!("flottille daemon: {why}"),
+        crate::update::Staged::Applied(binary) => {
+            eprintln!(
+                "flottille daemon: the build staged is applied: starting again from {}",
+                binary.display()
+            );
+            drop(_lock);
+            return Err(start_again(&binary));
+        }
+    }
+    // This build is the one that runs now: what ran before it is what is new since.
+    crate::whatsnew::record(paths);
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
+    // The folders of pushes a daemon that died left: none is in use.
+    let _ = std::fs::remove_dir_all(paths.runtime.join("pushes"));
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
+    crate::mounts::find_bus();
+    if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
+        eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
+    }
+    // Before anything runs: the git a push the gate let through runs, and the daemon's own,
+    // never one planted later.
+    crate::git::find_git();
+    // Before any repository is read: the user's own credential helpers, the only ones it runs.
+    crate::git::find_helpers();
+    // Before anything runs: what a push reads, which every run has read-only.
+    crate::pushed::find(true);
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
@@ -96,7 +173,26 @@ pub fn run(paths: &Paths) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(paths, store, projects, machine_key))
+    let served = runtime.block_on(serve(paths, store, projects, machine_key));
+    // Everything it held is let go before another daemon takes its place.
+    drop(runtime);
+    if served.is_ok() && crate::updates::restart_asked() {
+        drop(_store_lock);
+        drop(_lock);
+        return Err(start_again(&crate::update::binary()?));
+    }
+    served
+}
+
+/// Becomes `<binary> daemon`, in this process: it never returns but with why it could not.
+fn start_again(binary: &std::path::Path) -> Box<dyn std::error::Error> {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(binary).arg("daemon").exec();
+    format!(
+        "cannot start the daemon again from {}: {error}",
+        binary.display()
+    )
+    .into()
 }
 
 /// The lock is held for the daemon's whole life: the kernel lets go of it when the process ends,
@@ -167,6 +263,12 @@ pub struct Daemon {
     /// Held while a removal decides which branches to delete and deletes them, one removal at a
     /// time: two removals each counting its branch as kept in the other's would delete both.
     pub landing: tokio::sync::Mutex<()>,
+    /// Held while a launch from another machine recognises its project again and makes it: two
+    /// launches of a new project at once make it once, the second taking the first's.
+    pub making_projects: tokio::sync::Mutex<()>,
+    /// Held while the notification centre is kept: the keeper and the sweep each read the events
+    /// after the cursor, and two at once would each write what the other did not see.
+    pub notifying: std::sync::Mutex<()>,
     /// The projects being removed: no agent, workspace or command run starts in them until they
     /// are forgotten or the removal stopped (`projects::refuse_removing`).
     pub removing_projects: Lock<HashSet<String>>,
@@ -214,9 +316,16 @@ pub struct Daemon {
     pub extensions: extensions::Live,
     /// What the watchdog reads: the requests that wait, and whether the runtime runs.
     pub watch: Arc<watchdog::Watch>,
-    /// The link to the user's other machines, with remote on: unset with remote off, the reason
-    /// when it could not start.
-    pub remote: std::sync::OnceLock<std::result::Result<Arc<crate::link::Remote>, String>>,
+    /// The link to the user's other machines, with remote on: none with remote off, the reason
+    /// when it could not start. Remote is turned on and off while the daemon runs
+    /// (`remote_config`), so it is read through [`Daemon::link`].
+    remote: std::sync::RwLock<Option<std::result::Result<Arc<crate::link::Remote>, String>>>,
+    /// What the daemon knows of an update of Flottille (`updates`).
+    pub updates: crate::updates::Live,
+    /// What is new since the version last run (`whatsnew`).
+    pub whatsnew: crate::whatsnew::Live,
+    /// The pictures and texts of messages sent in chunks, waiting for their messages (`uploads`).
+    pub uploads: crate::uploads::Uploads,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -236,7 +345,47 @@ struct Subscription {
     last: u64,
 }
 
+/// Starts the link with `key`, where `daemon.toml` says it listens, and keeps it as the daemon's
+/// (or, when it could not start, why). Called at the daemon's start with remote on, and when the
+/// user turns remote on.
+pub(crate) fn start_link(
+    daemon: &Arc<Daemon>,
+    key: flottille_link::MachineKey,
+) -> std::result::Result<(), String> {
+    // Held weakly: the daemon holds the link, which must not hold the daemon.
+    let emitting = Arc::downgrade(daemon);
+    let emit: crate::link::Emit = Arc::new(move |name: &str, data: Value| {
+        if let Some(daemon) = emitting.upgrade()
+            && let Err(error) = daemon.emit(name, data)
+        {
+            eprintln!("flottille daemon: the event {name} was not stored: {error}");
+        }
+    });
+    let link = crate::link::start(
+        &daemon.paths,
+        key,
+        daemon.stopping.subscribe(),
+        emit,
+        Arc::downgrade(daemon),
+    );
+    daemon.set_link(Some(link.clone()));
+    link.map(|_| ())
+}
+
 impl Daemon {
+    /// The link to the other machines: none while remote is off, the reason when it could not
+    /// start.
+    pub fn link(&self) -> Option<std::result::Result<Arc<crate::link::Remote>, String>> {
+        self.remote.read().unwrap().clone()
+    }
+
+    pub(crate) fn set_link(
+        &self,
+        link: Option<std::result::Result<Arc<crate::link::Remote>, String>>,
+    ) {
+        *self.remote.write().unwrap() = link;
+    }
+
     /// A daemon over its store and projects, its tools served on `port`.
     pub fn new(
         paths: &Paths,
@@ -260,6 +409,8 @@ impl Daemon {
             preparing: Lock::named("preparing", HashSet::new()),
             removing_workspaces: Lock::named("removing_workspaces", HashSet::new()),
             landing: tokio::sync::Mutex::new(()),
+            making_projects: tokio::sync::Mutex::new(()),
+            notifying: std::sync::Mutex::new(()),
             removing_projects: Lock::named("removing_projects", HashSet::new()),
             removing: Lock::named("removing", HashMap::new()),
             step_outputs: Lock::named("step_outputs", HashMap::new()),
@@ -281,15 +432,32 @@ impl Daemon {
             vault: crate::vault::Keyring::open(paths),
             extensions: extensions::Live::default(),
             watch: Arc::default(),
-            remote: std::sync::OnceLock::new(),
+            remote: std::sync::RwLock::new(None),
+            updates: crate::updates::Live::default(),
+            whatsnew: crate::whatsnew::Live::default(),
+            uploads: crate::uploads::Uploads::default(),
             stopping: watch::Sender::new(false),
         }
+    }
+
+    /// Asks the daemon to stop, as `daemon.stop` does.
+    pub fn stop(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    /// Becomes true when the daemon stops.
+    pub fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
     }
 
     /// Stores the event and hands it to the subscribers under one lock, so that they see the
     /// events in the order of their numbers.
     #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
+        let data = match ASKED_BY.try_with(Arc::clone) {
+            Ok(asked) => naming(data, &asked.device),
+            Err(_) => data,
+        };
         let events = self.stored();
         let event = events.store.append_event(name, data)?;
         self.developer.event(&event);
@@ -520,12 +688,12 @@ async fn serve(
         Some(bus),
     ));
     watchdog::start(&daemon.watch)?;
-    if let Some(key) = machine_key {
-        let link = crate::link::start(paths, key, daemon.stopping.subscribe());
-        if let Err(why) = &link {
-            eprintln!("flottille daemon: the link is not up: {why}");
-        }
-        let _ = daemon.remote.set(link);
+    // What came in chunks to a daemon that stopped waits for no message any more.
+    crate::uploads::clear(&daemon);
+    if let Some(key) = machine_key
+        && let Err(why) = start_link(&daemon, key)
+    {
+        eprintln!("flottille daemon: the link is not up: {why}");
     }
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -559,6 +727,9 @@ async fn serve(
     crate::subscriptions::resume_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
+    // The drafts whose session or project went while no daemon ran, and their pictures.
+    let sweeping = daemon.clone();
+    let _ = tokio::task::spawn_blocking(move || crate::drafts::sweep_orphans(&sweeping)).await;
     // Before the agents' tools are served: a call would start a connection's server.
     extensions::close_left_at_start(&daemon).await;
     let picking = daemon.clone();
@@ -570,6 +741,15 @@ async fn serve(
         daemon.stopping.subscribe(),
     ));
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
+    tokio::spawn(crate::notifications::run(
+        daemon.clone(),
+        daemon.stopping.subscribe(),
+    ));
+    tokio::spawn(crate::updates::watch(
+        daemon.clone(),
+        daemon.stopping.subscribe(),
+    ));
+    tokio::spawn(crate::whatsnew::watch(daemon.clone()));
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
     crate::quota::check(&daemon);
@@ -578,7 +758,7 @@ async fn serve(
     let reason = loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => match started_by_an_agent(&stream) {
+                Ok((stream, _)) => match started_by_an_agent(&stream, std::process::id()) {
                     Some(pid) => {
                         eprintln!(
                             "flottille daemon: refused a client started by an agent (pid {pid})"
@@ -611,7 +791,7 @@ async fn serve(
     if judge(socket_identity(&socket), ours) == Socket::Ours {
         std::fs::remove_file(&socket)?;
     }
-    if let Some(Ok(remote)) = daemon.remote.get() {
+    if let Some(Ok(remote)) = daemon.link() {
         remote.close().await;
     }
     agents::stop_all(&daemon).await;
@@ -641,18 +821,18 @@ async fn wind_down(
     Ok(())
 }
 
-/// The pid of a client that descends from the daemon. Everything the daemon starts is an agent,
+/// The pid of a client that descends from the daemon, `daemon_pid`. Everything the daemon starts is an agent,
 /// a command of one, or a program of the daemon's own (git, a forge's command line, a provider's
 /// `--version`), and none of them is a client of the daemon: such a client was started by an
 /// agent. A client whose ancestry cannot be read is refused too.
-fn started_by_an_agent(stream: &UnixStream) -> Option<u32> {
+fn started_by_an_agent(stream: &UnixStream, daemon_pid: u32) -> Option<u32> {
     let pid = stream
         .peer_cred()
         .ok()
         .and_then(|credentials| credentials.pid())
         .and_then(|pid| u32::try_from(pid).ok())
         .unwrap_or(0);
-    children::descends_from(pid, std::process::id()).then_some(pid)
+    children::descends_from(pid, daemon_pid).then_some(pid)
 }
 
 /// Answers each request of a refused client with the refusal, until it leaves or `REFUSED_FOR`
@@ -676,7 +856,22 @@ async fn refuse(stream: UnixStream) {
     .await;
 }
 
+/// A request a device signed, checked, served on `stream` as one of a local client's: what its
+/// serving emits names its member, `asked.device`.
+/// Boxed, its type named: a connection carries requests that end up here.
+pub(crate) fn served_for(
+    daemon: Arc<Daemon>,
+    stream: UnixStream,
+    asked: Asked,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(ASKED_BY.scope(Arc::new(asked), connection(daemon, stream)))
+}
+
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
+    let asked_by = ASKED_BY.try_with(Arc::clone).ok();
+    // A watch carried to another machine whose link dropped ends the connection: its client
+    // resumes it after the last event it saw.
+    let (dropped, mut watch_dropped) = mpsc::channel::<()>(1);
     let (read, mut write) = stream.into_split();
     let (out, mut outgoing) = mpsc::channel::<Message>(256);
     let writer = tokio::spawn(async move {
@@ -692,6 +887,10 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut lines = BufReader::new(read).lines();
     let mut stopping = daemon.stopping.subscribe();
     let mut subscriptions = JoinSet::new();
+    // The requests carried to a machine: ended with the connection, so that a watch carried does
+    // not outlive its client (its stream to the other machine closes, and that machine ends its
+    // subscription).
+    let mut carried = JoinSet::new();
     // The workspaces this connection watches: their forges are read again while it stays open.
     let mut watched: HashMap<(String, String), forge::Watch> = HashMap::new();
     // Held while this connection is a window's.
@@ -700,8 +899,27 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         let line = tokio::select! {
             line = lines.next_line() => line,
             _ = stopping.wait_for(|stopping| *stopping) => break false,
+            _ = watch_dropped.recv() => break true,
+            Some(_) = carried.join_next(), if !carried.is_empty() => continue,
         };
         let Ok(Some(line)) = line else { break true };
+        // A request a client signed for a machine it names (`docs/remote.md`, "Requests from
+        // another machine's clients"): carried, never served here as it is. Never on a
+        // connection serving another machine's client, which carries one request of its own.
+        if asked_by.is_none()
+            && line.contains("\"machine\"")
+            && let Ok(Value::Object(request)) = serde_json::from_str::<Value>(&line)
+            && request.contains_key("machine")
+        {
+            let (daemon, out, dropped) = (daemon.clone(), out.clone(), dropped.clone());
+            carried.spawn(async move {
+                if crate::link::forward(daemon, Value::Object(request), out).await {
+                    // Full: it is said already.
+                    let _ = dropped.try_send(());
+                }
+            });
+            continue;
+        }
         let request = match serde_json::from_str::<Request>(&line) {
             Ok(request) => request,
             Err(error) => {
@@ -730,6 +948,17 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             watched.insert((asked.project, asked.name), watch);
         }
         if request.method == "events.watch"
+            && let Ok(WatchParams {
+                forge: Some([project, name]),
+                ..
+            }) = serde_json::from_value::<WatchParams>(request.params.clone())
+            && !watched.contains_key(&(project.clone(), name.clone()))
+            && let Ok(Some(workspace)) = daemon.read(|store| store.workspace(&project, &name))
+        {
+            let watch = forge::watch(&daemon, &workspace);
+            watched.insert((project, name), watch);
+        }
+        if request.method == "events.watch"
             && window.is_none()
             && let Ok(asked) = serde_json::from_value::<WatchParams>(request.params.clone())
             && asked.client.as_deref() == Some("window")
@@ -742,6 +971,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "workspace.",
             "agent.",
             "approval.",
+            "draft.",
             "test.",
             "provider.",
             "run.",
@@ -749,6 +979,9 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "items.",
             "vault.",
             "remote.",
+            "tunnel.",
+            "whatsnew.",
+            "signin.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -772,11 +1005,13 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             || extensions::answers(&request.method)
         {
             let (daemon, out) = (daemon.clone(), out.clone());
-            tokio::spawn(async move {
+            tokio::spawn(as_asked_by(asked_by.clone(), async move {
                 let answer = if request.method.starts_with("agent.") {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
                     approvals::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("draft.") {
+                    crate::drafts::answer(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("run.") {
                     run_methods::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("service.") {
@@ -785,6 +1020,12 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::vault::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("remote.") {
                     crate::link::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("tunnel.") {
+                    crate::tunnel::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("signin.") {
+                    crate::sign_in::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("whatsnew.") {
+                    crate::whatsnew::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
@@ -830,7 +1071,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     Err(failure) => failure.answer(Some(request.id)),
                 };
                 let _ = out.send(answer).await;
-            });
+            }));
             continue;
         }
         // Only these count for the watchdog: one answered by a task of its own may wait on work
@@ -848,6 +1089,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     };
 
+    carried.abort_all();
     // A client that left reads nothing more; a stopping daemon lets subscribers send the rest.
     if client_left {
         subscriptions.abort_all();
@@ -908,6 +1150,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        method if method.starts_with("notifications.") => (
+            match crate::notifications::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
@@ -917,6 +1166,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("appearance.") => (
             match crate::appearance::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("window.") => (
+            match crate::drafts::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
@@ -936,8 +1192,22 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        method if method.starts_with("travelled_folder.") => (
+            match crate::travelled_folder::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("workspaces_folder.") => (
             match crate::workspaces_folder::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("update.") => (
+            match crate::updates::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
@@ -959,6 +1229,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("judge.") => (
             match judge::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("about.") => (
+            match about::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
@@ -1045,6 +1322,7 @@ fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
             "waiting_for_user": approvals::waiting_for_user(daemon)?,
             "failed": count(&[AgentState::Failed]),
         },
+        "sandbox": crate::mounts::sandbox(),
     }))
 }
 
@@ -1086,12 +1364,64 @@ async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
 
     use super::*;
 
     const OURS: (u64, u64) = (1, 2);
+
+    /// A client whose credentials the kernel gives as this process's: the two ends of a pair are
+    /// made here. The refusal of a client started by an agent is reached without any run of one,
+    /// which Landlock may keep from the socket where the kernel has it.
+    #[tokio::test]
+    async fn a_client_that_descends_from_the_daemon_is_refused_and_told_why() {
+        let (client, served) = UnixStream::pair().unwrap();
+        // The daemon is this process's parent: this process, the client, descends from it.
+        let daemon = std::os::unix::process::parent_id();
+        assert_eq!(
+            started_by_an_agent(&served, daemon),
+            Some(std::process::id())
+        );
+        // Its own descendant too: a client is no stranger to itself.
+        assert_eq!(
+            started_by_an_agent(&served, std::process::id()),
+            Some(std::process::id())
+        );
+
+        let refusing = tokio::spawn(refuse(served));
+        let (read, mut write) = client.into_split();
+        write
+            .write_all(b"{\"id\":\"1\",\"method\":\"project.list\"}\n")
+            .await
+            .unwrap();
+        let line = BufReader::new(read)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["id"], "1");
+        assert_eq!(answer["error"]["code"], "refused");
+        assert_eq!(answer["error"]["message"], REFUSED_CLIENT);
+        drop(write);
+        refusing.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_does_not_descend_from_the_daemon_is_served() {
+        let (_client, served) = UnixStream::pair().unwrap();
+        // A process of its own is the daemon here: this one is not its descendant.
+        let mut daemon = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let stranger = started_by_an_agent(&served, daemon.id());
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        assert_eq!(stranger, None);
+    }
 
     #[test]
     fn only_a_socket_path_that_is_not_found_or_leads_elsewhere_is_gone() {
@@ -1108,7 +1438,7 @@ mod tests {
         assert_eq!(judge(error(ErrorKind::Interrupted), OURS), Socket::Unknown);
     }
 
-    fn an_agent(id: &str) -> Agent {
+    pub(crate) fn an_agent(id: &str) -> Agent {
         Agent {
             id: id.into(),
             provider: "claude".into(),
@@ -1149,7 +1479,7 @@ mod tests {
     }
 
     /// A daemon on a throwaway store with the agent `a`, and its bus when `bus` says so.
-    fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
+    pub(crate) fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
         let paths = Paths {
             runtime: dir.join("runtime"),
             state: dir.join("state"),

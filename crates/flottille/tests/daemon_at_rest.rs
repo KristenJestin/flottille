@@ -1,7 +1,7 @@
 //! The daemon at rest (#444): with its agents idle, no run and a client following its events (as
 //! the window does), it wakes no more than its own timers need.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -10,13 +10,15 @@ use common::User;
 use serde_json::json;
 
 /// The daemon's own timers at rest: the socket's check every two seconds and the sweep every
-/// five, about one wake-up a second (measured: 10 in 10 s), with room for a loaded machine. A
-/// wake-up is a context switch of one of its threads.
+/// five, about two wake-ups a second (measured: 15 to 18 in 10 s), with room. A wake-up is a
+/// thread of the daemon going to sleep and being woken: its voluntary context switches. The
+/// switches the scheduler forces on a running thread are not counted: a busy machine multiplies
+/// them (a loaded runner counted 34 where the same commit counted 17) when the daemon does
+/// nothing more.
 const WAKE_UPS_PER_SECOND: f64 = 3.0;
 
-/// How many times each thread of `pid` gave the processor back or had it taken: each is a
-/// wake-up that followed.
-fn switches(pid: u64) -> HashMap<String, u64> {
+/// How many times each thread of `pid`, by its id, went to sleep, and its name.
+fn sleeps(pid: u64) -> HashMap<String, (String, u64)> {
     let mut threads = HashMap::new();
     for task in std::fs::read_dir(format!("/proc/{pid}/task"))
         .unwrap()
@@ -25,22 +27,41 @@ fn switches(pid: u64) -> HashMap<String, u64> {
         let Ok(status) = std::fs::read_to_string(task.path().join("status")) else {
             continue;
         };
+        let name = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Name:"))
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         let count = status
             .lines()
-            .filter(|line| line.contains("ctxt_switches:"))
-            .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
-            .sum::<u64>();
-        threads.insert(task.file_name().to_string_lossy().into_owned(), count);
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|count| count.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        threads.insert(
+            task.file_name().to_string_lossy().into_owned(),
+            (name, count),
+        );
     }
     threads
 }
 
-/// The wake-ups between two counts: a thread that ended in between is not counted.
-fn woken(before: &HashMap<String, u64>, after: &HashMap<String, u64>) -> u64 {
-    after
-        .iter()
-        .map(|(thread, count)| count - before.get(thread).copied().unwrap_or(0))
-        .sum()
+/// The wake-ups between two counts, by thread name: a thread that ended in between is not
+/// counted.
+fn woken(
+    before: &HashMap<String, (String, u64)>,
+    after: &HashMap<String, (String, u64)>,
+) -> Vec<(String, u64)> {
+    let mut woken: Vec<(String, u64)> = Vec::new();
+    for (thread, (name, count)) in after {
+        let count = count - before.get(thread).map_or(0, |(_, count)| *count);
+        match woken.iter_mut().find(|(seen, _)| seen == name) {
+            Some((_, total)) => *total += count,
+            None => woken.push((name.clone(), count)),
+        }
+    }
+    woken.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    woken
 }
 
 #[test]
@@ -71,15 +92,16 @@ fn the_daemon_does_not_wake_at_rest() {
     watch.within(Duration::from_secs(6));
 
     let span = Duration::from_secs(10);
-    let before = switches(pid);
+    let before = sleeps(pid);
     std::thread::sleep(span);
-    let woken = woken(&before, &switches(pid));
+    let threads = woken(&before, &sleeps(pid));
 
+    let woken: u64 = threads.iter().map(|(_, count)| count).sum();
     let rate = woken as f64 / span.as_secs_f64();
     assert!(
         rate <= WAKE_UPS_PER_SECOND,
         "the daemon woke {woken} times in {span:?} ({rate:.1} per second, at most \
-         {WAKE_UPS_PER_SECOND})"
+         {WAKE_UPS_PER_SECOND}), by thread: {threads:?}"
     );
     let events: Vec<_> = watch
         .within(Duration::from_millis(100))

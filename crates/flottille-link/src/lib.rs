@@ -1,5 +1,5 @@
 //! Flottille's link between the user's devices (`docs/remote.md`): identity, keys, the member
-//! list, the invitation, request signing, and the link itself between two machines, over a
+//! list, the pair code, request signing, and the link itself between two machines, over a
 //! transport only `transport.rs` names.
 //!
 //! A device's identity is the public half of an Ed25519 key. The private half never leaves the
@@ -7,16 +7,18 @@
 //! zeroized when dropped. This crate knows no daemon and no store: the caller names the key folder
 //! and hands its keyring in.
 
-mod address;
 mod control;
 mod hello;
-mod invitation;
 mod link;
 mod members;
+mod offers;
+mod pairing;
 mod request;
 mod serial;
+mod sessions;
 mod transport;
-mod words;
+mod tunnel;
+mod upload;
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -29,26 +31,35 @@ use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-pub use address::Address;
 pub use control::{
-    Arriving, Ask, Asked, Asker, ControlError, Device, HANDSHAKE_LIMIT, HUB_PORT, HubSession,
-    HubUrl, LINE_LIMIT, PresenceOf, Pushed, Session, SetupCode, SetupProof, Stream, Tls, ToDevice,
-    Told, Transcript, arrive,
+    Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
+    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, PairProof, Paired, Pairing, PresenceOf,
+    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Transcript,
+    arrive, relays_in_memory,
 };
-pub use hello::{Hello, NeedsUpdate, PeerState, choose};
-pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
+pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
-    Accepting, Endpoint, FRAME_LIMIT, Link, LinkError, MachineMessage, Message, Received, Traffic,
+    Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
+    GitOffer, GitPlace, GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message,
+    Received, RepositoryIdentity, Secret, Share, SharedEntry, Streamed, Traffic, UNKNOWN_MESSAGE,
 };
 pub use members::{
-    Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
-    Members, Role, Signature,
+    Action, Change, ChangeHash, Colour, Icon, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member,
+    MemberList, Members, Role, Signature, check_name,
 };
+pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
+pub use pairing::{PairCode, PairCodeError, PairSecret, Proposed};
 pub use request::{
-    Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
+    Accepted, CLOSE_LASTS, CLOSES_SERVED_MOST, ClosesServed, FULL_SWITCH_LASTS, NONCES_PER_DEVICE,
+    Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
+    runs_agents,
+};
+pub use sessions::{
+    LightProject, LightSession, MOST_SESSIONS, ProjectList, STATES, SessionList, TITLE_LIMIT,
 };
 pub use transport::TlsServer;
-pub use words::verification_words;
+pub use tunnel::TunnelStream;
+pub use upload::{Attached, UPLOAD_CHUNK, fits, fits_with, upload_chunks, upload_name};
 
 /// The machine key's file in the key folder: the daemon's alone.
 pub const MACHINE_FILE: &str = "machine.key";
@@ -62,6 +73,34 @@ pub const DEVICE_LABEL: &str = "Flottille: device";
 /// called `device`).
 pub const DEVICE_ATTRIBUTES: [(&str, &str); 2] =
     [("application", "flottille"), ("flottille-key", "device")];
+/// The new device key of a setup or a join on its way, beside the kept one, with the same care:
+/// its file on a machine with no keyring.
+pub const DEVICE_PENDING_FILE: &str = "device.key.pending";
+/// Its item in the session's keyring.
+pub const DEVICE_PENDING_LABEL: &str = "Flottille: device, pending";
+pub const DEVICE_PENDING_ATTRIBUTES: [(&str, &str); 2] = [
+    ("application", "flottille"),
+    ("flottille-key", "device-pending"),
+];
+
+/// Where a device key is kept: its keyring item, or its file with no keyring.
+struct Place {
+    label: &'static str,
+    attributes: &'static [(&'static str, &'static str)],
+    file: &'static str,
+}
+
+const KEPT: Place = Place {
+    label: DEVICE_LABEL,
+    attributes: &DEVICE_ATTRIBUTES,
+    file: DEVICE_FILE,
+};
+
+const PENDING: Place = Place {
+    label: DEVICE_PENDING_LABEL,
+    attributes: &DEVICE_PENDING_ATTRIBUTES,
+    file: DEVICE_PENDING_FILE,
+};
 
 /// A device's identity: the public half of its key.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,7 +111,7 @@ impl PublicKey {
         self.0.as_bytes()
     }
 
-    /// The short form a person compares, on an invitation and on the screens: the first 8 bytes
+    /// The short form a person compares, on the screens: the first 8 bytes
     /// of the key's SHA-256, in hexadecimal by groups of four (`3f2a-91bc-0d4e-77a1`).
     pub fn fingerprint(&self) -> String {
         let digest = Sha256::digest(self.as_bytes());
@@ -111,11 +150,14 @@ pub enum KeyringError {
     Absent,
     /// There is one, and it failed (locked, refused): said, never worked around.
     Failed(String),
+    /// More than one item has the attributes asked for: which one is meant cannot be told.
+    Several(usize),
 }
 
 /// The session's keyring, as the client that holds a device key reaches it.
 pub trait Keyring {
-    /// The secret of the item that has these attributes, `None` when there is none.
+    /// The secret of the item that has these attributes, `None` when there is none; `Several`
+    /// when more than one has them, which cannot be told apart.
     fn read(&self, attributes: &[(&str, &str)])
     -> Result<Option<Zeroizing<Vec<u8>>>, KeyringError>;
 
@@ -126,6 +168,13 @@ pub trait Keyring {
         attributes: &[(&str, &str)],
         secret: &[u8],
     ) -> Result<(), KeyringError>;
+
+    /// Removes the items that have these attributes; nothing when there is none.
+    fn delete(&self, _attributes: &[(&str, &str)]) -> Result<(), KeyringError> {
+        Err(KeyringError::Failed(
+            "this keyring removes no item".to_owned(),
+        ))
+    }
 }
 
 /// The key of a machine's daemon (`docs/remote.md`, "Identity and keys"): it signs what a machine
@@ -188,26 +237,84 @@ impl DeviceKey {
     /// in `folder` as the machine key is (`device.key`, 600). A keyring that is there but fails is
     /// said: a file instead would give the same device a second identity.
     pub fn load_or_make(keyring: &impl Keyring, folder: &Path) -> Result<DeviceKey, KeyError> {
-        let failed = |why: String| KeyError(format!("the device key's keyring failed: {why}"));
-        match keyring.read(&DEVICE_ATTRIBUTES) {
-            Ok(Some(seed)) => from_seed(&seed)
-                .map(DeviceKey)
-                .ok_or_else(|| KeyError(format!("the keyring's item {DEVICE_LABEL} is not a key"))),
-            Ok(None) => {
-                let key = generate()?;
-                match keyring.store(DEVICE_LABEL, &DEVICE_ATTRIBUTES, key.as_bytes()) {
-                    Ok(()) => Ok(DeviceKey(key)),
-                    Err(KeyringError::Failed(why)) => Err(failed(why)),
-                    Err(KeyringError::Absent) => {
-                        Err(failed("it was there, then was not".to_owned()))
-                    }
+        if let Some(key) = DeviceKey::load(keyring, folder)? {
+            return Ok(key);
+        }
+        DeviceKey::make()?.keep(keyring, folder)
+    }
+
+    /// The key kept in the session's keyring, or with no keyring in `folder`; `None` when there
+    /// is none yet.
+    pub fn load(keyring: &impl Keyring, folder: &Path) -> Result<Option<DeviceKey>, KeyError> {
+        load_at(keyring, folder, &KEPT)
+    }
+
+    /// A new key, in memory only until it is kept: a device that joins keeps its key once the
+    /// join succeeded, so that a join that did not makes a new one (`docs/remote.md`, "Pairing").
+    pub fn make() -> Result<DeviceKey, KeyError> {
+        generate().map(DeviceKey)
+    }
+
+    /// Keeps this key where `load` reads it, when no key is kept there yet; the key kept then,
+    /// which is another one when another client kept its own at the same moment. Two kept at the
+    /// same moment in the keyring are refused: which one is the member's cannot be told.
+    pub fn keep(self, keyring: &impl Keyring, folder: &Path) -> Result<DeviceKey, KeyError> {
+        keep_at(self, keyring, folder, &KEPT)
+    }
+
+    /// The new key of a setup or a join that did not say how it ended, kept beside the kept one
+    /// (`keep_pending`); `None` when there is none. Two clients that kept theirs at the same
+    /// moment leave two, of which the hub may have seen either: both are removed, never sent
+    /// again, and `None` said, so that a new one is made.
+    pub fn load_pending(
+        keyring: &impl Keyring,
+        folder: &Path,
+    ) -> Result<Option<DeviceKey>, KeyError> {
+        if let Err(KeyringError::Several(_)) = keyring.read(PENDING.attributes) {
+            DeviceKey::discard_pending(keyring, folder)?;
+            return Ok(None);
+        }
+        load_at(keyring, folder, &PENDING)
+    }
+
+    /// Keeps this new key as pending, before the hub sees it: a setup or a join whose command is
+    /// gone before it ends leaves it there, for the next one to keep once it is a member, or to
+    /// remove. The key pending then, which is another one when another client kept its own.
+    pub fn keep_pending(
+        self,
+        keyring: &impl Keyring,
+        folder: &Path,
+    ) -> Result<DeviceKey, KeyError> {
+        keep_at(self, keyring, folder, &PENDING)
+    }
+
+    /// This pending key, a member now, made the kept one; the pending one removed. When another
+    /// client kept its own first, that one is said and this one stays pending: it may be the
+    /// member's, and only it signs for it.
+    pub fn promote(self, keyring: &impl Keyring, folder: &Path) -> Result<DeviceKey, KeyError> {
+        let public = self.public();
+        let kept = self.keep(keyring, folder)?;
+        if kept.public() == public {
+            DeviceKey::discard_pending(keyring, folder)?;
+        }
+        Ok(kept)
+    }
+
+    /// Removes the pending key, which is not a member: never sent to a hub again.
+    pub fn discard_pending(keyring: &impl Keyring, folder: &Path) -> Result<(), KeyError> {
+        match keyring.delete(PENDING.attributes) {
+            Ok(()) => Ok(()),
+            Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
+            Err(KeyringError::Absent) => {
+                let file = folder.join(PENDING.file);
+                match std::fs::remove_file(&file) {
+                    Err(error) if error.kind() != ErrorKind::NotFound => Err(KeyError(format!(
+                        "{} cannot be removed: {error}",
+                        file.display()
+                    ))),
+                    _ => Ok(()),
                 }
             }
-            Err(KeyringError::Absent) => {
-                private_folder(folder)?;
-                load_or_make_file(&folder.join(DEVICE_FILE)).map(DeviceKey)
-            }
-            Err(KeyringError::Failed(why)) => Err(failed(why)),
         }
     }
 
@@ -221,6 +328,92 @@ impl fmt::Debug for DeviceKey {
         f.debug_tuple("DeviceKey")
             .field(&self.public().fingerprint())
             .finish()
+    }
+}
+
+/// The key at `place`: in the keyring, or with none in `folder`.
+fn load_at(
+    keyring: &impl Keyring,
+    folder: &Path,
+    place: &Place,
+) -> Result<Option<DeviceKey>, KeyError> {
+    match keyring.read(place.attributes) {
+        Ok(Some(seed)) => from_seed(&seed)
+            .map(DeviceKey)
+            .map(Some)
+            .ok_or_else(|| not_a_key(place)),
+        Ok(None) => Ok(None),
+        Err(KeyringError::Absent) => {
+            private_folder(folder)?;
+            read_file(&folder.join(place.file)).map(|key| key.map(DeviceKey))
+        }
+        Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
+    }
+}
+
+/// Keeps `key` at `place` when none is there; what is there then, read back.
+fn keep_at(
+    key: DeviceKey,
+    keyring: &impl Keyring,
+    folder: &Path,
+    place: &Place,
+) -> Result<DeviceKey, KeyError> {
+    match keyring.read(place.attributes) {
+        Ok(Some(seed)) => from_seed(&seed)
+            .map(DeviceKey)
+            .ok_or_else(|| not_a_key(place)),
+        Ok(None) => match keyring.store(place.label, place.attributes, key.0.as_bytes()) {
+            // Read back: another client may have stored its own at the same moment.
+            Ok(()) => match keyring.read(place.attributes) {
+                Ok(Some(seed)) => from_seed(&seed)
+                    .map(DeviceKey)
+                    .ok_or_else(|| not_a_key(place)),
+                Ok(None) => Err(keyring_failed(
+                    "the key was stored, then was not there".to_owned(),
+                )),
+                Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => {
+                    Err(failed(error))
+                }
+                Err(KeyringError::Absent) => {
+                    Err(keyring_failed("it was there, then was not".to_owned()))
+                }
+            },
+            Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
+            Err(KeyringError::Absent) => {
+                Err(keyring_failed("it was there, then was not".to_owned()))
+            }
+        },
+        Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
+        Err(KeyringError::Absent) => {
+            private_folder(folder)?;
+            let file = folder.join(place.file);
+            remove_left_behind(&file);
+            // Linked into place, never over a key that is there.
+            write_new(&file, key.0.as_bytes())?;
+            read_file(&file)?
+                .map(DeviceKey)
+                .ok_or_else(|| KeyError(format!("{} was made, then was gone", file.display())))
+        }
+    }
+}
+
+fn not_a_key(place: &Place) -> KeyError {
+    KeyError(format!("the keyring's item {} is not a key", place.label))
+}
+
+fn keyring_failed(why: String) -> KeyError {
+    KeyError(format!("the device key's keyring failed: {why}"))
+}
+
+/// What a keyring that is there answered when it could not.
+fn failed(error: KeyringError) -> KeyError {
+    match error {
+        KeyringError::Several(n) => keyring_failed(format!(
+            "{n} items of the keyring hold a device key of Flottille's; one at most may: \
+             flottille remote members says which key is a member"
+        )),
+        KeyringError::Failed(why) => keyring_failed(why),
+        KeyringError::Absent => keyring_failed("it was there, then was not".to_owned()),
     }
 }
 
@@ -405,7 +598,11 @@ fn write_new(file: &Path, secret: &[u8]) -> Result<(), KeyError> {
     ));
     let failed = |error: std::io::Error| KeyError(format!("{shown} cannot be made: {error}"));
     let written = link_new(&temporary, file, secret);
-    let removed = std::fs::remove_file(&temporary);
+    let removed = match std::fs::remove_file(&temporary) {
+        // Renamed as the key (`link_new`, on Android): nothing is left to remove.
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    };
     written.map_err(failed)?;
     removed.map_err(failed)?;
     // The folder's entries, durable as the file is.
@@ -425,6 +622,19 @@ fn link_new(temporary: &Path, file: &Path, secret: &[u8]) -> std::io::Result<()>
     out.write_all(secret)?;
     out.sync_all()?;
     match std::fs::hard_link(temporary, file) {
+        // Android's SELinux refuses a hard link in an app's own data: the phone's endpoint key
+        // (`flottille-mobile`) is made by the app's one process, so a rename, which never leaves a
+        // part of a key under its name, does it; a key made there already is kept.
+        #[cfg(target_os = "android")]
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            match std::fs::symlink_metadata(file) {
+                Ok(_) => Ok(()),
+                Err(missing) if missing.kind() == ErrorKind::NotFound => {
+                    std::fs::rename(temporary, file)
+                }
+                Err(other) => Err(other),
+            }
+        }
         Err(error) if error.kind() != ErrorKind::AlreadyExists => Err(error),
         _ => Ok(()),
     }

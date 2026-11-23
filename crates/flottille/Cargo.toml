@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# The integration tests link as a few binaries, `[[test]]` below (`tests/group/`), not one each.
+autotests = false
 
 [dependencies]
 agent-client-protocol = { version = "3.5.0", features = ["unstable_end_turn_token_usage"] }
@@ -69,7 +71,8 @@ flate2 = "1.1.10"
 # To make real pictures, and read the size of the one that was stored.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # The window's scenarios run on GPUI's test platform, in front of a real daemon.
-gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.18" }
+flottille-window = { version = "0.1.0", path = "../flottille-window", features = ["test-support"] }
+gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.3.0-beta.12" }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets", "test-support"] }
 rmcp = { version = "3.7.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
@@ -78,3 +81,39 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 # The hub of the remote scenarios runs on a runtime of the test's own.
 tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+
+[[test]]
+name = "group_agents"
+path = "tests/group/agents.rs"
+
+[[test]]
+name = "group_sessions"
+path = "tests/group/sessions.rs"
+
+[[test]]
+name = "group_forges"
+path = "tests/group/forges.rs"
+
+[[test]]
+name = "group_tickets"
+path = "tests/group/tickets.rs"
+
+[[test]]
+name = "group_remote"
+path = "tests/group/remote.rs"
+
+[[test]]
+name = "group_daemon"
+path = "tests/group/daemon.rs"
+
+[[test]]
+name = "group_window_session"
+path = "tests/group/window_session.rs"
+
+[[test]]
+name = "group_window_shell"
+path = "tests/group/window_shell.rs"
+
+[[test]]
+name = "group_window_work"
+path = "tests/group/window_work.rs"

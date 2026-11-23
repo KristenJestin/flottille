@@ -28,12 +28,48 @@ type Result<T> = std::result::Result<T, String>;
 /// `Client::connect_or_start` in the binary, something else in a test.
 pub type Connect = Arc<dyn Fn() -> std::io::Result<UnixStream> + Send + Sync>;
 
+/// Signs a request for the machine named first with this device's key, which the window reads
+/// and the daemon never holds (`docs/remote.md`, "Requests from another machine's clients"): what
+/// the line written is then. The binary gives the command line's own; a test, a key of its own.
+pub type Sign = Arc<
+    dyn Fn(&str, &flottille_protocol::Request) -> std::io::Result<serde_json::Value> + Send + Sync,
+>;
+
+static SIGN: std::sync::OnceLock<Sign> = std::sync::OnceLock::new();
+
+/// How this window signs what only the user's device may ask (`vault.share`): given once, before
+/// the window opens. A window given none says so when it is asked.
+pub fn sign_with(sign: Sign) {
+    let _ = SIGN.set(sign);
+}
+
+pub(crate) fn signer() -> Option<Sign> {
+    SIGN.get().cloned()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
-    /// A fresh read of everything the shell shows.
-    Snapshot(Snapshot),
-    /// The connection broke, with why; the link is connecting again.
-    Disconnected(String),
+    /// The close of the session `agent` of the machine `machine` was kept by this machine's
+    /// daemon, or why not.
+    Closed {
+        machine: String,
+        agent: String,
+        refused: Option<String>,
+    },
+    /// A fresh read of everything the shell shows, with the generation of the machine shown its
+    /// connection was made for ([`crate::machines::Aim::generation`]).
+    Snapshot(Snapshot, u64),
+    /// What the daemon keeps of the window (the sidebar's folds, and the sessions that have a
+    /// draft), read once, before the first snapshot: the tree is made as it was left, not
+    /// animated from its default.
+    Kept(
+        crate::kept::Folds,
+        crate::arrange::Arrangement,
+        std::collections::HashSet<String>,
+    ),
+    /// The connection broke, with why, and the generation of the machine shown it was made for;
+    /// the link is connecting again.
+    Disconnected(String, u64),
     /// Flottille has not answered the link for `NOT_ANSWERING`: since when it was asked, in ms
     /// after the epoch; `None` once it answers again.
     NotAnswering(Option<u64>),
@@ -48,8 +84,18 @@ pub enum Update {
         judge: bool,
         project: Option<String>,
     },
+    /// What the daemon says of an update of Flottille (`update.show`, `update.changed`): read at
+    /// each connection, so that a daemon started again from another build is seen.
+    UpdateShown(Value),
+    /// What the daemon says is new since the version last run (`whatsnew.show`,
+    /// `whatsnew.changed`).
+    WhatsNewShown(Value),
+    /// What the user says of themselves changed, from any client: the settings page reads it again.
+    AboutChanged,
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
+    /// An agent filed a finding, or one was marked filed: the settings page lists them again.
+    FindingsChanged,
     /// The window's appearance was chosen, from any client: the window reads it again.
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
@@ -65,6 +111,13 @@ pub enum Update {
     /// An entry of the vault was set or removed, from any client: the settings page reads the
     /// list again.
     VaultChanged,
+    /// A program's own sign-in or sign-out moved (`signin.changed`): its name, its state and,
+    /// when it failed, Flottille's sentence of why; never what the program printed.
+    ProgramSignIn {
+        program: String,
+        state: String,
+        why: Option<String>,
+    },
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -93,6 +146,8 @@ pub enum Update {
         name: String,
         why: Option<String>,
     },
+    /// What this machine's daemon says of the user's machines (`machines`).
+    Machines(Box<crate::machines::News>),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -115,10 +170,37 @@ pub struct Seen {
     pub project_changes: AtomicU64,
     /// When the link asked what it waits for, in ms after the epoch; 0 while it waits for nothing.
     pub asking: Arc<AtomicU64>,
+    /// The generation of the machine shown ([`crate::machines::Aim::generations`]): 0 for good
+    /// when the window shows only this machine.
+    pub aimed: Arc<AtomicU64>,
 }
 
 /// How long a request of the link may wait before the window says Flottille is not answering.
 pub const NOT_ANSWERING: Duration = Duration::from_secs(30);
+
+/// [`NOT_ANSWERING`], or what a scenario of the window set for the window it opens on its thread.
+fn not_answering() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(limit) = NOT_ANSWERING_HERE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    NOT_ANSWERING
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static NOT_ANSWERING_HERE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// For a scenario of the window: the windows opened on this thread say Flottille is not
+/// answering after `limit`, not [`NOT_ANSWERING`]. A thread of its own, so that the scenarios
+/// that run beside it keep the production's.
+#[cfg(feature = "test-support")]
+pub fn not_answering_after_on_this_thread(limit: Duration) {
+    NOT_ANSWERING_HERE.with(|here| here.set(Some(limit)));
+}
+
 /// How long the link waits for nothing before it asks Flottille whether it still answers.
 const PING: Duration = Duration::from_secs(15);
 
@@ -144,16 +226,30 @@ pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
 
 /// Starts the link's thread, sending its updates to `sender`.
 pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen> {
-    let seen = Arc::new(Seen::default());
+    spawn_aimed_into(connect, Arc::default(), sender)
+}
+
+/// [`spawn_into`], on connections made to the machine shown, whose generation is `aimed`: what
+/// the link reads and says is stamped with the generation its connection was made for.
+pub fn spawn_aimed_into(
+    connect: Connect,
+    aimed: Arc<AtomicU64>,
+    sender: UnboundedSender<Update>,
+) -> Arc<Seen> {
+    let seen = Arc::new(Seen {
+        aimed,
+        ..Seen::default()
+    });
     let shared = seen.clone();
     let watched = (seen.asking.clone(), sender.clone());
+    let limit = not_answering();
     std::thread::Builder::new()
         .name("flottille-link".into())
         .spawn(move || run(connect, sender, shared))
         .expect("a thread for the link to Flottille");
     std::thread::Builder::new()
         .name("flottille-link-watch".into())
-        .spawn(move || watch(&watched.0, &watched.1, NOT_ANSWERING))
+        .spawn(move || watch(&watched.0, &watched.1, limit))
         .expect("a thread watching the link to Flottille");
     seen
 }
@@ -195,18 +291,32 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
     let mut briefs = Briefs::default();
     let reads = ProviderReads::default();
     loop {
+        let aimed = seen.aimed.load(Ordering::SeqCst);
         let why = match connect() {
+            // Made while another machine was chosen: made again, for that one.
+            Ok(_) if seen.aimed.load(Ordering::SeqCst) != aimed => continue,
             Ok(stream) => {
                 seen.connections.fetch_add(1, Ordering::Relaxed);
                 retry = FIRST_RETRY;
-                match follow(stream, &connect, &updates, &seen, &mut briefs, &reads) {
+                match follow(
+                    stream,
+                    &connect,
+                    &updates,
+                    &seen,
+                    &mut briefs,
+                    &reads,
+                    aimed,
+                ) {
                     Ok(()) => return,
                     Err(why) => why,
                 }
             }
             Err(error) => format!("cannot reach Flottille: {error}"),
         };
-        if updates.unbounded_send(Update::Disconnected(why)).is_err() {
+        if updates
+            .unbounded_send(Update::Disconnected(why, aimed))
+            .is_err()
+        {
             return;
         }
         std::thread::sleep(retry);
@@ -222,6 +332,7 @@ fn follow(
     seen: &Seen,
     briefs: &mut Briefs,
     reads: &ProviderReads,
+    aimed: u64,
 ) -> Result<()> {
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     conn.asking = Some(seen.asking.clone());
@@ -232,6 +343,46 @@ fn follow(
     if after.is_none() {
         seen.last_seq
             .store(started["after"].as_u64().unwrap_or(0), Ordering::Relaxed);
+    }
+    // Before the first snapshot, so that the nodes of the tree are made unfolded or folded as the
+    // user left them. A daemon that cannot say leaves every fold at its default.
+    if seen.connections.load(Ordering::Relaxed) == 1
+        && let Ok(state) = conn.request("window.get", json!({}))
+    {
+        // The sessions that hold a draft: their rows say it before their pages are opened.
+        let drafts = conn
+            .request("draft.list", json!({}))
+            .ok()
+            .and_then(|listed| {
+                listed["drafts"].as_array().map(|keys| {
+                    keys.iter()
+                        .filter_map(|key| key.as_str()?.strip_prefix("session:"))
+                        .map(str::to_owned)
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        let kept = Update::Kept(
+            crate::kept::Folds::of(&state["state"]),
+            crate::arrange::Arrangement::of(&state["state"]["arrangement"]),
+            drafts,
+        );
+        if updates.unbounded_send(kept).is_err() {
+            return Ok(());
+        }
+    }
+    // A daemon too old to say it leaves the version section waiting.
+    if let Ok(shown) = conn.request("update.show", json!({}))
+        && updates.unbounded_send(Update::UpdateShown(shown)).is_err()
+    {
+        return Ok(());
+    }
+    if let Ok(shown) = conn.request("whatsnew.show", json!({}))
+        && updates
+            .unbounded_send(Update::WhatsNewShown(shown))
+            .is_err()
+    {
+        return Ok(());
     }
     // When what the shell shows, and the providers, were first known to be stale.
     let mut stale = Some(Instant::now());
@@ -247,8 +398,20 @@ fn follow(
         if let Some(changed) = text_changed(event) {
             let _ = updates.unbounded_send(changed);
         }
+        if event.name == "update.changed" {
+            let _ = updates.unbounded_send(Update::UpdateShown(event.data.clone()));
+        }
+        if event.name == "whatsnew.changed" {
+            let _ = updates.unbounded_send(Update::WhatsNewShown(event.data.clone()));
+        }
+        if event.name == "about.changed" {
+            let _ = updates.unbounded_send(Update::AboutChanged);
+        }
         if event.name == "developer.changed" {
             let _ = updates.unbounded_send(Update::DeveloperChanged);
+        }
+        if event.name == "developer.reported" {
+            let _ = updates.unbounded_send(Update::FindingsChanged);
         }
         if event.name == "appearance.changed" {
             let _ = updates.unbounded_send(Update::AppearanceChanged);
@@ -260,6 +423,14 @@ fn follow(
         }
         if event.name == "vault.changed" {
             let _ = updates.unbounded_send(Update::VaultChanged);
+        }
+        if event.name == "signin.changed" {
+            let text = |key: &str| event.data[key].as_str().map(str::to_owned);
+            let _ = updates.unbounded_send(Update::ProgramSignIn {
+                program: text("program").unwrap_or_default(),
+                state: text("state").unwrap_or_default(),
+                why: text("why"),
+            });
         }
         if event.name == "sessions.changed" {
             let _ = updates.unbounded_send(Update::SessionsChanged);
@@ -325,7 +496,10 @@ fn follow(
             None => {
                 if stale.take().is_some() {
                     let snapshot = read(&mut conn, briefs, seen)?;
-                    if updates.unbounded_send(Update::Snapshot(snapshot)).is_err() {
+                    if updates
+                        .unbounded_send(Update::Snapshot(snapshot, aimed))
+                        .is_err()
+                    {
                         return Ok(());
                     }
                     seen.snapshots.fetch_add(1, Ordering::Relaxed);
@@ -490,6 +664,10 @@ fn matters(event: &Event) -> bool {
     match name.split_once('.').map(|(subject, _)| subject) {
         // A workspace's preparation shows in its place, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
+        // The notification centre: a notification came, was read or was answered, in any client.
+        Some("notifications") => true,
+        // A request for a vault entry marks its session and rings the bell until it is answered.
+        Some("vault") => matches!(name, "vault.asked" | "vault.ask_answered"),
         // A subscription opening or ending moves the session from waiting to rest.
         Some("subscription") => true,
         // A following that pauses or resumes shows on its row in the rail.
@@ -578,8 +756,10 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     let workspaces = conn.request("workspace.list", json!({}))?;
     let agents = conn.request("agent.list", json!({}))?;
     let approvals = conn.request("approval.list", json!({}))?;
+    let vault_asks = conn.request("vault.asks", json!({}))?;
     let commands = conn.request("run.list", json!({}))?;
     let subscriptions = conn.request("subscription.list", json!({}))?;
+    let notifications = conn.request("notifications.list", json!({"limit": 1000}))?;
     let (needs_user, questions) = needing_the_user(conn)?;
     let roots: Vec<&str> = agents["agents"]
         .as_array()
@@ -605,12 +785,14 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
         workspaces: &workspaces,
         agents: &agents,
         approvals: &approvals,
+        vault_asks: &vault_asks,
         needs_user: &needs_user,
         briefs: &briefs.texts,
         questions: &questions,
         commands: &commands,
         subscriptions: &subscriptions,
     });
+    snapshot.set_notifications(&notifications);
     snapshot.project_changes = seen.project_changes.load(Ordering::Relaxed);
     Ok(snapshot)
 }
@@ -662,6 +844,14 @@ impl Conn {
             link: Connection::new(stream),
             asking: None,
         })
+    }
+
+    /// Every request of this connection signed for the machine `machine` by `sign`.
+    pub(crate) fn signing(mut self, sign: Sign, machine: String) -> Conn {
+        self.link = self
+            .link
+            .signing(Box::new(move |request| sign(&machine, request)));
+        self
     }
 
     pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {

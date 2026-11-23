@@ -18,9 +18,10 @@ use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{branch_matches, cycle_sentence};
 use gpui_design_system::motion::{ENTER, MAX_STAGGER, STAGGER};
 use gpui_design_system::{
-    Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
-    Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type, awaiting, changing, enter,
-    follow_theme, hoverable, icon, palette, presence, presence_of, space, toast,
+    Button, ChipOption, ChipPicker, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu,
+    Modal, PageHeader, Section, Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type,
+    awaiting, changing, enter, follow_theme, hoverable, icon, palette, presence, presence_of,
+    space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -365,6 +366,8 @@ struct Fields {
     keys: Entity<InputState>,
     /// The base branch to add.
     branch: Entity<InputState>,
+    /// What the picker of dependencies searches the other repositories with.
+    depends: Entity<InputState>,
 }
 
 /// A row of the Repositories section: a repository of the project, or one found in its folder.
@@ -427,6 +430,10 @@ pub struct ProjectSettingsPage {
     forms: Vec<RepositoryForm>,
     tracker: Option<ProjectTracker>,
     obsolete: Vec<String>,
+    /// Why no push an agent asks for is run, as the daemon judges it now.
+    pushes_unlifted: Option<String>,
+    /// Why the user's SSH agent is lent to no push, as the daemon judges it now.
+    pushes_unlent: Option<String>,
     /// The repositories as their checkouts stand, added, removed and detected again.
     repositories: Entity<ProjectRepositories>,
     /// The command lines its forges and tracker need, checked (`docs/protocol.md`).
@@ -576,6 +583,8 @@ impl ProjectSettingsPage {
             forms: Vec::new(),
             tracker: None,
             obsolete: Vec::new(),
+            pushes_unlifted: None,
+            pushes_unlent: None,
             repositories,
             programs,
             repository_rows: Listing::default(),
@@ -879,6 +888,8 @@ impl ProjectSettingsPage {
         self.skills
             .update(cx, |section, _| section.set_folder(&folder));
         self.obsolete = strings(&settings["obsolete"]);
+        self.pushes_unlifted = settings["pushes_unlifted"].as_str().map(str::to_owned);
+        self.pushes_unlent = settings["pushes_unlent"].as_str().map(str::to_owned);
         let forge = |value: &Value| serde_json::from_value::<RepositoryForge>(value.clone()).ok();
         self.forms = settings["repositories"]
             .as_array()
@@ -1081,6 +1092,7 @@ impl ProjectSettingsPage {
                 site: line("acme.atlassian.net", window, cx),
                 keys: line("ABC, DEF", window, cx),
                 branch: line("develop", window, cx),
+                depends: line("Add a repository…", window, cx),
             };
             self._subscriptions.push(cx.subscribe_in(
                 &fields.branch,
@@ -1129,6 +1141,8 @@ impl ProjectSettingsPage {
         repository_field.update(cx, |f, cx| f.set_value(repository, window, cx));
         let branch_field = self.fields(window, cx).branch.clone();
         branch_field.update(cx, |f, cx| f.set_value("", window, cx));
+        let depends_field = self.fields(window, cx).depends.clone();
+        depends_field.update(cx, |f, cx| f.set_value("", window, cx));
         self.forge_kind = shown.as_ref().map_or(ForgeKind::None, ForgeKind::of);
         self.bases = form.base.clone();
         self.depends = form.depends_on.clone();
@@ -1209,16 +1223,17 @@ impl ProjectSettingsPage {
         self.base_error.as_deref()
     }
 
-    /// Whether the dialog's repository depends on `path`, flipped.
-    pub fn toggle_dependency(&mut self, path: &str, cx: &mut Context<Self>) {
-        match self.depends.iter().position(|d| d == path) {
-            Some(at) => {
-                self.depends.remove(at);
-            }
-            None => self.depends.push(path.to_owned()),
-        }
+    /// The repositories the dialog's repository depends on, as the picker gives them: in the order
+    /// they were added.
+    pub fn set_dependencies(&mut self, depends: Vec<String>, cx: &mut Context<Self>) {
+        self.depends = depends;
         self.dialog_error = None;
         cx.notify();
+    }
+
+    /// The field the picker of dependencies searches the other repositories with.
+    pub fn depends_search(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.depends)
     }
 
     pub fn branch_field(&self) -> Option<&Entity<InputState>> {
@@ -1310,7 +1325,7 @@ impl ProjectSettingsPage {
         seen
     }
 
-    /// What the `Log time with` select offers, each as its key and its label: none first, then
+    /// What the `Jira API access with` select offers, each as its key and its label: none first, then
     /// the entries the project sees (its own and the global ones) and no other use is bound to,
     /// by name, with their username. The entry the file names stays in the list when the project
     /// does not see it, said so.
@@ -2103,24 +2118,28 @@ impl ProjectSettingsPage {
             .error(self.base_error.clone())
     }
 
-    /// The other repositories of the project, each a switch: the ones this repository depends on.
-    fn depends_field(&self, path: &str, this: WeakEntity<Self>) -> Field {
+    /// The other repositories of the project, in a picker of chips: the ones this repository
+    /// depends on, in the order they were added.
+    fn depends_picker(
+        &self,
+        path: &str,
+        search: &Entity<InputState>,
+        this: WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let p = palette(cx);
         let others: Vec<_> = self.forms.iter().filter(|form| form.path != path).collect();
-        let mut control = div().flex().flex_col().gap(space::MD);
-        for form in &others {
-            let label = repository_label(&self.name, &form.path);
-            let remote = match &form.url {
-                Some(url) => short_remote(url, &self.folder),
-                None => "local only".to_owned(),
-            };
-            let (key, on) = (form.path.clone(), self.depends.contains(&form.path));
-            let switch = Switch::new(format!("depends-on-{label}"), on, label).hint(remote);
-            let this = this.clone();
-            control = control.child(switch.on_click(move |_, _, cx| {
-                this.update(cx, |this, cx| this.toggle_dependency(&key, cx))
-                    .ok();
-            }));
-        }
+        let options: Vec<ChipOption> = others
+            .iter()
+            .map(|form| {
+                let remote = match &form.url {
+                    Some(url) => short_remote(url, &self.folder),
+                    None => "local only".to_owned(),
+                };
+                ChipOption::new(form.path.clone(), repository_label(&self.name, &form.path))
+                    .detail(remote)
+            })
+            .collect();
         let hint = match others.is_empty() {
             true => "The project has no other repository.",
             false => {
@@ -2128,7 +2147,35 @@ impl ProjectSettingsPage {
                       that depends on it."
             }
         };
-        Field::new("depends-field", "Depends on", control).hint(hint)
+        let picker = ChipPicker::new(
+            "depends-on",
+            "Depends on",
+            search,
+            options,
+            self.depends.iter().cloned().map(SharedString::from),
+        )
+        .placeholder("Add a repository…")
+        .on_change(move |keys, _, cx| {
+            let depends = keys.iter().map(ToString::to_string).collect();
+            this.update(cx, |this, cx| this.set_dependencies(depends, cx))
+                .ok();
+        });
+        div()
+            .id("depends-field")
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(picker)
+            .child(
+                div()
+                    .id("depends-field-hint")
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .child(hint)
+                    .test_support(),
+            )
+            .test_support()
+            .into_any_element()
     }
 
     /// Whether its agents' runs may open windows on the user's screen: the user's alone.
@@ -2213,7 +2260,7 @@ impl ProjectSettingsPage {
                 let this = cx.entity().downgrade();
                 Some((
                     bases,
-                    self.depends_field(&path, this.clone()),
+                    self.depends_picker(&path, &fields.depends, this.clone(), cx),
                     self.delete_branch_switch(this),
                 ))
             }
@@ -2269,17 +2316,35 @@ impl ProjectSettingsPage {
                         div()
                             .flex()
                             .flex_col()
+                            .gap(space::LG)
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(space::LG)
-                                    .child(bases)
-                                    .child(depends)
-                                    .child(delete_branch)
-                                    .child(Field::new("forge-kind-field", "Forge", select)),
+                                Section::new("settings-section-branches", "Branches")
+                                    .sentence(
+                                        "Where a workspace starts from, and what a merge does \
+                                         with the branch.",
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(space::LG)
+                                            .child(bases)
+                                            .child(delete_branch),
+                                    ),
                             )
+                            .child(depends)
                             .child(
+                                Section::new("settings-section-forge", "Pull requests")
+                                    .sentence(
+                                        "Where the repository's pull requests are read and \
+                                         opened.",
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(Field::new("forge-kind-field", "Forge", select))
+                                            .child(
                                 presence(
                                     "forge-host-block",
                                     self.forge_kind == ForgeKind::BitbucketDataCenter,
@@ -2327,6 +2392,8 @@ impl ProjectSettingsPage {
                                     },
                                 )
                                 .space(space::LG),
+                            ),
+                                    ),
                             ),
                     )
                     .kept(error)
@@ -2447,7 +2514,7 @@ impl ProjectSettingsPage {
         }
     }
 
-    /// `Log time with`: the vault entry whose token logs time on Jira, and the way to add one.
+    /// `Jira API access with`: the vault entry whose token logs time on Jira, and the way to add one.
     fn worklog_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let options = self.worklog_options();
@@ -2476,8 +2543,8 @@ impl ProjectSettingsPage {
             .flex_col()
             .gap(space::SM)
             .child(
-                Field::new("tracker-worklog-field", "Log time with", select)
-                    .hint("A Jira API token in the vault, its username your Jira e-mail."),
+                Field::new("tracker-worklog-field", "Jira API access with", select)
+                    .hint("A Jira API token in the vault, its username your Jira e-mail: it logs time, replies, mentions and finds people."),
             )
             .child(
                 div().flex().child(hoverable(
@@ -2495,8 +2562,7 @@ impl ProjectSettingsPage {
                                         bound: Some(flottille_core::vault::worklog(&project)),
                                         ..VaultEntry::default()
                                     };
-                                    let back = Some((project.clone(), Reveal::Tracker));
-                                    shell.add_vault_entry(&prefill, None, back, window, cx)
+                                    shell.add_vault_entry(&prefill, None, window, cx)
                                 })
                                 .ok();
                         }),
@@ -2617,7 +2683,7 @@ impl ProjectSettingsPage {
             .collect();
         let mut list = ListCard::new("project-vault-list");
         for (key, placement, entry) in drawn {
-            let (shell, project, name) = (self.shell.clone(), self.name.clone(), key.clone());
+            let (shell, name) = (self.shell.clone(), key.clone());
             let row = crate::vault::entry_row(
                 ElementId::Name(format!("project-vault-{key}").into()),
                 &entry,
@@ -2626,7 +2692,7 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.replace_vault_entry_for(&project, &name, window, cx)
+                        shell.replace_vault_entry_for(&name, window, cx)
                     })
                     .ok();
             });
@@ -2652,8 +2718,7 @@ impl ProjectSettingsPage {
                                     project: Some(project.clone()),
                                     ..VaultEntry::default()
                                 };
-                                let back = Some((project.clone(), Reveal::Vault));
-                                shell.add_vault_entry(&prefill, None, back, window, cx)
+                                shell.add_vault_entry(&prefill, None, window, cx)
                             })
                             .ok();
                     }),
@@ -2827,6 +2892,22 @@ fn shown_folder(folder: &str) -> String {
     }
 }
 
+/// What the settings say when no push an agent asks for is run: why, and what to do.
+fn unlifted_said(why: &str) -> SharedString {
+    SharedString::from(format!(
+        "No push an agent asks for is run: it would run outside the sandbox, signed in as you, \
+         and {why}. Push from a terminal of your own; flottille doctor says the same."
+    ))
+}
+
+/// What the settings say when the user's SSH agent is lent to no push: why, and what to do.
+fn unlent_said(why: &str) -> SharedString {
+    SharedString::from(format!(
+        "Pushes over SSH are refused: your SSH agent is lent to no push, since {why}. Fix that \
+         and the next push is lent it again; flottille doctor says the same."
+    ))
+}
+
 impl Render for ProjectSettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -2852,6 +2933,11 @@ impl Render for ProjectSettingsPage {
         let header = div()
             .flex()
             .flex_col()
+            .child(crate::machines::where_line(
+                "project-settings-where",
+                &[&self.name, "Settings"],
+                cx,
+            ))
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)
@@ -2870,6 +2956,27 @@ impl Render for ProjectSettingsPage {
                     move |line| {
                         div()
                             .id("project-settings-unread")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.wait)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .space(space::MD),
+            )
+            .child(
+                presence_of(
+                    "project-settings-unlent-block",
+                    // Where no push is run, the agent's lending to one is moot.
+                    match self.pushes_unlifted.as_deref() {
+                        Some(why) => Some(unlifted_said(why)),
+                        None => self.pushes_unlent.as_deref().map(unlent_said),
+                    },
+                    move |line| {
+                        div()
+                            .id("project-settings-unlent")
                             .aria_label(line.clone())
                             .text_size(px(12.5))
                             .text_color(p.wait)
@@ -3000,8 +3107,9 @@ impl Render for ProjectSettingsPage {
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
-            }))
-            .test_support();
+            }));
+        // Held after its blocks: what it adds comes after them, and a block's place stays its own.
+        let page = crate::machines::hold(page, window, cx).test_support();
         div()
             .size_full()
             .flex()

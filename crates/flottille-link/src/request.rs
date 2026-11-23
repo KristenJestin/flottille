@@ -21,7 +21,7 @@
 //! params    length (4 bytes, big-endian), the JSON text
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -191,8 +191,9 @@ impl Requests {
     /// checked member list is `members`, at `now`, in this order: it is a request for this
     /// machine; its device is a member, and the signature is the device's; the time is within the
     /// window of `now`, and not before this machine started; the nonce was not seen in the window;
-    /// the device's role allows the method's class. Until the signature passes, a refusal names
-    /// nothing of the list. An accepted request's nonce is remembered.
+    /// the device's role allows the method's class, and a launch is for a runner (`runs_agents`).
+    /// Until the signature passes, a refusal names nothing of the list. An accepted request's
+    /// nonce is remembered.
     pub fn check(
         &mut self,
         text: &str,
@@ -256,10 +257,12 @@ impl Requests {
         }
         if member.role == Role::Viewer && class == Class::Drive {
             return refused(format!(
-                "{} may only view: a controller or a runner may call {}",
-                member.name, signed.method
+                "{} may only view: a controller or a runner may {}",
+                member.name,
+                deed(&signed.method)
             ));
         }
+        runs_agents(members, machine, &signed.method)?;
         if seen.len() >= NONCES_PER_DEVICE {
             return refused(format!(
                 "{} sent more than {NONCES_PER_DEVICE} requests in five minutes",
@@ -292,6 +295,197 @@ impl Requests {
             !seen.is_empty()
         });
     }
+}
+
+/// Refused when `method` starts an agent (`flottille_protocol::LAUNCHES`) and `machine` is the
+/// machine of a member that is no runner (`docs/remote.md`, "Roles"): the one check of it, made
+/// by the machine that would carry the request and by the one it is for. A name that is no member's passes: the carrier
+/// says it is no machine of the user's.
+pub fn runs_agents(members: &Members, machine: &str, method: &str) -> Result<(), RequestError> {
+    if !flottille_protocol::launches(method) {
+        return Ok(());
+    }
+    match members
+        .members()
+        .iter()
+        .find(|member| member.name == machine)
+    {
+        Some(member) if member.role != Role::Runner => Err(RequestError(format!(
+            "{machine} is a {}: it runs no agent, a runner does",
+            member.role.word()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// How long the user's switch of a tree to Full counts for its launches on other machines, from
+/// when it was signed: one night's work.
+pub const FULL_SWITCH_LASTS: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// The member whose device switched the tree `tree` of the machine `machine` to Full, as `text`
+/// holds the switch: a request that device signed for that machine, `agent.mode {agent: tree,
+/// mode: full}`, by a member that may switch the mode (a runner or a controller). A launch on
+/// another machine starts in Full only with it (`docs/remote.md`, "Starting a session on another
+/// machine"): a machine alone cannot raise a mode. It counts for `FULL_SWITCH_LASTS` from when it
+/// was signed (by `now`), however long the tree stays in Full: a machine that once held it
+/// cannot raise launches with it forever. Its nonce is not checked: it is sent with every launch
+/// of that time.
+pub fn full_switch(
+    text: &str,
+    machine: &str,
+    tree: &str,
+    members: &Members,
+    now: SystemTime,
+) -> Result<Member, RequestError> {
+    let refused = |why: &str| Err(RequestError(format!("the switch to Full {why}")));
+    let Ok(request) = serde_json::from_str::<Request>(text) else {
+        return refused("is not a signed request");
+    };
+    let Some(member) = members
+        .get(&request.signed.device)
+        .filter(|_| request.signed())
+    else {
+        return refused("is not signed by a member");
+    };
+    if member.role == Role::Viewer {
+        return refused(&format!("is {}'s, who may only view", member.name));
+    }
+    if request.machine != machine || request.signed.method != "agent.mode" {
+        return refused(&format!("is not one of {}'s", shown(machine)));
+    }
+    let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
+    if params["agent"] != tree || params["mode"] != "full" {
+        return refused("is for another tree or another mode");
+    }
+    let now = milliseconds(now);
+    let at = request.signed.at;
+    if at > now.saturating_add(REQUEST_WINDOW.as_millis() as u64) {
+        return refused("is dated ahead of this machine's clock");
+    }
+    if at < now.saturating_sub(FULL_SWITCH_LASTS.as_millis() as u64) {
+        return refused("is older than twelve hours: the user switches the tree to Full again");
+    }
+    Ok(member.clone())
+}
+
+/// How long a close the user asked of a session of a machine that was off counts for, from when
+/// it was signed: as long as its machine keeps a message for another (`docs/remote.md`,
+/// "Deliveries across machines").
+pub const CLOSE_LASTS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The member whose device closed the session `agent` of the machine `machine`, and that agent,
+/// as `request` holds the close: `agent.stop {agent}` that device signed for that machine, by a
+/// member that may stop a session (a runner or a controller). Kept by another machine while this
+/// one was off and sent when it linked again (`docs/remote.md`, "One list of every machine"), it
+/// counts for `CLOSE_LASTS` from when it was signed, by `now`. Its nonce is not checked here: the
+/// receiver serves a close once (`ClosesServed`) and does nothing to a session started or resumed
+/// after the close was signed.
+pub fn kept_close(
+    request: &Request,
+    machine: &str,
+    members: &Members,
+    now: SystemTime,
+) -> Result<(Member, String), RequestError> {
+    let refused = |why: &str| Err(RequestError(format!("the close {why}")));
+    let Some(member) = members
+        .get(&request.signed.device)
+        .filter(|_| request.signed())
+    else {
+        return refused("is not signed by a member");
+    };
+    if member.role == Role::Viewer {
+        return refused(&format!("is {}'s, who may only view", member.name));
+    }
+    if request.machine != machine {
+        return refused(&format!(
+            "is for {}, not for {}",
+            shown(&request.machine),
+            shown(machine)
+        ));
+    }
+    if request.signed.method != "agent.stop" {
+        return refused(&format!(
+            "is {}, not agent.stop",
+            shown(&request.signed.method)
+        ));
+    }
+    let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
+    let Some(agent) = params["agent"].as_str() else {
+        return refused("names no session");
+    };
+    let now = milliseconds(now);
+    let at = request.signed.at;
+    if at > now.saturating_add(REQUEST_WINDOW.as_millis() as u64) {
+        return refused("is dated ahead of this machine's clock");
+    }
+    if at < now.saturating_sub(CLOSE_LASTS.as_millis() as u64) {
+        return refused("is older than thirty days");
+    }
+    Ok((member.clone(), agent.to_owned()))
+}
+
+/// How many closes served a machine remembers; past it, the oldest are let go.
+pub const CLOSES_SERVED_MOST: usize = 4096;
+
+/// The closes a machine served (`kept_close`), by nonce, for as long as each counts: a close is
+/// served once, however often it is sent again (the outbox after an answer that was lost, a
+/// member that saw it signed). In memory: a daemon started again forgets them, which is safe
+/// because the receiver also ignores a close for a session started or resumed after it was signed.
+#[derive(Debug, Default)]
+pub struct ClosesServed {
+    /// Each close's nonce and when it stops counting, oldest first.
+    served: VecDeque<(Nonce, u64)>,
+}
+
+impl ClosesServed {
+    /// Whether `request` is a close not served yet, at `now`: it is then remembered. False for one
+    /// served already, which is answered and does nothing.
+    pub fn serve(&mut self, request: &Request, now: SystemTime) -> bool {
+        let now = milliseconds(now);
+        self.served.retain(|(_, until)| *until > now);
+        if self
+            .served
+            .iter()
+            .any(|(nonce, _)| *nonce == request.signed.nonce)
+        {
+            return false;
+        }
+        if self.served.len() >= CLOSES_SERVED_MOST {
+            self.served.pop_front();
+        }
+        let until = request
+            .signed
+            .at
+            .saturating_add(CLOSE_LASTS.as_millis() as u64);
+        self.served.push_back((request.signed.nonce, until));
+        true
+    }
+
+    /// Forgets `request`, whose service failed for now: it is served when it is sent again.
+    pub fn release(&mut self, request: &Request) {
+        self.served
+            .retain(|(nonce, _)| *nonce != request.signed.nonce);
+    }
+}
+
+/// What `method` does, as a refusal names it: the user's words for what they do most, the
+/// method's name otherwise.
+fn deed(method: &str) -> String {
+    let words = match method {
+        "approval.approve" | "approval.deny" => "answer a request",
+        "agent.answer" => "answer a question",
+        "agent.send" | "agent.send_now" => "send a message",
+        "agent.start" | "agent.run" => "start a session",
+        "agent.stop" => "stop a session",
+        "agent.cancel" => "stop a turn",
+        "agent.mode" => "switch the mode",
+        "remote.change" => "remove, rename or restyle a device",
+        "tunnel.open" => "open a tunnel",
+        "signin.start" => "sign a program in",
+        "signin.sign_out" => "sign a program out",
+        _ => return format!("call {method}"),
+    };
+    words.to_owned()
 }
 
 /// `time` in milliseconds since the Unix epoch; zero before it.

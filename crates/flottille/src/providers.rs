@@ -238,9 +238,9 @@ pub fn ready_here() -> Option<String> {
     None
 }
 
-/// Forge tokens and the folders of their command lines' configuration, and any variable named
-/// like a secret: no agent's business, whatever its provider (`docs/agents.md`, "The agent's
-/// environment"). Each provider lets its own sign-in through.
+/// Forge tokens and the folders of their command lines' configuration, the user's SSH agent, and
+/// any variable named like a secret: no agent's business, whatever its provider (`docs/agents.md`,
+/// "The agent's environment"). Each provider lets its own sign-in through.
 pub fn secret_or_forge(name: &str) -> bool {
     const FORGES: [&str; 8] = [
         "GH_TOKEN",
@@ -253,6 +253,7 @@ pub fn secret_or_forge(name: &str) -> bool {
         "GLAB_CONFIG_DIR",
     ];
     FORGES.contains(&name)
+        || name == crate::ssh_agent::VARIABLE
         || ["BITBUCKET_", "BKT_"]
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -934,9 +935,16 @@ pub fn learn(
         })
         .collect();
     let version = models_version(&check);
-    let _ = daemon.read(|store| {
-        store.set_provider_models(provider.name, version.as_deref(), &Value::Array(models))
-    });
+    let models = Value::Array(models);
+    let changed = last_models(daemon, &check)
+        .is_none_or(|(kept, current)| !current || Value::Array(kept) != models);
+    let _ =
+        daemon.read(|store| store.set_provider_models(provider.name, version.as_deref(), &models));
+    // The window reads the models again: a session that fails right after its start says
+    // nothing else, and its picker would offer a list the agent no longer has.
+    if changed {
+        let _ = daemon.emit("provider.models_read", json!({"name": provider.name}));
+    }
 }
 
 /// The value an option's `default` stands for, when the agent names it.
@@ -1065,9 +1073,20 @@ fn check_known(
     {
         *model = Some(listed.to_owned());
     }
-    let target = match model.as_deref().or(current) {
-        Some(model) => match models.iter().find(|m| m["id"] == model) {
-            Some(known) => Some((known, format!("model {model}"))),
+    let named = |model: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == model)
+            .map(|known| (known, format!("model {model}")))
+    };
+    // The model the agent runs on may have left the list: its session runs on what replaced it
+    // (the newest of its family, else the default), never a reason to refuse an effort.
+    let current = current
+        .and_then(|current| provider::resolved_model(offered.iter().copied(), current))
+        .and_then(named);
+    let target = match model.as_deref() {
+        Some(model) => match named(model) {
+            Some(known) => Some(known),
             None => {
                 return Err(Failure::refused(format!(
                     "provider {} offers no model {model}: it offers {}",
@@ -1076,10 +1095,12 @@ fn check_known(
                 )));
             }
         },
-        None => models
-            .iter()
-            .find(|m| m["default"] == true)
-            .and_then(|known| Some((known, format!("default model {}", known["id"].as_str()?)))),
+        None => current.or_else(|| {
+            models
+                .iter()
+                .find(|m| m["default"] == true)
+                .and_then(|known| Some((known, format!("default model {}", known["id"].as_str()?))))
+        }),
     };
     if let (Some(effort), Some((known, named))) = (effort, target)
         && let Some(efforts) = known["efforts"].as_array()
@@ -1215,6 +1236,7 @@ pub fn choose(
     // The model the setting gives is the one left when neither the agent nor the project names
     // one; the effort it gives belongs to that model, so it goes with another.
     let from_setting = asked.model.is_none() && project_model.is_none();
+    let from_project = asked.model.is_none() && project_model.is_some();
     let model = asked
         .model
         .or(project_model)
@@ -1225,23 +1247,32 @@ pub fn choose(
         .filter(|_| asked.effort.is_none() && model == setting_model);
     let (mut model, mut effort) = (model, asked.effort.or(setting_effort.clone()));
     // What the provider offers is known once one of its sessions said it; until then a model or
-    // an effort it does not offer fails the agent when its session opens. Without a model, an
-    // effort is the default model's, once a new session said which it is.
+    // an effort it does not offer is replaced when its session opens, and said. Without a model,
+    // an effort is the default model's, once a new session said which it is.
     let check = Check::of(provider, &settings, Version::Skip);
     if let Some(models) = known_models(daemon, &check) {
-        // What the setting gave and the provider no longer offers is let go, not refused: the
-        // session starts on what the provider proposes.
+        let offered = || models.iter().filter_map(|m| m["id"].as_str());
+        // What the setting gave and the provider no longer offers runs on the newest of its
+        // family, else is let go, not refused: the session starts on what the provider proposes.
         if from_setting && setting_model.is_some() {
-            let offered = models.iter().filter_map(|m| m["id"].as_str());
             if let Some(listed) = model
                 .as_deref()
-                .and_then(|asked| provider::listed_model(offered, asked))
+                .and_then(|asked| provider::resolved_model(offered(), asked))
             {
                 model = Some(listed.to_owned());
             } else {
                 model = None;
                 effort = effort.filter(|_| setting_effort.is_none());
             }
+        }
+        // The project's model the list dropped runs on the newest of its family; one of no
+        // family offered is refused below, naming what is offered.
+        if from_project
+            && let Some(listed) = model
+                .as_deref()
+                .and_then(|asked| provider::resolved_model(offered(), asked))
+        {
+            model = Some(listed.to_owned());
         }
         if let Some(given) = setting_effort.as_ref()
             && effort.as_ref() == Some(given)

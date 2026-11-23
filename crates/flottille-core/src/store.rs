@@ -12,12 +12,96 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
+use crate::finding::{self, Finding};
 use crate::item::{Check, Cursor, Filter, Item, Post};
+use crate::notification::{self, New as NewNotification, Notification};
 use crate::protocol::Event;
 use crate::run::{Readiness, Run, RunState};
 use crate::subscription::Subscription;
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
+
+/// The code of one repository that travelled for a launch (`travels`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Travel {
+    /// `out` when it went to `machine`, `in` when it came from it.
+    pub way: String,
+    /// The other machine's key.
+    pub machine: String,
+    pub launch: String,
+    /// Its path in the project.
+    pub repository: String,
+    pub project: String,
+    pub folder: String,
+    /// The sender's branch.
+    pub branch: String,
+    pub tip: String,
+    pub snapshot: String,
+    pub workspace: Option<String>,
+    pub there: Option<String>,
+    pub returned: Option<String>,
+    pub at: u64,
+}
+
+/// A session or a child started on another machine by an agent (`launches`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    /// `out` on the caller's machine, `in` on the machine it runs on.
+    pub way: String,
+    /// The other machine's key.
+    pub machine: String,
+    pub launch: String,
+    pub caller: String,
+    pub kind: String,
+    pub project: String,
+    /// `held`, `accepted`, `started` or `refused`; `ended`, for `out`, once its end came back.
+    pub state: String,
+    pub request: Option<u64>,
+    pub agent: Option<String>,
+    pub workspace: Option<String>,
+    /// The store's id of `workspace`, the one made of the launch's code; cleared when that
+    /// workspace is removed, as a later one may take its name and its id.
+    pub workspace_id: Option<i64>,
+    pub asked: Value,
+    pub at: u64,
+}
+
+/// A message kept for another machine until it takes it (`outbox`): a delivery for one of its
+/// agents, or a message to a session there (`docs/remote.md`, "Deliveries across machines").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    /// Its order among those kept: they are sent in it.
+    pub seq: i64,
+    /// The idempotent id the other machine stores it under.
+    pub id: String,
+    /// The other machine's key, and its name when the message was kept.
+    pub machine: String,
+    pub name: String,
+    pub launch: String,
+    /// The machine message, as JSON.
+    pub message: Value,
+    /// Whether the commits of the launch go back first, the message then naming where they came.
+    pub back: bool,
+    pub at: u64,
+}
+
+/// Why `Store::add_launch` did not record a launch: the launch was asked already, or its machine
+/// has as many launches waiting for their code, or for the user, as it may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchRefused {
+    Known,
+    Waiting,
+    Held,
+}
+
+/// Which launches `Store::launches` gives.
+#[derive(Debug, Clone, Copy)]
+pub enum LaunchFilter<'a> {
+    All,
+    Named(&'a str),
+    Agent(&'a str),
+    Request(u64),
+}
 
 /// A run's process recorded while it runs (`run_processes`), what a daemon started after a crash
 /// ends.
@@ -772,6 +856,173 @@ const MIGRATIONS: &[&str] = &[
     -- \"How long it took\").
     ALTER TABLE workspace_steps ADD COLUMN duration_ms INTEGER;
 ",
+    "
+    -- What the user left in a composer of the window and did not send (`docs/design.md` §10):
+    -- the text, and the names of its pictures' files, which are in the daemon's state folder and
+    -- go with the draft. `key` is `session:<agent>` or `project:<name>`. The user's own words:
+    -- no event, no log and no agent ever reads them.
+    CREATE TABLE drafts (
+        key        TEXT PRIMARY KEY,
+        text       TEXT NOT NULL,
+        pictures   TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+    -- The window's own small state, one JSON value by key (what the sidebar has folded).
+    CREATE TABLE window_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    ) STRICT;
+",
+    "
+    -- The code of a repository that went to another machine for a launch (`out`), or came from
+    -- one (`in`) (`docs/remote.md`, \"What travels\"): what a machine checks a bundle coming back
+    -- against, and what it sends back past. `machine` is the other machine's key. `folder` is the
+    -- repository it was sent from, or the one it was fetched into; `tip` the commit the sender's
+    -- branch was on, `snapshot` its uncommitted work; `workspace` and `there` the workspace made
+    -- of it on the receiving machine and its branch; `returned` the last commit that came back.
+    CREATE TABLE travels (
+        way        TEXT NOT NULL CHECK (way IN ('out', 'in')),
+        machine    TEXT NOT NULL,
+        launch     TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        project    TEXT NOT NULL,
+        folder     TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        tip        TEXT NOT NULL,
+        snapshot   TEXT NOT NULL,
+        workspace  TEXT,
+        there      TEXT,
+        returned   TEXT,
+        at         INTEGER NOT NULL,
+        PRIMARY KEY (way, machine, launch, repository)
+    ) STRICT;
+",
+    "
+    -- The machine a vault entry was shared from (`docs/remote.md`, \"Vault entries\"): a copy
+    -- of that machine's entry, NULL for an entry of this machine's own.
+    ALTER TABLE vault_entries ADD COLUMN shared_from TEXT;
+",
+    "
+    -- A session or a child started on another machine by an agent (`docs/remote.md`, \"Starting
+    -- a session on another machine\"): `out` on the caller's machine, `in` on the machine it runs
+    -- on. `machine` is the other machine's key; `caller` the agent that launched it (of this
+    -- machine for `out`, of the other for `in`); `state` `held` (for the user there), `accepted`
+    -- (by the gate there), `started`, or `refused`; `request` the user's request there while it is
+    -- held; `agent` the agent it started (there for `out`); `asked` the launch as it was asked.
+    CREATE TABLE launches (
+        way       TEXT NOT NULL CHECK (way IN ('out', 'in')),
+        machine   TEXT NOT NULL,
+        launch    TEXT NOT NULL,
+        caller    TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        project   TEXT NOT NULL,
+        state     TEXT NOT NULL,
+        request   INTEGER,
+        agent     TEXT,
+        workspace TEXT,
+        asked     TEXT NOT NULL,
+        at        INTEGER NOT NULL,
+        PRIMARY KEY (way, machine, launch)
+    ) STRICT;
+    CREATE INDEX launches_by_agent ON launches (agent);
+    -- The user's switch of a tree to Full, as the device that made it signed it: what a launch on
+    -- another machine needs to start in Full there.
+    ALTER TABLE agents ADD COLUMN full_switch TEXT;
+",
+    "
+    -- The store's id of the workspace a launch's code was made into (`workspace` is its name),
+    -- until that workspace is removed: a later one may take the name, and the id.
+    ALTER TABLE launches ADD COLUMN workspace_id INTEGER;
+",
+    "
+    -- What this machine keeps for another until it takes it (`docs/remote.md`, \"Deliveries
+    -- across machines\"): a delivery for an agent there, or a message to a session there, sent in
+    -- the order of `seq`, once each (`id`), and forgotten once taken, or after 30 days.
+    CREATE TABLE outbox (
+        seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+        id      TEXT NOT NULL UNIQUE,
+        machine TEXT NOT NULL,
+        name    TEXT NOT NULL,
+        launch  TEXT NOT NULL,
+        message TEXT NOT NULL,
+        back    INTEGER NOT NULL DEFAULT 0,
+        at      INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX outbox_by_machine ON outbox (machine, seq);
+",
+    "
+    -- What the daemon tells the user, one row each, for every client to read and mark
+    -- (`docs/protocol.md`, `notifications.list`). `source` is what the row is about, once: a
+    -- row is written once for it, so that the events read again change nothing. A row is kept 30
+    -- days, or the newest 1,000.
+    CREATE TABLE notifications (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        at        INTEGER NOT NULL,
+        kind      TEXT NOT NULL,
+        source    TEXT NOT NULL UNIQUE,
+        session   TEXT,
+        project   TEXT,
+        workspace TEXT,
+        title     TEXT NOT NULL,
+        excerpt   TEXT NOT NULL,
+        read_at   INTEGER,
+        resolved  INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+    CREATE INDEX notifications_by_session ON notifications (session);
+    -- The last event the centre made rows of: the last there is, the centre starting with the
+    -- events that come after it. `seeded` says the rows of what still waited at the upgrade (a
+    -- request, a question, a vault entry) were made.
+    CREATE TABLE notification_cursor (
+        id     INTEGER PRIMARY KEY CHECK (id = 1),
+        seq    INTEGER NOT NULL,
+        seeded INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+    INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
+",
+    "
+    -- The light copy of each other machine's list of sessions (`docs/remote.md`, \"One list of
+    -- every machine\"): the list it last told over its link, kept whole as JSON (each live root
+    -- session's id, title, project, state and last exchange, never its conversation), so that
+    -- the clients list the sessions of a machine that is off. One row per machine, by its key.
+    CREATE TABLE machine_sessions (
+        machine TEXT PRIMARY KEY,
+        name    TEXT NOT NULL,
+        list    TEXT NOT NULL,
+        at      INTEGER NOT NULL
+    ) STRICT;
+",
+    "
+    -- What the agents report about Flottille itself (`docs/developer.md`, \"The findings\"): one
+    -- finding per bug, each time it was met an occurrence. Texts are masked before they are kept.
+    CREATE TABLE findings (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        title    TEXT NOT NULL,
+        expected TEXT NOT NULL,
+        filed    TEXT
+    ) STRICT;
+    CREATE TABLE finding_occurrences (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        finding  INTEGER NOT NULL REFERENCES findings (id),
+        at       INTEGER NOT NULL,
+        session  TEXT NOT NULL,
+        called   TEXT NOT NULL,
+        happened TEXT NOT NULL,
+        differs  TEXT
+    ) STRICT;
+    CREATE INDEX finding_occurrences_by_finding ON finding_occurrences (finding, id);
+",
+    "
+    -- The answers an agent of this machine waits for from another machine: a call of a session
+    -- there held for that machine's user (`docs/remote.md`, \"A tree across machines\"). Its
+    -- answer is taken from that machine only while it is waited for.
+    CREATE TABLE awaited_answers (
+        machine TEXT NOT NULL,
+        request INTEGER NOT NULL,
+        agent   TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        at      INTEGER NOT NULL,
+        PRIMARY KEY (machine, request)
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -783,6 +1034,17 @@ const EXTENSION_MIGRATIONS: &str = "
         name    TEXT PRIMARY KEY,
         applied INTEGER NOT NULL
     ) STRICT;
+";
+
+/// A child an agent of another machine launched here was stored with no parent at depth 0 before
+/// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
+/// tree across machines"). Made at every open rather than as a numbered migration: it changes
+/// nothing once done, as such a child is never stored so again, and every check of a root then
+/// reads the depth alone.
+const REMOTE_CHILDREN_DEPTH: &str = "
+    UPDATE agents SET depth = 1
+    WHERE parent IS NULL AND depth = 0
+      AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child');
 ";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -799,6 +1061,9 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
 
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
+
+/// The kind and the time of the last delivery a launch on another machine sent here.
+pub type Heard = (String, u64);
 
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
@@ -1165,6 +1430,48 @@ impl Store {
             .flatten())
     }
 
+    /// Replaces the setup steps of the workspace `workspace` that have not started, its worktrees
+    /// kept, by `steps` (none of them a worktree), numbered after the steps that stay, in one
+    /// transaction: a workspace made of another machine's code takes the setup its launch laid,
+    /// once allowed. Nothing is changed when a setup step has started.
+    pub fn replace_pending_steps(&mut self, workspace: i64, steps: &[Step]) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        let started: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM workspace_steps WHERE workspace = ?1 AND state != 'pending' \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        if started > 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "DELETE FROM workspace_steps WHERE workspace = ?1 \
+             AND json_extract(action, '$.kind') IS NOT 'worktree'",
+            params![workspace],
+        )?;
+        let next: u32 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM workspace_steps WHERE workspace = ?1",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        for (at, step) in steps.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO workspace_steps (workspace, position, repository, action, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    workspace,
+                    next + at as u32,
+                    step.repository,
+                    serde_json::to_string(&step.action)?,
+                    StepState::Pending.as_str(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     /// Puts these steps back to pending, forgetting their failure, with one event, in one
     /// transaction.
     pub fn reset_steps(
@@ -1249,6 +1556,7 @@ impl Store {
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        forget_launches_workspace(&transaction, workspace)?;
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(event)
@@ -1270,6 +1578,7 @@ impl Store {
     ) -> Result<(Vec<Event>, Vec<Request>)> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        forget_launches_workspace(&transaction, workspace)?;
         transaction.execute(
             "UPDATE agents SET workspace = NULL, folder = ?2, instructions = ?3, updated_at = ?4 \
              WHERE id = ?1",
@@ -1373,10 +1682,11 @@ impl Store {
         Ok(agent)
     }
 
-    /// Every agent, the oldest first.
+    /// Every agent, the oldest first. A caller of another machine stood in for here
+    /// ([`Store::keep_stand_in`]) is none of this machine's: only its id finds it.
     pub fn agents(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
-            "SELECT {AGENT_COLUMNS} FROM agents ORDER BY created_at, id"
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE id NOT LIKE '%@%' ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -1387,7 +1697,7 @@ impl Store {
     pub fn live_agents(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state NOT IN ('ended', 'failed') \
-             ORDER BY created_at, id"
+             AND id NOT LIKE '%@%' ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -2286,6 +2596,30 @@ impl Store {
         Ok(Some(event))
     }
 
+    /// Settles a request whose answer is for no agent: the launch of another machine's agent,
+    /// which the user allowed or refused here. Its answer is kept as sent, never delivered.
+    pub fn settle_unsent(&mut self, request: &Request, outcome: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let id = format!("approval-{}", request.number);
+        let stored = transaction.execute(
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
+             images) VALUES (?1, ?2, 'approval', ?3, 'urgent', 'superseded', ?4, '[]')",
+            params![id, request.agent, outcome, now_ms()],
+        )?;
+        if stored == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            &request.agent,
+            "approval.settled",
+            json!({"number": request.number, "agent": request.agent, "outcome": outcome,
+                "delivery": id}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
     /// The requests allowed whose answer was never stored: a daemon stopped while it performed
     /// them.
     pub fn unsettled_requests(&self) -> Result<Vec<Request>> {
@@ -2552,6 +2886,109 @@ impl Store {
         Ok((Some(leave), Some(event)))
     }
 
+    /// Keeps the agent of another machine that calls a session of this one, stood in for by
+    /// `agent` (its id `<caller>@<machine's key>`, never one of this machine's): made the first
+    /// time, its title, project, mode and machine's name brought up to date after. No event: it
+    /// is shown nowhere but on the requests and in the leaves it makes. `None` when it is new and
+    /// `most` of that machine's are kept already.
+    pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
+        if self.agent(&agent.id)?.is_none() {
+            let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
+            let kept: i64 = self.connection.query_row(
+                "SELECT count(*) FROM agents WHERE instr(id, '@') > 0 \
+                 AND substr(id, instr(id, '@') + 1) = ?1",
+                params![machine],
+                |row| row.get(0),
+            )?;
+            if kept as usize >= most {
+                return Ok(None);
+            }
+            self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
+        } else {
+            self.connection.execute(
+                "UPDATE agents SET title = ?2, project = ?3, gate_mode = ?4, brief = ?5, \
+                 updated_at = ?6 WHERE id = ?1",
+                params![
+                    agent.id,
+                    agent.title,
+                    agent.project,
+                    agent.gate_mode.as_str(),
+                    agent.brief,
+                    now_ms()
+                ],
+            )?;
+        }
+        Ok(Some(
+            self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()),
+        ))
+    }
+
+    /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
+    /// machine whose key is none of `machines` (it left the members), or idle since before
+    /// `idle_before`, with their leaves and requests; and the answers awaited from such a
+    /// machine, or since before `idle_before` (never sent). No `machines` is a member list that
+    /// was never read: no machine left by it. How many callers went.
+    pub fn forget_stand_ins(
+        &mut self,
+        machines: Option<&[String]>,
+        idle_before: u64,
+    ) -> Result<usize> {
+        let left =
+            |machine: &str| machines.is_some_and(|kept| !kept.iter().any(|key| key == machine));
+        let transaction = self.connection.transaction()?;
+        let stand_ins: Vec<(String, u64)> = {
+            let mut statement = transaction
+                .prepare("SELECT id, updated_at FROM agents WHERE instr(id, '@') > 0")?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut forgotten = 0;
+        for (id, at) in stand_ins {
+            let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+            if at < idle_before || left(machine) {
+                forgotten +=
+                    transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+            }
+        }
+        let awaited: Vec<(String, i64, u64)> = {
+            let mut statement =
+                transaction.prepare("SELECT machine, request, at FROM awaited_answers")?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (machine, request, at) in awaited {
+            if at < idle_before || left(&machine) {
+                transaction.execute(
+                    "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2",
+                    params![machine, request],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(forgotten)
+    }
+
+    /// Records that `agent` of this machine waits for the answer of request `request` of the
+    /// machine of key `machine`: that answer alone is taken from it.
+    pub fn await_answer(&mut self, machine: &str, request: u64, agent: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO awaited_answers (machine, request, agent, at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![machine, request as i64, agent, now_ms() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `agent` waited for the answer of request `request` of the machine of key
+    /// `machine`, which it waits for no more.
+    pub fn take_awaited(&mut self, machine: &str, request: u64, agent: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2 AND agent = ?3",
+            params![machine, request as i64, agent],
+        )? > 0)
+    }
+
     /// Whether the user let `writer` write to `session`.
     pub fn has_leave(&self, writer: &str, session: &str) -> Result<bool> {
         Ok(self
@@ -2682,7 +3119,7 @@ impl Store {
     /// The vault's entries, by name.
     pub fn vault_entries(&self) -> Result<Vec<crate::vault::Entry>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT name, description, url, username, project, updated_at, bound \
+            "SELECT name, description, url, username, project, updated_at, bound, shared_from \
              FROM vault_entries ORDER BY name",
         )?;
         let rows = statement.query_map([], |row| {
@@ -2694,6 +3131,7 @@ impl Store {
                 project: row.get(4)?,
                 updated_at: row.get(5)?,
                 bound: row.get(6)?,
+                shared_from: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2705,9 +3143,10 @@ impl Store {
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO vault_entries \
-             (name, description, url, username, project, updated_at, bound) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (name) DO UPDATE SET \
-             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6, bound = ?7",
+             (name, description, url, username, project, updated_at, bound, shared_from) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT (name) DO UPDATE SET \
+             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6, \
+             bound = ?7, shared_from = ?8",
             params![
                 entry.name,
                 entry.description,
@@ -2715,7 +3154,8 @@ impl Store {
                 entry.username,
                 entry.project,
                 entry.updated_at,
-                entry.bound
+                entry.bound,
+                entry.shared_from
             ],
         )?;
         let event = append_event(
@@ -2736,7 +3176,7 @@ impl Store {
         let removed = transaction
             .query_row(
                 "DELETE FROM vault_entries WHERE name = ?1 \
-                 RETURNING description, url, username, project, updated_at, bound",
+                 RETURNING description, url, username, project, updated_at, bound, shared_from",
                 params![name],
                 |row| {
                     Ok(crate::vault::Entry {
@@ -2747,6 +3187,7 @@ impl Store {
                         project: row.get(3)?,
                         updated_at: row.get(4)?,
                         bound: row.get(5)?,
+                        shared_from: row.get(6)?,
                     })
                 },
             )
@@ -2761,6 +3202,619 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok((Some(removed), Some(event)))
+    }
+
+    /// The draft of the composer `key` (`session:<agent>`, `project:<name>`): its text and the
+    /// names of its pictures' files; `None` when it holds none.
+    pub fn draft(&self, key: &str) -> Result<Option<(String, Vec<String>)>> {
+        let found = self
+            .connection
+            .query_row(
+                "SELECT text, pictures FROM drafts WHERE key = ?1",
+                params![key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        found
+            .map(|(text, pictures)| Ok((text, serde_json::from_str(&pictures)?)))
+            .transpose()
+    }
+
+    /// Keeps `text` as the draft of `key`, with the files of `pictures` (the ones it has when
+    /// there are none given), in place of the draft it had: read and written in one transaction,
+    /// so that a second window's write cannot slip between them. Text and pictures that are
+    /// nothing forget the draft. What comes back is whether a draft is kept, and the names of the
+    /// pictures the one it had held and this one does not, which the caller removes once the
+    /// transaction is over. No event: a draft is the user's own words.
+    pub fn set_draft(
+        &mut self,
+        key: &str,
+        text: &str,
+        pictures: Option<&[String]>,
+    ) -> Result<(bool, Vec<String>)> {
+        let transaction = self.connection.transaction()?;
+        let before: Vec<String> = transaction
+            .query_row(
+                "SELECT pictures FROM drafts WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|names| serde_json::from_str(&names))
+            .transpose()?
+            .unwrap_or_default();
+        let names = pictures.map_or_else(|| before.clone(), <[String]>::to_vec);
+        let kept = !(text.trim().is_empty() && names.is_empty());
+        if kept {
+            transaction.execute(
+                "INSERT INTO drafts (key, text, pictures, updated_at) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (key) DO UPDATE SET text = ?2, pictures = ?3, updated_at = ?4",
+                params![key, text, serde_json::to_string(&names)?, now_ms()],
+            )?;
+        } else {
+            transaction.execute("DELETE FROM drafts WHERE key = ?1", params![key])?;
+        }
+        transaction.commit()?;
+        let gone = before
+            .into_iter()
+            .filter(|name| !kept || !names.contains(name))
+            .collect();
+        Ok((kept, gone))
+    }
+
+    /// Forgets the draft of `key`: the names of the pictures it had, which the caller removes.
+    pub fn forget_draft(&mut self, key: &str) -> Result<Vec<String>> {
+        let before = self.draft(key)?.map(|(_, pictures)| pictures);
+        self.connection
+            .execute("DELETE FROM drafts WHERE key = ?1", params![key])?;
+        Ok(before.unwrap_or_default())
+    }
+
+    /// Keeps what travelled, in place of what that repository of that launch was when it
+    /// travelled that way with that machine before: a launch whose sending failed is sent again.
+    pub fn record_travel(&mut self, travel: &Travel) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO travels (way, machine, launch, repository, project, folder, \
+             branch, tip, snapshot, workspace, there, returned, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                travel.way,
+                travel.machine,
+                travel.launch,
+                travel.repository,
+                travel.project,
+                travel.folder,
+                travel.branch,
+                travel.tip,
+                travel.snapshot,
+                travel.workspace,
+                travel.there,
+                travel.returned,
+                travel.at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What travelled `way` for `launch`, with `machine` or with any, by repository.
+    pub fn travels(&self, way: &str, machine: Option<&str>, launch: &str) -> Result<Vec<Travel>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT way, machine, launch, repository, project, folder, branch, tip, snapshot, \
+             workspace, there, returned, at FROM travels \
+             WHERE way = ?1 AND (?2 IS NULL OR machine = ?2) AND launch = ?3 \
+             ORDER BY repository",
+        )?;
+        let rows = statement.query_map(params![way, machine, launch], |row| {
+            Ok(Travel {
+                way: row.get(0)?,
+                machine: row.get(1)?,
+                launch: row.get(2)?,
+                repository: row.get(3)?,
+                project: row.get(4)?,
+                folder: row.get(5)?,
+                branch: row.get(6)?,
+                tip: row.get(7)?,
+                snapshot: row.get(8)?,
+                workspace: row.get(9)?,
+                there: row.get(10)?,
+                returned: row.get(11)?,
+                at: row.get::<_, i64>(12)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The workspace made on this machine of what came from `machine` for `launch`, and its
+    /// branch, for each of its repositories.
+    pub fn set_travel_place(
+        &mut self,
+        machine: &str,
+        launch: &str,
+        workspace: &str,
+        there: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE travels SET workspace = ?3, there = ?4 \
+             WHERE way = 'in' AND machine = ?1 AND launch = ?2",
+            params![machine, launch, workspace, there],
+        )?;
+        Ok(())
+    }
+
+    /// The last commit of a repository of `launch` that came back, or was sent back.
+    pub fn set_travel_returned(
+        &mut self,
+        way: &str,
+        machine: &str,
+        launch: &str,
+        repository: &str,
+        commit: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE travels SET returned = ?5 \
+             WHERE way = ?1 AND machine = ?2 AND launch = ?3 AND repository = ?4",
+            params![way, machine, launch, repository, commit],
+        )?;
+        Ok(())
+    }
+
+    /// Records a launch, in place of the one of the same name with the same machine; a launch `in`
+    /// already recorded keeps its workspace (`place_launch` writes it).
+    pub fn record_launch(&mut self, launch: &Launch) -> Result<()> {
+        insert_launch(&self.connection, launch)
+    }
+
+    /// Records what came of a launch `in` that was recorded: its `state`, `request` and `agent`,
+    /// and the workspace `workspace`, as it is in this very write (its name and its id); when
+    /// that workspace was removed meanwhile, none, as a later one may take its id. The id
+    /// recorded, `None` when the launch is not there (forgotten meanwhile).
+    pub fn place_launch(
+        &mut self,
+        launch: &Launch,
+        workspace: Option<i64>,
+    ) -> Result<Option<Option<i64>>> {
+        Ok(self
+            .connection
+            .query_row(
+                "UPDATE launches SET state = ?4, request = ?5, agent = ?6, \
+                 workspace = (SELECT name FROM workspaces WHERE id = ?7), \
+                 workspace_id = (SELECT id FROM workspaces WHERE id = ?7) \
+                 WHERE way = ?1 AND machine = ?2 AND launch = ?3 RETURNING workspace_id",
+                params![
+                    launch.way,
+                    launch.machine,
+                    launch.launch,
+                    launch.state,
+                    launch.request.map(|n| n as i64),
+                    launch.agent,
+                    workspace,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Settles the launch `launch` of `machine`, held for the user, as `state`: only a launch
+    /// still held is settled, so that the user's answer and the end of its agent never overwrite
+    /// each other. The id of its workspace, as it is now, when it was; `None` when it was not held.
+    pub fn settle_launch(
+        &mut self,
+        machine: &str,
+        launch: &str,
+        state: &str,
+    ) -> Result<Option<Option<i64>>> {
+        Ok(self
+            .connection
+            .query_row(
+                "UPDATE launches SET state = ?3 WHERE way = 'in' AND machine = ?1 AND launch = ?2 \
+                 AND state = 'held' RETURNING workspace_id",
+                params![machine, launch, state],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Refuses the launch `launch` of `machine`, which the user allowed (`settle_launch`) but
+    /// which cannot start after all: its project's settings could not be laid.
+    pub fn refuse_started_launch(&mut self, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = 'refused' WHERE way = 'in' AND machine = ?1 \
+             AND launch = ?2 AND state = 'started'",
+            params![machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Records a new launch `in` from its machine, unless it was asked already or that machine
+    /// has `most_waiting` launches waiting for their code, or `most_held` waiting for the user
+    /// (when this one is held): counted and recorded in one transaction, so that launches asked at
+    /// once never go past them. Why it was not, when it was not.
+    pub fn add_launch(
+        &mut self,
+        launch: &Launch,
+        most_waiting: usize,
+        most_held: usize,
+    ) -> Result<Option<LaunchRefused>> {
+        let transaction = self.connection.transaction()?;
+        let (known, waiting, held): (i64, i64, i64) = transaction.query_row(
+            "SELECT COALESCE(SUM(launch = ?2), 0), \
+             COALESCE(SUM(agent IS NULL AND state != 'refused'), 0), \
+             COALESCE(SUM(state = 'held'), 0) \
+             FROM launches WHERE way = 'in' AND machine = ?1",
+            params![launch.machine, launch.launch],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let refused = if known > 0 {
+            Some(LaunchRefused::Known)
+        } else if waiting as usize >= most_waiting {
+            Some(LaunchRefused::Waiting)
+        } else if launch.state == "held" && held as usize >= most_held {
+            Some(LaunchRefused::Held)
+        } else {
+            None
+        };
+        if refused.is_none() {
+            insert_launch(&transaction, launch)?;
+        }
+        transaction.commit()?;
+        Ok(refused)
+    }
+
+    /// The launches `way` with `machine` (any, when `None`) that match `filter`: `launch` the
+    /// launch's name, `agent` the agent it started, `request` the user's request.
+    pub fn launches(
+        &self,
+        way: &str,
+        machine: Option<&str>,
+        filter: LaunchFilter<'_>,
+    ) -> Result<Vec<Launch>> {
+        let (launch, agent, request) = match filter {
+            LaunchFilter::All => (None, None, None),
+            LaunchFilter::Named(launch) => (Some(launch), None, None),
+            LaunchFilter::Agent(agent) => (None, Some(agent), None),
+            LaunchFilter::Request(request) => (None, None, Some(request as i64)),
+        };
+        let mut statement = self.connection.prepare_cached(
+            "SELECT way, machine, launch, caller, kind, project, state, request, agent, \
+             workspace, workspace_id, asked, at FROM launches \
+             WHERE way = ?1 AND (?2 IS NULL OR machine = ?2) AND (?3 IS NULL OR launch = ?3) \
+             AND (?4 IS NULL OR agent = ?4) AND (?5 IS NULL OR request = ?5) ORDER BY at, launch",
+        )?;
+        let rows = statement.query_map(params![way, machine, launch, agent, request], |row| {
+            Ok((
+                Launch {
+                    way: row.get(0)?,
+                    machine: row.get(1)?,
+                    launch: row.get(2)?,
+                    caller: row.get(3)?,
+                    kind: row.get(4)?,
+                    project: row.get(5)?,
+                    state: row.get(6)?,
+                    request: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
+                    agent: row.get(8)?,
+                    workspace: row.get(9)?,
+                    workspace_id: row.get(10)?,
+                    asked: Value::Null,
+                    at: row.get::<_, i64>(12)? as u64,
+                },
+                row.get::<_, String>(11)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut launch, asked) = row?;
+            launch.asked = serde_json::from_str(&asked)?;
+            Ok(launch)
+        })
+        .collect()
+    }
+
+    /// The launches `out` the tree of this machine shows under their pilot, oldest first, each with
+    /// the kind and the time of the last delivery it sent its caller here (stored under
+    /// `<launch>-…`): those that started a session there, not refused, not handed to the user,
+    /// and not ended, unless it ended on a report and the agent that started it lives. In one
+    /// read: every launch ever made is never read.
+    pub fn launches_shown(&self) -> Result<Vec<(Launch, Option<Heard>)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT l.way, l.machine, l.launch, l.caller, l.kind, l.project, l.state, l.request, \
+             l.agent, l.workspace, l.workspace_id, l.asked, l.at, h.kind, h.created_at \
+             FROM launches l LEFT JOIN deliveries h ON h.rowid = (SELECT d.rowid FROM deliveries d \
+             WHERE d.agent = l.caller AND substr(d.id, 1, length(l.launch) + 1) = l.launch || '-' \
+             ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) \
+             WHERE l.way = 'out' AND l.agent IS NOT NULL AND l.state != 'refused' \
+             AND l.kind != 'handed' AND (l.state != 'ended' OR (h.kind = 'child-report' \
+             AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = l.caller \
+             AND a.state IN ('ended', 'failed')))) ORDER BY l.at, l.launch",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                Launch {
+                    way: row.get(0)?,
+                    machine: row.get(1)?,
+                    launch: row.get(2)?,
+                    caller: row.get(3)?,
+                    kind: row.get(4)?,
+                    project: row.get(5)?,
+                    state: row.get(6)?,
+                    request: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
+                    agent: row.get(8)?,
+                    workspace: row.get(9)?,
+                    workspace_id: row.get(10)?,
+                    asked: Value::Null,
+                    at: row.get::<_, i64>(12)? as u64,
+                },
+                row.get::<_, String>(11)?,
+                row.get::<_, Option<String>>(13)?
+                    .zip(row.get::<_, Option<i64>>(14)?.map(|at| at as u64)),
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut launch, asked, heard) = row?;
+            launch.asked = serde_json::from_str(&asked)?;
+            Ok((launch, heard))
+        })
+        .collect()
+    }
+
+    /// Ends the launch `out` `launch` to `machine`: the session it started there ended, and counts
+    /// in no cap here any more.
+    pub fn end_launch(&mut self, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = 'ended' WHERE way = 'out' AND machine = ?1 \
+             AND launch = ?2 AND state != 'refused'",
+            params![machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps `list`, the sessions the machine of key `machine` (named `name`) told at `at`, in
+    /// place of the one it told before. The projects it told apart (`keep_machine_projects`) stay.
+    pub fn keep_machine_sessions(
+        &mut self,
+        machine: &str,
+        name: &str,
+        list: &Value,
+        at: u64,
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let mut list = list.clone();
+        let before: Option<String> = transaction
+            .query_row(
+                "SELECT list FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let projects = before
+            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
+            .and_then(|before| before.get("projects").cloned());
+        if let (Some(projects), Some(list)) = (projects, list.as_object_mut()) {
+            list.entry("projects").or_insert(projects);
+        }
+        transaction.execute(
+            "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3, at = ?4",
+            params![machine, name, list.to_string(), at as i64],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keeps `projects`, the projects the machine of key `machine` (named `name`) told at `at`,
+    /// beside the sessions it told (none yet when this is the first it says).
+    pub fn keep_machine_projects(
+        &mut self,
+        machine: &str,
+        name: &str,
+        projects: &Value,
+        at: u64,
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let before: Option<String> = transaction
+            .query_row(
+                "SELECT list FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut list = before
+            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({"sessions": []}));
+        list["projects"] = projects.clone();
+        transaction.execute(
+            "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3",
+            params![machine, name, list.to_string(), at as i64],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Forgets the list of each machine but those of keys `machines`: the others left the members or
+    /// are no runner any more.
+    pub fn forget_machine_sessions_except(&mut self, machines: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let kept: Vec<String> = {
+            let mut statement = transaction.prepare("SELECT machine FROM machine_sessions")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for machine in kept.iter().filter(|machine| !machines.contains(machine)) {
+            transaction.execute(
+                "DELETE FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Each other machine's list as it last told it: its key, its name, the list, and when.
+    pub fn machine_sessions(&self) -> Result<Vec<(String, String, Value, u64)>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT machine, name, list, at FROM machine_sessions ORDER BY name")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        rows.map(|row| {
+            let (machine, name, list, at) = row?;
+            Ok((machine, name, serde_json::from_str(&list)?, at))
+        })
+        .collect()
+    }
+
+    /// Keeps a message for another machine, after those kept before it; one of an id kept already
+    /// is not kept again.
+    pub fn keep_outgoing(&mut self, outgoing: &Outgoing) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO outbox (id, machine, name, launch, message, back, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                outgoing.id,
+                outgoing.machine,
+                outgoing.name,
+                outgoing.launch,
+                outgoing.message.to_string(),
+                outgoing.back,
+                outgoing.at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The messages kept for `machine` (any, when `None`), in the order they are sent.
+    pub fn outgoing(&self, machine: Option<&str>) -> Result<Vec<Outgoing>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT seq, id, machine, name, launch, message, back, at FROM outbox \
+             WHERE ?1 IS NULL OR machine = ?1 ORDER BY seq",
+        )?;
+        let rows = statement.query_map(params![machine], |row| {
+            Ok((
+                Outgoing {
+                    seq: row.get(0)?,
+                    id: row.get(1)?,
+                    machine: row.get(2)?,
+                    name: row.get(3)?,
+                    launch: row.get(4)?,
+                    message: Value::Null,
+                    back: row.get(6)?,
+                    at: row.get::<_, i64>(7)? as u64,
+                },
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut outgoing, message) = row?;
+            outgoing.message = serde_json::from_str(&message)?;
+            Ok(outgoing)
+        })
+        .collect()
+    }
+
+    /// The message kept as `id` is now `message`, its commits gone back already.
+    pub fn sent_back_outgoing(&mut self, id: &str, message: &Value) -> Result<()> {
+        self.connection.execute(
+            "UPDATE outbox SET message = ?2, back = 0 WHERE id = ?1",
+            params![id, message.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the message kept as `id`: the other machine took it.
+    pub fn forget_outgoing(&mut self, id: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Forgets the messages kept since before `before`, and gives them.
+    pub fn drop_outgoing_before(&mut self, before: u64) -> Result<Vec<Outgoing>> {
+        let old: Vec<Outgoing> = self
+            .outgoing(None)?
+            .into_iter()
+            .filter(|outgoing| outgoing.at < before)
+            .collect();
+        for outgoing in &old {
+            self.forget_outgoing(&outgoing.id)?;
+        }
+        Ok(old)
+    }
+
+    /// Forgets a launch.
+    pub fn forget_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM launches WHERE way = ?1 AND machine = ?2 AND launch = ?3",
+            params![way, machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps the user's switch of the tree of `agent` to Full as the device signed it, or forgets
+    /// it (`None`).
+    pub fn set_full_switch(&mut self, agent: &str, signed: Option<&str>) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET full_switch = ?2 WHERE id = ?1",
+            params![agent, signed],
+        )?;
+        Ok(())
+    }
+
+    /// The user's switch of the tree of `agent` to Full, as the device signed it, when kept.
+    pub fn full_switch(&self, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT full_switch FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// The keys of the drafts the composers hold.
+    pub fn draft_keys(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT key FROM drafts ORDER BY key")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The window's own state: each key with its JSON value.
+    pub fn window_state(&self) -> Result<Vec<(String, Value)>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT key, value FROM window_state ORDER BY key")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (key, value) = row?;
+            Ok((key, serde_json::from_str(&value)?))
+        })
+        .collect()
+    }
+
+    /// Keeps `value` for `key` of the window's state; `None` forgets it.
+    pub fn set_window_state(&mut self, key: &str, value: Option<&Value>) -> Result<()> {
+        match value {
+            Some(value) => self.connection.execute(
+                "INSERT INTO window_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT (key) DO UPDATE SET value = ?2",
+                params![key, value.to_string()],
+            )?,
+            None => self
+                .connection
+                .execute("DELETE FROM window_state WHERE key = ?1", params![key])?,
+        };
+        Ok(())
     }
 
     /// The user takes the leave back, with its `leave.withdrawn` event; `None` when there was
@@ -3334,9 +4388,20 @@ impl Store {
 
     /// The children of the project that have not ended: what its children cap counts.
     pub fn live_children(&self, project: &str) -> Result<usize> {
+        // A child another machine launched here has no parent here (one whose code is on its way
+        // counts already), and one an agent of this machine launched on another counts while its
+        // parent lives, until its end comes back (`docs/remote.md`, "Starting a session on another
+        // machine").
         let count: u64 = self.connection.query_row(
-            "SELECT count(*) FROM agents WHERE project = ?1 AND parent IS NOT NULL \
-             AND state NOT IN ('ended', 'failed')",
+            "SELECT (SELECT count(*) FROM agents WHERE project = ?1 \
+             AND state NOT IN ('ended', 'failed') AND (parent IS NOT NULL OR id IN \
+             (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child' AND agent IS NOT NULL))) \
+             + (SELECT count(*) FROM launches WHERE way = 'in' AND kind = 'child' \
+             AND project = ?1 AND agent IS NULL AND state IN ('held', 'accepted')) \
+             + (SELECT count(*) FROM launches JOIN agents ON agents.id = launches.caller \
+             WHERE launches.way = 'out' AND launches.kind = 'child' AND launches.project = ?1 \
+             AND launches.state NOT IN ('refused', 'ended') \
+             AND agents.state NOT IN ('ended', 'failed'))",
             params![project],
             |row| row.get(0),
         )?;
@@ -3495,6 +4560,317 @@ impl Store {
             )
             .optional()?
             .transpose()
+    }
+
+    /// Keeps a notification, unless one is kept for its `source` already: its id, `None` for a
+    /// source seen before.
+    pub fn add_notification(&self, new: &NewNotification) -> Result<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "INSERT INTO notifications (at, kind, source, session, project, workspace, title, \
+                 excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT (source) DO NOTHING RETURNING id",
+                params![
+                    new.at,
+                    new.kind,
+                    new.source,
+                    new.session,
+                    new.project,
+                    new.workspace,
+                    new.title,
+                    new.excerpt
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The notifications, oldest first: with `after`, the first `limit` numbered after it;
+    /// without, the last `limit` of all. `unread` leaves out those read.
+    pub fn notifications(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        unread: bool,
+    ) -> Result<Vec<Notification>> {
+        let filter = if unread { "AND read_at IS NULL" } else { "" };
+        let columns =
+            "id, at, kind, session, project, workspace, title, excerpt, read_at, resolved";
+        let found = match after {
+            Some(after) => {
+                let mut statement = self.connection.prepare(&format!(
+                    "SELECT {columns} FROM notifications WHERE id > ?1 {filter} \
+                     ORDER BY id LIMIT ?2"
+                ))?;
+                statement
+                    .query_map(params![after, limit as i64], notification_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut statement = self.connection.prepare(&format!(
+                    "SELECT {columns} FROM notifications WHERE 1 = 1 {filter} \
+                     ORDER BY id DESC LIMIT ?1"
+                ))?;
+                let mut found = statement
+                    .query_map(params![limit as i64], notification_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                found.reverse();
+                found
+            }
+        };
+        Ok(found)
+    }
+
+    /// How many notifications are unread: those that wait for the user, and the others.
+    pub fn unread_notifications(&self) -> Result<(usize, usize)> {
+        let waits = notification::NEEDS_YOU
+            .iter()
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count = |wait: bool| -> Result<usize> {
+            Ok(self.connection.query_row(
+                &format!(
+                    "SELECT count(*) FROM notifications WHERE read_at IS NULL \
+                     AND kind {} IN ({waits})",
+                    if wait { "" } else { "NOT" }
+                ),
+                [],
+                |row| row.get(0),
+            )?)
+        };
+        Ok((count(true)?, count(false)?))
+    }
+
+    /// Marks notifications read at `now`: the numbers of those that changed.
+    pub fn read_notifications(&self, which: notification::Which, now: u64) -> Result<Vec<u64>> {
+        // `?1` is the time; what selects the rows numbers its own from `?2`.
+        let (condition, mut values): (String, Vec<rusqlite::types::Value>) = match which {
+            notification::Which::All => ("1 = 1".into(), Vec::new()),
+            notification::Which::Session(session) => {
+                ("session = ?2".into(), vec![session.to_owned().into()])
+            }
+            notification::Which::Ids(ids) => {
+                let marks: Vec<String> = (0..ids.len()).map(|n| format!("?{}", n + 2)).collect();
+                (
+                    format!("id IN ({})", marks.join(", ")),
+                    ids.iter().map(|id| (*id as i64).into()).collect(),
+                )
+            }
+        };
+        values.insert(0, (now as i64).into());
+        let mut statement = self.connection.prepare(&format!(
+            "UPDATE notifications SET read_at = ?1 WHERE read_at IS NULL AND {condition} \
+             RETURNING id"
+        ))?;
+        let mut changed = statement
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row.get::<_, u64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        changed.sort_unstable();
+        Ok(changed)
+    }
+
+    /// What answered the notification of `source` resolves it, and reads it: its number, `None`
+    /// when there is no such row or it was resolved already.
+    pub fn resolve_notification(&self, source: &str, now: u64) -> Result<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "UPDATE notifications SET resolved = 1, read_at = coalesce(read_at, ?2) \
+                 WHERE source = ?1 AND resolved = 0 RETURNING id",
+                params![source, now],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The sources of the notifications of `kind` still waiting for their answer.
+    pub fn unresolved_notifications(&self, kind: &str) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source FROM notifications WHERE kind = ?1 AND resolved = 0 ORDER BY id",
+        )?;
+        let found = statement
+            .query_map([kind], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(found)
+    }
+
+    /// Forgets the notifications older than 30 days, then all but the newest 1,000: how many
+    /// went.
+    pub fn prune_notifications(&self, now: u64) -> Result<usize> {
+        let oldest = now.saturating_sub(notification::KEPT_DAYS * 24 * 3_600_000);
+        let old = self
+            .connection
+            .execute("DELETE FROM notifications WHERE at < ?1", [oldest])?;
+        let many = self.connection.execute(
+            "DELETE FROM notifications WHERE id NOT IN \
+             (SELECT id FROM notifications ORDER BY id DESC LIMIT ?1)",
+            [notification::KEPT_ROWS as i64],
+        )?;
+        Ok(old + many)
+    }
+
+    /// The last event the notifications were made of, `None` before the first.
+    pub fn notification_cursor(&self) -> Result<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT seq FROM notification_cursor WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Moves the cursor to `seq`, never back: two readers that each read an older cursor leave
+    /// the furthest.
+    pub fn set_notification_cursor(&self, seq: u64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO notification_cursor (id, seq) VALUES (1, ?1) \
+             ON CONFLICT (id) DO UPDATE SET seq = max(seq, excluded.seq)",
+            [seq],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the rows of what waited for the user at the upgrade were made.
+    pub fn notifications_seeded(&self) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT seeded FROM notification_cursor WHERE id = 1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn set_notifications_seeded(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE notification_cursor SET seeded = 1 WHERE id = 1 AND seeded = 0",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps a new finding with its first occurrence: its id.
+    pub fn add_finding(
+        &mut self,
+        title: &str,
+        expected: &str,
+        first: &finding::NewOccurrence,
+    ) -> Result<u64> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO findings (title, expected) VALUES (?1, ?2)",
+            params![title, expected],
+        )?;
+        let id = transaction.last_insert_rowid() as u64;
+        add_occurrence_row(&transaction, id, first)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Adds an occurrence to a finding: `None` when there is no such finding.
+    pub fn add_occurrence(
+        &mut self,
+        finding: u64,
+        occurrence: &finding::NewOccurrence,
+    ) -> Result<Option<u64>> {
+        let transaction = self.connection.transaction()?;
+        let known = transaction
+            .query_row(
+                "SELECT 1 FROM findings WHERE id = ?1",
+                [finding],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if known.is_none() {
+            return Ok(None);
+        }
+        let id = add_occurrence_row(&transaction, finding, occurrence)?;
+        transaction.commit()?;
+        Ok(Some(id))
+    }
+
+    /// Every finding, the oldest first, each with its occurrences in the order they came.
+    pub fn findings(&self) -> Result<Vec<Finding>> {
+        let mut found = self
+            .connection
+            .prepare("SELECT id, title, expected, filed FROM findings ORDER BY id")?;
+        let mut all: Vec<Finding> = found
+            .query_map([], |row| {
+                Ok(Finding {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    expected: row.get(2)?,
+                    count: 0,
+                    first_at: 0,
+                    last_at: 0,
+                    filed: row.get(3)?,
+                    occurrences: Vec::new(),
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut rows = self.connection.prepare(
+            "SELECT finding, id, at, session, called, happened, differs \
+             FROM finding_occurrences ORDER BY id",
+        )?;
+        let occurrences = rows.query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                finding::Occurrence {
+                    id: row.get(1)?,
+                    at: row.get(2)?,
+                    session: row.get(3)?,
+                    called: row.get(4)?,
+                    happened: row.get(5)?,
+                    differs: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in occurrences {
+            let (of, occurrence) = row?;
+            if let Some(finding) = all.iter_mut().find(|finding| finding.id == of) {
+                finding.occurrences.push(occurrence);
+            }
+        }
+        for finding in &mut all {
+            finding.count = finding.occurrences.len();
+            finding.first_at = finding.occurrences.first().map_or(0, |o| o.at);
+            finding.last_at = finding.occurrences.last().map_or(0, |o| o.at);
+        }
+        Ok(all)
+    }
+
+    /// Marks a finding filed, with the address of its issue: whether there was such a finding.
+    pub fn file_finding(&self, id: u64, issue: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE findings SET filed = ?2 WHERE id = ?1",
+            params![id, issue],
+        )? > 0)
+    }
+
+    /// Whether `prune_notifications` would forget any: read, so that a keeper with nothing to do
+    /// writes nothing.
+    pub fn prunable_notifications(&self, now: u64) -> Result<bool> {
+        let oldest = now.saturating_sub(notification::KEPT_DAYS * 24 * 3_600_000);
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM notifications WHERE at < ?1) \
+             OR (SELECT count(*) FROM notifications) > ?2",
+            params![oldest, notification::KEPT_ROWS as i64],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// How many rows were written since the store was opened: what a reader at rest checks
+    /// it leaves alone.
+    pub fn changes_made(&self) -> u64 {
+        self.connection.total_changes()
     }
 
     /// The number of the last event, 0 when there is none.
@@ -3788,6 +5164,47 @@ impl Space<'_> {
     }
 }
 
+/// Records a launch, in place of the one of the same name with the same machine: a launch `in`
+/// already recorded keeps its workspace, its name and its id, as `place_launch` alone writes them.
+fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
+    connection.execute(
+        "INSERT INTO launches (way, machine, launch, caller, kind, project, state, request, \
+         agent, workspace, workspace_id, asked, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+         ON CONFLICT (way, machine, launch) DO UPDATE SET caller = excluded.caller, \
+         kind = excluded.kind, project = excluded.project, state = excluded.state, \
+         request = excluded.request, agent = excluded.agent, \
+         workspace = CASE WHEN launches.way = 'in' THEN launches.workspace \
+         ELSE excluded.workspace END, asked = excluded.asked, at = excluded.at",
+        params![
+            launch.way,
+            launch.machine,
+            launch.launch,
+            launch.caller,
+            launch.kind,
+            launch.project,
+            launch.state,
+            launch.request.map(|n| n as i64),
+            launch.agent,
+            launch.workspace,
+            launch.workspace_id,
+            serde_json::to_string(&launch.asked)?,
+            launch.at as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The launches made of the workspace `workspace`, removed now, no longer name it: a workspace
+/// made later may take its name and its id.
+fn forget_launches_workspace(connection: &Connection, workspace: i64) -> Result<()> {
+    connection.execute(
+        "UPDATE launches SET workspace = NULL, workspace_id = NULL WHERE workspace_id = ?1",
+        params![workspace],
+    )?;
+    Ok(())
+}
+
 fn append_event(connection: &Connection, name: &str, data: Value) -> Result<Event> {
     let at = now_ms();
     let text = serde_json::to_string(&data)?;
@@ -3822,6 +5239,23 @@ fn append_agent_event(
         )?;
     }
     Ok(event)
+}
+
+fn notification_row(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
+    let kind: String = row.get(2)?;
+    Ok(Notification {
+        id: row.get(0)?,
+        at: row.get(1)?,
+        needs_you: notification::NEEDS_YOU.contains(&kind.as_str()),
+        kind,
+        session: row.get(3)?,
+        project: row.get(4)?,
+        workspace: row.get(5)?,
+        title: row.get(6)?,
+        excerpt: row.get(7)?,
+        read_at: row.get(8)?,
+        resolved: row.get::<_, i64>(9)? != 0,
+    })
 }
 
 fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Event>> {
@@ -4091,6 +5525,26 @@ fn path_text(path: &Path) -> Result<&str> {
     })
 }
 
+fn add_occurrence_row(
+    connection: &Connection,
+    finding: u64,
+    occurrence: &finding::NewOccurrence,
+) -> Result<u64> {
+    connection.execute(
+        "INSERT INTO finding_occurrences (finding, at, session, called, happened, differs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            finding,
+            occurrence.at,
+            occurrence.session,
+            occurrence.called,
+            occurrence.happened,
+            occurrence.differs
+        ],
+    )?;
+    Ok(connection.last_insert_rowid() as u64)
+}
+
 fn migrate(connection: &mut Connection) -> Result<()> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -4120,6 +5574,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         transaction.execute_batch(migration)?;
     }
     transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    transaction.execute_batch(REMOTE_CHILDREN_DEPTH)?;
     if alpha {
         transaction.execute_batch(
             "INSERT INTO extension_migrations (name, applied) \
@@ -4138,6 +5593,147 @@ mod tests {
     use crate::approval;
     use crate::workspace::{Base, Worktree};
     use serde_json::json;
+
+    fn noted(store: &Store, source: &str, at: u64, session: &str, kind: &str) -> u64 {
+        store
+            .add_notification(&NewNotification {
+                at,
+                kind: kind.into(),
+                source: source.into(),
+                session: Some(session.into()),
+                project: Some("app".into()),
+                workspace: None,
+                title: "Failed".into(),
+                excerpt: "it broke".into(),
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_notification_is_kept_once_for_its_source() {
+        let store = Store::open_in_memory().unwrap();
+        noted(&store, "event:1", 10, "s1", "failure");
+        let again = store
+            .add_notification(&NewNotification {
+                at: 11,
+                kind: "failure".into(),
+                source: "event:1".into(),
+                session: None,
+                project: None,
+                workspace: None,
+                title: "Failed".into(),
+                excerpt: String::new(),
+            })
+            .unwrap();
+        assert_eq!(again, None);
+        assert_eq!(store.notifications(None, 10, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reading_marks_by_ids_by_session_or_all_and_counts_what_waits_apart() {
+        let store = Store::open_in_memory().unwrap();
+        let a = noted(&store, "request:1", 10, "s1", "request");
+        let b = noted(&store, "event:2", 11, "s1", "failure");
+        let c = noted(&store, "event:3", 12, "s2", "report");
+        assert_eq!(store.unread_notifications().unwrap(), (1, 2));
+
+        assert_eq!(
+            store
+                .read_notifications(notification::Which::Ids(&[a]), 20)
+                .unwrap(),
+            [a]
+        );
+        assert_eq!(store.unread_notifications().unwrap(), (0, 2));
+        // Read once: nothing changes again, and the time stays the first one.
+        assert!(
+            store
+                .read_notifications(notification::Which::Session("s1"), 30)
+                .unwrap()
+                == [b]
+        );
+        let read = store.notifications(None, 10, false).unwrap();
+        assert_eq!(read[0].read_at, Some(20));
+        assert_eq!(read[1].read_at, Some(30));
+        assert_eq!(
+            store
+                .read_notifications(notification::Which::All, 40)
+                .unwrap(),
+            [c]
+        );
+        assert_eq!(store.unread_notifications().unwrap(), (0, 0));
+        assert!(store.notifications(None, 10, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolving_reads_and_happens_once() {
+        let store = Store::open_in_memory().unwrap();
+        let a = noted(&store, "request:1", 10, "s1", "request");
+        assert_eq!(
+            store.resolve_notification("request:1", 20).unwrap(),
+            Some(a)
+        );
+        assert_eq!(store.resolve_notification("request:1", 30).unwrap(), None);
+        assert_eq!(store.resolve_notification("request:9", 30).unwrap(), None);
+        let row = &store.notifications(None, 10, false).unwrap()[0];
+        assert!(row.resolved);
+        assert_eq!(row.read_at, Some(20));
+        assert!(
+            store
+                .unresolved_notifications("request")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn notifications_are_listed_after_a_number_and_limited() {
+        let store = Store::open_in_memory().unwrap();
+        let ids: Vec<u64> = (1..=5)
+            .map(|n| noted(&store, &format!("event:{n}"), n, "s1", "failure"))
+            .collect();
+        let last = store.notifications(None, 2, false).unwrap();
+        assert_eq!(last.iter().map(|n| n.id).collect::<Vec<_>>(), ids[3..]);
+        let next = store.notifications(Some(ids[0]), 2, false).unwrap();
+        assert_eq!(next.iter().map(|n| n.id).collect::<Vec<_>>(), ids[1..3]);
+    }
+
+    #[test]
+    fn notifications_are_kept_thirty_days_or_a_thousand_whichever_is_less() {
+        let store = Store::open_in_memory().unwrap();
+        let day = 24 * 3_600_000;
+        let now = 100 * day;
+        noted(&store, "event:old", now - 31 * day, "s1", "failure");
+        noted(&store, "event:edge", now - 29 * day, "s1", "failure");
+        assert_eq!(store.prune_notifications(now).unwrap(), 1);
+        assert_eq!(store.notifications(None, 10, false).unwrap().len(), 1);
+        for n in 0..1100 {
+            noted(&store, &format!("event:{n}"), now, "s1", "report");
+        }
+        store.prune_notifications(now).unwrap();
+        let kept = store.notifications(None, 5000, false).unwrap();
+        assert_eq!(kept.len(), notification::KEPT_ROWS);
+        // The newest are the ones kept.
+        assert_eq!(kept.last().unwrap().id, 1102);
+    }
+
+    #[test]
+    fn the_notification_cursor_is_kept() {
+        let store = Store::open_in_memory().unwrap();
+        // The migration starts it at the last event there was: none in a new store.
+        assert_eq!(store.notification_cursor().unwrap(), Some(0));
+        store.set_notification_cursor(7).unwrap();
+        store.set_notification_cursor(9).unwrap();
+        assert_eq!(store.notification_cursor().unwrap(), Some(9));
+    }
+
+    #[test]
+    fn the_notification_cursor_never_goes_back() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_notification_cursor(9).unwrap();
+        store.set_notification_cursor(7).unwrap();
+        assert_eq!(store.notification_cursor().unwrap(), Some(9));
+    }
 
     #[test]
     fn a_new_store_is_brought_to_the_last_schema() {
@@ -4331,6 +5927,7 @@ mod tests {
                 },
                 resumed: false,
                 resumed_branch: None,
+                laid: None,
             }],
             steps: vec![
                 Step {
@@ -4435,6 +6032,65 @@ mod tests {
             .set_ticket(id, None, ("workspace.ticket", json!({"ticket": null})))
             .unwrap();
         assert_eq!(store.workspace_by_id(id).unwrap().ticket, None);
+    }
+
+    #[test]
+    fn a_step_naming_worktree_in_its_text_is_replaced_once_not_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let step = |position, action| Step {
+            position,
+            repository: None,
+            action,
+            state: StepState::Pending,
+            failure: None,
+            started_at: None,
+            ended_at: None,
+            duration_ms: None,
+        };
+        let mut workspace = a_workspace();
+        // Steps whose JSON holds "worktree" without being one.
+        workspace.steps.push(step(
+            2,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        ));
+        workspace.steps.push(step(
+            3,
+            Action::Run {
+                line: "git worktree prune".into(),
+                task: Some("worktree".into()),
+                time_limit: 60,
+            },
+        ));
+        let (id, _) = store
+            .create_workspace(&workspace, ("workspace.created", json!({})))
+            .unwrap();
+        let laid = [step(
+            0,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        )];
+
+        assert!(store.replace_pending_steps(id, &laid).unwrap());
+
+        let actions: Vec<Action> = store
+            .workspace_by_id(id)
+            .unwrap()
+            .steps
+            .into_iter()
+            .map(|step| step.action)
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::Worktree,
+                Action::Copy {
+                    globs: vec!["worktree".into()]
+                }
+            ]
+        );
     }
 
     #[test]
@@ -4951,6 +6607,43 @@ mod tests {
         let (leave, event) = store.grant_leave(&writer.id, &session.id, 8).unwrap();
         assert_eq!(leave.map(|l| l.request), Some(8));
         assert_eq!(event.unwrap().name, "leave.granted");
+    }
+
+    #[test]
+    fn a_draft_is_replaced_in_one_step_and_says_the_pictures_it_no_longer_holds() {
+        let mut store = Store::open_in_memory().unwrap();
+        let names = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            store
+                .set_draft("session:a", "one", Some(&names(&["a.png", "b.png"])))
+                .unwrap(),
+            (true, vec![])
+        );
+        // No pictures given: it keeps the ones it has.
+        assert_eq!(
+            store.set_draft("session:a", "two", None).unwrap(),
+            (true, vec![])
+        );
+        assert_eq!(
+            store.draft("session:a").unwrap(),
+            Some(("two".into(), names(&["a.png", "b.png"])))
+        );
+        // Others given: the ones it no longer holds are said, to be removed once this is over.
+        assert_eq!(
+            store
+                .set_draft("session:a", "three", Some(&names(&["b.png", "c.png"])))
+                .unwrap(),
+            (true, names(&["a.png"]))
+        );
+        // Nothing left to send: the draft is forgotten, with all its pictures.
+        assert_eq!(
+            store
+                .set_draft("session:a", "  ", Some(&names(&[])))
+                .unwrap(),
+            (false, names(&["b.png", "c.png"]))
+        );
+        assert_eq!(store.draft("session:a").unwrap(), None);
+        assert!(store.draft_keys().unwrap().is_empty());
     }
 
     #[test]
@@ -7501,5 +9194,376 @@ mod tests {
 
         store.set_service_writer("mongo", None).unwrap();
         assert_eq!(store.service_writer("mongo").unwrap(), None);
+    }
+
+    fn a_launch_in() -> Launch {
+        Launch {
+            way: "in".into(),
+            machine: "0123456789ab".into(),
+            launch: "first".into(),
+            caller: "caller".into(),
+            kind: "led".into(),
+            project: "app".into(),
+            state: "held".into(),
+            request: None,
+            agent: None,
+            workspace: None,
+            workspace_id: None,
+            asked: json!({}),
+            at: 1,
+        }
+    }
+
+    #[test]
+    fn a_launch_update_never_resurrects_a_workspace_id_cleared_since() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let stale = a_launch_in();
+        assert_eq!(store.add_launch(&stale, 8, 4).unwrap(), None);
+        store
+            .connection
+            .execute(
+                "UPDATE launches SET workspace = 'login', workspace_id = ?1",
+                params![id],
+            )
+            .unwrap();
+        // What a write that read the launch before the removal still holds.
+        let stale = Launch {
+            workspace: Some("login".into()),
+            workspace_id: Some(id),
+            state: "started".into(),
+            ..stale
+        };
+        store
+            .remove_workspace(id, ("workspace.removed", json!({})))
+            .unwrap();
+
+        store.record_launch(&stale).unwrap();
+
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, "started");
+        assert_eq!((read.workspace.as_deref(), read.workspace_id), (None, None));
+    }
+
+    #[test]
+    fn a_store_that_shipped_the_launches_table_without_a_workspace_id_gains_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("ADD COLUMN workspace_id"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        // The table as an alpha of this branch made it: no `workspace_id`.
+        let columns: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('launches') WHERE name = 'workspace_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0, "the earlier schema already has the column");
+        old.execute_batch(
+            "INSERT INTO launches (way, machine, launch, caller, kind, project, state, asked, at) \
+             VALUES ('in', '0123456789ab', 'first', 'caller', 'led', 'app', 'held', '{}', 1);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let read = store.launches("in", None, LaunchFilter::All).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].workspace_id, None);
+    }
+
+    fn kept(id: &str, machine: &str, at: u64) -> Outgoing {
+        Outgoing {
+            seq: 0,
+            id: id.into(),
+            machine: machine.into(),
+            name: "pc".into(),
+            launch: "l1".into(),
+            message: json!({"deliver": {"id": id}}),
+            back: false,
+            at,
+        }
+    }
+
+    #[test]
+    fn messages_kept_for_a_machine_are_given_in_order_and_kept_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_outgoing(&kept("b", "m1", 1)).unwrap();
+        store.keep_outgoing(&kept("a", "m1", 2)).unwrap();
+        store.keep_outgoing(&kept("c", "m2", 3)).unwrap();
+        // The same id again: kept once, at its first place.
+        store.keep_outgoing(&kept("b", "m1", 4)).unwrap();
+
+        let ids = |store: &Store, machine| {
+            store
+                .outgoing(machine)
+                .unwrap()
+                .into_iter()
+                .map(|outgoing| outgoing.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&store, Some("m1")), ["b", "a"]);
+        assert_eq!(ids(&store, None), ["b", "a", "c"]);
+        store.forget_outgoing("b").unwrap();
+        assert_eq!(ids(&store, Some("m1")), ["a"]);
+        let dropped = store.drop_outgoing_before(3).unwrap();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].id, "a");
+        assert_eq!(ids(&store, None), ["c"]);
+    }
+
+    #[test]
+    fn a_launch_records_a_workspace_only_while_it_exists() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let launch = a_launch_in();
+        assert_eq!(store.add_launch(&launch, 8, 4).unwrap(), None);
+        let placed = Launch {
+            agent: Some("agent".into()),
+            ..launch.clone()
+        };
+
+        assert_eq!(
+            store.place_launch(&placed, Some(id)).unwrap(),
+            Some(Some(id))
+        );
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(
+            (read.workspace.as_deref(), read.workspace_id),
+            (Some("login"), Some(id))
+        );
+        assert_eq!(read.agent.as_deref(), Some("agent"));
+
+        // Removed before a write that still names it: nothing is recorded, never a dead id.
+        store
+            .remove_workspace(id, ("workspace.removed", json!({})))
+            .unwrap();
+        assert_eq!(store.place_launch(&placed, Some(id)).unwrap(), Some(None));
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!((read.workspace.as_deref(), read.workspace_id), (None, None));
+
+        // A launch forgotten meanwhile is not brought back.
+        store
+            .forget_launch("in", &launch.machine, &launch.launch)
+            .unwrap();
+        assert_eq!(store.place_launch(&placed, None).unwrap(), None);
+        assert!(
+            store
+                .launches("in", None, LaunchFilter::All)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_held_launch_is_settled_once_and_keeps_its_workspace_as_it_is() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let launch = a_launch_in();
+        store.add_launch(&launch, 8, 4).unwrap();
+        store.place_launch(&launch, Some(id)).unwrap();
+
+        let settled = store.settle_launch(&launch.machine, &launch.launch, "refused");
+        assert_eq!(settled.unwrap(), Some(Some(id)));
+        // The user's answer after the end of its agent, or the reverse, settles nothing more.
+        let again = store.settle_launch(&launch.machine, &launch.launch, "started");
+        assert_eq!(again.unwrap(), None);
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(
+            (read.state.as_str(), read.workspace_id),
+            ("refused", Some(id))
+        );
+    }
+
+    #[test]
+    fn a_machine_s_projects_stay_beside_the_sessions_it_lists_again() {
+        let mut store = Store::open_in_memory().unwrap();
+        let projects = json!([{"name": "app", "remotes": ["github.com/acme/app"]}]);
+        // Its projects may come first: its list then holds no session yet.
+        store
+            .keep_machine_projects("aa", "server", &projects, 1)
+            .unwrap();
+        store
+            .keep_machine_sessions("aa", "server", &json!({"sessions": [{"id": "s1"}]}), 2)
+            .unwrap();
+        let kept = store.machine_sessions().unwrap();
+        assert_eq!(kept[0].2["projects"], projects);
+        assert_eq!(kept[0].2["sessions"], json!([{"id": "s1"}]));
+        assert_eq!(kept[0].3, 2);
+        // A machine of before says none: its list holds no projects.
+        store
+            .keep_machine_sessions("bb", "old", &json!({"sessions": []}), 3)
+            .unwrap();
+        let old = &store.machine_sessions().unwrap()[0];
+        assert_eq!(old.1, "old");
+        assert!(old.2.get("projects").is_none());
+    }
+
+    #[test]
+    fn an_allowed_launch_whose_settings_cannot_be_laid_is_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+        let launch = a_launch_in();
+        store.add_launch(&launch, 8, 4).unwrap();
+        // Only a started launch: one still held is the user's to answer.
+        store
+            .refuse_started_launch(&launch.machine, &launch.launch)
+            .unwrap();
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, launch.state);
+
+        store
+            .settle_launch(&launch.machine, &launch.launch, "started")
+            .unwrap();
+        store
+            .refuse_started_launch(&launch.machine, &launch.launch)
+            .unwrap();
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, "refused");
+    }
+
+    /// A caller of the machine of key `machine` stood in for here.
+    fn a_stand_in(caller: &str, machine: &str) -> Agent {
+        let mut agent = an_agent();
+        agent.id = format!("{caller}@{machine}");
+        agent
+    }
+
+    #[test]
+    fn a_stand_in_is_none_of_this_machine_s_agents() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 64).unwrap();
+
+        assert!(store.agents().unwrap().is_empty());
+        assert!(store.live_agents().unwrap().is_empty());
+        assert!(store.agent("c0@aa").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_machine_keeps_a_bounded_number_of_stand_ins_and_forgets_the_idle_and_the_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        for caller in ["c0", "c1", "c2"] {
+            assert!(
+                store
+                    .keep_stand_in(&a_stand_in(caller, "aa"), 3)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        // A fourth caller of that machine is refused; one already kept and another machine's
+        // are taken.
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c3", "aa"), 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c0", "aa"), 3)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c0", "bb"), 3)
+                .unwrap()
+                .is_some()
+        );
+        let local = an_agent();
+        store
+            .create_agent(&local, ("agent.created", json!({})))
+            .unwrap();
+        store.grant_leave("c0@aa", &local.id, 1).unwrap();
+        store.grant_leave("c0@bb", &local.id, 2).unwrap();
+        store.await_answer("aa", 5, &local.id).unwrap();
+        store.await_answer("bb", 6, &local.id).unwrap();
+
+        // `bb` left the members: its caller goes, with its leave and what is awaited of it.
+        assert_eq!(
+            store.forget_stand_ins(Some(&["aa".to_owned()]), 0).unwrap(),
+            1
+        );
+        assert!(store.agent("c0@bb").unwrap().is_none());
+        assert!(!store.has_leave("c0@bb", &local.id).unwrap());
+        assert!(store.has_leave("c0@aa", &local.id).unwrap());
+        assert!(!store.take_awaited("bb", 6, &local.id).unwrap());
+
+        // Idle for long: every caller goes, and what is awaited since as long.
+        let later = now_ms() + 1;
+        assert_eq!(
+            store
+                .forget_stand_ins(Some(&["aa".to_owned()]), later)
+                .unwrap(),
+            3
+        );
+        assert!(store.leaves_of(&local.id).unwrap().is_empty());
+        assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
+        assert!(store.agent(&local.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_member_list_never_read_forgets_no_machine_and_still_the_idle() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
+        let local = an_agent();
+        store
+            .create_agent(&local, ("agent.created", json!({})))
+            .unwrap();
+        store.await_answer("aa", 5, &local.id).unwrap();
+
+        // No list: nobody left the members.
+        assert_eq!(store.forget_stand_ins(None, 0).unwrap(), 0);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+
+        // Idle for long: gone all the same, with what is awaited since as long.
+        assert_eq!(store.forget_stand_ins(None, now_ms() + 1).unwrap(), 1);
+        assert!(store.agent("c0@aa").unwrap().is_none());
+        assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
+    }
+
+    #[test]
+    fn a_machine_s_list_is_forgotten_when_it_leaves_the_members_or_stops_being_a_runner() {
+        let mut store = Store::open_in_memory().unwrap();
+        for (machine, name) in [("aa", "pc"), ("bb", "server"), ("cc", "tablet")] {
+            store
+                .keep_machine_sessions(machine, name, &json!({"sessions": []}), 1)
+                .unwrap();
+        }
+        let kept = |store: &Store| -> Vec<String> {
+            store
+                .machine_sessions()
+                .unwrap()
+                .into_iter()
+                .map(|(machine, ..)| machine)
+                .collect()
+        };
+        // Only the machines still among the members keep a list.
+        store
+            .forget_machine_sessions_except(&["aa".to_owned(), "bb".to_owned()])
+            .unwrap();
+        assert_eq!(kept(&store), ["aa", "bb"]);
+        // A machine that is no runner any more is left out of the runners.
+        store
+            .forget_machine_sessions_except(&["bb".to_owned()])
+            .unwrap();
+        assert_eq!(kept(&store), ["bb"]);
+        store.forget_machine_sessions_except(&[]).unwrap();
+        assert!(kept(&store).is_empty());
     }
 }

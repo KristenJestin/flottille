@@ -4,7 +4,7 @@
 //! allowed. Against the real daemon with the fake ACP agent, throwaway repositories and temporary
 //! XDG folders.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 
@@ -228,12 +228,10 @@ fn a_refused_end_ends_nothing_and_says_so() {
 }
 
 #[test]
-fn ending_a_session_of_another_project_or_itself_is_refused_before_asking() {
+fn ending_itself_a_child_or_no_session_is_refused_before_asking() {
     let user = user();
-    project(&user, "other");
     let (a, mcp) = root(&user, "app");
     let (_, x_mcp) = root(&user, "app");
-    let (elsewhere, _) = root(&user, "other");
     let child = launched(&user, &x_mcp, "child", "worker");
     let judged = judge_prompts(&user);
 
@@ -241,10 +239,6 @@ fn ending_a_session_of_another_project_or_itself_is_refused_before_asking() {
         (
             a.clone(),
             format!("refused: {a} is your own session: agent_stop ends another"),
-        ),
-        (
-            elsewhere.clone(),
-            format!("refused: {elsewhere} is a session of another project, other, not of app"),
         ),
         (
             child.clone(),
@@ -263,7 +257,7 @@ fn ending_a_session_of_another_project_or_itself_is_refused_before_asking() {
 
     assert!(requests(&user).is_empty());
     assert_eq!(judge_prompts(&user), judged, "the judge was asked");
-    for id in [&a, &elsewhere, &child] {
+    for id in [&a, &child] {
         assert_ne!(shown(&user, id)["state"], "ended", "{id}");
     }
 }

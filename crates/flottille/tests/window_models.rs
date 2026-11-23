@@ -2,14 +2,13 @@
 //! "The models"). On GPUI's test platform in front of a real daemon whose providers are fake ACP
 //! agents, with a throwaway user. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_window::Shell;
-use flottille_window::composer::{Composer, Menu};
 use flottille_window::link::Connect;
 use flottille_window::shell::Selection;
 use gpui_design_system::omarchy::Environment;
@@ -62,9 +61,13 @@ fn settle(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
-fn menu_labels(composer: &Entity<Composer>, menu: Menu, cx: &mut VisualTestContext) -> Vec<String> {
-    composer.read_with(cx, |c, _| {
-        c.entries(menu).into_iter().map(|e| e.label).collect()
+/// What the agent picker says closed: `Provider · Model · effort`.
+fn said(cx: &mut VisualTestContext) -> String {
+    cx.update(|window, _| {
+        window
+            .try_find("agent-picker")
+            .and_then(|found| found.label().map(str::to_owned))
+            .unwrap_or_default()
     })
 }
 
@@ -97,29 +100,31 @@ fn the_composer_offers_the_models_before_any_session(cx: &mut TestAppContext) {
         })
     });
     settle(cx);
-    let composer = shell
-        .read_with(cx, |s, _| s.composer_of("atlas").cloned())
-        .expect("the page has a composer");
-
     // No session ever opened: the daemon read the models, and the window shows them as they
-    // come (the existing live update).
+    // come (the existing live update), in the one picker.
     until(&shell, cx, "the models are offered", |cx| {
-        composer.read_with(cx, |c, _| {
-            c.entries(Menu::Model)
-                .iter()
-                .any(|e| e.label == "fake-large")
-        })
+        said(cx).contains("fake-small")
     });
     settle(cx);
-
-    assert_eq!(
-        menu_labels(&composer, Menu::Model, cx),
-        ["fake-small", "fake-large"]
-    );
+    cx.update(|window, cx| window.click("agent-picker", cx));
+    settle(cx);
+    assert!(has("agent-picker-model-claude-fake-small", cx));
+    assert!(has("agent-picker-model-claude-fake-large", cx));
     // The provider's real default is named, and already selected.
-    let default = composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].clone());
-    assert!(default.on);
-    assert_eq!(default.note.as_deref(), Some("recommended"));
+    cx.update(|window, _| {
+        assert_eq!(
+            window
+                .find("agent-picker-model-claude-fake-small")
+                .selected(),
+            Some(true)
+        );
+        assert_eq!(
+            window
+                .find("agent-picker-model-claude-fake-large")
+                .selected(),
+            Some(false)
+        );
+    });
     let agents = user.call("agent.list", serde_json::Value::Null).unwrap();
     assert_eq!(agents["agents"], json!([]), "no session was opened");
 }
@@ -152,11 +157,11 @@ fn efforts_user(large: serde_json::Value, more: serde_json::Value) -> User {
     user
 }
 
-/// The window on the project's page, and its composer.
+/// The window on the project's page, its composer drawn.
 fn atlas<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
-) -> (Entity<Shell>, Entity<Composer>, &'a mut VisualTestContext) {
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::Project("atlas".into()), window, cx)
@@ -169,93 +174,85 @@ fn atlas<'a>(
                 .is_some_and(|page| page.read(cx).name() == "atlas")
         })
     });
-    let composer = shell
-        .read_with(cx, |s, _| s.composer_of("atlas").cloned())
-        .expect("the page has a composer");
-    (shell, composer, cx)
+    (shell, cx)
 }
 
-fn pick_large(shell: &Entity<Shell>, composer: &Entity<Composer>, cx: &mut VisualTestContext) {
+/// Chooses `fake-large` in the one picker, whose menu stays open when the model has efforts.
+fn pick_large(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the models are offered", |cx| {
-        menu_labels(composer, Menu::Model, cx).contains(&"fake-large".to_owned())
+        said(cx).contains("fake-small")
     });
-    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("agent-picker", cx));
     cx.run_until_parked();
-    cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    cx.update(|window, cx| window.click("agent-picker-model-claude-fake-large", cx));
     settle(cx);
 }
 
 #[gpui_kit::test]
 fn picking_a_model_never_run_offers_its_efforts_once_learned(cx: &mut TestAppContext) {
     let user = efforts_user(json!(["low", "medium", "max"]), json!({}));
-    let (shell, composer, cx) = atlas(&user, cx);
-    pick_large(&shell, &composer, cx);
+    let (shell, cx) = atlas(&user, cx);
+    pick_large(&shell, cx);
 
-    until(&shell, cx, "the effort picker is offered", |cx| {
-        has("effort-picker", cx)
+    until(&shell, cx, "the efforts are offered", |cx| {
+        has("agent-picker-effort-max", cx)
     });
     settle(cx);
-    assert_eq!(
-        menu_labels(&composer, Menu::Effort, cx),
-        ["low", "medium", "max"]
+    for level in ["low", "medium", "max"] {
+        assert!(has(&format!("agent-picker-effort-{level}"), cx), "{level}");
+    }
+    assert!(!has("agent-picker-effort-high", cx), "only the model's own");
+    assert!(
+        said(cx).starts_with("Claude · fake-large · "),
+        "{}",
+        said(cx)
     );
     let agents = user.call("agent.list", serde_json::Value::Null).unwrap();
     assert_eq!(agents["agents"], json!([]), "no session ran on it");
 }
 
 #[gpui_kit::test]
-fn a_model_without_effort_shows_no_effort_picker(cx: &mut TestAppContext) {
+fn a_model_without_effort_shows_none(cx: &mut TestAppContext) {
     let user = efforts_user(json!([]), json!({}));
-    let (shell, composer, cx) = atlas(&user, cx);
-    until(&shell, cx, "the small model's efforts are offered", |cx| {
-        has("effort-picker", cx)
+    let (shell, cx) = atlas(&user, cx);
+    until(&shell, cx, "the small model's efforts are said", |cx| {
+        said(cx).starts_with("Claude · fake-small · ")
     });
-    pick_large(&shell, &composer, cx);
+    pick_large(&shell, cx);
 
-    assert!(!has("effort-picker", cx), "no effort picker");
-    assert!(!has("effort-picker-skeleton", cx), "nor its skeleton");
-    // Said once: on the model's own row, and nowhere else.
-    let entries = composer.read_with(cx, |c, _| c.entries(Menu::Model));
-    let said: Vec<_> = entries
-        .iter()
-        .filter(|e| e.note.as_deref().is_some_and(|n| n.contains("no effort")))
-        .map(|e| e.id.clone())
-        .collect();
-    assert_eq!(said, ["model-choice-fake-large"]);
-    assert_eq!(
-        composer.read_with(cx, |c, _| c.entries(Menu::Effort).len()),
-        0
-    );
+    // The model offers none: the label says none, and the menu has no effort section.
+    assert_eq!(said(cx), "Claude · fake-large");
+    assert!(!has("agent-picker-effort-low", cx));
+    assert!(!has("agent-picker-effort-high", cx));
 }
 
 #[gpui_kit::test]
-fn while_efforts_are_learned_the_effort_picker_shows_its_skeleton(cx: &mut TestAppContext) {
-    // The listing takes its time: the efforts are being learned while the page is shown.
-    let user = efforts_user(json!(["low"]), json!({"init_wait": 10000}));
-    let (shell, _composer, cx) = atlas(&user, cx);
+fn while_efforts_are_learned_the_label_has_none_until_they_are_said(cx: &mut TestAppContext) {
+    // The listing takes its time (three seconds, not ten): the efforts are being learned while
+    // the page is shown.
+    let user = efforts_user(json!(["low"]), json!({"init_wait": 3000}));
+    let (shell, cx) = atlas(&user, cx);
 
-    until(&shell, cx, "the effort picker's skeleton is shown", |cx| {
-        has("effort-picker-skeleton", cx)
-    });
-    assert!(!has("effort-picker", cx));
-    until(&shell, cx, "the effort picker replaces it", |cx| {
-        has("effort-picker", cx)
+    until(&shell, cx, "the efforts are said", |cx| {
+        said(cx).starts_with("Claude · ") && said(cx).matches('·').count() == 2
     });
     settle(cx);
-    assert!(!has("effort-picker-skeleton", cx));
+    assert!(
+        said(cx).ends_with("low") || said(cx).ends_with("high"),
+        "{}",
+        said(cx)
+    );
 }
 
 #[gpui_kit::test]
 fn the_effort_picked_for_another_model_reaches_the_session(cx: &mut TestAppContext) {
     let user = efforts_user(json!(["low", "medium", "max"]), json!({}));
-    let (shell, composer, cx) = atlas(&user, cx);
-    pick_large(&shell, &composer, cx);
-    until(&shell, cx, "the effort picker is offered", |cx| {
-        has("effort-picker", cx)
+    let (shell, cx) = atlas(&user, cx);
+    pick_large(&shell, cx);
+    until(&shell, cx, "the efforts are offered", |cx| {
+        has("agent-picker-effort-max", cx)
     });
-    cx.update(|window, cx| window.click("effort-picker", cx));
-    cx.run_until_parked();
-    cx.update(|window, cx| window.click("effort-choice-max", cx));
+    cx.update(|window, cx| window.click("agent-picker-effort-max", cx));
     cx.update(|window, cx| window.click("composer-field", cx));
     cx.simulate_input("Please look around");
     cx.simulate_keystrokes("enter");

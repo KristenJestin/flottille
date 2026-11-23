@@ -3,10 +3,11 @@ name: ci
 on:
   pull_request:
   push:
-    # A feature branch's pushes are verified, then published as its alpha (`publish`).
-    # A stable line's (stable/X.Y) and the next version's (next/X.Y) are published as their
-    # pre-releases, -rc.N and -next.N.
-    branches: [main, dev, "stable/*", "next/*", "feat/**", "fix/**"]
+    # A feature branch (`feat/**`, `fix/**`) has no push run: its pull request's run judges its
+    # commits, and publishes its alpha once `verify` passed on it (`changes`, `publish`), so that
+    # the suite runs once per commit, not twice. A stable line's (stable/X.Y) and the next
+    # version's (next/X.Y) pushes are published as their pre-releases, -rc.N and -next.N.
+    branches: [main, dev, "stable/*", "next/*"]
   workflow_dispatch:
 
 # A push makes the runs of the same ref's older pushes useless: they are cancelled, so that the
@@ -18,7 +19,7 @@ concurrency:
 
 jobs:
   commit-messages:
-    # A feature branch's commits are judged on its pull request, as before its pushes ran here.
+    # A feature branch's commits are judged on its pull request: it has no push run.
     if: github.event_name != 'push' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/stable/') || startsWith(github.ref, 'refs/heads/next/')
     runs-on: ubuntu-latest
     steps:
@@ -89,9 +90,35 @@ jobs:
   # suite then runs, as if it had said so.
   changes:
     runs-on: ubuntu-latest
+    # It runs a script of the pull request's own code: it can only read.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
+      suite: ${{ steps.tests.outputs.suite }}
+      selected: ${{ steps.tests.outputs.selected }}
+      hub: ${{ steps.hub.outputs.hub }}
+      alpha: ${{ steps.alpha.outputs.alpha }}
+      android: ${{ steps.android.outputs.android }}
     steps:
+      # A feature branch's pull request publishes the branch's alpha, once `verify` passed (`build`,
+      # `publish`): it has no push run to do it. Only a branch of this repository, named
+      # `feat/...` or `fix/...` as the pushes that published were: a fork's token cannot write, and
+      # another branch (`ci/...`, `docs/...`) never had an alpha. A failure here says nothing
+      # (`alpha` stays empty): nothing is published.
+      - name: Does this pull request publish an alpha
+        id: alpha
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          alpha=false
+          if [ "$EVENT_NAME" = pull_request ] && [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] && [[ $HEAD_REF == feat/* || $HEAD_REF == fix/* ]]; then
+            alpha=true
+          fi
+          echo "alpha=$alpha" >> "$GITHUB_OUTPUT"
       - if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
         with:
@@ -125,16 +152,97 @@ jobs:
           if [ -z "$files" ]; then rust=true; fi
           if [ "$rust" = false ]; then echo "::notice::Only apps/android/ and site/ changed: the Rust suite does not run."; fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      # The Android job (`android`) runs for a pull request that changes the app, the mobile core
+      # or what the core is built from; every push runs it. A failure here says nothing
+      # (`android` stays empty): it then runs.
+      - name: Does the Android job have to run
+        id: android
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          android=false
+          while IFS= read -r path; do
+            case "$path" in
+              apps/android/* | crates/flottille-mobile/* | crates/flottille-link/* | Cargo.lock | .github/workflows/ci.yml)
+                android=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+      # A pull request runs a fast check, not the whole suite (docs/releases.md, "What CI checks"):
+      # `check`, and the tests it touches (`.github/scripts/pr-tests.sh`), which `test-selected`
+      # runs. Only this step says `suite=false`: a failure of it says nothing, and the whole suite
+      # runs, as it does on every push.
+      - name: Which tests does this pull request run
+        id: tests
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EVENT_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The description as it is now, not as it was when the run started: running the jobs
+          # again picks up a `Tests:` line written after the push. The event's is the fallback.
+          BODY=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.body // ""') || BODY=$EVENT_BODY
+          export BODY
+          selected=$(.github/scripts/pr-tests.sh)
+          echo "::notice::Tests run by this pull request: ${selected:-none}."
+          {
+            echo "suite=false"
+            echo "selected=$selected"
+          } >> "$GITHUB_OUTPUT"
+      # The hub's jobs (`hub`) are not in every pull request's CI: only in one that changes the hub,
+      # what it is built from, or the files that build and publish it, or that publishes an alpha
+      # (`alpha`), which holds the hub's archives. A push always runs them: a push publishes. A
+      # failure here says nothing (`hub` stays empty): they then run.
+      - name: Does the hub have to be built and checked
+        id: hub
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ALPHA: ${{ steps.alpha.outputs.alpha }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ] || [ "$ALPHA" = true ]; then
+            echo "::notice::$EVENT_NAME: the hub is built."
+            echo "hub=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          hub=false
+          while IFS= read -r path; do
+            case "$path" in
+              crates/flottille-hub/* | crates/flottille-link/* | crates/flottille-protocol/* | \
+                Cargo.toml | Cargo.lock | LICENSE | \
+                .github/workflows/ci.yml | .github/workflows/release.yml | \
+                tools/package-hub.sh | tools/check-static.sh | tools/check-hub-image.sh)
+                echo "::notice::$path: the hub is built."
+                hub=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          if [ -z "$files" ]; then hub=true; fi
+          if [ "$hub" = false ]; then echo "::notice::Nothing of the hub or its release changed: it is not built."; fi
+          echo "hub=$hub" >> "$GITHUB_OUTPUT"
 
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
   # repositories (see AGENTS.md, Testing).
   #
-  # The suite is split so that a pull request does not wait for every test binary one after the
-  # other on one runner: the matrix `test` builds the tests on six runners at once and each runs
-  # a sixth of them (`cargo nextest run --partition count:k/6`), `check` runs the formatting and
-  # clippy beside them, and `verify`, the required check, reports what they all said. Each
-  # partition builds the tests itself, from the cache: about four minutes, when an archive built
-  # once (6 GB, 37 GB extracted) took longer to pack, upload, download and extract.
+  # A push (dev, main, a stable or next line, a tag) runs the whole suite, built once and run on
+  # twelve runners at once: `build-tests` compiles every test and packs them in a nextest archive,
+  # the matrix `test` downloads it and runs a twelfth of the tests each
+  # (`cargo nextest run --archive-file … --partition count:k/12`), never compiling. `doc-tests`
+  # (nextest does not run doc tests) runs beside them. A pull request runs `test-selected`
+  # instead: the tests it touches only. `check` (formatting and clippy) runs on both, and `verify`,
+  # the required check, reports what they all said. Every job that compiles links with mold
+  # (`setup-mold` makes it the default `ld`: no flag changes, so the caches stay valid).
   check:
     needs: [verified-on-dev, changes]
     # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
@@ -147,11 +255,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add rustfmt clippy
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
           # The key does not follow Cargo.toml: bump this one when a profile changes, or the
           # cache keeps the artefacts of the old profiles and never saves the new ones.
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           # Clippy's own artefacts, apart from the tests' (`test`).
           shared-key: check
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
@@ -169,26 +278,30 @@ jobs:
         # A failure to print it must not hide the verdict above.
         continue-on-error: true
 
-  test:
+  build-tests:
     needs: [verified-on-dev, changes]
-    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
+    # `!= 'false'`: only a pull request says `suite=false`, and a step of it that failed says nothing.
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite != 'false' }}
     runs-on: ubuntu-latest
-    strategy:
-      # Every partition says what fails in it, not only the first one to fail.
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4, 5, 6]
     env:
       CARGO_INCREMENTAL: 0
+      # The archive is most of this job: line tables keep a panic's file and line, and are a
+      # smaller thing to pack, upload and download twelve times. The same on every job that shares
+      # this cache (the key follows the environment).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # The whole suite is CPU-bound (test time dominates), so the workspace's crates are built at
+      # one level here, as the dependencies are in Cargo.toml everywhere. `test-selected` and
+      # `doc-tests` are compile-bound: they keep level 0 for the workspace.
+      CARGO_PROFILE_DEV_OPT_LEVEL: 1
     steps:
       - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           # The name of the job that wrote the cache before the suite was split: the
-          # dependencies already cached are kept. The partitions build the same thing: one saves.
+          # dependencies already cached are kept.
           shared-key: verify
-          save-if: ${{ matrix.partition == 1 }}
       - name: Have the window's system libraries
         run: |
           sudo apt-get update
@@ -196,20 +309,300 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.152
-      - run: cargo nextest run --locked --partition count:${{ matrix.partition }}/6 --no-fail-fast
-      # nextest does not run doc tests: one partition runs them, whatever its tests said.
-      - if: ${{ !cancelled() && matrix.partition == 1 }}
-        run: cargo test --doc --locked
+      # The test binaries, and the fakes they spawn, which sit beside them.
+      - run: cargo nextest archive --locked --archive-file "$RUNNER_TEMP/tests.tar.zst"
+      - run: ls -lh "$RUNNER_TEMP/tests.tar.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tests
+          path: ${{ runner.temp }}/tests.tar.zst
+          # The archive is compressed already.
+          compression-level: 0
+          retention-days: 1
       - name: Disk left
         if: always()
         run: df -h /
         continue-on-error: true
 
+  test:
+    needs: [build-tests]
+    if: ${{ !cancelled() && needs.build-tests.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every partition says what fails in it, not only the first one to fail.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    steps:
+      # The tests read files of the repository (fixtures), and the archive is run against it.
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tests
+          path: ${{ runner.temp }}/archive
+      # What the test binaries load at run time (the window's tests link the same libraries).
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      # The profile `ci` (`.config/nextest.toml`) retries a failed test twice: a test that passes
+      # on a retry is flaky, and listed below.
+      # Extracted into the checkout: the test binaries hold the paths of the build (`target/debug/…`,
+      # where `env!("CARGO_BIN_EXE_…")` and the fakes beside it are looked for), which are these.
+      # `target/tmp` is where the tests keep scratch files (`CARGO_TARGET_TMPDIR`): cargo makes it
+      # when it runs a test, and an archive does not hold it.
+      # Ubuntu's AppArmor lets an unprivileged user make a user namespace, then refuses it every
+      # capability there: the private mount namespace of a confined command (`mounts.rs`) is never
+      # made, and its tests would be skipped. Lifted, they run.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: mkdir -p "$GITHUB_WORKSPACE/target/tmp"
+      - run: cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
+      # Whatever the tests said: the flaky ones are seen (job summary `Flaky tests`), and kept for
+      # `verify`, which lists those of every partition.
+      - name: Flaky tests
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/junit"
+          report="$GITHUB_WORKSPACE/target/nextest/ci/junit.xml"
+          if [ ! -f "$report" ]; then
+            echo "::warning::No JUnit report: the flaky tests of this partition are not known."
+            exit 0
+          fi
+          cp "$report" "$RUNNER_TEMP/junit/junit-${{ matrix.partition }}.xml"
+          .github/scripts/flaky-report.sh "$report" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-${{ matrix.partition }}
+          path: ${{ runner.temp }}/junit
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
+  # A pull request's tests: the binaries it touches, and those its description lists
+  # (`.github/scripts/pr-tests.sh`), built and run here, from the cache the pushes to dev write
+  # (this job only reads it). The fakes the tests spawn are built first, as AGENTS.md says to for a
+  # test binary run alone. Skipped when the pull request touches none.
+  test-selected:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite == 'false' && needs.changes.outputs.selected != '' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Names of test binaries and crates, nothing else (the script keeps only those).
+      SELECTED: ${{ needs.changes.outputs.selected }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: verify
+          # The workspace is at level 0 here and at 1 in `build-tests`, so the environment hash of
+          # the key differs; the cache holds the dependencies only (never the workspace's crates),
+          # and they are the same at level 1 in both (Cargo.toml). Without the hash, the key is
+          # the prefix of the one `build-tests` writes, and this job restores that one.
+          add-rust-environment-hash-key: false
+          save-if: false
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Build the fakes the tests spawn
+        run: |
+          fakes=()
+          for crate in crates/flottille-fake-*; do fakes+=(-p "${crate#crates/}"); done
+          cargo build --locked "${fakes[@]}"
+      # Ubuntu's AppArmor lets an unprivileged user make a user namespace, then refuses it every
+      # capability there: the private mount namespace of a confined command (`mounts.rs`) is never
+      # made, and its tests would be skipped. Lifted, they run.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The profile `ci` retries a failed test twice, as on the partitions: a flaky one is listed.
+      - run: cargo nextest run --locked --profile ci $SELECTED
+      - name: Flaky tests
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/junit"
+          report=target/nextest/ci/junit.xml
+          if [ ! -f "$report" ]; then
+            echo "::warning::No JUnit report: the flaky tests are not known."
+            exit 0
+          fi
+          cp "$report" "$RUNNER_TEMP/junit/junit-selected.xml"
+          .github/scripts/flaky-report.sh "$report" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-selected
+          path: ${{ runner.temp }}/junit
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
+  # nextest does not run doc tests: this job does, once, beside the partitions. It builds the
+  # libraries itself, from the cache `build-tests` writes (this one only reads it).
+  doc-tests:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite != 'false' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: verify
+          # The workspace is at level 0 here and at 1 in `build-tests`, so the environment hash of
+          # the key differs; the cache holds the dependencies only (never the workspace's crates),
+          # and they are the same at level 1 in both (Cargo.toml). Without the hash, the key is
+          # the prefix of the one `build-tests` writes, and this job restores that one.
+          add-rust-environment-hash-key: false
+          save-if: false
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - run: cargo test --doc --locked
+
+  # The Android app's job (`docs/remote.md`, "The Android app"): the mobile core built with cargo
+  # ndk for the phone and the emulator, the Gradle unit tests (the bindings on the JVM, the 16 KB
+  # alignment of the libraries) and the instrumentation tests on an emulator (`apps/android/ci.sh`).
+  android:
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.android != 'false' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      # The whole history, with its tags: the APK's version is `tools/version.sh`'s.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+      - run: apps/android/ci.sh
+      # The APK (`docs/releases.md`, "The version"), on every pull request that touches the app and
+      # every push, for every channel: the version of `tools/version.sh`. This job runs the
+      # branch's own code and holds no secret: the APK it builds is unsigned, and a copy of it is
+      # signed with a key made for the run, to install on a phone for a test. The release key
+      # signs it in `android-sign`, a job of its own.
+      - name: The APK, with the version
+        id: apk
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APK_OUT: ${{ runner.temp }}/apk
+        run: apps/android/apk.sh
+      - name: Keep the APK to try
+        if: steps.apk.outputs.dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.dir }}
+          retention-days: 14
+      # What `android-sign` signs: the same build, unsigned.
+      - name: Keep the unsigned APK
+        if: steps.apk.outputs.unsigned != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unsigned
+          path: ${{ steps.apk.outputs.unsigned }}
+          retention-days: 1
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
+  # The release key signs the APK here and nowhere else (`docs/releases.md`, "The version"). The
+  # job runs on a push to a protected branch, and on the release build of main (the `Release`
+  # workflow starts ci.yml on main by workflow_dispatch, and a commit main holds is always a
+  # released commit of dev), in the environment `android-release`, whose deployment branches are
+  # the maintainer's to set: no other branch's code, no pull request and no run started by hand on
+  # another ref reaches the key. It runs no third-party action and no script of the repository: it
+  # takes the unsigned APK of `android`, signs it with the runner's own `apksigner`, and keeps it
+  # for `publish`. Without the secrets it signs nothing and says so.
+  android-sign:
+    needs: [android]
+    if: >-
+      ${{ !cancelled() && needs.android.result == 'success'
+      && (github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+    runs-on: ubuntu-latest
+    environment: android-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-unsigned
+          path: unsigned
+      - name: Sign the APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          shopt -s nullglob
+          apks=(unsigned/flottille-*-unsigned.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "::notice::no APK was built: nothing to sign."; exit 0; fi
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::notice::the release key is not in this environment's secrets: no signed APK."
+            exit 0
+          fi
+          umask 077
+          ks=$(mktemp)
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$ks"
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          mkdir signed
+          for unsigned in "${apks[@]}"; do
+            name=${unsigned##*/}
+            signed=signed/${name%-unsigned.apk}.apk
+            "$apksigner" sign --v4-signing-enabled false --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out "$signed" "$unsigned"
+            "$apksigner" verify "$signed"
+          done
+          echo "::notice::signed with the release key."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-signed
+          path: signed
+          if-no-files-found: ignore
+          retention-days: 1
+
   # The required check: one job that always ends, success or failure, whatever happened to the
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
-  # `check` and `test` skipped are a pass only when `changes` said the suite is not needed.
+  # `check` and the tests skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, test]
+    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -218,16 +611,69 @@ jobs:
         id: verdict
         env:
           CHECK: ${{ needs.check.result }}
+          BUILD: ${{ needs.build-tests.result }}
+          DOC: ${{ needs.doc-tests.result }}
           TEST: ${{ needs.test.result }}
+          SELECTED: ${{ needs.test-selected.result }}
+          SUITE: ${{ needs.changes.outputs.suite }}
           RUST: ${{ needs.changes.outputs.rust }}
+          HUB: ${{ needs.hub.result }}
+          ANDROID: ${{ needs.android.result }}
         run: |
-          if [ "$CHECK" = success ] && [ "$TEST" = success ]; then exit 0; fi
-          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$TEST" = skipped ]; then
+          # The Android job (the phone's core, its emulator run): skipped when the pull request
+          # leaves the app and the core alone, a pass; red or cancelled, never merged.
+          if [ "$ANDROID" = failure ] || [ "$ANDROID" = cancelled ]; then
+            echo "::error::android: $ANDROID."
+            exit 1
+          fi
+          # `publish` needs `hub`: a red hub check merged would stop every release. Skipped (a pull
+          # request that leaves the hub alone) is fine.
+          if [ "$HUB" = failure ] || [ "$HUB" = cancelled ]; then
+            echo "::error::hub: $HUB."
+            exit 1
+          fi
+          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$BUILD" = skipped ] && [ "$DOC" = skipped ] && [ "$TEST" = skipped ] && [ "${SELECTED:-skipped}" = skipped ]; then
             echo "::notice::The Rust suite was not needed for this change."
             exit 0
           fi
-          echo "::error::check: $CHECK, test: $TEST, rust suite needed: ${RUST:-unknown}."
+          # A pull request (`suite=false`, said by `changes` alone) runs `check` and the tests it
+          # touches: skipped is a pass for those only when it touches none. Whatever else it says
+          # is the whole suite's, which must have passed.
+          if [ "$SUITE" = false ]; then
+            if [ "$CHECK" = success ] && { [ "$SELECTED" = success ] || [ "$SELECTED" = skipped ]; }; then exit 0; fi
+            echo "::error::check: $CHECK, selected tests: $SELECTED."
+            exit 1
+          fi
+          if [ "$CHECK" = success ] && [ "$BUILD" = success ] && [ "$DOC" = success ] && [ "$TEST" = success ]; then exit 0; fi
+          echo "::error::check: $CHECK, build-tests: $BUILD, doc-tests: $DOC, test: $TEST, rust suite needed: ${RUST:-unknown}."
           exit 1
+      # The flaky tests of every partition, as the summary of the run: a test that passed on a
+      # retry did not fail it, and is to be fixed (docs/releases.md, "What CI checks").
+      # Informational: a failure of these steps must not fail the required check.
+      - uses: actions/checkout@v4
+        if: ${{ always() }}
+        continue-on-error: true
+        with:
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v4
+        if: ${{ always() }}
+        continue-on-error: true
+        with:
+          pattern: junit-*
+          path: junit
+          merge-multiple: true
+      - name: Flaky tests
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          shopt -s nullglob
+          reports=(junit/*.xml)
+          if [ ${#reports[@]} -eq 0 ]; then exit 0; fi
+          .github/scripts/flaky-report.sh "${reports[@]}" > "$RUNNER_TEMP/flaky.md"
+          if [ -s "$RUNNER_TEMP/flaky.md" ]; then
+            cat "$RUNNER_TEMP/flaky.md" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Flaky tests passed on a retry: see the summary of this run."
+          fi
 
   # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`
@@ -236,11 +682,26 @@ jobs:
   # with its own token started no push run. So is a stable line's release, on the tag it made, and
   # next/X.Y once forward.yml merged dev into it.
   build:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/next/')))
+    needs: [changes]
+    # A feature branch's alpha is built by its pull request's run (`changes`): `!cancelled()` keeps
+    # a `changes` that failed from skipping a push's build.
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/next/')))
+        || needs.changes.outputs.alpha == 'true')
     # Old enough a C library that the binary runs on current Arch and Debian stable.
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+      # `tools/changelog.sh` reads the notes of the merged pull requests through the API.
+      pull-requests: read
+    env:
+      # A pull request's alpha is built from its head (the commit and the branch pushed), not from
+      # its merge commit, which no one pushed: the scripts below read these two, and fall back on
+      # the ref and the commit of the run when they are empty.
+      HEAD_REF: ${{ github.head_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     outputs:
       skip: ${{ steps.version.outputs.skip }}
       channel: ${{ steps.version.outputs.channel }}
@@ -249,13 +710,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: The channel and the version
         id: version
+        env:
+          # Only this step: the build scripts and dependencies of the steps below never see it.
+          GH_TOKEN: ${{ github.token }}
         run: |
           skip() { echo "::notice::$1: nothing is published."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
-          at=$GITHUB_SHA
+          branch=${HEAD_REF:-$GITHUB_REF_NAME} sha=${HEAD_SHA:-$GITHUB_SHA}
+          at=$sha
           # A line's release (release.yml): the tag vX.Y.Z it put on a commit of stable/X.Y, with
           # the version of that commit's release candidate (-rc). Its changelog is the line's
           # commits since the line's previous tag.
@@ -283,13 +749,13 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          case "$GITHUB_REF_NAME" in
+          case "$branch" in
             main)
               channel=stable
               # A release is main moved forward to a commit of dev, which is the commit released:
               # its version is the one its beta had, without the pre-release.
-              if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/dev; then
-                echo "::error::$GITHUB_SHA is not a commit of dev: main is released by the Release workflow only (docs/releases.md), nothing was published."
+              if ! git merge-base --is-ancestor "$sha" origin/dev; then
+                echo "::error::$sha is not a commit of dev: main is released by the Release workflow only (docs/releases.md), nothing was published."
                 exit 1
               fi
               ;;
@@ -303,13 +769,13 @@ jobs:
           computed=$channel
           case "$channel" in rc | next) computed=beta ;; esac
           status=0
-          version=$(tools/version.sh "$computed" --branch "$GITHUB_REF_NAME" --at "$at") || status=$?
+          version=$(tools/version.sh "$computed" --branch "$branch" --at "$at") || status=$?
           # 3: nothing was committed since the last release, which is then this one, run again.
           [ "$status" -ne 3 ] || skip "nothing to release since the last stable release"
           [ "$status" -eq 0 ] || exit "$status"
           # Every build is its own release, an alpha's too: nothing is ever replaced.
           tag="v$version"
-          tools/changelog.sh --at "$at" --branch "$GITHUB_REF_NAME" > "$RUNNER_TEMP/changelog.md"
+          tools/changelog.sh --at "$at" --branch "$branch" > "$RUNNER_TEMP/changelog.md"
           {
             echo "channel=$channel"
             echo "version=$version"
@@ -321,13 +787,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
       - if: steps.version.outputs.skip != 'true'
+        uses: rui314/setup-mold@v1
+      - if: steps.version.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
       - name: Build
         if: steps.version.outputs.skip != 'true'
         env:
           FLOTTILLE_BUILD_VERSION: ${{ steps.version.outputs.version }}
           FLOTTILLE_BUILD_CHANNEL: ${{ steps.version.outputs.channel }}
-          FLOTTILLE_BUILD_BRANCH: ${{ github.ref_name }}
+          FLOTTILLE_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: cargo build --release --locked -p flottille
       - name: Package, with the notes
         if: steps.version.outputs.skip != 'true'
@@ -335,17 +803,18 @@ jobs:
           CHANNEL: ${{ steps.version.outputs.channel }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          branch=${HEAD_REF:-$GITHUB_REF_NAME} sha=${HEAD_SHA:-$GITHUB_SHA}
           out="$RUNNER_TEMP/release"
           tools/package.sh "$VERSION" target/release/flottille "$out/assets"
           # The install.sh of this very commit: main has none before the first stable release.
-          install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install.sh | sh -s -- --channel $CHANNEL"
-          if [ "$CHANNEL" = alpha ]; then install="$install --branch '$GITHUB_REF_NAME'"; fi
+          install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$sha/install.sh | sh -s -- --channel $CHANNEL"
+          if [ "$CHANNEL" = alpha ]; then install="$install --branch '$branch'"; fi
           # A stable line's builds, and the next version's, are not dev's: this very version.
-          if [ "$GITHUB_REF_TYPE" = tag ] || [[ $GITHUB_REF_NAME == stable/* || $GITHUB_REF_NAME == next/* ]]; then
-            install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install.sh | sh -s -- --version $VERSION"
+          if [ "$GITHUB_REF_TYPE" = tag ] || [[ $branch == stable/* || $branch == next/* ]]; then
+            install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$sha/install.sh | sh -s -- --version $VERSION"
           fi
           {
-            echo "Flottille $VERSION, $CHANNEL, built from ${GITHUB_SHA:0:12}."
+            echo "Flottille $VERSION, $CHANNEL, built from ${sha:0:12}."
             echo
             echo "Linux x86_64. Install: \`$install\` (see docs/releases.md)."
             echo "The window needs the system's fontconfig, freetype, xkbcommon (and xkbcommon-x11), wayland-client or libxcb, and a Vulkan loader with a driver."
@@ -359,22 +828,128 @@ jobs:
           path: ${{ runner.temp }}/release
           retention-days: 1
 
+  # The hub (docs/releases.md, "What CI publishes"): its static binary for both architectures,
+  # the archives and the image, and the three scenarios of its release as steps. On a pull request
+  # that changes the hub or its release (`changes`), and on every push that publishes, where it
+  # holds the files `publish` puts beside Flottille's archives. Like `build`, it runs the branch's
+  # code with a token that can only read, and it publishes nothing.
+  hub:
+    needs: [changes, build]
+    # `build` is skipped on a pull request that publishes no alpha: `!cancelled()` keeps that from
+    # skipping this job. On a push, and on an alpha's pull request, it follows `build` (the
+    # version), and is skipped when `build` publishes nothing.
+    if: >-
+      !cancelled()
+      && needs.changes.outputs.hub != 'false'
+      && ((github.event_name == 'pull_request' && needs.changes.outputs.alpha != 'true')
+        || (needs.build.result == 'success' && needs.build.outputs.skip != 'true'))
+    # The runner Flottille's own build uses.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            platform: amd64
+          # Cross-compiled by the C compiler of the other architecture: nothing is emulated.
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            platform: arm64
+    env:
+      CARGO_INCREMENTAL: 0
+      # `ring`, under the hub's TLS, has C and assembly to build for the target. No linker is set for
+      # x86_64: `musl-gcc` is a wrapper that links dynamically, whatever Rust asks, and the target's
+      # own linking is static.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+      # A pull request's archives carry no real version: they are only made, to be checked.
+      VERSION: ${{ needs.build.outputs.version || '0.0.0-ci' }}
+      BINARY: target/${{ matrix.target }}/release/flottille-hub
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: rui314/setup-mold@v1
+      - name: Have the musl and the cross compilers, and the target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: hub-${{ matrix.target }}
+      - name: Build the hub
+        run: cargo build --release --locked -p flottille-hub --target ${{ matrix.target }}
+      - name: the_static_binary_runs_with_no_shared_library
+        run: tools/check-static.sh "$BINARY"
+      # The architecture of the runner: the binary that is static runs. The other one is not run.
+      - name: Run the hub it built
+        if: matrix.arch == 'x86_64'
+        run: |
+          "$BINARY" --version
+          "$BINARY" --help > /dev/null
+      - name: Package, with its sum
+        run: tools/package-hub.sh "$VERSION" ${{ matrix.arch }} "$BINARY" "$RUNNER_TEMP/hub/assets"
+      # `scratch` and a COPY: the image of the other architecture is made here too, with nothing run.
+      - name: Build the image
+        run: |
+          context="$RUNNER_TEMP/hub-image"
+          mkdir -p "$context/lib/flottille-hub"
+          install -m 0755 "$BINARY" "$context/flottille-hub"
+          docker build --platform linux/${{ matrix.platform }} --build-arg SOURCE=https://github.com/${{ github.repository }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
+      - name: the_image_starts_says_how_to_pair_and_answers_on_its_port
+        if: matrix.arch == 'x86_64'
+        run: tools/check-hub-image.sh flottille-hub:linux-amd64
+      - name: the_compose_example_is_valid
+        if: matrix.arch == 'x86_64'
+        env:
+          FLOTTILLE_HUB_IMAGE: flottille-hub:linux-amd64
+        run: docker compose -f crates/flottille-hub/compose.example.yml config
+      - name: Keep the image for the job that pushes it
+        if: github.event_name != 'pull_request' || needs.changes.outputs.alpha == 'true'
+        run: docker save flottille-hub:linux-${{ matrix.platform }} --output "$RUNNER_TEMP/hub-image-${{ matrix.platform }}.tar"
+      - if: github.event_name != 'pull_request' || needs.changes.outputs.alpha == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-assets-${{ matrix.arch }}
+          path: ${{ runner.temp }}/hub
+          retention-days: 1
+      - if: github.event_name != 'pull_request' || needs.changes.outputs.alpha == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-image-${{ matrix.platform }}
+          path: ${{ runner.temp }}/hub-image-${{ matrix.platform }}.tar
+          retention-days: 1
+
   publish:
-    needs: [verified-on-dev, verify, build]
+    needs: [verified-on-dev, changes, verify, build, hub, android, android-sign]
     # `verify` passed here, or was skipped because this commit passed it on dev: never on a commit
     # no `verify` passed on. A failed or skipped `build` publishes nothing.
     if: >-
       !cancelled()
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        || needs.changes.outputs.alpha == 'true')
       && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
+      && needs.hub.result == 'success'
+      && (needs.android.result == 'success' || needs.android.result == 'skipped')
+      && (needs.android-sign.result == 'success' || needs.android-sign.result == 'skipped')
       && (needs.verify.result == 'success'
         || (needs.verify.result == 'skipped' && needs.verified-on-dev.outputs.verified == 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # A pull request publishes its branch's alpha, for its head commit (see `build`).
+      HEAD_REF: ${{ github.head_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     # Shared with alpha-cleanup.yml: a branch's alpha is never deleted while it is published.
     concurrency:
-      group: publish-${{ github.ref_name }}
+      group: publish-${{ github.head_ref || github.ref_name }}
     # This job holds the write token: it runs no git and never works inside the artifact, whose
     # files come from the branch's code (a repository's layout there would hand its config to
     # git). Only `gh` runs, naming the files it uploads.
@@ -383,6 +958,22 @@ jobs:
         with:
           name: release
           path: release
+      # The hub's archives and their sums: in the one `gh release create` below, beside Flottille's.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hub-assets-*
+          path: hub
+          merge-multiple: true
+      # The app's APK: the signed one of `android-sign`, which only a push run and the release
+      # build of main have (its job runs on those, in its environment). A pull request's run, or
+      # one without the release key, attaches none: no APK of a build job is ever attached.
+      - name: The signed APK
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-signed
+          path: android
       - name: Publish
         id: publish
         env:
@@ -394,25 +985,28 @@ jobs:
         run: |
           # Read right before publishing: a push over this commit publishes itself, after it, and
           # a deleted branch publishes nothing. A line's release tag must still name this commit.
-          path="git/ref/heads/$GITHUB_REF_NAME" jq=.object.sha
+          branch=${HEAD_REF:-$GITHUB_REF_NAME} sha=${HEAD_SHA:-$GITHUB_SHA}
+          path="git/ref/heads/$branch" jq=.object.sha
           if [ "$GITHUB_REF_TYPE" = tag ]; then path="commits/$GITHUB_REF_NAME" jq=.sha; fi
           if tip=$(gh api "repos/$GH_REPO/$path" --jq "$jq" 2> "$RUNNER_TEMP/tip.err"); then
-            if [ "$tip" != "$GITHUB_SHA" ]; then echo "::notice::$GITHUB_REF_NAME moved on to $tip: nothing is published."; exit 0; fi
+            if [ "$tip" != "$sha" ]; then echo "::notice::$branch moved on to $tip: nothing is published."; exit 0; fi
           elif grep -q 'HTTP 404' "$RUNNER_TEMP/tip.err"; then
-            echo "::notice::$GITHUB_REF_NAME was deleted: nothing is published."; exit 0
+            echo "::notice::$branch was deleted: nothing is published."; exit 0
           else
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
           title="Flottille v$VERSION"
+          shopt -s nullglob
+          apk=(android/flottille-*.apk)
           # Nothing is replaced, ever (releases are immutable): a version already published, of any
           # channel, stays as it is; a draft left by a failed upload is made again.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
             if [ "$draft" = true ]; then gh release delete "$TAG" --yes; else echo "::notice::$TAG is already published."; exit 0; fi
           fi
           # The files go with the release in this one call: an immutable release takes none after.
-          if [ "$CHANNEL" = stable ] && [ "$GITHUB_REF_NAME" = main ]; then
+          if [ "$CHANNEL" = stable ] && [ "$branch" = main ]; then
             # On the commit released, the same on main and on dev: the next betas count from it.
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --latest
           elif [ "$CHANNEL" = stable ]; then
             # A line's, on its tag: the stable channel takes the latest release, so it is marked
             # latest when above the one marked (the newest line's fix reaches its users), never
@@ -425,7 +1019,60 @@ jobs:
             elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
               cat "$RUNNER_TEMP/latest.err" >&2; exit 1
             fi
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md "$latest"
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md "$latest"
           else
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi
+
+  # The hub's image (docs/releases.md): once its release is published, the image the `hub` job made
+  # is pushed to the repository's container registry under the release's version, and `latest` when
+  # that release is the latest. It loads what `hub` saved and pushes it: no Dockerfile, no build and
+  # no code of the branch runs here, where the token that writes packages is. No alpha has one: they
+  # would pile up, one per push.
+  hub-image:
+    needs: [build, hub, publish]
+    if: >-
+      !cancelled()
+      && needs.publish.result == 'success' && needs.hub.result == 'success'
+      && needs.build.outputs.channel != 'alpha'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hub-image-*
+          path: images
+          merge-multiple: true
+      - name: Push the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          # Only a release that stands has its image: a branch that moved on publishes nothing.
+          if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null) || [ "$draft" = true ]; then
+            echo "::notice::$TAG is not published: no image."
+            exit 0
+          fi
+          # The registry wants a lowercase path: the repository's own, `-hub` after it.
+          image=ghcr.io/${GITHUB_REPOSITORY,,}-hub
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # Nothing is replaced: a version already pushed stays as it is.
+          if docker buildx imagetools inspect "$image:$VERSION" > /dev/null 2>&1; then
+            echo "::notice::$image:$VERSION is already pushed."
+            exit 0
+          fi
+          for platform in amd64 arm64; do
+            docker load --input "images/hub-image-$platform.tar"
+            docker tag "flottille-hub:linux-$platform" "$image:$VERSION-$platform"
+            docker push "$image:$VERSION-$platform"
+          done
+          tags=(--tag "$image:$VERSION")
+          if [ "$(gh release view "$TAG" --json isLatest --jq .isLatest)" = true ]; then
+            tags+=(--tag "$image:latest")
+          fi
+          # One name for both architectures: the registry's manifest, joined from the two pushed.
+          docker buildx imagetools create "${tags[@]}" "$image:$VERSION-amd64" "$image:$VERSION-arm64"

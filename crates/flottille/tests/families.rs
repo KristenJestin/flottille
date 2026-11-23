@@ -6,7 +6,7 @@
 //! throwaway bare repositories; the escalating programs are fakes, first on the daemon's `PATH`,
 //! and none runs.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -2007,53 +2007,6 @@ fn a_missing_required_field_is_named_in_the_refusal() {
 }
 
 #[test]
-fn a_work_item_is_edited_with_its_custom_fields() {
-    let user = user();
-    on_jira(&user);
-    jira_requiring_fields(&user);
-    let (_, mcp) = root_in(&user, None);
-
-    let number = held(&mcp.call(
-        "tickets",
-        json!({"action": "edit", "ticket": "ABC-1", "title": "A new title",
-            "fields": {"customfield_10100": {"value": "Minor"}}}),
-    ));
-    let done = allow(&user, number);
-
-    assert!(done.contains("ABC-1 was changed."), "{done}");
-    let edits: Vec<Value> = user
-        .acli_received()
-        .into_iter()
-        .filter(|call| call["args"][2] == "edit")
-        .collect();
-    // The fields first, so that a refusal of them leaves the rest unwritten.
-    assert_eq!(edits.len(), 2, "{edits:?}");
-    assert_eq!(edits[0]["args"][3], "--from-json");
-    assert_eq!(edits[0]["args"][5], "--yes");
-    assert_eq!(
-        edits[0]["files"][0]["json"],
-        json!({"issues": ["ABC-1"],
-            "additionalAttributes": {"customfield_10100": {"value": "Minor"}}})
-    );
-    assert_eq!(
-        words(vec![edits[1].clone()])[0],
-        "jira workitem edit --key ABC-1 --summary A new title --yes"
-    );
-    // Fields alone are an edit: one call.
-    let alone = held(&mcp.call(
-        "tickets",
-        json!({"action": "edit", "ticket": "ABC-1",
-            "fields": {"customfield_10101": {"value": "Always"}}}),
-    ));
-    allow(&user, alone);
-    let edits = words(user.acli_received())
-        .into_iter()
-        .filter(|call| call.starts_with("jira workitem edit"))
-        .count();
-    assert_eq!(edits, 3);
-}
-
-#[test]
 fn fields_are_refused_where_they_cannot_go_before_anything_is_asked() {
     let user = user();
     on_jira(&user);
@@ -2411,7 +2364,7 @@ fn tickets_people_lists_the_assignable_users() {
         lines,
         [
             "- Ben Sample (557058:bbbb-0002)",
-            "- Anne Example (anne@example.org)"
+            "- Anne Example (anne@example.org), account id 557058:aaaa-0001"
         ],
         "{listed}"
     );
@@ -2420,7 +2373,11 @@ fn tickets_people_lists_the_assignable_users() {
         mcp.call("tickets", json!({"action": "people", "query": "anne"})),
     );
     let lines: Vec<&str> = narrowed.lines().filter(|l| l.starts_with("- ")).collect();
-    assert_eq!(lines, ["- Anne Example (anne@example.org)"], "{narrowed}");
+    assert_eq!(
+        lines,
+        ["- Anne Example (anne@example.org), account id 557058:aaaa-0001"],
+        "{narrowed}"
+    );
     let search = words(user.acli_received())
         .into_iter()
         .find(|call| call.starts_with("jira workitem search"))
@@ -2435,6 +2392,56 @@ fn tickets_people_lists_the_assignable_users() {
     let listed = read(&user, mcp.call("tickets", json!({"action": "people"})));
     let lines: Vec<&str> = listed.lines().filter(|l| l.starts_with("- ")).collect();
     assert_eq!(lines, ["- Ana Example (ana)", "- bob"], "{listed}");
+}
+
+#[test]
+fn the_tickets_tool_says_how_to_mention_on_jira() {
+    let user = user();
+    on_jira(&user);
+    let (_, mcp) = root_in(&user, None);
+    let tools = mcp.tools();
+    let tickets = tools.iter().find(|tool| tool["name"] == "tickets").unwrap();
+    let field = |name: &str| {
+        tickets["inputSchema"]["properties"][name]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // Where the agent reads what a text may hold: the Jira form, that a bare @Name does not
+    // notify, where the ids are, and GitHub's own form.
+    let body = field("body");
+    assert!(
+        body.contains("[@Display Name](mention:<accountId>)"),
+        "{body}"
+    );
+    assert!(body.contains("people"), "{body}");
+    assert!(body.contains("@Name"), "{body}");
+    assert!(body.contains("@login"), "{body}");
+    let query = field("query");
+    assert!(query.contains("account id"), "{query}");
+    // The tool's own description stays short: the details are the fields'.
+    let description = tickets["description"].as_str().unwrap();
+    assert!(description.len() < 1_000, "{}", description.len());
+}
+
+#[test]
+fn people_gives_the_account_id_for_a_mention() {
+    let user = user();
+    on_jira(&user);
+    jira_with_people(&user);
+    let (_, mcp) = root_in(&user, None);
+    let listed = read(&user, mcp.call("tickets", json!({"action": "people"})));
+    // Anne is named by her e-mail for an assignee: her account id is said beside it.
+    assert!(
+        listed.contains("- Anne Example (anne@example.org), account id 557058:aaaa-0001"),
+        "{listed}"
+    );
+    // Ben has no e-mail: his account id is already how he is named.
+    assert!(
+        listed.contains("- Ben Sample (557058:bbbb-0002)\n"),
+        "{listed}"
+    );
+    assert!(listed.contains("mention:<accountId>"), "{listed}");
 }
 
 /// GitHub's `acme/app`: Ana Example (whose name `gh` says on the issue she wrote) and Bob can be
@@ -2989,34 +2996,6 @@ fn the_sprints_of_the_project_s_board_are_listed() {
         mcp.call("tickets", json!({"action": "sprints", "project": "ABC"})),
     );
     assert!(none.contains("does not support sprints"), "{none}");
-}
-
-#[test]
-fn changing_the_parent_of_an_existing_item_is_refused_saying_why() {
-    let user = user();
-    on_jira(&user);
-    jira_planned(&user);
-    let (_, mcp) = root_in(&user, None);
-
-    let refused = mcp.call(
-        "tickets",
-        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10"}),
-    );
-
-    assert!(refused.error, "{}", refused.text);
-    assert!(
-        refused.text.contains("acli's workitem edit has no parent"),
-        "{}",
-        refused.text
-    );
-    assert!(refused.text.contains("Jira's REST API"), "{}", refused.text);
-    assert!(
-        refused.text.contains("nothing was written"),
-        "{}",
-        refused.text
-    );
-    assert!(no_request(&user));
-    assert!(user.acli_received().is_empty());
 }
 
 #[test]
@@ -4913,7 +4892,7 @@ fn workspace_remove_on_a_workspace_with_an_unpushed_commit_names_it_and_is_refus
     assert!(!folder.exists());
 }
 
-/// This user with a `git` first in its `PATH` that, before the `look`th `git status` of the
+/// This user with a daemon's `git` that, before the `look`th `git status` of the
 /// workspace `login`, writes an uncommitted file in it: work that appears while a removal is
 /// under way. Everything else is the real `git`.
 fn with_work_appearing_before_the_look(user: User, look: u32) -> User {
@@ -4939,8 +4918,8 @@ fn with_work_appearing_before_the_look(user: User, look: u32) -> User {
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    user.with_env("PATH", &path)
+    // The daemon's own git is the one found at its start, not the `PATH`'s first.
+    user.with_env("FLOTTILLE_TEST_GIT", program.to_str().unwrap())
 }
 
 #[test]

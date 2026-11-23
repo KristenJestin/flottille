@@ -4,7 +4,7 @@
 //! refused. The trackers are the fake `acli` and the fake `gh`; the remotes are throwaway bare
 //! repositories; the escalating programs are fakes, first on the daemon's `PATH`, and none runs.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -15,6 +15,36 @@ use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 const SITE: &str = "example.atlassian.net";
+/// What the daemon reads to send its Jira calls to a server of this machine (a debug build only).
+const BASE: &str = "FLOTTILLE_TEST_JIRA_BASE";
+
+/// A site of this machine whose comment list holds the comments 20000 to 20002, none a reply: the
+/// card of a Jira reply reads the thread of the comment it answers there (#1068). No test reaches
+/// a real site.
+fn site() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut chunk = [0u8; 4096];
+            let _ = stream.read(&mut chunk);
+            let said = json!({"startAt": 0, "maxResults": 5000, "total": 3, "comments": [
+                {"id": "20000"}, {"id": "20001"}, {"id": "20002"}]})
+            .to_string();
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{said}",
+                    said.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    base
+}
 
 fn user() -> User {
     User::with_fake_agent()
@@ -70,6 +100,21 @@ fn on_jira(user: &User) {
         user,
         json!({"kind": "jira", "site": SITE, "projects": ["ABC", "DEF"]}),
     );
+}
+
+/// A Jira tracker with the vault entry a Jira reply needs (#1068): it is posted through Jira's API.
+fn on_jira_with_entry(user: &User) {
+    fixture(
+        user,
+        json!({"kind": "jira", "site": SITE, "projects": ["ABC", "DEF"],
+            "worklog_token": "jira-time"}),
+    );
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": "an-api-token", "username": "dev@example.com",
+            "project": "app"}),
+    )
+    .unwrap();
 }
 
 fn on_github(user: &User) {
@@ -1209,78 +1254,60 @@ fn a_ticket_shows_the_ids_of_every_comment() {
 }
 
 #[test]
-fn a_reply_to_a_jira_comment_answers_it() {
+fn show_gives_each_comment_author_s_account_id() {
     let user = user();
     on_jira(&user);
     jira_script(
         &user,
         json!({"items": {"ABC-1": commented("ABC-1", json!([
-            person_with_account("20000", "I can reproduce")]))}}),
+            person_with_account("20000", "I can reproduce"),
+            person("20001", "Same here")]))}}),
     );
     let mcp = root_in(&user);
-
-    let done = written(
-        &user,
-        &mcp,
-        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000",
-            "body": "Thanks, a fix is on app/login"}),
-    );
-
-    assert!(
-        done.contains("The reply to the comment 20000 of ABC-1 was posted"),
-        "{done}"
-    );
-    assert!(
-        acli_calls(&user)
-            .iter()
-            .any(|c| c.starts_with("jira workitem comment create --key ABC-1 --body-file ")),
-        "{:?}",
-        acli_calls(&user)
-    );
-    // What the file held: a document that mentions the author as Jira's Reply does, quotes the
-    // comment it answers, then says the reply.
-    let posted: Value =
-        serde_json::from_str(&std::fs::read_to_string(user.path("acli/posted.json")).unwrap())
-            .unwrap();
-    let held = &posted["ABC-1"][0];
-    let content = held["content"].as_array().unwrap();
-    assert_eq!(content[0]["content"][0]["type"], "mention", "{held}");
-    assert_eq!(
-        content[0]["content"][0]["attrs"]["id"], "5b10ac8d82e05b22cc7d4ef5",
-        "{held}"
-    );
-    assert_eq!(content[1]["type"], "blockquote", "{held}");
-    assert!(content[1].to_string().contains("I can reproduce"), "{held}");
-    assert!(
-        held.to_string().contains("Thanks, a fix is on app/login"),
-        "{held}"
-    );
-    // No visibility was passed: `comment create` has no flag for one.
-    assert!(
-        acli_calls(&user).iter().all(|c| !c.contains("visibility")),
-        "{:?}",
-        acli_calls(&user)
-    );
-    // The reply reads back as the agent's, with its own id.
     let shown = read(
         &user,
         &mcp,
         json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
     );
-    // The quote and the answer are lines of the comment, the author and its id are on the first.
-    let reply = shown
+    // The account id is on the comment's line, so an agent answering Ana can mention her.
+    let line = shown
         .lines()
-        .find(|line| line.contains("[comment 10100]"))
-        .unwrap_or_else(|| panic!("{shown}"));
-    assert!(shown.contains("Thanks, a fix is on app/login"), "{shown}");
-    assert!(reply.contains("by an agent"), "{shown}");
-    assert_eq!(comment_records(&user, "ABC-1"), [Some("10100".to_owned())]);
+        .find(|l| l.contains("I can reproduce"))
+        .unwrap();
+    assert!(line.contains("5b10ac8d82e05b22cc7d4ef5"), "{shown}");
+    // A comment whose author Jira gives no account for says none.
+    let line = shown.lines().find(|l| l.contains("Same here")).unwrap();
+    assert!(!line.contains("account"), "{shown}");
+}
+
+#[test]
+fn a_mention_read_in_a_comment_keeps_its_account_id() {
+    let user = user();
+    on_jira(&user);
+    let mut comment = person("20000", "");
+    comment["body"] = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+        "content": [{"type": "text", "text": "Thanks "},
+            {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5", "text": "@Ana Example"}}]}]});
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([comment]))}}),
+    );
+    let mcp = root_in(&user);
+    let shown = read(
+        &user,
+        &mcp,
+        json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+    );
+    assert!(
+        shown.contains("Thanks [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"),
+        "{shown}"
+    );
 }
 
 #[test]
 fn a_reply_to_a_jira_comment_that_is_not_there_or_restricted_writes_nothing() {
     let user = user();
-    on_jira(&user);
+    on_jira_with_entry(&user);
     let mut internal = person_with_account("20001", "Internal: the key is rotated");
     internal["visibility"] = json!({"type": "role", "value": "Administrators"});
     jira_script(
@@ -1386,25 +1413,6 @@ fn a_reply_names_the_ticket_the_comment_and_its_words() {
     }
 }
 
-/// An ADF comment as Jira gives it back for a reply to a comment: a quote, a heading and a table.
-fn comment_with_a_quote_a_heading_and_a_table() -> Value {
-    let paragraph =
-        |text: &str| json!({"type": "paragraph", "content": [{"type": "text", "text": text}]});
-    let cell =
-        |kind: &str, text: &str| json!({"type": kind, "attrs": {}, "content": [paragraph(text)]});
-    let mut comment = person_with_account("20000", "");
-    comment["body"] = json!({"type": "doc", "version": 1, "content": [
-        paragraph("Alice wrote:"),
-        {"type": "blockquote", "content": [paragraph("I can reproduce")]},
-        {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Steps"}]},
-        {"type": "table", "attrs": {}, "content": [
-            {"type": "tableRow", "content": [cell("tableHeader", "step"), cell("tableHeader", "result")]},
-            {"type": "tableRow", "content": [cell("tableCell", "log in"), cell("tableCell", "fails")]}]},
-        {"type": "rule"},
-        paragraph("Thanks")]});
-    comment
-}
-
 /// The words of the card of the last request, one per line.
 fn card_of_the_last(user: &User) -> String {
     requests(user).last().unwrap()["says"]
@@ -1417,61 +1425,8 @@ fn card_of_the_last(user: &User) -> String {
 }
 
 #[test]
-fn a_reply_to_a_reply_is_a_document_jira_takes() {
-    let user = user();
-    on_jira(&user);
-    jira_script(
-        &user,
-        json!({"items": {"ABC-1": commented("ABC-1", json!([
-            comment_with_a_quote_a_heading_and_a_table()]))}}),
-    );
-    let mcp = root_in(&user);
-
-    // The fake `acli` refuses a quote that holds a quote, a heading, a rule or a table, as Jira does.
-    let done = written(
-        &user,
-        &mcp,
-        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Agreed"}),
-    );
-
-    assert!(done.contains("was posted"), "{done}");
-    let posted: Value =
-        serde_json::from_str(&std::fs::read_to_string(user.path("acli/posted.json")).unwrap())
-            .unwrap();
-    let held = &posted["ABC-1"][0];
-    let quote = held["content"][1].to_string();
-    assert_eq!(held["content"][1]["type"], "blockquote", "{held}");
-    for words in ["I can reproduce", "Steps", "log in", "Agreed"] {
-        assert!(held.to_string().contains(words), "{words}: {held}");
-    }
-    assert!(quote.contains("Steps"), "{quote}");
-}
-
-#[test]
 fn the_card_of_a_reply_shows_what_is_posted_and_who_is_notified() {
-    let user = user();
-    on_jira(&user);
-    jira_script(
-        &user,
-        json!({"items": {"ABC-1": commented("ABC-1", json!([
-            person_with_account("20000", "I can reproduce")]))}}),
-    );
-    let mcp = root_in(&user);
-    held(&mcp.call(
-        "tickets",
-        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Fixed"}),
-    ));
-    let card = card_of_the_last(&user);
-    assert!(card.contains("It mentions Ana, who is notified"), "{card}");
-    assert!(
-        card.contains("@Ana wrote:")
-            && card.contains("> I can reproduce")
-            && card.contains("Fixed"),
-        "{card}"
-    );
-    // The reply is not said twice, as a body of its own.
-    assert!(!card.contains("Its body:"), "{card}");
-
+    // A Jira reply posts no quote: its card is in `ticket_jira_replies.rs`. Here the GitHub ones.
     let github = self::user();
     on_github(&github);
     github.gh_script(json!({"issues": {"acme/app": {"1": {
@@ -1519,8 +1474,8 @@ fn the_card_of_a_reply_shows_what_is_posted_and_who_is_notified() {
 
 #[test]
 fn a_reply_to_an_internal_note_or_a_hidden_comment_is_refused() {
-    let user = user();
-    on_jira(&user);
+    let user = user().with_env(BASE, &site());
+    on_jira_with_entry(&user);
     let mut note = person_with_account("20001", "Internal: the key is rotated");
     note["jsdPublic"] = json!(false);
     let mut public = person_with_account("20002", "A public answer");
@@ -1576,7 +1531,7 @@ fn a_reply_to_an_internal_note_or_a_hidden_comment_is_refused() {
 #[test]
 fn a_comment_of_another_issue_is_not_one_to_reply_to() {
     let user = user();
-    on_jira(&user);
+    on_jira_with_entry(&user);
     jira_script(
         &user,
         json!({"items": {
@@ -1621,8 +1576,8 @@ fn a_comment_of_another_issue_is_not_one_to_reply_to() {
 
 #[test]
 fn a_comment_that_goes_or_is_restricted_after_the_card_is_not_answered() {
-    let user = user();
-    on_jira(&user);
+    let user = user().with_env(BASE, &site());
+    on_jira_with_entry(&user);
     let script = |comments: Value| {
         jira_script(
             &user,
@@ -1667,8 +1622,8 @@ fn github_issue_with(comment: &str) -> Value {
 
 #[test]
 fn a_comment_edited_after_the_card_is_not_answered() {
-    let user = user();
-    on_jira(&user);
+    let user = user().with_env(BASE, &site());
+    on_jira_with_entry(&user);
     let script = |text: &str| {
         jira_script(
             &user,

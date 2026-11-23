@@ -54,7 +54,14 @@ fn holder(daemon: &Daemon, agent: &str) -> String {
         .read(|store| store.agent(agent))
         .ok()
         .flatten()
-        .and_then(|agent| agent.parent)
+        // A child an agent of another machine launched: that agent holds it, whose machine is
+        // told, or gives it to the user while it is off.
+        .and_then(|agent| {
+            agent
+                .parent
+                .clone()
+                .or_else(|| crate::across::caller_of(daemon, &agent, "child"))
+        })
         .unwrap_or_else(|| approval::USER.to_owned())
 }
 
@@ -131,10 +138,16 @@ pub fn ask(
                 _ => format!("agent {session}"),
             };
             return (
-                Outcome::Refused(format!(
-                    "refused: request #{number} already asks the user to let you write to \
-                     {named}; this message was not sent: send it once its answer came"
-                )),
+                Outcome::Refused(match tool {
+                    "session_read" => format!(
+                        "refused: request #{number} already asks the user to let you read \
+                         {named}; read it once its answer came"
+                    ),
+                    _ => format!(
+                        "refused: request #{number} already asks the user to let you write to \
+                         {named}; this message was not sent: send it once its answer came"
+                    ),
+                }),
                 None,
             );
         }
@@ -155,10 +168,17 @@ pub fn ask(
         }
         Ok(request) => {
             tree::asks_parent(daemon, &request);
-            (
-                Outcome::Held(waiting_on_parent(request.number)),
-                Some(request.number),
-            )
+            // Its parent's machine is off: it went to the user at once.
+            let users = daemon
+                .read(|store| store.request(request.number))
+                .ok()
+                .flatten()
+                .is_some_and(|request| request.held_by == approval::USER);
+            let said = match users {
+                true => waiting(request.number),
+                false => waiting_on_parent(request.number),
+            };
+            (Outcome::Held(said), Some(request.number))
         }
         Err(error) => {
             eprintln!(
@@ -186,10 +206,15 @@ fn asking_leave(store: &Store, asked: &Request) -> flottille_core::Result<Option
         .into_iter()
         .chain(store.unsettled_requests()?)
         .find(|request| {
+            // One leave covers reading and writing across projects: a read and a message for the
+            // same pair are one card.
             request.agent == asked.agent
-                && request.tool == asked.tool
+                && matches!(request.tool.as_str(), "session_send" | "session_read")
                 && request.arguments["session"] == asked.arguments["session"]
-                && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+                && request
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == gate::LEAVE || reason == gate::READ_LEAVE)
                 && (request.call_key.is_none() || request.call_key != asked.call_key)
         })
         .map(|request| request.number))
@@ -307,6 +332,11 @@ async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: 
             .unwrap_or(request);
         return Err(already(&request));
     };
+    // Another machine's launch: its answer is for no agent of this machine.
+    if let Some(launch) = crate::launches::held_by_request(daemon, number) {
+        crate::launches::decided(daemon, launch, &request, decision != Decision::Deny);
+        return Ok(json!({"request": request.to_json()}));
+    }
     if decision == Decision::Deny {
         let body = format!(
             "Request #{number} ({}) was refused by the user. Nothing was done.",
@@ -447,11 +477,13 @@ async fn performed(
     // A verdict on a pull request is read as it stood: its card says the head it was given on.
     // A ticket created in a milestone goes in the one its card named, not one merely named so now.
     // A reply goes out with the quote its card showed, not with the comment as edited since.
+    // A worklog is changed or deleted as its card showed it, not as it became since.
     let review = gate::decides_a_review(tool, &request.arguments);
     if request.kind == Kind::Action
         || review
         || gate::creates_in_a_milestone(tool, &request.arguments)
         || gate::replies_to_a_comment(tool, &request.arguments)
+        || gate::changes_a_worklog(tool, &request.arguments)
     {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
             Err(
@@ -532,8 +564,11 @@ async fn performed(
     .await;
     // The user allowed the first message of a pair: the leave is the pair's from now on.
     if matches!(outcome, Outcome::Done(_))
-        && tool == "session_send"
-        && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+        && matches!(tool, "session_send" | "session_read")
+        && request
+            .reasons
+            .iter()
+            .any(|reason| reason == gate::LEAVE || reason == gate::READ_LEAVE)
         && let Some(session) = request.arguments["session"].as_str()
     {
         tree::grant_leave(daemon, &request.agent, session, number);
@@ -583,6 +618,10 @@ fn store_answer_with(
             "flottille daemon: request #{}: its answer cannot be stored: {error}",
             request.number
         );
+        return;
+    }
+    // A caller of another machine is told on its machine, as it would be here.
+    if crate::across::answer_back(daemon, request, body) {
         return;
     }
     deliveries::ring(daemon, &request.agent);

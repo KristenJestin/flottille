@@ -75,8 +75,11 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   quoted, never spliced. A text written is passed as one argument, never through a shell.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
-  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **the gate refuses
-  every `acli` line an agent runs, reads included**; an agent reads the tickets with `tickets`.
+  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **an `acli` line an
+  agent runs is the gate's**: what only shows or lists passes as a read, as `gh`'s reads do, what
+  writes is judged (the card says it writes to the tracker signed in as the user), and what
+  touches the sign-in is base (`docs/tools.md`, "`acli` in a run"); an agent still reads and
+  writes the tickets with `tickets`.
 
 ## The Jira site
 
@@ -161,8 +164,10 @@ take for markup (`*`, `` ` ``, `[`, `<`, `~`, `_` at a word's edge, a line start
 **What an agent posts is found again by its words.** The record of a Jira comment is a hash of its
 text (`forges.md`, "What Flottille posts is recorded"). What is recorded is the text after the
 round trip (Markdown, ADF, Markdown), the text a read gives, so the match does not rely on Jira
-keeping anything but the tree. What Jira rewrites on its own (a mention, a smart link) still
-breaks the match: that comment is then shown as a person's and `from: people` delivers it. The
+keeping anything but the tree. What Jira rewrites on its own (a smart link) still breaks the match:
+that comment is then shown as a person's and `from: people` delivers it. A comment posted through
+the REST API (a mention, a reply) and an edited one are recorded by the id Jira answers, so they
+do not depend on the words. The
 maintainer checks one real Jira comment, as for the shapes below.
 
 ### What `acli` prints is assumed, and the maintainer checks it
@@ -448,42 +453,115 @@ ticket itself.
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
   --method PATCH -f body=<text>` and `--method DELETE`. An edit replaces the record of the id with the
   new words, so that the comment stays the agent's and has one record; a delete drops it.
-- **Replies** (#934): `reply {ticket, comment, body}` answers any comment of a ticket, an agent's
-  or a person's, found by the id that `show` with `detail full` prints after the author of
+- **Replies** (#934, #1068): `reply {ticket, comment, body}` answers any comment of a ticket, an
+  agent's or a person's, found by the id that `show` with `detail full` prints after the author of
   **every** comment (`[comment 20000]`, GitHub's `issuecomment-500`); `comment_edit` and
-  `comment_delete` still take an agent's own alone. Neither tracker has threads on a ticket, so a
-  reply is a new comment that says whom it answers and quotes it (the first 500 characters),
-  recorded as an agent's comment like `comment` (one record of its id, read right after the post
-  on Jira). The gate judges it as a comment (one card: the ticket, the comment id and the words),
-  and a comment that is not there is refused before the user is asked, checked again right before
-  the write.
-  - GitHub: `gh issue comment <n> --body` of `> @alice wrote:`, the quoted lines, a blank line and
-    the reply.
-  - Jira: `acli jira workitem comment create --key <K> --body-file <file>` of an ADF document: a
-    paragraph with a **mention** of the author (`{"type": "mention", "attrs": {"id": <account id
-    of the comment's author>, "text": "@Name"}}`, plain text when the read gave no account id)
-    and ` wrote:`, a blockquote of the comment, then the reply, as Jira's own Reply does. The
-    quote is the comment's first 500 characters written as a Markdown quote and converted like any
-    text, so a quote, a heading, a rule or a table in the comment (a reply to a reply) is written
-    as paragraphs there, which Jira takes in a quote and refuses otherwise.
-  - **The card shows what is posted**: the comment quoted first and the reply, as they go out
-    (on GitHub the Markdown, on Jira the document as Markdown), and "it mentions <name>, who is
-    notified" when the author is mentioned: on Jira when the read gave their account id, on
-    GitHub (`> @alice wrote:`) when it gave their login (a deleted user has none: `> A deleted
-    user wrote:`, no mention). The card is rebuilt when the user allows the call, and a comment
-    edited since is not posted: it is refused as what the call does having changed. A comment
+  `comment_delete` still take an agent's own alone. It is recorded as an agent's comment like
+  `comment` (one record of its id), judged by the gate as a comment, and a comment that is not
+  there is refused before the user is asked, checked again right before the write.
+  - **GitHub** has no threads on an issue: a reply is a new comment that says whom it answers and
+    quotes it (the first 500 characters): `gh issue comment <n> --body` of `> @alice wrote:`, the
+    quoted lines, a blank line and the reply. The `@alice` notifies its author (a deleted user has
+    no login: `> A deleted user wrote:`, no mention).
+  - **Jira Cloud** has threaded replies, one level deep, as the user's own Reply makes: the reply
+    goes **under** the comment, in its thread. It is `POST /rest/api/3/issue/<key>/comment` with
+    `{"body": <ADF>, "parentId": <number>}`, **no quote and no "wrote:"**, by the daemon with the
+    project's tracker entry (the one `log_time`, `worklogs` and `edit` with `fields` use; the
+    secret goes to the tracker's site alone and is in no argument, log, error, event or card).
+    `parentId` is the comment answered, or, when that comment is itself a reply, **the first comment
+    of its thread** (Jira refuses a reply to a reply with `Parent comment not found`): it is read
+    from `GET /rest/api/3/issue/<key>/comment`, whose comments each carry a reply's `parentId`
+    (a number, beside `id`, `author`, `body` and `created`; the field is not in the published v3
+    schema, the maintainer read it on a real site from a reply made in Jira's UI). The answer is
+    the reply's Markdown as an ADF document, and Jira answers the new comment's `id`, recorded
+    as the agent's. `acli jira workitem comment create` has no way to name a parent, so `acli`
+    posts no reply.
+  - **Without the entry** (the tracker names none, or the vault does not hold it) a Jira `reply` is
+    **refused before anything is asked or run**, saying it needs the entry and how to set one (or
+    to ask the user for it, `vault ask`); it never falls back to a separate comment.
+  - **The card** says the comment answered (its id, its author and its first 500 characters), the
+    answer, that it goes through Jira's API with the vault entry's name, and who is notified when
+    the answer mentions someone. The comment named is the one the answer goes under: for a reply
+    to a reply, the first comment of the thread, read as the post reads it. The card is rebuilt when the user allows the call, and a comment
+    edited since is not answered: it is refused as what the call does having changed. A comment
     that cannot be read when the card is built gets no card, it is refused.
-  - **A comment not for everyone is not quoted**: acli's reference gives `--visibility-role` and
-    `--visibility-group` to `comment update` only; `comment create` uses *the project's default
-    visibility*, so a reply cannot be posted in the visibility of the comment it answers. A Jira
-    comment whose `visibility` (a role or a group, as Jira's REST gives it) is set, or whose
-    `jsdPublic` is `false` (a Service Management internal note), is refused, saying so, with nothing
-    written. On GitHub a hidden comment (`isMinimized`) is refused too: quoting it would show it
-    again. Refused before the user is asked, and again right before the write.
-  - Not confirmed against a real site (the fake follows acli's published reference): that
-    `view --json` gives each comment's `author.accountId`, and `visibility` and `jsdPublic`
-    (**if it leaves them out, a restricted comment is not seen as one and is quoted to everyone**),
-    and that `comment create` takes a document with a mention node in `--body-file`.
+  - **`show` with `detail full` draws the threads** of a Jira work item: each reply under its
+    comment, indented, with its id (`[comment 20001]`); a reply whose parent is not among the
+    comments read stands in the list and says whom it answers (`a reply to 20000`). The threads
+    come from the REST read above, so they are drawn when the project has the entry; without it
+    the comments are listed flat, as `acli`'s view gives them (its comments are not known to carry
+    `parentId`). A read that fails is said under the comments, not hidden.
+  - **A comment not for everyone is not answered**: a Jira comment whose `visibility` (a role or a
+    group, as Jira's REST gives it) is set, or whose `jsdPublic` is `false` (a Service Management
+    internal note), is refused, saying so, with nothing written: the reply would stand in the open
+    under it, and the call carries no visibility. On GitHub a hidden comment (`isMinimized`) is
+    refused too: quoting it would show it again. Refused before the user is asked, and again right
+    before the write.
+- **Mentions** (#1068): on Jira an `@Name` written in an ADF text stays text and notifies no one;
+  only a `mention` node with the account id does. In a Jira `comment`, `comment_edit`, `reply`,
+  `log_time` comment, and `create` and `edit` description, `[@Display Name](mention:<accountId>)`
+  (or its reference form, `[@Display Name][x]` with `[x]: mention:<accountId>`) becomes
+  `{"type": "mention", "attrs": {"id": "<accountId>", "text": "@Display Name"}}` (`people` gives
+  the account ids; the conversion is the same as the rest of Jira's text, `adf::from_markdown`).
+  A `mention:` whose id is not an account id (24 hexadecimal digits, or `<number>:<uuid>`) is
+  refused before the user is asked.
+  - **Each account is looked up on the site** with the project's entry (`GET
+    /rest/api/3/user?accountId=`, signed as the rest of the REST calls): an id the site does not
+    know is **refused before the card**, `nothing was written`, and the name Jira returns is the
+    one the node carries (the text the agent wrote is its own, Jira's notifies). **The card says
+    who is notified**, by the name Jira returns and the id (`It mentions Ana Example (5b10…), Ben
+    Sample (7120…), who are notified`), whatever the text says.
+  - **Every path with a mention goes through the REST API with the entry, never `acli`** (that
+    `acli` keeps a mention node is not confirmed): a `comment` (`POST …/comment`), a `reply`, a
+    `comment_edit` (`PUT /rest/api/3/issue/<key>/comment/<id>`), a `log_time` comment (its
+    worklog), an `edit` description (`PUT /rest/api/3/issue/<key>` with `fields.description`;
+    the title, assignee and labels of the same call still go through `acli`, and an edit with
+    only the description does not call `acli` at all) and a `create` (`acli` creates the work
+    item **without** a description, then the description is set with the same `PUT` in the same
+    action; if that `PUT` fails the answer says the work item exists with no description). Without
+    the entry, any of them is **refused before it is asked**, saying it needs the entry (and
+    `vault ask`), never posted without its mention. A text with no mention goes as it did.
+    These paths need no signed-in `acli` of their own: a comment with a mention is posted with
+    `acli` signed out (a `reply` and a `comment_edit` still read the work item through `acli`
+    first).
+  - **What the agent posted is recorded by the id Jira answers** (a comment, a reply, an edited
+    comment), so it is still the agent's when read back, whatever Jira shows for the mention. A
+    description is recorded by its words, the names being Jira's own, as a read gives them.
+  - **The agent is told, and can find the account id** (#1127): the `body` field's description
+    gives the form (and `@login` for GitHub), and `people`'s (`query`) says it gives each person's
+    account id. `people` says the account id of every person (`Ana Example (ana@example.org),
+    account id 5b10…`, once when it is already how they are named), and `show` with `detail
+    full` says the author's account id on each Jira comment's line (`[comment 20000, author
+    account 5b10…]`), so an agent answering someone can mention them.
+  - **A person seen nowhere yet is searched on the site.** `people {query, ticket?}` on Jira also
+    asks the site, with the project's tracker entry (REST, signed as the rest of the calls, the
+    secret in no argument, log nor answer): with a `ticket`, `GET
+    /rest/api/3/user/viewissue/search?issueKey=&query=` (only the people who can see it, what
+    Jira's own picker offers, so a mention reaches someone who can read the ticket), else `GET
+    /rest/api/3/user/search?query=`. A deactivated account and one with no account id are left
+    out. Each line gives the name, the account id and the e-mail when Jira shows it; people of the
+    same name are all listed, never one chosen silently. What `acli` shows (the assignees) comes
+    first and is not repeated. **With a `ticket` the answer is the site's alone**, an assignee
+    matching the query who cannot see the ticket not being listed under a header that says who can.
+    `maxResults=50` is sent, and a full page says so (`there may be more on the site, narrow with
+    query`). **A person found on the site is named by account id for `assignee`**: `edit` finds a
+    display name among the assignees `acli` shows only (below), so the answer's closing line says
+    so, and gives the account id as the way to name them. Without the entry, or when the site
+    cannot be reached, `people` answers from the assignees and says so (`Only the assignees were
+    searched, not the site: …`, with how to set the entry), and claims no ticket filter. No query:
+    no search (Jira's takes words).
+  - A mention reads back as `[@Display Name](mention:<accountId>)`, the form the agent writes, so
+    one read can be repeated (a mention whose id is no account id reads as its text: an id is
+    never put into a link whatever its shape). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
+    a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
+    looked up, except those of `fields.description`.
+  - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node
+    in the body of `POST …/comment`, of the comment's `PUT`, of a description's `PUT` and of a
+    worklog notifies the person, and what `GET /rest/api/3/user?accountId=` answers for an
+    account of another site or a deactivated one (a `404` is taken as unknown), and what `GET
+    /rest/api/3/user/search` and `GET /rest/api/3/user/viewissue/search` answer for the entry's
+    account (the fake follows Jira's documentation: an array of users, `active`, at most
+    `maxResults`; whether the second needs more than the entry's account has is unknown).
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are
@@ -511,10 +589,11 @@ refused it, and the new work item went to the project's default assignee.
   of one, and the agent fell back to a Task. `create` and `edit` take `fields`, an object passed
   to `acli` **as given**: a creation puts it in the `additionalAttributes` of its JSON definition
   (`workitem create --from-json`, like a sprint's field and a version, with the type that JSON
-  needs), an edit in `{"issues": [<key>], "additionalAttributes": {…}}` of `workitem edit
-  --from-json <file> --yes` (**assumed** from the creation's shape: `acli` was not at hand to
-  measure `--generate-json`), run before the flags that set the title, the description, the
-  labels and the assignee. Keys are a field's id (`customfield_10042`) or a system field's key,
+  needs), an edit through Jira's REST API (`PUT /rest/api/3/issue/<key>` with `{"fields": {…}}`, #1067),
+  run before the flags that set the title, the description, the labels and the assignee: `acli`'s
+  `workitem edit --from-json` reads **no** `additionalAttributes` (it answers `json: unknown field
+  "additionalAttributes"`, which the first version of this edit, written to the creation's
+  shape, met on a real site on every call), so an edit never goes through it. Keys are a field's id (`customfield_10042`) or a system field's key,
   values are Jira's (a select `{"value": "Major"}`): there is no model of the fields' kinds, so
   every field `acli` or Jira accepts is reachable. A name is not resolved to an id: Jira's REST
   takes ids, and `acli` lists no create metadata (`project view` has `issueTypes` names only), so
@@ -523,11 +602,21 @@ refused it, and the new work item went to the project's default assignee.
   `acli`'s own words (the field's name, the values it allows, when Jira says them), `nothing was
   created`, the fields the type requires and `fields` does not set by name and id when the
   project's vault entry lets them be read, and how to fill each in `fields`; it is not tried
-  again. An edit whose fields `acli` refuses
-  writes nothing; one whose fields were set and whose flags `acli` then refused says the fields
-  were set. The card says each field and its value. Refused before anything is asked: `fields`
-  on GitHub, on an action other than `create` and `edit`, with `fixVersions` beside `milestone`,
-  or on a `create` without `type`.
+  again. An edit's call is made by the daemon with the project's tracker entry, the one `log_time`,
+  `worklogs` and `fields` use (the same client; the secret goes to the tracker's site alone and is
+  in no answer, "Logging time"): without one set, `edit` with `fields` is **refused before
+  anything is asked**, saying it needs the entry and how to set one (or to ask the user for it,
+  `vault ask`), never a Jira that did not refuse. An edit whose fields Jira refuses writes
+  nothing, says Jira's words and `nothing was written`; one whose fields were set and whose flags
+  `acli` then refused says what was set (its fields, its parent, its fix version). A call Jira
+  may have applied (a time-out, a connection that broke after the request) says the change is not
+  confirmed and to check the work item, never `nothing was written`. The card says each field and
+  its value, and that the change is written through Jira's API with the vault entry's name. Refused
+  before anything is asked: `fields` on GitHub, on an action other than `create` and `edit`, with
+  `fixVersions` beside `milestone` or `remove_milestone`, or on a `create` without `type`; the
+  other refusals of an edit (`assignees`, `reason` on Jira; `assignee` on GitHub) are not skipped
+  because the edit also sets fields, a parent or a version. `fixVersions` replaces every fix
+  version the work item has.
 - **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
   `--remove-assignee`): `"me"`, an email or an account id, **as `acli` takes them**. `me` is the
   user the agent works for, sent as `acli`'s `@me` (`"@me"` is taken too), which `acli` resolves
@@ -675,9 +764,10 @@ does (#362):
 - **A parent at `create`**: `parent`, a key of the tracker (any case, kept in upper case),
   `--parent <key>`: an epic, or the parent of a sub-task. Measured: a task created with `--parent`
   on an epic's key is under that epic. `acli jira workitem edit` has no parent, so **`edit` with
-  `parent` is refused before anything is asked**: `acli's workitem edit has no parent …: changing
-  the parent of an existing work item needs Jira's REST API, which Flottille does not call yet
-  (#382)`. A `link` of kind `parent of` is refused the same way.
+  `parent` (#1067) is a `PUT /rest/api/3/issue/<key>` with `{"fields": {"parent": {"key":
+  "<parent>"}}}`**, through the tracker's entry as `edit` with `fields` is, and judged as `edit`
+  is today (the gate); without the entry it is refused before anything is asked. A `link` of
+  kind `parent of` is refused as before.
 - **`sprints {project?, board?}`**, a read: the project's boards (`acli jira board search
   --project <P> --json`, Jira's agile page `{"values": [{"id", "name", "type"}]}`, as a real site
   printed it), the one named alone when `board` names one (its name or its id; `board` on any
@@ -862,9 +952,12 @@ What Flottille does with it:
 - **Refused, with what to do instead**, before anything is asked and nothing run: `milestone_create`
   and `milestone_edit` (`none of acli's jira commands makes, changes or releases a project's
   version, and Flottille calls no Jira REST API for it: the user does it in Jira, on the
-  project's Releases page`), and `edit` with `milestone` or `remove_milestone` (`acli's workitem
-  edit takes no fix version …: the user changes it in Jira`). This is the rule of a sprint's move
-  (#382): nothing is done through another route, and the daemon calls no REST API for a version.
+  project's Releases page`), and (`edit` with `milestone` or
+  `remove_milestone` is no longer refused: it is `PUT /rest/api/3/issue/<key>` with `{"fields":
+  {"fixVersions": [{"name": "<the version>"}]}}`, `[]` for `remove_milestone` (#1067), with the
+  tracker's entry as `edit` with `fields` is; the version is found among those of the work item's
+  project first, and one that does not exist is refused, `nothing was written`). A sprint's move
+  is still refused (#382).
 - **The writes are judged as every ticket write**: a `create` in a version is held in Ask and
   allowed in Full, and its card says the version.
 - **Not measured**: no `acli` is installed where this was written, and no Jira was tried. Assumed:
@@ -976,16 +1069,18 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   while to allow it). **`body`**, optional, is the worklog's comment, Markdown converted to ADF as
   every Jira text is. **`ticket` is required**: the workspace's ticket is never taken for it, so that the card names the work item the user allows.
 - **The token is a vault entry the project names** (`docs/vault.md`): `worklog_token = "<entry>"`
-  in `[tracker]` (`kind = "jira"` only), the entry's secret being a Jira API token and its
+  in `[tracker]` (`kind = "jira"` only; the key keeps its name, but the entry is the project's
+  **Jira API access**: it serves worklogs, replies, mentions, an `edit` with `fields`, and the
+  site search of `people`, and the window and the refusals say "Jira API"), the entry's secret being a Jira API token and its
   username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
   the secret with `vault::secret` for this one request. No entry named, an entry the project does
   not see, or one with no username is refused before anyone is asked, with a sentence that says
-  how to set one up: the window's way first (the project's Settings, Tracker, `Log time with`), the
+  how to set one up: the window's way first (the project's Settings, Tracker, `Jira API access with`), the
   file's second. **The window offers that way**: the refusal's `agent.tool_served` carries
   `setup: "time_logging"` (`docs/events.md`), and the conversation shows a line and a `Set up
-  time logging` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
+  Jira API access` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
   answers is masked of it, and so is every error.
-- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Log time with it: the secret of the vault entry `<name>` will be sent to <site>`). Such a change, an agent's `set_settings` that sends the token to another site or names another entry for it, is held for the user in every mode, **Full included**, and never reaches the judge: answered at once, the result coming later as a delivery, so that an agent cannot send the user's token to a host it chose. A change that keeps the site and the entry passes in Full as before; the window, the command line and an edit of the project's file are the user's own.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), Jira API access with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Jira API access with it: the secret of the vault entry `<name>` will be sent to <site>`). Such a change, an agent's `set_settings` that sends the token to another site or names another entry for it, is held for the user in every mode, **Full included**, and never reaches the judge: answered at once, the result coming later as a delivery, so that an agent cannot send the user's token to a host it chose. A change that keeps the site and the entry passes in Full as before; the window, the command line and an edit of the project's file are the user's own.
 - **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
   duration or a start that is wrong, before anyone is asked.
 - **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says
@@ -996,12 +1091,64 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   the agents that worked at the same time each counted, never the time between the first and the
   last message. The agent proposes it to the user, who confirms or changes it; it never logs it
   alone. A turn whose agent reported no usage is not on record and not counted.
+- **A worklog already logged is corrected, not added to**: `worklog_edit` and `worklog_delete`
+  ("Correcting a worklog" below).
 - The tests send the call to a fake HTTP server of this machine (`FLOTTILLE_TEST_JIRA_BASE`, read
   by a debug build only), with the daemon's in-memory keyring.
 
 **The maintainer checks it on their Jira site**: one worklog logged on a real work item, with an
 API token of their own: Jira Cloud's answer to a worklog written as above is not something this was
 written against.
+
+### Correcting a worklog
+
+`log_time` only adds time. A wrong duration, a wrong day, a comment to change or a worklog logged
+on the wrong work item is corrected with the id `worklogs` gives, through Jira's REST API as
+`log_time` posts, with the same vault entry (`worklog_token`), the daemon using the secret itself
+toward the tracker's site and no other:
+
+```
+tickets {action: "worklog_edit", ticket: "ABC-123", worklog: "10234", duration?: "1h", started?: "2026-11-06T09:00:00+01:00", comment?: "…"}
+tickets {action: "worklog_delete", ticket: "ABC-123", worklog: "10234"}
+```
+
+- **`worklog_edit`** is `PUT /rest/api/3/issue/<KEY>/worklog/<id>` with what changes alone: at least
+  one of `duration`, `started` and `comment` is required, and their forms are `log_time`'s
+  (`comment` being the worklog's new text, Markdown converted to ADF, its mentions checked as every
+  Jira text's are). What is left out stays as it is. **`worklog_delete`** is `DELETE
+  /rest/api/3/issue/<KEY>/worklog/<id>`, with Jira's default `adjustEstimate=auto`. `ticket` and
+  `worklog` are required, and `worklog` is the number `worklogs` gives.
+- **Only the token's own account's worklogs**: the worklog is read first (`GET
+  /rest/api/3/issue/<KEY>/worklog/<id>`) and its author compared with the account `worklogs`
+  finds (`GET /rest/api/3/myself`, kept per project, entry and site, "Reading worklogs"). One of
+  another author is refused before anything is asked (`refused: worklog 10234 is Jane Doe's, not
+  your account's`), and so is one that is not on that work item or does not exist (`refused: ABC-1
+  has no worklog 10234`). The worklog is read again, and the author checked again, when the call is
+  done. Jira answers a worklog of another work item as well as one of the right work item, so the
+  worklog's `issueId` is compared with the work item's id (`GET /rest/api/3/issue/<KEY>?fields=id`),
+  never taken from a `404`.
+- **Held for the user like `log_time`**: each edit and each delete is a write to Jira, judged like
+  `comment`, answered at once, the result coming later as a delivery. The card says the work item,
+  the worklog as it is and what it becomes, or that it is deleted: `It is now: 1h, started
+  2026-11-06T08:00:00Z, "Pairing"`, `It becomes: 2h, started 2026-11-06T08:00:00Z, "Pairing"`, `It
+  deletes the worklog 10234 of ABC-1: …`. The card is compared again when the user allows the call,
+  as a reply's is: a worklog that was changed, deleted or given to another author in Jira
+  between the card and the Allow is not written, and the user is told what it is now.
+- **`worklog_delete` is the user's alone, in every mode, Full included**: a worklog deleted cannot
+  be got back, so it is held as a base call, never passed by the judge, and Full does not let it
+  through. `worklog_edit` stays as `log_time` is: judged in Auto, allowed in Full. The Auto judge
+  reads the same lines as the card (`It is now`, `It becomes`), not the rules' reasons alone.
+- **A comment cannot be cleared**: an empty `comment` is dropped as if it were left out, so
+  `worklog_edit` cannot turn a worklog's comment into none; to remove the text, the user edits the
+  worklog in Jira.
+- **GitHub is refused** (`GitHub has no worklogs`); no entry named, or one with no username, is
+  refused with `log_time`'s sentence. The secret is in no argument, result, event, log nor error:
+  what Jira answers is masked of it.
+- The tests send the calls to the fake Jira REST server of the `log_time` tests.
+
+**The maintainer checks it on their Jira site**: one worklog of their own corrected and one
+deleted on a real work item. The answers of the worklog endpoint to a `PUT` and a `DELETE` were not
+read from a real site.
 
 ### Reading worklogs
 
@@ -1032,8 +1179,9 @@ sentence as `log_time`, how to set one up. GitHub is refused: `GitHub has no wor
   endpoint is asked for the range too (`startedAfter` and `startedBefore`, in milliseconds, with a
   day of margin each side), so that the worklogs of other days are not all read; the local cut
   stays.
-- **The answer**: per day, each worklog as `KEY title — 1h30 (started 09:12) "comment"` (the comment
-  as one line, cut at 300 characters), the day's total, then the range's total.
+- **The answer**: per day, each worklog as `KEY title — 1h30 (started 09:12, worklog 10234)
+  "comment"` (the comment as one line, cut at 300 characters; the worklog's id is what
+  `worklog_edit` and `worklog_delete` take), the day's total, then the range's total.
 - **`search` and anyone's worklogs**: a `jql` that uses `worklogDate` without `worklogAuthor` (`=`
   or `in`; `!=` and `not in` do not keep to anyone) matches
   the work items on which *anyone* logged time that day, not the user's: its result says so.

@@ -4,7 +4,7 @@
 //! git knows at once, each pending part shows a skeleton that its content replaces in place, and
 //! a part that failed says why where its skeleton was. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;

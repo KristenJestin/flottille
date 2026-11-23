@@ -125,6 +125,10 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             let ProjectName { name } = serde_json::from_value(params)?;
             Ok(serde_json::to_value(load(projects, &name)?)?)
         }
+        "project.folders" => {
+            let asked: FoldersAsked = serde_json::from_value(params)?;
+            folders(projects, asked.path.as_deref())
+        }
         "project.detect" => {
             let plan = plan(projects, serde_json::from_value(params)?)?;
             Ok(json!({
@@ -185,7 +189,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
 
 /// How long a removal waits for the processes of the project's agents to be gone once they
 /// were stopped: each has its own grace, and they stop together.
-const RELEASE_WAIT: Duration = Duration::from_secs(15);
+fn release_wait() -> Duration {
+    crate::test_time::tuned("FLOTTILLE_TEST_RELEASE_WAIT_MS", Duration::from_secs(15))
+}
 
 /// The refusal of anything that would start in a project being removed (an agent, a workspace,
 /// a command run) or edit its file.
@@ -366,7 +372,7 @@ async fn remove_marked(
         .into_iter()
         .filter(|agent| agent.project == name)
         .collect();
-    let deadline = Instant::now() + RELEASE_WAIT;
+    let deadline = Instant::now() + release_wait();
     loop {
         let stopping: Vec<&str> = all
             .iter()
@@ -468,6 +474,9 @@ async fn remove_marked(
         return Err(done.partway(name, "its file is gone already"));
     }
     projects.known.remove(name);
+    drop(projects);
+    let sessions: Vec<String> = all.iter().map(|agent| agent.id.clone()).collect();
+    crate::drafts::forget_project(daemon, name, &sessions);
     emit(daemon, "project.removed", json!({"name": name}))?;
     Ok(json!({
         "removed": name,
@@ -573,9 +582,16 @@ async fn settings_of(project: &Project) -> Value {
             "disagrees": disagrees,
         }));
     }
+    // Why the user's SSH agent is lent to no push, which the settings say with what to do: the
+    // machine's, the same for every project.
+    let pushes_unlent = tokio::task::spawn_blocking(crate::pushed::unlent)
+        .await
+        .unwrap_or_else(|_| Some("the judgement of what ssh reads failed".into()));
     json!({
         "name": project.name,
         "folder": project.folder,
+        "pushes_unlifted": crate::pushed::unlifted(),
+        "pushes_unlent": pushes_unlent,
         "repositories": repositories,
         "tracker": project.tracker,
         "message_checks": project.message_checks,
@@ -635,9 +651,11 @@ async fn base_refusal(
                 format!("{path}: {branch} is not a branch of {path}, which has no remote {remote}")
             });
     }
-    match git::output(
+    match git::output_remote(
         &folder,
-        &["ls-remote", "--heads", "--end-of-options", remote],
+        remote,
+        "ls-remote",
+        &["--heads", "--end-of-options", remote],
         Class::Read,
     )
     .await
@@ -1585,6 +1603,322 @@ fn key_renamed(table: &mut toml_edit::Table, from: &str, to: &str) -> bool {
     true
 }
 
+/// The file of the project `name`, as it is written.
+pub fn text(daemon: &Daemon, name: &str) -> std::result::Result<String, Failure> {
+    let file = daemon.projects.lock().unwrap().registry.file(name);
+    std::fs::read_to_string(&file)
+        .map_err(|error| Failure::new("unavailable", format!("projects/{name}.toml: {error}")))
+}
+
+/// The project `name` as its file `text` says it.
+pub fn parsed(daemon: &Daemon, name: &str, text: &str) -> std::result::Result<Project, Failure> {
+    let projects = daemon.projects.lock().unwrap();
+    projects
+        .registry
+        .parse(name, text)
+        .map_err(|error| Failure::new("invalid-config", error.to_string()))
+}
+
+/// The settings of the project `name` that travel with a launch to another machine, as its file
+/// writes them (`docs/remote.md`, "What travels").
+pub fn travelling(daemon: &Daemon, name: &str) -> std::result::Result<Value, Failure> {
+    let text = text(daemon, name)?;
+    flottille_core::project::travelling(&text)
+        .map_err(|why| Failure::new("invalid-config", format!("projects/{name}.toml: {why}")))
+}
+
+/// Makes the project `name` for a launch of the machine `from` (its key, which its member's name
+/// is not: a name another member can take), in `folder`, with the repositories at `paths` (none
+/// of them there yet: they come from that machine), marked as made by Flottille, with none of
+/// that machine's settings yet: they are laid once the launch is allowed (`take_travelled`).
+pub fn make_travelled(
+    daemon: &Daemon,
+    name: &str,
+    folder: &Path,
+    paths: &[String],
+    from: &str,
+) -> std::result::Result<Project, Failure> {
+    let mut projects = daemon.projects.lock().unwrap();
+    let projects = &mut *projects;
+    let mut project = Project::new(name, folder.to_owned(), paths.to_vec(), &projects.data);
+    project.from_machine = Some(from.to_owned());
+    projects.registry.create(&project)?;
+    let project = load(projects, name)?;
+    announce_edits(daemon, projects)?;
+    eprintln!(
+        "flottille daemon: project {name} made in {} for a launch of {from}",
+        folder.display()
+    );
+    Ok(project)
+}
+
+/// The project `name` as its file `text` would be with `settings`, which came with a launch of
+/// the machine `from`, laid on it (`lay_travelled`), nothing written: what the gate classes
+/// before the launch is allowed. Refused when the result is not a configuration this machine can
+/// use.
+pub fn as_travelled(
+    daemon: &Daemon,
+    name: &str,
+    text: &str,
+    settings: &Value,
+    from: &str,
+) -> std::result::Result<Project, Failure> {
+    let came = came(name, settings, from)?;
+    let mut document: toml_edit::DocumentMut =
+        text.parse().map_err(|error: toml_edit::TomlError| {
+            Failure::new(
+                "invalid-config",
+                format!("projects/{name}.toml: {}", error.message()),
+            )
+        })?;
+    lay_travelled(name, &mut document, &came)?;
+    let projects = daemon.projects.lock().unwrap();
+    projects
+        .registry
+        .parse(name, &document.to_string())
+        .map_err(|error| Failure::refused(format!("the settings of {name} from {from}: {error}")))
+}
+
+/// The TOML of `settings` that came from `from` for the project `name`, refused when it holds a
+/// key that does not travel.
+fn came(
+    name: &str,
+    settings: &Value,
+    from: &str,
+) -> std::result::Result<toml_edit::DocumentMut, Failure> {
+    let refused =
+        |why: String| Failure::refused(format!("the settings of {name} from {from}: {why}"));
+    let text = flottille_core::project::travelled_toml(settings).map_err(refused)?;
+    text.parse()
+        .map_err(|error: toml_edit::TomlError| refused(error.message().to_owned()))
+}
+
+/// Lays `settings`, which came with a launch of the machine `from` (its key), in the file of the
+/// project `name`, which Flottille made for a launch of that very machine: each key that travels
+/// is replaced by the one that came (removed when none came), each repository's own keys too, a
+/// repository that came and the file lacks is added; every other key stays the machine's own.
+/// Laid only on the file `classed` was, which what the user or the judge allowed was said of, as
+/// a held write is done only while its words still hold; or when laying changes nothing. Refused,
+/// nothing written, for a project the user registered or one made for another machine, when an
+/// added repository leads where it may not (`refused_repository`), and when the result is not a
+/// configuration this machine can use.
+pub fn take_travelled(
+    daemon: &Daemon,
+    name: &str,
+    settings: &Value,
+    from: &str,
+    classed: Option<&str>,
+) -> std::result::Result<Project, Failure> {
+    let came = came(name, settings, from)?;
+    // Read before the file is: `rewrite` holds the projects.
+    let others = all(daemon);
+    rewrite(daemon, name, |project, document| {
+        match &project.from_machine {
+            None => {
+                return Err(Failure::refused(format!(
+                    "{name} was registered by the user here: it keeps its own settings"
+                )));
+            }
+            Some(owner) if owner != from => {
+                return Err(Failure::refused(format!(
+                    "{name} was made here for another machine's launches: it keeps that \
+                     machine's settings"
+                )));
+            }
+            Some(_) => {}
+        }
+        let was = document.to_string();
+        lay_travelled(name, document, &came)?;
+        if document.to_string() != was && classed != Some(was.as_str()) {
+            return Err(Failure::refused(format!(
+                "{name} changed here since the launch was allowed: what it allowed is no longer \
+                 what its settings would do; launch it again"
+            )));
+        }
+        let added = document
+            .get("repositories")
+            .and_then(toml_edit::Item::as_array_of_tables)
+            .into_iter()
+            .flat_map(toml_edit::ArrayOfTables::iter)
+            .filter_map(|table| table.get("path").and_then(toml_edit::Item::as_str))
+            .filter(|path| !project.repositories.iter().any(|r| r.path == *path));
+        for path in added {
+            if let Some(why) = refused_repository(&others, project, path) {
+                return Err(Failure::refused(why));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Why a repository a launch adds at `path` to `project` is refused, as one the user adds is
+/// (`add_repository`): a path out of its folder, a link leading out of it, or a repository of
+/// another project of `others`. Nothing there yet is not refused, unless a folder on its way
+/// leads out (`stays_inside`): its code comes from the launch's machine.
+pub fn refused_repository(others: &[Project], project: &Project, path: &str) -> Option<String> {
+    if repository_path(path).as_deref() != Some(path) {
+        return Some(format!("{path} is not a folder of {}", project.name));
+    }
+    let folder = project.folder.join(path);
+    if std::fs::symlink_metadata(&folder).is_err() {
+        return (!stays_inside(&project.folder, path))
+            .then(|| format!("{path} leads outside the project folder"));
+    }
+    let Ok(inside) = leads_inside(&project.folder, path) else {
+        return Some(format!("{path} leads outside the project folder"));
+    };
+    let elsewhere = others
+        .iter()
+        .flat_map(|other| {
+            other
+                .repositories
+                .iter()
+                .filter(move |r| other.name != project.name || r.path != path)
+                .map(move |r| (other, checkout_folder(other, &r.path)))
+        })
+        .find(|(_, folder)| std::fs::canonicalize(folder).ok().as_ref() == Some(&inside));
+    elsewhere.map(|(other, _)| {
+        format!(
+            "{path} is a repository of the project {} already",
+            other.name
+        )
+    })
+}
+
+/// Whether what is made at `path` of the project folder `folder` lands inside it: the deepest
+/// part of the path that exists, links followed, is inside the project's folder. A path that is
+/// not there yet can lead out through a link in a middle folder.
+pub fn stays_inside(folder: &Path, path: &str) -> bool {
+    let Ok(root) = std::fs::canonicalize(folder) else {
+        // No project folder: nothing in it leads anywhere yet; a link that leads nowhere does not
+        // lead inside.
+        return std::fs::symlink_metadata(folder).is_err();
+    };
+    let mut deepest = folder.join(path);
+    while std::fs::symlink_metadata(&deepest).is_err() {
+        if !deepest.pop() {
+            return false;
+        }
+    }
+    std::fs::canonicalize(&deepest).is_ok_and(|at| at.starts_with(&root))
+}
+
+/// The folder of the repository at `path` of `project`, canonical, when it is inside the
+/// project's folder: an error when it leads out of it, through a link or otherwise.
+pub fn leads_inside(folder: &Path, path: &str) -> std::result::Result<PathBuf, ()> {
+    let inside = std::fs::canonicalize(folder.join(path)).map_err(|_| ())?;
+    let root = std::fs::canonicalize(folder).map_err(|_| ())?;
+    match inside.starts_with(&root) {
+        true => Ok(inside),
+        false => Err(()),
+    }
+}
+
+fn checkout_folder(project: &Project, path: &str) -> PathBuf {
+    match path {
+        "." => project.folder.clone(),
+        path => project.folder.join(path),
+    }
+}
+
+/// Each key that travels of `document` replaced by `came`'s, as `take_travelled` says.
+fn lay_travelled(
+    name: &str,
+    document: &mut toml_edit::DocumentMut,
+    came: &toml_edit::DocumentMut,
+) -> std::result::Result<(), Failure> {
+    use flottille_core::project::{TRAVELLING, TRAVELLING_REPOSITORY};
+    for key in TRAVELLING {
+        document.remove(key);
+        if let Some(item) = came.get(key) {
+            document.insert(key, item.clone());
+        }
+    }
+    let invalid = || {
+        Failure::new(
+            "invalid-config",
+            format!("projects/{name}.toml: repositories: must be a list of tables"),
+        )
+    };
+    let mut here = document
+        .remove("repositories")
+        .and_then(|item| item.into_array_of_tables().ok())
+        .ok_or_else(invalid)?;
+    let path_of = |table: &toml_edit::Table| {
+        table
+            .get("path")
+            .and_then(toml_edit::Item::as_str)
+            .map(str::to_owned)
+    };
+    for repository in came
+        .get("repositories")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .into_iter()
+        .flat_map(toml_edit::ArrayOfTables::iter)
+    {
+        let Some(path) = path_of(repository) else {
+            continue;
+        };
+        let at = here
+            .iter()
+            .position(|table| path_of(table).as_ref() == Some(&path));
+        let table = match at {
+            Some(at) => here.get_mut(at).expect("found"),
+            None => {
+                let mut added = toml_edit::Table::new();
+                added.insert("path", toml_edit::value(path.as_str()));
+                here.push(added);
+                here.get_mut(here.len() - 1).expect("added")
+            }
+        };
+        for key in TRAVELLING_REPOSITORY {
+            table.remove(key);
+            if let Some(item) = repository.get(key) {
+                table.insert(key, item.clone());
+            }
+        }
+    }
+    document.insert("repositories", toml_edit::Item::ArrayOfTables(here));
+    Ok(())
+}
+
+/// Removes the project `name` Flottille made in `folder` for a launch of `from` that did not
+/// start: its file and its folder, which hold nothing but what that launch sent. Only while it is
+/// still that machine's, and nothing else of this machine uses it: no agent, no workspace.
+pub fn unmake_travelled(
+    daemon: &Daemon,
+    name: &str,
+    folder: &Path,
+    from: &str,
+) -> std::result::Result<(), Failure> {
+    let mut projects = daemon.projects.lock().unwrap();
+    let projects = &mut *projects;
+    let project = load(projects, name)?;
+    if project.from_machine.as_deref() != Some(from) || project.folder != folder {
+        return Err(Failure::refused(format!(
+            "{name} is no longer the project made for {from}'s launch"
+        )));
+    }
+    if !live_agents(daemon, name)?.is_empty() || !workspaces_of(daemon, name)?.is_empty() {
+        return Err(Failure::refused(format!("{name} is in use")));
+    }
+    projects.registry.remove(name)?;
+    let removed = std::fs::remove_dir_all(folder);
+    announce_edits(daemon, projects)?;
+    if let Err(error) = removed
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(Failure::new(
+            "unavailable",
+            format!("{}: {error}", folder.display()),
+        ));
+    }
+    eprintln!(
+        "flottille daemon: project {name}, made for a launch of {from} that did not start, removed"
+    );
+    Ok(())
+}
+
 /// Every project whose file can be used, as the files say now.
 pub fn all(daemon: &Daemon) -> Vec<Project> {
     let projects = daemon.projects.lock().unwrap();
@@ -1672,13 +2006,74 @@ struct Plan {
 
 /// A folder typed as `~` or `~/…` is the home of the user the daemon runs for. `~other` is not
 /// expanded: it stays relative and is refused like any relative path.
-fn home_expanded(typed: &str) -> Option<PathBuf> {
+pub(crate) fn home_expanded(typed: &str) -> Option<PathBuf> {
     let rest = typed.strip_prefix('~')?;
     if !(rest.is_empty() || rest.starts_with('/')) {
         return None;
     }
     let home = PathBuf::from(std::env::var_os("HOME")?);
     Some(home.join(rest.trim_start_matches('/')))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FoldersAsked {
+    path: Option<String>,
+}
+
+/// The folders inside `path` (the home when none), for a client that picks where a project is
+/// added rather than typing it (`docs/remote.md`, "Paths are picked, not typed"): each with how
+/// many repositories it holds as `project.detect` finds them, and the project already registered
+/// there.
+fn folders(projects: &Projects, path: Option<&str>) -> std::result::Result<Value, Failure> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let folder = match path {
+        None => home
+            .clone()
+            .ok_or_else(|| Failure::refused("the daemon has no HOME to start from: give a path"))?,
+        Some(typed) => home_expanded(typed).unwrap_or_else(|| PathBuf::from(typed)),
+    };
+    if !folder.is_absolute() {
+        return Err(Failure::refused(format!(
+            "the folder must be an absolute path, not {}",
+            folder.display()
+        )));
+    }
+    let names = detect::folders(&folder).map_err(|error| {
+        Failure::refused(format!("{} cannot be read: {error}", folder.display()))
+    })?;
+    let project_of = |path: &Path| {
+        projects
+            .known
+            .values()
+            .find(|project| project.folder == path)
+            .map(|project| project.name.clone())
+    };
+    let shown = |path: &Path| match home.as_deref().map(|home| path.strip_prefix(home)) {
+        Some(Ok(rest)) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(Ok(rest)) => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    };
+    let listed: Vec<Value> = names
+        .iter()
+        .map(|name| {
+            let path = folder.join(name);
+            let found = detect::repositories(&path).unwrap_or_default();
+            json!({
+                "name": name,
+                "path": path,
+                "repository": found.first().is_some_and(|first| first == "."),
+                "repositories": found.len(),
+                "project": project_of(&path),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "path": folder,
+        "shown": shown(&folder),
+        "parent": folder.parent(),
+        "folders": listed,
+    }))
 }
 
 fn plan(projects: &Projects, asked: ProjectFolder) -> std::result::Result<Plan, Failure> {

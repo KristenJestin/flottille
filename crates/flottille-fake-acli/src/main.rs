@@ -154,8 +154,10 @@
 //! ["Minor", "Major"]}}}}`. A `create` of such a type that does not carry each of them in the
 //! JSON's `additionalAttributes` (a creation by flags carries none) ends with 1 saying every
 //! missing one by name (`✗ Error: Severity is required (allowed values: Minor, Major)`). `workitem
-//! edit --from-json F --yes` reads `{"issues": [K, …], "additionalAttributes": {…}}` from F
-//! (recorded under `files` as `json`) and ends with 0 saying `✓ Work item K updated` for each.
+//! edit --from-json F --yes` reads `{"issues": [K, …], …}` from F (recorded under `files` as
+//! `json`) and ends with 0 saying `✓ Work item K updated` for each; a JSON with
+//! `additionalAttributes`, which only a creation reads, ends with 1 (`✗ Error: json: unknown field
+//! "additionalAttributes"`), as the real command does.
 //!
 //! A transition that ends with 0 moves the work item: a later `view` shows the status as the
 //! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
@@ -163,11 +165,18 @@
 //! `no_move` ends with 0 without moving, as a bulk command ignoring a refused transition may;
 //! `die` ends the process by a signal, before or after the move; `unreadable_after_move` makes
 //! a `view` end with 1 once the work item has moved.
+//!
+//! The sign-in (#1185): `jira auth login` and `jira auth logout` play the scripted sign-in every
+//! fake shares (`crates/flottille-fake-gh/src/sign_in.rs`), and `jira auth status` says what it
+//! left.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
+
+#[path = "../../flottille-fake-gh/src/sign_in.rs"]
+mod sign_in;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -386,9 +395,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             println!("acli version 1.3.2-stable");
             0
         }
+        // Its documented web sign-in (`acli jira auth login --web`), the browser on the same
+        // machine; the words it prints are assumed, `acli`'s source being closed.
+        ["jira", "auth", "login", ..] => sign_in::login(dir, script, args, |address, _| {
+            println!("Open this URL in your browser to authenticate: {address}");
+        }),
+        ["jira", "auth", "logout", ..] => sign_in::logout(dir, args),
         ["jira", "auth", "status", ..] => {
             wait(script);
-            if script["signed_in"] == false {
+            if !sign_in::signed_in(dir, script) {
                 eprintln!("✗ Not logged in. Run: acli jira auth login");
                 return 1;
             }
@@ -787,6 +802,11 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let Some(item) = value(rest, "--from-json").and_then(file_text) else {
                 return not_run(&words);
             };
+            // As measured on the real command: its edit JSON is not a creation's.
+            if item.get("additionalAttributes").is_some() {
+                eprintln!("✗ Error: json: unknown field \"additionalAttributes\"");
+                return 1;
+            }
             for key in item["issues"].as_array().into_iter().flatten() {
                 let key = key.as_str().unwrap_or_default();
                 if script["items"].get(key).is_none() && script["created"] != key {

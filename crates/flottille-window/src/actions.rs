@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
+use crate::arrange::{self, Arrangement, Change};
 use crate::commands::CommandInfo;
-use crate::link::{Conn, Connect, Update};
+use crate::kept::{Draft, DraftKey, Written};
+use crate::link::{Conn, Connect, Sign, Update};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow, Watch};
 use crate::session_link::{PullRequest, TICKET_FRESH, TicketFacts, pull_requests, ticket_facts};
@@ -164,11 +166,27 @@ pub enum Command {
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
+    /// What the user says of themselves, which every agent reads (`about.show`).
+    AboutRead,
+    /// Saves what the user says of themselves (name, how to refer to them, notes), or with no
+    /// text forgets it (`about.set`, `about.reset`).
+    AboutWrite {
+        text: Option<(String, String, String)>,
+    },
     /// The developer mode (`developer.show`).
     DeveloperRead,
     /// Switches the developer mode (`developer.set`).
     DeveloperSet {
         log: bool,
+    },
+    /// The findings agents filed about Flottille itself (`developer.reports`).
+    FindingsRead,
+    /// Writes them to a file (`developer.reports_export`).
+    FindingsExport,
+    /// A request of the update's (`update.show`, `.set`, `.check`, `.download`, `.restart`).
+    Update {
+        method: &'static str,
+        params: Value,
     },
     /// A request of a part of Flottille the window draws in its places (`extensions`): what to
     /// do with the answer is said by `then`.
@@ -176,6 +194,31 @@ pub enum Command {
         method: String,
         params: Value,
         then: crate::extensions::Then,
+    },
+    /// A request only the user's device may ask, signed with its key for the machine `machine`
+    /// (this one's own name when `None`): what to do with the answer is said by `then`.
+    Signed {
+        machine: Option<String>,
+        method: String,
+        params: Value,
+        then: crate::extensions::Then,
+    },
+    /// The sign-in of the connection `name` of the machine `machine`: begun there, its redirect
+    /// carried by a tunnel to this machine's `127.0.0.1` for as long as it waits
+    /// (`docs/remote.md`, "Connections"). Answered twice: the address to open, then how it
+    /// ended.
+    SignInOn {
+        name: String,
+        machine: String,
+    },
+    /// A tunnel to a run of another machine, signed by this device and held by a connection of
+    /// its own for as long as the tunnel lives (`docs/remote.md`, "Tunnels"). Answered once it is
+    /// open or refused, and again when it ends.
+    TunnelOpen(crate::tunnels::Ask),
+    /// Closes a tunnel this window holds (`tunnel.close`); the connection that holds it says it
+    /// ended.
+    TunnelClose {
+        tunnel: String,
     },
     /// The limit above which a tool result is cut (`tool_results.show`).
     ToolResultsRead,
@@ -206,6 +249,31 @@ pub enum Command {
     AppearanceSet {
         appearance: gpui_design_system::Appearance,
         seq: u64,
+    },
+    /// What the daemon keeps of a composer's draft (`draft.get`).
+    DraftRead {
+        key: DraftKey,
+    },
+    /// Keeps a composer's draft (`draft.set`; an empty one forgets it): the pictures only when
+    /// they are not the ones the daemon holds. `after_read`: the window is closing before the
+    /// daemon answered the read of the draft, the keeper reads it first and writes only if it
+    /// could.
+    DraftWrite {
+        key: DraftKey,
+        text: String,
+        pictures: Option<Vec<Picture>>,
+        after_read: bool,
+    },
+    /// Keeps one value of the window's own state (`window.set`).
+    WindowSet {
+        key: String,
+        value: Value,
+    },
+    /// Keeps a change of the user's arrangement of the projects: the daemon's arrangement is
+    /// read, the change applied to it and the whole written (`window.get`, `window.set`), so
+    /// that what another window arranged meanwhile stays.
+    ArrangementChange {
+        change: Change,
     },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
@@ -301,6 +369,10 @@ pub enum Command {
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
+    /// The led sessions the end of `session` would end (`agent.ending`), for its confirmation.
+    ReadEnding {
+        session: String,
+    },
     /// What removing the project would do (`project.removal`): read `serial` of its dialog.
     ReadRemoval {
         project: String,
@@ -314,6 +386,13 @@ pub enum Command {
         discard: Option<Vec<flottille_protocol::ShownWorkspace>>,
     },
     /// What registering a folder would register.
+    /// The folders of the machine shown a project may be added from (`project.folders`).
+    ProjectFolders {
+        /// The machine shown when it was asked: an answer for another one is dropped.
+        machine: Option<String>,
+        /// The folder whose folders are listed; the home when none.
+        path: Option<String>,
+    },
     DetectProject {
         folder: String,
         name: Option<String>,
@@ -358,10 +437,27 @@ pub enum Command {
         project: String,
         write: CommandWrite,
     },
+    /// The programs and whether each is signed in (`signin.list`, #1185).
+    SignIns,
+    /// A program's own sign-in, started by its daemon (`signin.start`).
+    SignInStart(String),
+    /// The code the user pasted for that program's sign-in (`signin.code`), sent once.
+    SignInCode(String, PastedCode),
+    /// A program's sign-in stopped (`signin.cancel`).
+    SignInCancel(String),
+    /// A program's own sign-out, confirmed (`signin.sign_out`).
+    SignOut(String),
     /// The vault's entries, their metadata (`vault.list`).
     Vault,
     /// An entry set or removed (`vault.set`, `vault.remove`).
     VaultWrite(VaultWrite),
+    /// The machines an entry may be shared with: the user's others that are online.
+    ShareMachines,
+    /// The entry `name` shared with the machine `machine` (`vault.share`), signed by this device.
+    VaultShare {
+        name: String,
+        machine: String,
+    },
     /// The card of the request `ask` for a vault entry dismissed.
     VaultDismiss {
         ask: u64,
@@ -498,6 +594,13 @@ pub enum Command {
         place: Option<String>,
         path: Option<String>,
     },
+    /// Where this machine makes the projects of other machines' launches
+    /// (`travelled_folder.show`).
+    TravelledFolderRead,
+    /// Keeps it (`travelled_folder.set`): the user's folder, or none for the data folder.
+    TravelledFolderSet {
+        folder: Option<String>,
+    },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
@@ -602,6 +705,9 @@ pub enum Command {
         writer: String,
         leave_session: String,
     },
+    /// Marks notifications of the centre read (`notifications.read`): the window follows the
+    /// daemon's `notifications.changed`, not this command's answer.
+    ReadNotifications(Reading),
     /// Resumes a paused following of the session's agents, as a message of the user's does.
     ResumeFollowing {
         session: String,
@@ -693,6 +799,22 @@ impl std::fmt::Debug for VaultWrite {
     }
 }
 
+/// A code the user pasted for a program's sign-in: a debug line never says it.
+#[derive(Clone, PartialEq)]
+pub struct PastedCode(String);
+
+impl From<String> for PastedCode {
+    fn from(code: String) -> Self {
+        PastedCode(code)
+    }
+}
+
+impl std::fmt::Debug for PastedCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PastedCode(..)")
+    }
+}
+
 /// The setting of Sessions a choice wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionsSetting {
@@ -722,6 +844,25 @@ pub enum CommandWrite {
     Remove {
         name: String,
     },
+}
+
+/// Which notifications of the centre are marked read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reading {
+    Ids(Vec<u64>),
+    /// Those of a session, by its root.
+    Session(String),
+    All,
+}
+
+impl Reading {
+    fn params(&self) -> Value {
+        match self {
+            Reading::Ids(ids) => json!({"ids": ids}),
+            Reading::Session(session) => json!({"session": session}),
+            Reading::All => json!({"all": true}),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -894,6 +1035,11 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
     },
+    /// The led sessions ending `session` would end, or why they cannot be read.
+    EndingRead {
+        session: String,
+        read: Result<Value, String>,
+    },
     /// What removing the project would do, or why it cannot be read.
     RemovalRead {
         project: String,
@@ -904,6 +1050,12 @@ pub enum Outcome {
     ProjectRemoved {
         project: String,
         result: Result<Value, String>,
+    },
+    /// The folders of `machine` a project may be added from, as `project.folders` says them, or
+    /// why they cannot be read.
+    ProjectFolders {
+        machine: Option<String>,
+        read: Result<Value, String>,
     },
     /// What a folder would register (`project.detect`), or why it cannot be.
     ProjectDetected {
@@ -954,12 +1106,35 @@ pub enum Outcome {
         name: String,
         read: Result<CommandInfo, String>,
     },
+    /// The programs' sign-in states, as `signin.list` answers them, or why they cannot be read.
+    SignIns(Result<Value, String>),
+    /// What a program's sign-in said it needs, or why it did not start.
+    SignInStarted {
+        program: String,
+        answer: Result<Value, String>,
+    },
+    /// A code, a cancel or a sign-out (`what`) was done, or refused with why.
+    SignInAnswered {
+        program: String,
+        what: &'static str,
+        refused: Option<String>,
+    },
     /// The vault's entries, or why they cannot be read.
     Vault {
         listed: Result<Vec<crate::vault::VaultEntry>, String>,
     },
     /// A change to the vault was made, or refused with why.
     VaultWritten {
+        refused: Option<String>,
+    },
+    /// The user's other machines that are online, by name, or why they cannot be read.
+    ShareMachines {
+        listed: Result<Vec<String>, String>,
+    },
+    /// The entry `name` was shared with `machine`, or refused with why.
+    VaultShared {
+        name: String,
+        machine: String,
         refused: Option<String>,
     },
     /// A change to the commands was made, or refused with why.
@@ -976,11 +1151,28 @@ pub enum Outcome {
         name: String,
         read: Result<SkillInfo, String>,
     },
+    /// What the user says of themselves as the daemon says it, after a read (`written` false) or a
+    /// save or a reset.
+    About {
+        written: bool,
+        shown: Result<crate::about::Shown, String>,
+    },
     /// The developer mode as the daemon says it, after a read (`written` false) or a switch.
     Developer {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The findings as the daemon lists them.
+    Findings(Result<Vec<crate::findings::Finding>, String>),
+    /// Where the findings were exported, or why not.
+    FindingsExported(Result<String, String>),
+    /// The daemon's answer to a [`Command::Update`]: what `update.show` says, or why not.
+    Update {
+        method: &'static str,
+        answer: Result<Value, String>,
+    },
+    /// What a connection that holds a tunnel says of it.
+    Tunnel(crate::tunnels::News),
     /// The daemon's answer to an [`Command::Ask`], or why there is none.
     Asked {
         then: crate::extensions::Then,
@@ -998,6 +1190,29 @@ pub enum Outcome {
     Sessions {
         written: Option<SessionsSetting>,
         shown: Result<(Option<u64>, bool), String>,
+    },
+    /// What the daemon keeps of a composer's draft.
+    Draft {
+        key: DraftKey,
+        found: Result<Option<Draft>, String>,
+    },
+    /// How the write of a composer's draft ended.
+    DraftWritten {
+        key: DraftKey,
+        result: Written,
+    },
+    /// How the write of a value of the window's state ended, with its key and the value.
+    WindowKept {
+        key: String,
+        value: Value,
+        result: Written,
+    },
+    /// How the keeping of a change of the arrangement ended, with the arrangement the daemon
+    /// holds then (none when it could not be read).
+    ArrangementKept {
+        change: Change,
+        arrangement: Option<Arrangement>,
+        result: Written,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
@@ -1045,6 +1260,12 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// Where this machine makes the projects of other machines' launches, after a read
+    /// (`written` false) or a choice.
+    TravelledFolder {
+        written: bool,
+        shown: Result<crate::travelled_folder::Shown, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -1238,6 +1459,11 @@ pub enum Outcome {
         session: String,
         answer: RunAnswer,
     },
+    /// Notifications were marked read, or the daemon could not: the centre's own event says
+    /// what changed; a failure lets the window ask again.
+    NotificationsRead {
+        failed: bool,
+    },
     /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
     /// why.
     SubscriptionCancelled {
@@ -1281,19 +1507,54 @@ const DETAILS_EVERY: Duration = Duration::from_secs(1);
 pub struct Actions {
     details: Sender<String>,
     appearance: Sender<Command>,
+    keeper: Sender<Keep>,
     connect: Connect,
+    /// This machine's daemon, whichever machine the window shows.
+    local: Connect,
+    /// The machine `connect` goes to, when the window may show another.
+    aim: Option<crate::machines::Aim>,
     updates: UnboundedSender<Update>,
     bounds: Bounds,
+    /// How this window signs what only the user's device may ask, when it was given its own
+    /// (`Shell::sign_with`); the process's (`link::sign_with`) otherwise.
+    sign: Option<Sign>,
 }
 
 impl Actions {
+    /// Signs with `sign` from now on, rather than with the process's signer.
+    pub fn sign_with(&mut self, sign: Sign) {
+        self.sign = Some(sign);
+    }
+
     /// Starts the details' thread; it ends when every `Actions` is dropped.
     pub fn spawn(connect: Connect, updates: UnboundedSender<Update>) -> Actions {
         Self::spawn_bounded(connect, updates, BOUNDS)
     }
 
+    /// The actions on `aim`'s connections, which go to the machine the window shows; what the
+    /// window keeps (its folds, the drafts) and its appearance are this machine's, asked on
+    /// `local`.
+    pub fn spawn_aimed(
+        aim: crate::machines::Aim,
+        local: Connect,
+        updates: UnboundedSender<Update>,
+    ) -> Actions {
+        let mut actions = Self::spawn_on(aim.connect(local.clone()), local, updates, BOUNDS);
+        actions.aim = Some(aim);
+        actions
+    }
+
     pub(crate) fn spawn_bounded(
         connect: Connect,
+        updates: UnboundedSender<Update>,
+        bounds: Bounds,
+    ) -> Actions {
+        Self::spawn_on(connect.clone(), connect, updates, bounds)
+    }
+
+    fn spawn_on(
+        connect: Connect,
+        local: Connect,
         updates: UnboundedSender<Update>,
         bounds: Bounds,
     ) -> Actions {
@@ -1306,30 +1567,106 @@ impl Actions {
         // The appearance is asked one request at a time, in the order of the clicks: on threads of
         // their own, two quick choices could reach the daemon in the other order.
         let (appearance, chosen) = channel();
-        let (to, updates_to) = (connect.clone(), updates.clone());
+        let (to, updates_to) = (local.clone(), updates.clone());
         std::thread::Builder::new()
             .name("flottille-appearance".into())
             .spawn(move || {
                 while let Ok(command) = chosen.recv() {
-                    let outcome = perform(&to, command, bounds);
+                    let outcome = perform(&to, None, command, bounds);
                     if updates_to.unbounded_send(Update::Done(outcome)).is_err() {
                         return;
                     }
                 }
             })
             .expect("a thread for the window's appearance");
+        // What the window keeps is written one request at a time, in the order it was asked: a
+        // draft written, then forgotten, must not reach the daemon the other way round.
+        let (keeper, kept) = channel();
+        let (to, updates_to) = (local.clone(), updates.clone());
+        std::thread::Builder::new()
+            .name("flottille-keeper".into())
+            .spawn(move || keep(to, kept, updates_to, bounds))
+            .expect("a thread for what the window keeps");
         Actions {
             details,
             appearance,
+            keeper,
             connect,
+            local,
+            aim: None,
             updates,
             bounds,
+            sign: None,
+        }
+    }
+
+    /// Waits until everything asked of the keeper so far reached the daemon, for `wait` at most:
+    /// the window is closing, and what it holds must be written before the process ends.
+    pub fn flush(&self, wait: Duration) {
+        let (done, reached) = channel();
+        if self.keeper.send(Keep::Barrier(done)).is_ok() {
+            let _ = reached.recv_timeout(wait);
         }
     }
 
     pub fn send(&self, command: Command) {
+        if matches!(
+            command,
+            Command::DraftRead { .. }
+                | Command::DraftWrite { .. }
+                | Command::WindowSet { .. }
+                | Command::ArrangementChange { .. }
+        ) {
+            let _ = self.keeper.send(Keep::Do(command));
+            return;
+        }
         if let Command::Details(project) = command {
             let _ = self.details.send(project);
+            return;
+        }
+        let sign = self.sign.clone().or_else(crate::link::signer);
+        // Its tunnel ends at this machine's `127.0.0.1`, where the browser is: asked of this
+        // machine's daemon, signed here for the machine that signs in, whichever one is shown.
+        // Its connection stays open as long as the tunnel does: a thread of its own. It goes to
+        // this machine's daemon, whichever machine is shown, which carries the request signed
+        // for the machine of the run and listens on `127.0.0.1` here.
+        if let Command::TunnelOpen(ask) = command {
+            let (connect, updates, bounds) =
+                (self.local.clone(), self.updates.clone(), self.bounds);
+            std::thread::Builder::new()
+                .name("flottille-tunnel".into())
+                .spawn(move || hold_tunnel(&connect, sign, ask, bounds, &updates))
+                .expect("a thread for a tunnel");
+            return;
+        }
+        if let Command::TunnelClose { tunnel } = command {
+            let (connect, updates, bounds) =
+                (self.local.clone(), self.updates.clone(), self.bounds);
+            std::thread::Builder::new()
+                .name("flottille-tunnel-close".into())
+                .spawn(move || {
+                    let refused = match ask_alone(
+                        &connect,
+                        "tunnel.close",
+                        json!({"tunnel": tunnel}),
+                        bounds.quick,
+                    ) {
+                        Ok(Ok(_)) => return,
+                        Ok(Err(why)) | Err(why) => why,
+                    };
+                    let news = crate::tunnels::News::NotClosed { why: refused };
+                    let _ = updates.unbounded_send(Update::Done(Outcome::Tunnel(news)));
+                })
+                .expect("a thread for closing a tunnel");
+            return;
+        }
+        if let Command::SignInOn { name, machine } = command {
+            let (connect, updates, bounds) =
+                (self.local.clone(), self.updates.clone(), self.bounds);
+            std::thread::Builder::new()
+                .name("flottille-sign-in".into())
+                .spawn(move || sign_in_on(&connect, sign, &name, &machine, bounds, &updates))
+                .expect("a thread for a sign-in on another machine");
             return;
         }
         if matches!(
@@ -1339,15 +1676,230 @@ impl Actions {
             let _ = self.appearance.send(command);
             return;
         }
-        let (connect, updates, bounds) = (self.connect.clone(), self.updates.clone(), self.bounds);
+        // A share is the shown machine's entry or connection going to another machine, on the
+        // user's consent: the device's signature, which that machine checks and sends on with
+        // it. Shown, another machine is asked through the aim, which signs each request for it
+        // with the device key; this one is asked on its own connection, signed here.
+        let shown = self.aim.as_ref().and_then(crate::machines::Aim::machine);
+        let command = match command {
+            Command::Signed {
+                machine: None,
+                method,
+                params,
+                then,
+            } if shown.is_some() => Command::Ask {
+                method,
+                params,
+                then,
+            },
+            command => command,
+        };
+        let (updates, bounds) = (self.updates.clone(), self.bounds);
+        if let (Some(_), Command::VaultShare { name, machine }) = (&shown, &command) {
+            let (connect, name, machine) = (self.connect.clone(), name.clone(), machine.clone());
+            std::thread::Builder::new()
+                .name("flottille-action".into())
+                .spawn(move || {
+                    let params = json!({"name": name, "machine": machine});
+                    let refused = match ask_alone(&connect, "vault.share", params, bounds.quick) {
+                        Ok(Ok(_)) => None,
+                        Ok(Err(why)) | Err(why) => Some(why),
+                    };
+                    let outcome = Outcome::VaultShared {
+                        name,
+                        machine,
+                        refused,
+                    };
+                    let _ = updates.unbounded_send(Update::Done(outcome));
+                })
+                .expect("a thread for a window's action");
+            return;
+        }
+        let connect = match &command {
+            // This window's build and its update are this machine's, whichever machine is shown:
+            // `update.download` and `update.restart` are never carried.
+            Command::Update { .. } => self.local.clone(),
+            Command::Signed {
+                machine: Some(_), ..
+            } => self.local.clone(),
+            Command::VaultShare { .. } | Command::Signed { .. } | Command::ShareMachines
+                if shown.is_none() =>
+            {
+                self.local.clone()
+            }
+            _ => self.connect.clone(),
+        };
         std::thread::Builder::new()
             .name("flottille-action".into())
             .spawn(move || {
-                let outcome = perform(&connect, command, bounds);
+                let outcome = perform(&connect, sign, command, bounds);
                 let _ = updates.unbounded_send(Update::Done(outcome));
             })
             .expect("a thread for a window's action");
     }
+}
+
+/// What the keeper's thread is asked.
+enum Keep {
+    Do(Command),
+    /// Answers once everything asked before it was.
+    Barrier(Sender<()>),
+}
+
+/// The keeper's thread: what the window keeps, one request at a time on a connection kept.
+fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update>, bounds: Bounds) {
+    let mut conn: Option<Conn> = None;
+    while let Ok(next) = asked.recv() {
+        let command = match next {
+            Keep::Barrier(done) => {
+                let _ = done.send(());
+                continue;
+            }
+            Keep::Do(command) => command,
+        };
+        let outcome = match command {
+            Command::DraftRead { key } => {
+                let params = json!({"kind": key.kind(), "target": key.target()});
+                let found = match coded(&connect, &mut conn, "draft.get", params, bounds.quick) {
+                    Ok(Ok(answer)) => Ok(draft_of(&answer["draft"])),
+                    // Gone: no composer, no draft.
+                    Ok(Err(refused)) if refused.code == "not-found" => Ok(None),
+                    Ok(Err(refused)) => Err(refused.message),
+                    Err(why) => Err(why),
+                };
+                Outcome::Draft { key, found }
+            }
+            Command::DraftWrite {
+                key,
+                text,
+                pictures,
+                after_read,
+            } => {
+                let params = json!({"kind": key.kind(), "target": key.target()});
+                // The window is closing and did not read the draft: what is typed replaces it
+                // only if the daemon can say that it holds one the field did not know.
+                let readable = !after_read
+                    || coded(
+                        &connect,
+                        &mut conn,
+                        "draft.get",
+                        params.clone(),
+                        bounds.quick,
+                    )
+                    .is_ok_and(|read| read.is_ok());
+                let result = if readable {
+                    let mut params = params;
+                    params["text"] = json!(text);
+                    if let Some(pictures) = pictures {
+                        params["images"] = pictures.iter().map(Picture::to_json).collect();
+                    }
+                    written(coded(
+                        &connect,
+                        &mut conn,
+                        "draft.set",
+                        params,
+                        bounds.quick,
+                    ))
+                } else {
+                    Written::Retry
+                };
+                Outcome::DraftWritten { key, result }
+            }
+            Command::WindowSet { key, value } => {
+                let params = json!({"key": key, "value": value});
+                let result = written(coded(
+                    &connect,
+                    &mut conn,
+                    "window.set",
+                    params,
+                    bounds.quick,
+                ));
+                Outcome::WindowKept { key, value, result }
+            }
+            Command::ArrangementChange { change } => {
+                let read = coded(&connect, &mut conn, "window.get", json!({}), bounds.quick);
+                match read {
+                    Ok(Ok(state)) => {
+                        let mut arrangement = Arrangement::of(&state["state"][arrange::KEY]);
+                        let before = arrangement.clone();
+                        arrangement.apply(&change);
+                        // What the change does not change is not written.
+                        let result = match arrangement == before {
+                            true => Written::Kept,
+                            false => written(coded(
+                                &connect,
+                                &mut conn,
+                                "window.set",
+                                json!({"key": arrange::KEY, "value": arrangement.to_json()}),
+                                bounds.quick,
+                            )),
+                        };
+                        Outcome::ArrangementKept {
+                            change,
+                            arrangement: Some(arrangement),
+                            result,
+                        }
+                    }
+                    other => Outcome::ArrangementKept {
+                        change,
+                        arrangement: None,
+                        result: match other {
+                            Ok(Err(refused)) => written(Ok(Err(refused))),
+                            _ => Written::Retry,
+                        },
+                    },
+                }
+            }
+            _ => unreachable!("only what the window keeps is sent to the keeper"),
+        };
+        if updates.unbounded_send(Update::Done(outcome)).is_err() {
+            return;
+        }
+    }
+}
+
+/// How a write ended, by what the daemon answered.
+fn written(asked: Result<Result<Value, flottille_protocol::ErrorBody>, String>) -> Written {
+    match asked {
+        Ok(Ok(_)) => Written::Kept,
+        Ok(Err(refused)) => match refused.code.as_str() {
+            "not-found" => Written::Gone,
+            "unavailable" => Written::Retry,
+            _ => Written::Refused,
+        },
+        Err(_) => Written::Retry,
+    }
+}
+
+/// [`ask`], with the code of the daemon's refusal beside its sentence.
+fn coded(
+    connect: &Connect,
+    conn: &mut Option<Conn>,
+    method: &str,
+    params: Value,
+    bound: Duration,
+) -> Result<Result<Value, flottille_protocol::ErrorBody>, String> {
+    if conn.is_none() {
+        *conn = Some(connected(connect)?);
+    }
+    let answer = conn
+        .as_mut()
+        .expect("connected")
+        .ask_within_coded(method, params, bound);
+    if answer.is_err() {
+        *conn = None;
+    }
+    answer.map_err(|e| e.to_string())
+}
+
+/// A draft as the daemon answers it (`null` when it holds none).
+fn draft_of(found: &Value) -> Option<Draft> {
+    let text = found["text"].as_str()?.to_owned();
+    let pictures = found["images"]
+        .as_array()
+        .map(|images| images.iter().filter_map(Picture::of).collect())
+        .unwrap_or_default();
+    Some(Draft { text, pictures })
 }
 
 fn read_details(
@@ -1427,6 +1979,206 @@ fn of_part(part: &Option<String>, mut params: Value) -> Value {
     params
 }
 
+/// `vault.share` of the entry `name` with `machine`: a request of this machine's, signed with this
+/// device's key, whose signature goes with the secret for that machine to check.
+fn share(
+    connect: &Connect,
+    sign: Option<Sign>,
+    name: &str,
+    machine: &str,
+    bound: Duration,
+) -> Result<(), String> {
+    let sign = sign.ok_or(
+        "this window cannot sign with this device's key: share it with flottille vault share",
+    )?;
+    let this = ask_alone(connect, "remote.machines", json!({}), bound)??["this"]["name"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or("this machine is no member of the user's yet")?;
+    connected(connect)?
+        .signing(sign, this)
+        .ask_within(
+            "vault.share",
+            json!({"name": name, "machine": machine}),
+            bound,
+        )?
+        .map(|_| ())
+}
+
+/// `method` on a connection of its own, signed with this device's key for the machine `machine`,
+/// this one when `None` (a request that carries the user's consent further: `connection.share`).
+fn signed_by_device(
+    connect: &Connect,
+    sign: Option<Sign>,
+    machine: Option<String>,
+    method: &str,
+    params: Value,
+    bound: Duration,
+) -> Result<Value, String> {
+    let sign =
+        sign.ok_or("this window cannot sign with this device's key: use the command line")?;
+    let machine = match machine {
+        Some(machine) => machine,
+        None => ask_alone(connect, "remote.machines", json!({}), bound)??["this"]["name"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or("this machine is no member of the user's yet")?,
+    };
+    connected(connect)?
+        .signing(sign, machine)
+        .ask_within(method, params, bound)?
+}
+
+/// How long the window waits for a sign-in on another machine: the daemon's own wait, and a
+/// little more.
+const SIGN_IN_WAIT: Duration = Duration::from_secs(310);
+
+/// The sign-in of `name` on `machine` ([`Command::SignInOn`]): `connection.login` there, then
+/// `tunnel.open {sign_in}` held on a connection of its own, whose end is the sign-in's. Says the
+/// address to open, then how it ended.
+fn sign_in_on(
+    connect: &Connect,
+    sign: Option<Sign>,
+    name: &str,
+    machine: &str,
+    bounds: Bounds,
+    updates: &UnboundedSender<Update>,
+) {
+    let said = |then: crate::extensions::connections::Then, answer: Result<Value, String>| {
+        updates
+            .unbounded_send(Update::Done(Outcome::Asked {
+                then: crate::extensions::Then::Connections(then),
+                answer,
+            }))
+            .is_ok()
+    };
+    let opened = crate::extensions::connections::Then::SignInOpened {
+        name: name.to_owned(),
+        machine: machine.to_owned(),
+    };
+    let ended = crate::extensions::connections::Then::SignedInOn {
+        name: name.to_owned(),
+        machine: machine.to_owned(),
+    };
+    let begun = (|| {
+        let url = signed_by_device(
+            connect,
+            sign.clone(),
+            Some(machine.to_owned()),
+            "connection.login",
+            json!({"name": name}),
+            bounds.quick.max(Duration::from_secs(40)),
+        )?;
+        let sign =
+            sign.ok_or("this window cannot sign with this device's key: use the command line")?;
+        let mut tunnel = connected(connect)?.signing(sign, machine.to_owned());
+        tunnel.ask_within("tunnel.open", json!({"sign_in": name}), bounds.quick)??;
+        Ok::<_, String>((url, tunnel))
+    })();
+    let (url, mut tunnel) = match begun {
+        Ok(begun) => begun,
+        Err(why) => {
+            said(opened, Err(why));
+            return;
+        }
+    };
+    if !said(opened, Ok(url)) {
+        return;
+    }
+    let deadline = Instant::now() + SIGN_IN_WAIT;
+    let answer = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match tunnel.next_event(Some(left)) {
+            Ok(Some(event)) if event.name == "tunnel.closed" => {
+                break match event.data["signed_in"] == true {
+                    true => Ok(Value::Null),
+                    false => Err(event.data["reason"]
+                        .as_str()
+                        .unwrap_or("it ended without signing in")
+                        .to_owned()),
+                };
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break Err("the browser did not come back in time".to_owned()),
+            Err(why) => break Err(why),
+        }
+    };
+    said(ended, answer);
+}
+
+/// A tunnel to a run of `ask.machine` ([`Command::TunnelOpen`]): `tunnel.open` signed for it, on
+/// a connection that stays open, so that the tunnel lives as long as it does. Said when it is
+/// open (or why not), and when it ends: the daemon says why on that connection, which also ends
+/// with the window.
+fn hold_tunnel(
+    connect: &Connect,
+    sign: Option<Sign>,
+    ask: crate::tunnels::Ask,
+    bounds: Bounds,
+    updates: &UnboundedSender<Update>,
+) {
+    use crate::tunnels::{News, Tunnel, run_for_port};
+    let said = |news: News| {
+        updates
+            .unbounded_send(Update::Done(Outcome::Tunnel(news)))
+            .is_ok()
+    };
+    let begun = (|| {
+        let sign =
+            sign.ok_or("this window cannot sign with this device's key: use the command line")?;
+        let mut tunnel = connected(connect)?.signing(sign, ask.machine.clone());
+        // A link names a port, not a run: the machine says which of its runs are running.
+        let run = match (&ask.run, ask.port) {
+            (Some(run), _) => run.clone(),
+            (None, Some(port)) => {
+                let listed = tunnel.ask_within("run.list", json!({}), bounds.quick)??;
+                run_for_port(&listed, port, &ask.machine)?
+            }
+            (None, None) => return Err("nothing to reach".to_owned()),
+        };
+        let answer = tunnel.ask_within(
+            "tunnel.open",
+            json!({"run": run, "port": ask.port}),
+            bounds.quick,
+        )??;
+        let opened = Tunnel::of(&ask, &run, &answer)?;
+        Ok::<_, String>((opened, tunnel))
+    })();
+    let (opened, mut held) = match begun {
+        Ok(begun) => begun,
+        Err(why) => {
+            said(News::Refused { ask, why });
+            return;
+        }
+    };
+    let id = opened.id.clone();
+    if !said(News::Opened {
+        ask,
+        tunnel: opened,
+    }) {
+        return;
+    }
+    let reason = loop {
+        match held.next_event(Some(TUNNEL_LISTEN)) {
+            Ok(Some(event)) if event.name == "tunnel.closed" && event.data["tunnel"] == id => {
+                break event.data["reason"]
+                    .as_str()
+                    .unwrap_or("it ended")
+                    .to_owned();
+            }
+            Ok(Some(_)) => {}
+            // Nothing came: the window may have gone, which closes the tunnel with this thread.
+            Ok(None) if updates.is_closed() => return,
+            Ok(None) => {}
+            Err(why) => break why,
+        }
+    };
+    said(News::Closed { tunnel: id, reason });
+}
+
+/// How often a connection that holds a tunnel looks whether the window is still there.
+const TUNNEL_LISTEN: Duration = Duration::from_secs(1);
+
 /// One request on a connection of its own.
 fn ask_alone(
     connect: &Connect,
@@ -1435,6 +2187,55 @@ fn ask_alone(
     bound: Duration,
 ) -> Result<Result<Value, String>, String> {
     connected(connect)?.ask_within(method, params, bound)
+}
+
+/// `method` with `words` and the pictures and pasted texts `files`, as [`ask_alone`] asks it;
+/// when, signed for another machine, it would not fit one frame of the link, its files go first in
+/// chunks (`agent.upload`) and the message names their upload (`docs/remote.md`, "Pictures sent
+/// to another machine"). A chunk refused is the message's refusal: it says which picture and why.
+/// It is judged from the files' sizes, and a file is encoded only as it goes.
+fn ask_with_files(
+    connect: &Connect,
+    method: &str,
+    mut words: Value,
+    (images, texts): (&[Picture], &[Pasted]),
+    bound: Duration,
+) -> Result<Result<Value, String>, String> {
+    let files: Vec<flottille_link::Attached> = images
+        .iter()
+        .map(|picture| flottille_link::Attached::Picture {
+            mime: &picture.mime,
+            bytes: &picture.bytes,
+        })
+        .chain(
+            texts
+                .iter()
+                .map(|pasted| flottille_link::Attached::Text(&pasted.text)),
+        )
+        .collect();
+    if files.is_empty() || flottille_link::fits_with(method, &words, &files) {
+        words["images"] = images.iter().map(Picture::to_json).collect();
+        if !texts.is_empty() {
+            words["texts"] = texts.iter().map(Pasted::to_json).collect();
+        }
+        return ask_alone(connect, method, words, bound);
+    }
+    // The words still travel in one frame: when they cannot, nothing is sent.
+    if !flottille_link::fits(method, &words) {
+        return Ok(Err(
+            "this message is too big for the link: its words take 1 MiB at most".to_owned(),
+        ));
+    }
+    let upload = flottille_link::upload_name()?;
+    let mut conn = connected(connect)?;
+    for chunk in flottille_link::upload_chunks(&upload, &files) {
+        match conn.ask_within("agent.upload", chunk, bound) {
+            Ok(Ok(_)) => {}
+            refused => return refused,
+        }
+    }
+    words["upload"] = json!(upload);
+    conn.ask_within(method, words, bound)
 }
 
 /// What the user does to a command, and what the daemon answered.
@@ -1477,9 +2278,34 @@ fn run_answer(
     }
 }
 
-fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
+/// A step of a program's sign-in that answers nothing but whether it was done.
+fn sign_in_step(
+    connect: &Connect,
+    method: &str,
+    what: &'static str,
+    program: String,
+    time: Duration,
+) -> Outcome {
+    let refused = match ask_alone(connect, method, json!({"program": program}), time) {
+        Ok(Ok(_)) => None,
+        Ok(Err(why)) | Err(why) => Some(why),
+    };
+    Outcome::SignInAnswered {
+        program,
+        what,
+        refused,
+    }
+}
+
+fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Bounds) -> Outcome {
     match command {
         Command::Details(_) => unreachable!("the details have their own thread"),
+        Command::DraftRead { .. }
+        | Command::DraftWrite { .. }
+        | Command::WindowSet { .. }
+        | Command::ArrangementChange { .. } => {
+            unreachable!("what the window keeps has its own thread")
+        }
         Command::Start {
             project,
             target,
@@ -1493,17 +2319,11 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Target::Main => None,
                 Target::Workspace(name) => Some(name),
             };
-            match ask_alone(
+            match ask_with_files(
                 connect,
                 "agent.start",
-                start_params(
-                    &project,
-                    workspace.as_deref(),
-                    &pick,
-                    &message,
-                    (&images, &texts),
-                    &mode,
-                ),
+                start_params(&project, workspace.as_deref(), &pick, &message, &mode),
+                (&images, &texts),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -1631,6 +2451,26 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 written: true,
             }
         }
+        Command::AboutRead => Outcome::About {
+            written: false,
+            shown: answer(ask_alone(connect, "about.show", json!({}), bounds.quick))
+                .map(|shown| crate::about::Shown::of(&shown)),
+        },
+        Command::AboutWrite { text } => {
+            let asked = match &text {
+                Some((name, pronouns, notes)) => ask_alone(
+                    connect,
+                    "about.set",
+                    json!({"name": name, "pronouns": pronouns, "notes": notes}),
+                    bounds.quick,
+                ),
+                None => ask_alone(connect, "about.reset", json!({}), bounds.quick),
+            };
+            Outcome::About {
+                written: true,
+                shown: answer(asked).map(|shown| crate::about::Shown::of(&shown)),
+            }
+        }
         Command::DeveloperRead | Command::DeveloperSet { .. } => {
             let (method, params, written) = match command {
                 Command::DeveloperSet { log } => ("developer.set", json!({"log": log}), true),
@@ -1644,6 +2484,28 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             });
             Outcome::Developer { written, shown }
         }
+        Command::FindingsRead => Outcome::Findings(
+            answer(ask_alone(
+                connect,
+                "developer.reports",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|said| crate::findings::Finding::all(&said)),
+        ),
+        Command::FindingsExport => Outcome::FindingsExported(
+            answer(ask_alone(
+                connect,
+                "developer.reports_export",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|said| said["file"].as_str().unwrap_or_default().to_owned()),
+        ),
+        Command::Update { method, params } => {
+            let answer = answer(ask_alone(connect, method, params, bounds.quick));
+            Outcome::Update { method, answer }
+        }
         Command::Ask {
             method,
             params,
@@ -1651,6 +2513,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         } => {
             let answer = answer(ask_alone(connect, &method, params, bounds.quick));
             Outcome::Asked { then, answer }
+        }
+        Command::Signed {
+            machine,
+            method,
+            params,
+            then,
+        } => {
+            let answer = signed_by_device(connect, sign, machine, &method, params, bounds.quick);
+            Outcome::Asked { then, answer }
+        }
+        Command::SignInOn { .. } => unreachable!("a sign-in on another machine has its thread"),
+        Command::TunnelOpen(_) | Command::TunnelClose { .. } => {
+            unreachable!("a tunnel has its thread")
         }
         Command::ToolResultsRead
         | Command::ToolResultsSet { .. }
@@ -1841,6 +2716,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
         },
+        Command::ReadEnding { session } => Outcome::EndingRead {
+            read: answer(ask_alone(
+                connect,
+                "agent.ending",
+                json!({"agent": session}),
+                bounds.quick,
+            )),
+            session,
+        },
         Command::ReadRemoval { project, serial } => Outcome::RemovalRead {
             read: answer(ask_alone(
                 connect,
@@ -1863,6 +2747,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 bounds.slow,
             )),
             project,
+        },
+        Command::ProjectFolders { machine, path } => Outcome::ProjectFolders {
+            machine,
+            read: answer(ask_alone(
+                connect,
+                "project.folders",
+                json!({"path": path}),
+                bounds.quick,
+            )),
         },
         Command::DetectProject { folder, name, seq } => Outcome::ProjectDetected {
             seq,
@@ -1962,6 +2855,45 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 name,
             }
         }
+        Command::SignIns => Outcome::SignIns(
+            ask_alone(connect, "signin.list", json!({}), bounds.quick).and_then(|listed| listed),
+        ),
+        Command::SignInStart(program) => Outcome::SignInStarted {
+            answer: ask_alone(
+                connect,
+                "signin.start",
+                json!({"program": program}),
+                bounds.quick,
+            )
+            .and_then(|started| started),
+            program,
+        },
+        Command::SignInCode(program, PastedCode(code)) => {
+            let refused = match ask_alone(
+                connect,
+                "signin.code",
+                json!({"program": program, "code": code}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SignInAnswered {
+                program,
+                what: "code",
+                refused,
+            }
+        }
+        Command::SignInCancel(program) => {
+            sign_in_step(connect, "signin.cancel", "cancel", program, bounds.quick)
+        }
+        Command::SignOut(program) => sign_in_step(
+            connect,
+            "signin.sign_out",
+            "sign_out",
+            program,
+            bounds.quick,
+        ),
         Command::Vault => {
             let listed = ask_alone(connect, "vault.list", json!({}), bounds.quick);
             Outcome::Vault {
@@ -2000,6 +2932,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::VaultWritten { refused }
+        }
+        Command::ShareMachines => {
+            let listed = ask_alone(connect, "remote.machines", json!({}), bounds.quick)
+                .and_then(|listed| listed)
+                .map(|listed| {
+                    listed["machines"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|machine| machine["state"] == "online")
+                        // A share is for a runner: a controller's machine would refuse it.
+                        .filter(|machine| machine["role"] == "runner")
+                        .filter_map(|machine| machine["name"].as_str().map(str::to_owned))
+                        .collect()
+                });
+            Outcome::ShareMachines { listed }
+        }
+        Command::VaultShare { name, machine } => {
+            let refused = share(connect, sign, &name, &machine, bounds.quick).err();
+            Outcome::VaultShared {
+                name,
+                machine,
+                refused,
+            }
         }
         Command::VaultDismiss { ask } => {
             let refused = match ask_alone(
@@ -2065,6 +3021,29 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
                 written: true,
                 project,
+            }
+        }
+        Command::TravelledFolderRead => {
+            let shown = ask_alone(connect, "travelled_folder.show", json!({}), bounds.quick);
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::TravelledFolderSet { folder } => {
+            let shown = ask_alone(
+                connect,
+                "travelled_folder.set",
+                json!({"folder": folder}),
+                bounds.quick,
+            );
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: true,
             }
         }
         Command::RulesWrite { project, text } => {
@@ -2461,15 +3440,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             texts,
             compact,
         } => {
-            let mut params = json!({"agent": session, "message": message,
-                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()});
-            if !texts.is_empty() {
-                params["texts"] = texts.iter().map(Pasted::to_json).collect();
-            }
+            let mut params = json!({"agent": session, "message": message});
             if let Some(compact) = compact {
                 params["compact"] = json!(compact);
             }
-            let answer = match ask_alone(connect, "agent.send", params, bounds.quick) {
+            let answer = match ask_with_files(
+                connect,
+                "agent.send",
+                params,
+                (&images, &texts),
+                bounds.quick,
+            ) {
                 Ok(Ok(taken)) => Ok(crate::session::Accepted {
                     delivery: taken["delivery"].as_str().unwrap_or_default().to_owned(),
                     after: taken["after"].as_u64().unwrap_or_default(),
@@ -2696,6 +3677,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::LeaveWithdrawn { session, refused }
         }
+        Command::ReadNotifications(reading) => {
+            let answer = ask_alone(
+                connect,
+                "notifications.read",
+                reading.params(),
+                bounds.quick,
+            );
+            Outcome::NotificationsRead {
+                failed: !matches!(answer, Ok(Ok(_))),
+            }
+        }
         Command::ResumeFollowing {
             session,
             subscription,
@@ -2823,7 +3815,7 @@ pub(crate) fn read_providers(
 }
 
 /// The appearance in the words of `appearance.show`.
-fn appearance_json(appearance: gpui_design_system::Appearance) -> Value {
+pub(crate) fn appearance_json(appearance: gpui_design_system::Appearance) -> Value {
     use gpui_design_system::Source;
     use gpui_design_system::theme::Shade;
     let theme = match appearance.source {
@@ -2877,11 +3869,10 @@ fn start_params(
     workspace: Option<&str>,
     pick: &Pick,
     message: &str,
-    (images, texts): (&[Picture], &[Pasted]),
     mode: &str,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
-    let mut params = json!({
+    json!({
         "project": project,
         "workspace": workspace,
         "provider": pick.provider,
@@ -2889,12 +3880,7 @@ fn start_params(
         "effort": pick.effort,
         "gate_mode": mode,
         "message": message,
-        "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
-    });
-    if !texts.is_empty() {
-        params["texts"] = texts.iter().map(Pasted::to_json).collect();
-    }
-    params
+    })
 }
 
 fn started_outcome(project: &str, started: &Value) -> Outcome {
@@ -3214,6 +4200,151 @@ mod tests {
         // No empty list to ask a confirmation about: the toast says what the daemon said.
         assert_eq!(needed, None);
         assert_eq!(answer, Err("db is needed by app's api".to_owned()));
+    }
+
+    /// A daemon on socket pairs that keeps every request, answers `agent.send` with a delivery,
+    /// and refuses the chunks of the picture `refused`.
+    fn recording(refused: Option<u64>) -> (Connect, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keeping = asked.clone();
+        let connect: Connect = Arc::new(move || {
+            let (window, daemon) = UnixStream::pair()?;
+            let asked = keeping.clone();
+            std::thread::spawn(move || {
+                let mut writer = daemon.try_clone().unwrap();
+                for line in BufReader::new(daemon).lines() {
+                    let Ok(line) = line else { return };
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    asked.lock().unwrap().push(request.clone());
+                    let answer = match request["method"].as_str().unwrap() {
+                        "agent.upload"
+                            if Some(request["params"]["file"].as_u64().unwrap()) == refused =>
+                        {
+                            json!({"id": request["id"], "error": {"code": "refused",
+                                "message": "picture 2 is empty or over 5 MiB"}})
+                        }
+                        "agent.send" => json!({"id": request["id"],
+                            "result": {"delivery": "d1", "after": 3}}),
+                        _ => json!({"id": request["id"], "result": {}}),
+                    };
+                    writeln!(writer, "{answer}").unwrap();
+                }
+            });
+            Ok(window)
+        });
+        (connect, asked)
+    }
+
+    fn reply_with(images: Vec<Picture>) -> Command {
+        Command::Reply {
+            session: "s1".into(),
+            key: 1,
+            message: "look".into(),
+            images,
+            texts: Vec::new(),
+            compact: None,
+        }
+    }
+
+    fn photo(size: usize) -> Picture {
+        Picture {
+            mime: "image/jpeg".into(),
+            bytes: (0..size).map(|n| (n % 251) as u8).collect(),
+        }
+    }
+
+    #[test]
+    fn a_picture_larger_than_a_frame_goes_in_chunks_before_its_message() {
+        let (connect, asked) = recording(None);
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        let big = photo(3 * 1024 * 1024);
+        actions.send(reply_with(vec![big.clone()]));
+
+        let Some(Outcome::Replied { answer, .. }) = next(&mut updates, Duration::from_secs(10))
+        else {
+            panic!("no answer");
+        };
+        assert!(answer.is_ok(), "{answer:?}");
+        let asked = asked.lock().unwrap();
+        let (chunks, sent) = asked.split_at(asked.len() - 1);
+        assert_eq!(chunks.len(), 6, "3 MiB in chunks of 512 KiB");
+        let mut arrived = Vec::new();
+        for chunk in chunks {
+            use base64::Engine as _;
+            assert_eq!(chunk["method"], "agent.upload");
+            assert_eq!(chunk["params"]["upload"], sent[0]["params"]["upload"]);
+            arrived.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(chunk["params"]["data"].as_str().unwrap())
+                    .unwrap(),
+            );
+        }
+        assert!(arrived == big.bytes);
+        assert_eq!(sent[0]["method"], "agent.send");
+        assert!(sent[0]["params"].get("images").is_none(), "{}", sent[0]);
+    }
+
+    #[test]
+    fn a_small_picture_goes_with_its_message() {
+        let (connect, asked) = recording(None);
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        actions.send(reply_with(vec![photo(1000)]));
+
+        assert!(next(&mut updates, Duration::from_secs(5)).is_some());
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["params"]["images"][0]["mime"], "image/jpeg");
+    }
+
+    #[test]
+    fn a_chunk_refused_is_the_message_s_refusal() {
+        let (connect, asked) = recording(Some(2));
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        actions.send(reply_with(vec![photo(600_000), photo(600_000)]));
+
+        let Some(Outcome::Replied { answer, .. }) = next(&mut updates, Duration::from_secs(10))
+        else {
+            panic!("no answer");
+        };
+        // Said in the composer as a local refusal is: which picture, and why.
+        assert_eq!(
+            answer.err().as_deref(),
+            Some("picture 2 is empty or over 5 MiB")
+        );
+        let asked = asked.lock().unwrap();
+        assert!(
+            asked
+                .iter()
+                .all(|request| request["method"] != "agent.send"),
+            "the message is never sent"
+        );
+    }
+
+    #[test]
+    fn words_that_do_not_fit_a_frame_are_refused_before_any_chunk() {
+        let (connect, asked) = recording(None);
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(connect, sender);
+        let mut command = reply_with(vec![photo(1_200_000)]);
+        if let Command::Reply { message, .. } = &mut command {
+            *message = "w".repeat(2 * 1024 * 1024);
+        }
+        actions.send(command);
+
+        let Some(Outcome::Replied { answer, .. }) = next(&mut updates, Duration::from_secs(10))
+        else {
+            panic!("no answer");
+        };
+        assert!(
+            answer
+                .err()
+                .unwrap()
+                .contains("its words take 1 MiB at most")
+        );
+        assert!(asked.lock().unwrap().is_empty(), "no chunk was sent");
     }
 
     #[test]

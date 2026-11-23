@@ -5,7 +5,8 @@ use crate::state::Status;
 use gpui_design_system::{Type, palette, presence_of, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window,
+    div, px,
 };
 
 use crate::composer::Composer;
@@ -18,6 +19,7 @@ use crate::services::ServicesPage;
 use crate::session::SessionPage;
 use crate::settings::SettingsPage;
 use crate::shell::{Layout, Shell};
+use crate::whats_new::WhatsNewPage;
 
 /// What the main area says while Flottille does not answer.
 const TITLE: &str = "Flottille is not answering";
@@ -47,6 +49,8 @@ pub enum Page {
     },
     /// The services of the machine.
     Services,
+    /// What is new since the version last run.
+    WhatsNew,
 }
 
 pub struct MainArea {
@@ -65,6 +69,8 @@ pub struct MainArea {
     spec: Option<Entity<SpecPage>>,
     /// The services page, one for the window's life.
     services: Entity<ServicesPage>,
+    /// What's new, one page for the window's life: it follows the daemon while closed too.
+    whats_new: Entity<WhatsNewPage>,
     /// Since when Flottille has not answered the window, in ms after the epoch: said in a banner
     /// above the page while it lasts.
     not_answering: Option<u64>,
@@ -75,6 +81,8 @@ pub struct MainArea {
     restarted: bool,
     /// Whether Flottille was read once: until then, an empty page says nothing of the projects.
     read: bool,
+    /// Whether Flottille can be reached: when it cannot, the page does not wait for it.
+    reachable: bool,
 }
 
 impl MainArea {
@@ -82,6 +90,7 @@ impl MainArea {
         shell: WeakEntity<Shell>,
         settings: Entity<SettingsPage>,
         services: Entity<ServicesPage>,
+        whats_new: Entity<WhatsNewPage>,
         _: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -94,10 +103,12 @@ impl MainArea {
             project_settings: None,
             spec: None,
             services,
+            whats_new,
             not_answering: None,
             restarting: false,
             restarted: false,
             read: false,
+            reachable: true,
         }
     }
 
@@ -109,6 +120,20 @@ impl MainArea {
             self.not_answering = since;
             cx.notify();
         }
+    }
+
+    /// Whether the link reaches Flottille: until it has been read, the page shows a skeleton
+    /// while it does, and the "reconnecting" of the top bar speaks for it when it does not.
+    pub fn set_reachable(&mut self, reachable: bool, cx: &mut Context<Self>) {
+        if self.reachable != reachable {
+            self.reachable = reachable;
+            cx.notify();
+        }
+    }
+
+    /// Whether Flottille was read once.
+    pub fn read(&self) -> bool {
+        self.read
     }
 
     pub fn restarting(&self) -> bool {
@@ -244,6 +269,8 @@ impl MainArea {
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             self.services
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            self.whats_new
+                .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             if let Some(page) = &self.project_settings {
                 page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             }
@@ -256,8 +283,15 @@ impl MainArea {
 }
 
 impl Render for MainArea {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        // Another machine that is off is said as such, greyed: no restart of this one is offered.
+        let holding = crate::machines::held(cx);
+        let not_answering = self
+            .not_answering
+            .filter(|_| !holding.as_ref().is_some_and(|holding| holding.offline));
+        let waiting = !self.read && self.reachable && not_answering.is_none();
+        let veil = crate::loading::veil(waiting, &p, window, cx);
         let root = div()
             .id("main")
             .size_full()
@@ -295,12 +329,15 @@ impl Render for MainArea {
             Page::Session { .. } => page.children(self.session.clone()),
             Page::Settings => page.child(self.settings.clone()),
             Page::Services => page.child(self.services.clone()),
+            Page::WhatsNew => page.child(self.whats_new.clone()),
             Page::ProjectSettings { .. } => page.children(self.project_settings.clone()),
             Page::Spec { .. } => page.children(self.spec.clone()),
         };
+        let page = page.children(veil);
         root.flex()
             .flex_col()
-            .child(self.not_answering_banner(cx))
+            .child(self.not_answering_banner(not_answering, cx))
+            .child(held_line(holding.map(|holding| holding.line), cx))
             .child(page)
     }
 }
@@ -308,9 +345,13 @@ impl Render for MainArea {
 impl MainArea {
     /// The banner above the page while Flottille does not answer: it unfolds and fades in, and
     /// folds away and fades out, with its last words, once it answers again.
-    fn not_answering_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn not_answering_banner(
+        &self,
+        not_answering: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
-        let said = self.not_answering.map(|since| {
+        let said = not_answering.map(|since| {
             format!(
                 "It has not answered since {}. Restarting it cuts the turns under way.",
                 crate::session::clock(since)
@@ -319,7 +360,7 @@ impl MainArea {
         });
         // Folding away, it says what it said when Flottille answered again, and is no longer
         // clicked.
-        let leaving = self.not_answering.is_none();
+        let leaving = not_answering.is_none();
         let restarting = self.restarting || leaving && self.restarted;
         let disabled = self.restarting || leaving;
         let shell = self.shell.clone();
@@ -373,4 +414,29 @@ impl MainArea {
                 .into_any_element()
         })
     }
+}
+
+/// The line above a page of the machine in front while it takes no change
+/// ([`crate::machines::Held`]): it unfolds and fades in, and folds away with its words.
+fn held_line(line: Option<String>, cx: &mut Context<MainArea>) -> impl IntoElement {
+    let p = palette(cx);
+    presence_of(
+        "page-held-block",
+        line.map(SharedString::from),
+        move |line| {
+            div()
+                .id("page-held")
+                .aria_label(line.clone())
+                .px(space::LG)
+                .py(space::SM)
+                .bg(p.wait_bg)
+                .border_b_1()
+                .border_color(p.wait_line)
+                .text_size(px(12.5))
+                .text_color(p.text)
+                .child(line)
+                .test_support()
+                .into_any_element()
+        },
+    )
 }

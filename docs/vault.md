@@ -42,7 +42,10 @@ all: `https`, or `http` on this machine, does; `http` to any other host does not
 another host (`api.app.example.test` is not `app.example.test`). For a connection an agent proposes,
 a header takes an entry only on its host (`docs/extensions.md`, "Connections"), so two services on
 the same host can both be given the same entry, whatever their ports and paths: the binding does not
-tell them apart. The user's own form binds an entry to any host.
+tell them apart. The user's own form binds an entry to any host. `web`'s calls of an API are
+stricter: for them the binding is the `url`'s **origin**, its scheme, host and port
+(`https://app.example.test:8443/api` is `https://app.example.test:8443`, and `https://app.example.test/`
+another origin), so that another service on another port of the same host is never given the secret.
 
 ## Bound to one use
 
@@ -50,7 +53,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 
 | `for` | The use |
 |---|---|
-| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"). |
+| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), corrects and deletes worklogs with ("Correcting a worklog"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), posts a reply under a comment, and posts or changes a text that mentions someone, and looks the mentioned accounts up, with (`docs/tickets.md`, "Replies"), and searches the site's people with, for `people` (`docs/tickets.md`, "Mentions"). |
 | `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"), and the logins its adapter signs in with (agent-browser's `login`, "Adapters"). |
 
 - **Only its use reads it.** A feature reads an entry bound to it or an unbound one it names. An
@@ -58,7 +61,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   secret is read, with a sentence naming its use (`the vault entry jira-time is bound to the
   worklog of the project app and serves no other use`), never its value. A connection naming
   another use's entry is refused when it is declared, and its server does not start; the
-  worklog's `Log time with` does not offer it, and `tickets log_time` refuses it before any card.
+  worklog's `Jira API access with` does not offer it, and `tickets log_time` refuses it before any card.
 - **Made from a feature, bound to it from the start**: the entry set from a request's card (the
   worklog's need), from a project's Settings, Tracker, "New entry in the vault", or from a feature's
   own screen, which says `for`. An entry set from Settings, Vault (or `flottille vault set`)
@@ -67,9 +70,9 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   use of each entry on its row (`For the worklog of the project app alone`).
 - **Seen from a project.** A project's Settings has a Vault tab: the entries that project sees (its
   own first, then every project's, marked as such), each the row of Settings, Vault. "New entry"
-  there opens Settings, Vault's own dialog with "Seen by agents of" set to the project, and a click
-  on a row edits the entry in it (the dialog says when the entry is every project's); closed, the
-  window goes back to the tab. The tab follows the vault live.
+  there opens the vault's own dialog over the tab with "Seen by agents of" set to the project, and
+  a click on a row edits the entry in it (the dialog says when the entry is every project's); the
+  tab is never left. The tab follows the vault live.
 - **A worklog's entry is its project's.** Bound to `worklog:<project>`, an entry is that project's
   (its `project` is set to it when it names none; an entry of another project is refused), so no
   other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
@@ -119,17 +122,18 @@ again as soon as the secret is sent.
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
 message, a command's output, a tool's arguments, finds it `[masked]` there, raw and in the forms
-a page shows a typed secret in (percent-encoded in an address, escaped in HTML or JSON, and, with
-the entry's username, in base64 as HTTP Basic authentication sends them). The values are read
+a page shows a typed secret in (percent-encoded in an address, escaped in HTML or JSON, `/` written
+`\/` included, and, with the entry's username, in base64 as HTTP Basic authentication sends them,
+with and without its padding, and that base64 in the same forms). The values are read
 from the keyring when the daemon starts, before any agent resumes (the start waits 5 seconds at
 most for a keyring that asks to be unlocked, then goes on), and a new secret is masked as soon as
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
 hold the same value.
 
-## Choosing the entry for time logging
+## Choosing the entry for Jira API access
 
 A Jira project's Settings, Repositories tab, Tracker, names the entry (`docs/projects.md`, "Forges
-and tracker"): the select `Log time with` lists the entries the project sees by name and username,
+and tracker"): the select `Jira API access with` lists the entries the project sees by name and username,
 but those bound to another use, and its link opens the vault's new-entry dialog from there, the
 entry it makes bound to the project's worklog.
 
@@ -175,14 +179,20 @@ an entry to the vault, not a request with rules of its own.
   refusal says the entry may be asked for, with the call to make: `tickets log_time` with its
   name, a browser connection's `login` with its name and `for: "connection:<name>"`
   (`docs/extensions.md`, "Connections"). The ask answers at once: nothing waits for the user.
-- **A way in to the vault's own form.** The user sees one card in the session of the agent that
-  asked (and an inbox entry, which names the host and whose entry it is, the project's or every
-  project's, as the form will save it: a login's is the project's unless asked `every`): the
-  entry's name, the host of its URL **on a line of its own** (where the secret
-  will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
-  its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
-  its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
-  of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
+- **A way in to the vault's own form.** The request waits on the user, so it is a card of the
+  session's rail, **Waiting for you**, beside the requests held for the user, and never a card of
+  the conversation, which records it in one quiet line with no button (`asked for the vault entry
+  <name> · waiting for you`, then `… · saved` or `… · dismissed`). The card is in the session of
+  the agent that asked (and an inbox entry, which names the host and whose entry it is, the
+  project's or every project's, as the form will save it: a login's is the project's unless asked
+  `every`); it counts in the section's number, the session's row in the sidebar shows the same
+  "waits for you" mark as for a held request, and the bell rings until it is answered. Its lines:
+  the entry's name, the host of its URL **on a line of its own** (where the secret
+  will go: the agent chose it; the daemon's reading, never the window's), its project and the
+  agent's reason; under **Details**, what it is for, its use and who asked. Its buttons are **New
+  entry** and **Dismiss** (disabled while its call runs). The card leaves once the request is
+  answered. New entry opens the vault's form of a new entry over the page the user is
+  on (the session: it is not left), prefilled with all of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
   host its secret goes to ("Goes to …", under the URL's field, bound or not, while the URL is the
   one asked) and **Remove the binding**: the user changes any field, types the secret and saves,
   with the checks of that form (a connection's entry refused for a URL login cannot read, in the
@@ -211,8 +221,12 @@ daemon puts the secret where it goes itself (an HTTP header, a command's standar
 field), with `vault::secret`, which only a tool's own code calls and whose value never leaves that
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
-answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklogs` and `fields`
-that read Jira's REST API with the same entry, and
+answered the same. Its users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklog_edit` and `worklog_delete` ("Correcting a
+worklog"), `worklogs` and `fields` that read Jira's REST API with the same entry and `edit` with `fields`, `parent` or a milestone that
+writes through it (#1067), `web`'s calls of an API (`docs/tools.md`, "The web": `entry` names the entry, the daemon signs in with
+HTTP Basic when it has a username, else as a bearer token, and only on the origin of its `url`
+(its scheme, host and port), `https` or `http` on this machine; an entry without a `url`, of another project or bound to
+another use is refused before anything is sent, and a missing one offers `vault ask`), and
 Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `secrets` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for
@@ -230,6 +244,82 @@ scope with **Share with every project**, the address with **Bind it to <host>**,
 window's confirmation, which says that the change stays even if the request is then refused,
 and the agent can do neither. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
+
+## Shared with another machine
+
+The one way a secret leaves its machine (`docs/remote.md`, "Vault entries"): the user shares an
+entry, one at a time, with another of their machines that runs agents, from Settings, Vault, the
+row's **Share with…** (a dialog that lists the runners online), or `flottille vault share <name>
+--machine <machine>`.
+
+- **Only the user's device asks it.** `vault.share {name, machine}` is a request the client signs
+  with the device key (`docs/remote.md`, "Requests from another machine's clients"), for its own
+  machine: the daemon, which never holds that key, serves it only so signed, and refuses a client
+  that does not sign (`sharing a vault entry is signed by the user's device: …`).
+- **The signature goes with the secret.** The holding daemon reads the secret from its keyring
+  and sends it, with the entry's metadata and the user's signed request as the client wrote it,
+  in a `share` message over the link, encrypted end to end between the two machines. The other
+  machine checks that request itself as it checks any user's request: signed by a member's
+  device, for the machine that sent it, within five minutes, never seen before, of a role that may
+  drive, `vault.share` of that very entry with this machine. The machine that sent it must be a
+  runner's or a controller's, as for code (`docs/remote.md`, "What travels"): a viewer's machine
+  shares nothing, whoever signed (`refused: phone is a viewer's machine: only a runner's or a
+  controller's machine shares a vault entry`).
+- **What the signature covers, and what it does not.** The device signs the entry's name and the
+  machine it goes to, nothing more: not the secret, nor the metadata, which are the holding
+  machine's word. So a machine's message alone shares nothing the user did not: a machine key read
+  by an agent's code can carry only an entry the user just shared, by that name, to that machine,
+  within the request's five minutes, and once; it cannot share another entry, send it elsewhere,
+  or play the share again. The receiving machine therefore takes nothing else on trust: it checks
+  the metadata as Save checks it, and never replaces an entry of its own (below).
+- **One write of an entry at a time.** A Save, a removal and a share of the same name are served
+  one after the other: a share that arrives while the user saves that entry waits, then finds it,
+  and is refused; it never overwrites it.
+- **Kept as any secret there.** The other machine checks the metadata first as its own Save
+  would: the project is one of its own, the use (`for`) is one it knows and fits the entry, a
+  `connection:` entry's `url` is no plain `http` to another machine. A `worklog:<project>` entry
+  is refused until that project is there (`the vault entry jira is bound to the worklog of the
+  project app, which is not on this machine: add the project here first`), as is an entry of a
+  project it lacks. Then it masks the secret, writes it into its own keyring under the entry's
+  name, and the metadata into its store, marked as shared from the machine it came from
+  (`shared_from`, the row's `Shared from pc`); an agent there whose request for that entry was
+  open is told, as when the user sets it. A store that refuses the write takes the secret back
+  out of the keyring: nothing is left half kept. It is a copy, not kept in sync: sharing again from
+  the same machine replaces it, and a secret set there by hand makes it that machine's own. It
+  never replaces an entry that machine set up itself, nor a copy from a third machine: that is
+  refused (`this machine has its own vault entry tracker: remove or rename it here first`).
+- **A machine with no keyring refuses**, saying so (`this machine has no keyring: no Secret Service
+  runs in its session …`): the vault keeps no secret in a file, there either.
+- **Nowhere else.** Neither side writes the secret to a file, the store, an event, a log or an
+  error; the logs say what was shared, with which machine, and by whom, never the value. The hub
+  never sees it.
+
+## Made from a file a setup copies
+
+A launch on another machine whose project's setup copies a file that machine lacks (an ignored
+`.env`) asks the user to share it (`docs/remote.md`, "Which project"): the file becomes a vault
+entry first, on the machine that has it, with `vault.from_file {project, path, name?, replace?}`.
+The daemon reads the file only then, inside the project's folder, opened once and never through a
+link (what is checked is the file that is read), a text
+of 64 KiB at most; its text is the entry's secret, masked whole and line by line before it is
+kept, and nothing that is said of it, an answer, an error, a log or an event, holds a word of it.
+Each line is masked, a file of one line without a final newline too (any secret bound to a
+`file:` is, set by hand or received as well), and each line's value: what follows its first `=` or `:` (`KEY=v`, `key: v`,
+`"key": "v",`), its quotes and final comma left out, and the password of an address's
+`user:password@`, each of 6 characters or more, comments left. **A secret transformed is not
+recognised**: a value an agent decodes, splits, re-encodes (other than the address, HTML and JSON
+forms every vault value is masked in) or computes from the file is not masked.
+
+The entry is named `<project>-<path>` (`app-.env`), every project's, described as the file of that
+project its setup copies, and **bound to that file** (`"for": "file:<project>/<path>"`), which
+serves no tool and no other use; it is then shared as any other, its binding kept. The other
+machine makes the file from an entry only when it is bound to that very file and was shared from
+the launch's machine: an entry of its own, or another machine's, whatever its name, is never
+written into a file. **A machine renamed leaves the copies it shared under its old name matching
+nothing**: a launch from the new name finds no entry shared from it, so the file is asked for again
+(fail closed); share the entry again from the renamed machine. A name already taken is refused: by another entry (`a/b` and `a-b` both name
+`app-a-b`: the second file is refused, naming the first), and by the same file's entry unless the
+call says `replace: true`.
 
 ## The runtime folder
 
@@ -252,7 +342,33 @@ push the gate let through, and its checks' dry run, are the exception (below):
   login (and its reload of the page), are also granted their display folder,
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
-  The folder is the one the daemon made, never one a variable of the connection names.
+  The folder is the one the daemon made, never one a variable of the connection names;
+- Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
+  process also starts in a **private mount namespace** of its own, where the kernel lets a user
+  make one (an unprivileged user namespace): the user's runtime folders are empty folders there
+  (a `tmpfs`), so the bus, the user's systemd, the portal, the sound server and an SSH agent
+  that lives there are not found by their path at all. Only what the daemon itself gives the
+  process is put back in them, at the same path: the display folder of a run or a connection's
+  browser shown on the screen, and the SSH agent's socket lent to the daemon's own fetch (below).
+  The daemon's own socket is not among them. X11's socket folder (`/tmp/.X11-unix`) is emptied
+  the same way, unless the process is given X11's display. A session bus the daemon's
+  `DBUS_SESSION_BUS_ADDRESS` names by a path outside the runtime folders (`unix:path=/tmp/dbus-…`,
+  as `dbus-launch` makes one), found at the daemon's start, has its path hidden in every
+  confined process, whatever is there now: a socket or a file under `/dev/null`, a folder under
+  an empty read-only one, and nothing at all where nothing is there (nothing is reached by that
+  path then). The daemon also keeps what tells the socket found from another (its device, inode
+  and change time: an inode freed is often given to the next file made); once the socket at the
+  path is no longer that one, gone or replaced, no push the gate lets through is given the bus's
+  address (below), and `flottille doctor` says so in its warnings. The mounts are made by the process before it runs its
+  program, which runs as the user, not as root of the namespace, with `no_new_privs` set first
+  (a program with file capabilities gains none in the namespace): it holds no capability to
+  unmount or remount them, and a namespace it makes inside gets them locked. Landlock's rules
+  apply after it, unchanged. Where the kernel refuses (a kernel built without user namespaces, a
+  distribution that forbids them to unprivileged users), the process starts without it, and the
+  daemon's log and `flottille doctor` (its `sandbox` part, with Landlock's ABI, as the daemon
+  has it) say so. The daemon probes it once, by a child that makes one: a probe that concludes
+  nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
+  process still starts in its namespace, or fails to start.
 
 **The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
@@ -261,14 +377,267 @@ password manager's under the home), from Landlock's ninth ABI, the folders on th
 ruled without the right to connect, their other entries with every right, and the socket itself
 gets no rule.
 
+The agent command lines (Claude Code, Codex, OpenCode, the judge's, the one that lists models)
+start without `SSH_AUTH_SOCK` either: bare mode gives them no shell, and the variable would still
+tell them where the agent is, and lend it to a tool that spawns.
+
+**The daemon's own git is walled like a run's.** Every `git` the daemon runs for itself on a
+repository (its status and log reads, its worktrees, the `ls-remote` and `fetch` that find a
+workspace's base) is the one found at its start, as its `ssh` is (below): the first of its `PATH`
+that only root may change (it and every folder on the way to it are root's, and neither their
+group nor others may write them), else the first one, its links followed then, never one a
+run put first in the `PATH` since. It is bound by the same Landlock rules, gets no `SSH_AUTH_SOCK`, and is given what a
+repository's settings could otherwise turn into a program of theirs: `core.hooksPath=/dev/null`,
+`core.fsmonitor=false`, `fetch.recurseSubmodules=false` and `submodule.recurse=false` on its line
+(the command's scope, which wins over the repository's settings and what they include: git cannot
+be told to skip an `include.path`, so what it brings is overridden instead), and
+`GIT_SSH_COMMAND` naming the `ssh` found at its start, which wins over `core.sshCommand` and
+`GIT_SSH`: the first `ssh` of the daemon's `PATH` that only root may change (as above), else the
+first one (said once in the daemon's log), and in either case the program its links lead to
+then, so that a link pointed elsewhere later changes nothing, given `-o ControlMaster=no -o
+ControlPath=none -o ForwardAgent=no` first (the first value `ssh` reads wins: no master socket,
+which the read-only `~/.ssh` could not hold and which any run could use elsewhere, and the agent
+forwarded to no host). On the same line,
+`credential.helper=` empties the list of credential helpers the repository's settings built,
+and the user's own (the system's and the user's settings, read at the daemon's start, their
+names alone) follow it: git hands a sign-in to `store` on every helper it knows, and a
+repository's own would get it. Its environment sets `GIT_NO_LAZY_FETCH=1` (a partial clone
+asks its promisor remote for no missing object while the daemon reads it), an empty
+`GIT_ALLOW_PROTOCOL` (no remote reached at all), and an empty `GIT_PROXY_COMMAND` and
+`GIT_ASKPASS`, which win over the `core.gitProxy` and `core.askPass` a repository names. A call
+that reaches a remote also gets:
+
+- `GIT_ALLOW_PROTOCOL` set to the one protocol the remote's URL uses, as git resolves it
+  (`ls-remote --get-url`, so after `url.*.insteadOf`), and only if it is one of git's own
+  transports: `ssh`, `https`, `http`, `git` or `file`. A URL through a helper (`ext::<command>`,
+  `<name>::` or `<name>://` for a `git-remote-<name>` of the `PATH`) runs a program it names:
+  it is not fetched, and the workspace starts from the base as last fetched, saying why;
+- `--upload-pack=git-upload-pack` on its line: git takes the first `remote.<name>.uploadpack` it
+  reads, the repository's, so only the line's own option wins over it. The daemon never pushes,
+  so no `receivepack` is ever read;
+- `maintenance.auto=false` and `gc.auto=0`: no maintenance after the fetch, which could go on in
+  the background with the lent agent;
+- when that protocol is SSH, the user's SSH agent, lent as to nothing else, to the `git` a push
+  runs (below) and to no other: `SSH_AUTH_SOCK` names
+  the socket found at the start, and from Landlock's ninth ABI a rule on that socket alone grants
+  connecting to it, the rest of the runtime folder (the bus) staying denied. An HTTPS remote gets
+  no agent and no session bus: its credential helper runs confined (below, "The gaps").
+
 **A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
 line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
 project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
 the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
-helper and the forge command line's sign-in are theirs. Only `core.hooksPath=/dev/null` is added,
-and the project's and the workspace's variables are not applied (`docs/commands.md`, "The
-environment"). The other git reads made for a push, and the probes of a push's task (its `ready`
+helper and the forge command line's sign-in are theirs. A push that goes to paths alone (a remote
+that is a folder of this machine) needs none of them, and runs in the sandbox instead, with the
+run's own environment but the rewrite of its push URLs to nowhere, `file` its one transport:
+the git that receives it runs the hooks and settings of a repository a run may have made, as a
+run's own push would. Git says which it is: the push's dry run, in the sandbox and with `file`
+alone allowed, refuses no transport. A push to a path and to a remote at once goes outside, and
+fails on the path. Outside the sandbox, only these are added:
+
+- the `git` of the daemon's `PATH` that only root may change (above), found at the daemon's
+  start, its links followed, never one a run put first in the `PATH` since; without one, the
+  push is refused before anything of it is read or judged, saying why (the daemon's log says it
+  at its start, and `flottille doctor` in its warnings);
+- no push at all where Landlock (its second ABI or later) is not enforced: the folder below is
+  in the daemon's runtime folder, which only Landlock keeps a confined command from (the private
+  mount namespace's empty folder is reached through `/proc/<pid>/root` without it, "The gaps"),
+  and a run that could reach it would add a proxy to its settings between the push's checks and
+  the push. The push is refused, saying so: push from a terminal of your own (`flottille doctor`
+  and the project's settings say it too, of every push and not of SSH's alone);
+- of git's global options on the push's line, only `-C` and those that name no program, setting
+  or git folder (`--no-pager`, `-P`, `-p`, `--paginate`, `--no-replace-objects`, the pathspec
+  ones, `--no-optional-locks`, `--no-advice`, `--no-lazy-fetch`): a line with another is
+  refused, saying which. `--exec-path` would take `git-remote-https` from a folder of a run's,
+  `-c` and `--config-env` give a setting that wins over the daemon's own (a line's `-c
+  http.proxy=…` over everything below), `--git-dir` and `--work-tree` another git folder;
+- **none of the repository's settings but which remote it goes to.** A run can write the
+  repository's settings, and git has no switch that leaves them unread; a setting given on the
+  push's own line does not win over a more specific one of the repository's either
+  (`http.<url>.sslVerify` over `http.sslVerify`, `http.<url>.proxy` over `http.proxy`), so
+  overriding the dangerous keys one by one cannot hold. The push runs from a git folder the
+  daemon makes for it instead, in its own runtime folder (out of every confined command's reach,
+  above), and removes once the push ended: `GIT_DIR` names it, so git reads no repository's
+  settings but its file, which holds the repository's format alone (`core.repositoryformatversion`
+  and its `extensions.*`, each a plain word or refused; refs kept in a `reftable` are refused).
+  Its `HEAD` and its refs are the repository's as they are then, written in it (each ref in its
+  `packed-refs`, a symbolic one as the ref it leads to), and its `shallow` a copy of the
+  repository's, with `GIT_OBJECT_DIRECTORY` its objects: a run that moves a branch between the
+  push's checks and the push does not change what the push sends, which is what the checks read.
+  The remote-tracking refs the push moved there are moved in the repository once it ended, each
+  from the object it had when the folder was made (one a run moved since is left as it is, and
+  the daemon's log says so). The repository's `info/grafts` and replacements are not read by
+  what the checks read of the push (below). Its settings are then, in git's order: the system's
+  (root's); the user's own (`GIT_CONFIG_GLOBAL=/dev/null`, and in their place the files found at
+  the daemon's start as they apply to the repository, an `includeIf "gitdir:…"` or
+  `"onbranch:…"` included, read with the repository's folder but never its settings, given on
+  the command's scope); then, of the repository's own settings and its worktree's (read in the
+  sandbox, with what they include), only `remote.<name>.url`, `pushurl` and `fetch`,
+  `branch.<name>.remote`, `pushRemote` and `merge`, `remote.pushDefault` and
+  `push.autoSetupRemote`; then the daemon's own below, which win over them all. Each of those
+  kept is a remote's name, a URL or the refs that track it, never how the remote is reached
+  (`http.*`, `url.*.insteadOf` and `pushInsteadOf`, `remote.<name>.proxy`, `remote.<name>.vcs`,
+  `core.*`, `include.*` are not given), nor which refs a push that names none sends: a
+  repository whose settings hold a `remote.<name>.push`, a `remote.<name>.mirror` that is on or
+  a `push.default` is refused, saying which and what to do (unset it, or set it in your own
+  settings, and name the refs on the line: `git push origin HEAD:refs/heads/<branch>`). A run
+  that wrote `remote.origin.push=:refs/heads/main`, `+refs/heads/*:refs/heads/*` or `mirror`
+  would make a plain `git push` delete, force or prune the remote's branches, and
+  `push.default=upstream` with a `branch.<name>.merge` of its own send the branch to another;
+  the gate refuses all of these on the line, never in the settings it does not read. Where the
+  push's own settings (the system's and the user's, as git reads them for it) say
+  `push.default=upstream` (or `tracking`), a `branch.<name>.merge` of the repository's that names
+  another branch than `refs/heads/<name>` is not given either: a plain `git push` of that branch
+  then has no upstream, and git says so; name the branch on the line. Where `push.default`
+  cannot be read, the push is refused. A URL a
+  run wrote sends the push to that host, with only the sign-in the user's own helper gives that
+  host, over git's own transports (below), as the push's line could. The user's own `http.*` and
+  `url.*` settings still apply: they are theirs. An `includeIf "hasconfig:remote.*.url:…"` of
+  theirs (the settings of one forge) is given as it is, its file named by its full path, and
+  git includes it where the push's remotes' URLs match; an `includeIf "gitdir:…"` inside that
+  file is read against the daemon's folder, so it does not apply.
+  **What the repository's own settings said of how it is reached does not apply** to such a
+  push: an `http.sslCAInfo` for a company's certificate, a `credential.username`,
+  `credential.useHttpPath`, a `pushInsteadOf` the user wrote in that repository. Set them in
+  your own settings instead, for that repository's folder if they are its alone (`[includeIf
+  "gitdir:~/work/app/"]` and a file of yours it includes), or for its remote (`[includeIf
+  "hasconfig:remote.*.url:https://forge.example/**"]`). An upstream the push sets (`-u`, `push.autoSetupRemote`), which
+  git writes in the folder's settings, is written back to the repository's once it ended. A
+  push line that names another git folder (`--git-dir`, `--work-tree`) is refused, and one that
+  moves (`-C`) is made from the repository it moves to;
+- `PATH` made of the folders of the daemon's `PATH` that only root may change (each of them and
+  every folder on the way is root's, and no one else may write it): a program the user's
+  settings name by a bare name (a credential helper's `!gh auth git-credential`, `ssh` inside a
+  wrapper) is root's, never one a run put first in a folder it can write (`~/.local/bin`,
+  `~/bin`). It is one folder the daemon makes for each push in the push's folder (below),
+  holding a link to each program of those folders that only root may change too, under its name
+  and to its name (`python3`, not the `python3.12` it leads to, so that an upgrade is followed):
+  a name whose first program there is not (a file of the user's in `/usr/local/bin`, a link to
+  one, a link that leads nowhere) has none, and the daemon's log says which. One the system's
+  folders do not hold is not found, and the helper fails: name it by its path, in a folder only
+  root may change. Where that folder cannot be made, the `PATH` is a path to no folder, and no
+  program is found by its bare name;
+- `core.hooksPath=/dev/null`;
+- `credential.helper=` and then the user's own credential helpers (the system's and the user's
+  settings, read at the daemon's start), as for the daemon's own git (above): a helper a run wrote
+  in the repository's settings is not asked, nor handed the sign-in to `store`. Those the user
+  gives one forge alone, through an `includeIf "hasconfig:remote.*.url:…"`, are read at the start
+  too, from the file it includes, and written in a file of the push's folder that is included
+  after them only where the daemon finds every URL the push may go to matches the pattern, as
+  git matches it (`*` within a folder, `**` across them; a pattern with a class `[…]` or an
+  escape matches nothing). Those URLs are the push URLs (as `git remote -v` says them) of
+  every remote the push knows, whichever its line or settings choose; a push whose line names a
+  URL or `--repo`, or whose `branch.<name>.remote`, `branch.<name>.pushRemote` or
+  `remote.pushDefault` names a remote git does not know (a URL), gets none. Git's own
+  `hasconfig` would include them where any remote's URL matches, a remote or a `pushurl` a run
+  wrote among them, and ask them for a sign-in to wherever the push goes: a helper that gives
+  its token to any host would send one forge's sign-in to a run's host, or another account's
+  of the same forge;
+- `push.gpgSign=false`, and the signing programs (`gpg.program`, `gpg.openpgp.program`,
+  `gpg.x509.program`, `gpg.ssh.program`, `gpg.ssh.defaultKeyCommand`) set to none: a push is
+  not signed, and a line's `--signed` fails;
+- `--no-recurse-submodules` last among the push's options: the push of a submodule runs with the
+  submodule's own settings and receiving program, so none is made, whatever the line or the
+  settings say;
+- `GIT_SSH_COMMAND`, so that a `core.sshCommand` a run wrote in the repository is not what signs
+  in: the user's own when they have one (the daemon's `GIT_SSH_COMMAND`, else the
+  `core.sshCommand` of their own git settings as they apply to the repository pushed, an
+  `includeIf "gitdir:…"` or `"onbranch:…"` for several accounts of one forge included, read from
+  the files of those settings found at the daemon's start and never from the repository's), else
+  the `ssh` found at the daemon's start, as for its own fetch (above). A command of the user's
+  that names `ssh` alone runs that one; one that names another program runs it only when it is
+  in `~/.ssh` or only root may change it and its folders, and one with `-F` (another
+  configuration, but `-F /dev/null`), `-I` (a library), `-A` (the agent forwarded), `-M` or
+  `-S` (a shared connection), an `-o` that runs a program, shares a connection (`ControlMaster`,
+  `ControlPath`, `ControlPersist`), forwards the agent or includes a file, or anything the shell
+  would read as more than words lends the agent to no push (below). Short options are read as
+  `ssh` reads them, grouped too (`-vF<file>`). Whichever runs is given `-o ControlMaster=no -o
+  ControlPath=none -o ForwardAgent=no` first, as the daemon's own `ssh` is (above);
+- `GIT_ALLOW_PROTOCOL` set to git's own network transports (`ssh:https:http:git`), which wins
+  over the `protocol.*.allow` settings: a URL a run set through a helper (`ext::<command>`, a
+  `git-remote-<name>`) is not run, and a path is not reached (above). The push's remote is git's
+  to resolve (the line's options, the branch's `pushRemote`, `remote.pushDefault`), and its URL a
+  setting a run can write, so the transports allowed are git's own four rather than the one
+  protocol of a remote. A push through a remote helper of the user's own is refused too;
+- what the repository's settings may name as a program of its transport is not run: an empty
+  `GIT_PROXY_COMMAND` and `GIT_ASKPASS`, which win over `core.gitProxy` (a `git://` remote) and
+  `core.askPass` (an HTTPS sign-in with no helper), `--receive-pack=git-receive-pack` on the
+  push's line, right after `push` (git takes the first `remote.<name>.receivepack` it reads, the
+  repository's, and runs it on this machine for a remote reached by its path; the gate refuses
+  the option on the agent's own line). The user's own `core.gitProxy` and `core.askPass` are not
+  used by such a push either;
+- no `DBUS_SESSION_BUS_ADDRESS` once the bus the daemon found at its start by a path outside the
+  runtime folders is gone or replaced (above): what is at that path now may be a run's. The
+  daemon's own use of the keyring (the vault) is unchanged: it still reaches the bus its
+  environment names.
+
+The project's and the workspace's variables are not applied (`docs/commands.md`, "The
+environment"). What the project's message checks read of such a push runs where the push does,
+outside the sandbox, from its folder and with its environment: its dry run, the URL the remote is
+read at and what the remote has (`ls-remote`), and the commits it sends (`rev-list`, `cat-file`),
+with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH`. A push whose dry run forces a ref (`+`) or
+deletes one (`-`) its line does not ask to (`--force`, `--force-with-lease`, `--delete`,
+`--prune`, `--mirror`, a refspec `+…`, `:…` or `+:…`) is refused, saying which: settings chose
+it, and the gate judged the line alone. That check reads the dry run of the message checks, so
+it runs only for a project that declares message checks or a branch format (`docs/projects.md`):
+elsewhere a plain `git push` forces or deletes what the user's own `remote.<name>.push` says
+(the repository's is refused, above). So none of the repository's settings
+apply to them either (a proxy a run set never sees the sign-in they make, and a `url.*.insteadOf`
+of the repository's no longer refuses the push), nor its `info/grafts` or a replacement a run
+made, which would hide a commit from the checks while the push sends it. The other git reads
+made for a push (whether it would push submodules), and the probes of a push's task (its `ready`
 and `url` commands), run in the sandbox.
+
+**What such a push reads is read-only to every confined command.** The push runs the user's `ssh`,
+with their agent, outside the sandbox: whatever a run could write into what `ssh` reads
+(`ProxyCommand`, `Match exec`, an `Include`d file) would run there with the user's keys. So in the
+private mount namespace of every command Flottille confines (above), `~/.ssh` is read-only whole,
+with what is below it, and so are the files of the user's own git settings found at the daemon's
+start (`GIT_CONFIG_GLOBAL` when set, else `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`) and
+those they include (`include.path`, `includeIf.*.path`, whatever their condition): those git
+reads at every push, and the daemon reads its user's `core.sshCommand` from. Each folder on the
+way to them that a command could rename or remove (its own folder is the user's, or one they may
+write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
+the way is renamed to put another file at the path. `~/.ssh` is the account's (the home of the
+user database, which `ssh` reads `~` as, whatever `HOME` says); the daemon makes it at its start
+(`0700`, as `ssh` would) when it is missing, since a folder that is not there could not be kept
+read-only. A command started at any time has them read-only from its start, and nothing it runs
+can unmount them (above).
+
+What that cannot hold is not protected file by file: the user's SSH agent is then **lent to no
+push**, no `SSH_AUTH_SOCK` and no `ssh` among the transports allowed (a push over SSH fails, saying
+why on its result), and, when it is what `ssh` itself reads, the daemon's own fetch is not lent
+the agent either. It is judged at each push, from the files as they are then, and `flottille
+doctor` says it in its warnings with how to fix it (`sandbox.ssh_lent` false in `--json`):
+
+- `~/.ssh` is not a folder of its own (a link), or no longer the one found at the daemon's start;
+- a link in `~/.ssh` that leads out of it (`ssh` follows it to a file a run can write: put the file
+  itself in `~/.ssh`), a file with a hard link elsewhere, or more than 10,000 entries. A link to a
+  file of `~/.ssh`, with no other link on the way, is kept read-only with it; a link to a socket
+  (the agent's, where a terminal multiplexer finds it) is one `ssh` never reads, unless it bears a
+  name `ssh` reads: `config`, `id_*`, `known_hosts*`, an `Include`d file, or one an
+  `IdentityFile`, `CertificateFile`, `UserKnownHostsFile`, `GlobalKnownHostsFile` or
+  `RevokedHostKeys` names (any, when one of these names a token or a variable);
+- an `Include` of `~/.ssh/config`, or of a file it includes, outside `~/.ssh` (`~` read as the
+  account's home, a relative path in `~/.ssh`, no `..`), or that names a variable, a token
+  (`%d`) or a class of characters, which Flottille does not read: move the file into `~/.ssh`;
+- a program the configuration runs or loads (`ProxyCommand`, `LocalCommand`, `KnownHostsCommand`,
+  `Match exec`, `PKCS11Provider`, `SecurityKeyProvider`, `XAuthLocation`; `none` is none), which
+  may itself be, or be found through the `PATH` in, a file a run writes. `ProxyJump` is not one.
+  A line is split as `ssh` splits it, its quotes undone (`"ProxyCommand"` is the keyword);
+- the git settings include a file that was not there at the daemon's start (a missing include is
+  nothing, for git and for this judgement, until it is made), or one with a hard link; a file of
+  them is no longer the one found at the
+  start (git replaces the file it edits: `git config --global` is followed by a restart of the
+  daemon);
+- another mount of the same files (a bind mount of the home elsewhere, the top of a Btrfs volume
+  mounted beside its subvolumes), or a mount below them, which stays writable;
+- the kernel gives no user namespace to the commands Flottille confines (above), or no Landlock
+  (its second ABI or later): without it, `/proc/<pid>/root` of a process outside the namespace
+  leads to the writable `~/.ssh` (below, "The gaps"), and no push the gate let through is run at
+  all (above), which is what `flottille doctor` and the project's settings say then;
+- the user's own `ssh` command runs a program a run could change, or reads another configuration
+  (above).
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
@@ -281,7 +650,7 @@ server, has no `DISPLAY` and no `XAUTHORITY`, and Landlock keeps X11's abstract 
 sixth ABI, Linux 6.12). Its sockets by their path, under `/tmp/.X11-unix`, are not denied: a rule
 on `/tmp` takes from a process what is made there after it started (a file made there could no
 longer be moved or linked into its worktree, a socket made there by another process could not be
-reached), so the private mount namespace of #976 masks the folder instead (below, "The gaps").
+reached), so the private mount namespace empties the folder instead (above).
 Only a run of a project that lets its runs open windows, and a connection's browser that is
 shown, in a session without Wayland, are given X11 (`docs/tools.md`, `docs/extensions.md`): their
 display folder says so, and their process is not bound to the scope. The scope keeps out every
@@ -294,30 +663,97 @@ The gaps, where the platform does not allow more:
 
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
-  cannot be opened, but a process that guesses the bus's path can still connect to it;
-- from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
-  bus: a gpg-agent socket there cannot be reached, so a commit signed through gpg-agent fails;
+  cannot be opened, but a process that guesses the bus's path could still connect to it: the
+  private mount namespace is what keeps it out there, where the kernel gives one (below);
+- the runtime folder is emptied whole, and from the ninth ABI connecting is denied to every
+  socket of it, not only the bus: a gpg-agent socket there cannot be reached, so a commit signed
+  through gpg-agent fails;
 - below the ninth ABI, connecting is not governed: a run gets no `SSH_AUTH_SOCK`, but one that
-  guesses the agent's path can still connect to it, as to the bus;
-- a push the gate let through runs with what the repository's settings say, as the user's own
-  push from that folder would: a script the gate never read may have changed them before
-  (`credential.helper`, `core.sshCommand`, `core.fsmonitor`, `url.*.insteadOf`), and that applies
-  to the push, outside the sandbox, with the user's credentials. So does what the user's
-  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command can still write
-  until the private mount namespace (#976) mounts `~/.ssh` read-only. The gate judges the push's
-  line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
-  signs in as theirs does;
+  guesses the path of an agent outside the runtime folders (`/tmp/ssh-…/agent.…`, a password
+  manager's under the home) can still connect to it: the private mount namespace empties the
+  runtime folders alone;
+- where the kernel refuses user namespaces, a confined process has no private mount namespace:
+  below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
+  by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
+  (`sandbox.private_mounts` false in `--json`);
+- a session bus outside the runtime folders is hidden at its path only: where its socket is in
+  a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
+  folder (only the masked socket itself is a mount point), and the bus found at the start is then
+  reached at its new path, which nothing hides. A socket a confined command made at the bus's
+  path is hidden from the others, but the daemon's own keyring use would reach it, since its
+  environment still names the path. Any change of the socket's change time (a `chmod`, a new
+  link, a bus started there again) counts as replaced: the push loses the bus's address while
+  the path stays hidden;
+- `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
+  from every process outside its domain, so it is closed wherever Landlock is used (its second
+  ABI or later), and open without it: the user's SSH agent is then lent to no push (above);
+- a push the gate let through still goes where the repository's remotes say (`remote.<name>.url`,
+  `pushurl`, the branch's `pushRemote`, above): a run that rewrote a URL sends the push to another
+  host, over git's own transports and with the sign-in the user's own helper gives that host. The
+  gate judges the push's line, not the repository it runs in: an accepted risk, as a push the
+  line names by its URL would go there too;
+- a program the user's own settings name by its path, in a folder a confined command can write
+  (a credential helper `~/.local/bin/helper`), runs outside the sandbox as written there: the
+  settings are the user's, and only a bare name is looked for in the folders only root may
+  change (above);
+- the daemon runs every git of its own (its statuses, worktrees and fetches, the reads of the
+  user's settings at its start) from the `git` found at its start: root's when there is one,
+  else the first of its `PATH` then. Where root owns none, a `git` a run left in a folder of that
+  `PATH` before the daemon started is the one it runs, confined and with nothing of the user's,
+  and no push the gate let through is run (above);
+- a `branch.<name>.merge` that names `refs/heads/<name>` is given to a push whatever the
+  `push.default`: one a run wrote changes nothing of where a plain push goes. One the user set to
+  another branch is not, where `push.default` is `upstream`, so their plain `git push` of that
+  branch fails, and with `push.autoSetupRemote` goes to the branch of its own name and sets it as
+  the upstream;
+- a credential helper the user gives one forge alone signs in a push the gate let through only
+  where every remote the repository knows is that forge's: a repository with remotes on two
+  forges, or a remote a run added, pushes with the helpers set for every remote alone. What else
+  the file of such an `includeIf "hasconfig:remote.*.url:…"` sets (a `url.*.insteadOf`, a
+  `user.email`) is still included by git itself where any remote matches, a remote a run wrote
+  among them: those settings are the user's own;
+- what the system's `ssh` configuration (`/etc/ssh/ssh_config` and what it includes) runs is
+  root's to say, and not judged;
+- `~/.ssh` being read-only to every confined command, the `ssh` of the daemon's own fetch adds no
+  host to `known_hosts` (`StrictHostKeyChecking accept-new` warns and goes on), and a run cannot make a key or write the user's git settings
+  (`git config --global`); a push the gate let through, outside the sandbox, writes them as the
+  user's own;
+- a file protected at the daemon's start is protected at the path it had then: a command started
+  before the user replaced it (an editor that writes a new file, `git config --global`) still sees
+  the new one writable, so the push is lent nothing until the daemon restarts, which ends every
+  run. A process a run of an older Flottille left behind, outside its session and without its
+  marker, is not ended at the start, and has `~/.ssh` as that version left it;
+- the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
+  lent agent, as a push does, under the same judgement; and the remote's URL is read just before
+  the call, so a run that rewrites it in between sends that call to another host of the same
+  protocol;
+- the daemon's own git still runs the filters and the `textconv` a repository's attributes and
+  settings name (`filter.<name>.smudge`, `clean`, `process`, `diff.<name>.textconv`) when it
+  checks a worktree out or reads a file: git has no switch that keeps them all off. They run
+  confined, as a run does, with no agent and no remote;
+- a worktree the daemon makes checks out with no `SSH_AUTH_SOCK`: a Git LFS smudge filter that
+  signs in over SSH (`git-lfs-authenticate`) cannot, and the worktree then gets LFS pointers or
+  an error in place of the files. The agent is not lent to it: a filter is a program the
+  repository names;
+- the daemon's own fetch of an HTTPS remote runs its credential helper confined: one that reads a
+  file signs in, one that asks the keyring over the session bus (`gh auth git-credential` with
+  its token in the keyring, `git-credential-libsecret`) cannot, and the workspace then starts
+  from the base as last fetched, saying why;
 - from the ninth ABI, a socket made after a command started directly in a folder on the way to a
   kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
-  kept out only from Landlock's sixth ABI on (its abstract scope, above);
-- X11 by its socket's path, until the private mount namespace (#976) gives a run that is not
-  given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
+  kept out only from Landlock's sixth ABI on (its abstract scope, above). A bus by its path
+  outside the runtime folders is hidden only when the daemon's own `DBUS_SESSION_BUS_ADDRESS`
+  named it at its start: one another program of the session uses, or one started later, is not
+  known, and below Landlock's ninth ABI it is reached by its path;
+- X11 by its socket's path where the kernel refuses the private mount namespace, which gives a
+  process that is not given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
   `/tmp/.X11-unix/X0` itself (a program of its own, or an X11 library given that path as its
-  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not denied, since a rule on `/tmp` would
-  hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
+  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not
+  denied by Landlock, since a rule on `/tmp` would
+hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
   client without it reads `~/.Xauthority`, which a run can read, and a display manager's own key
   file (SDDM's `/tmp/xauth_…`) is readable too; a server that lets the user's local connections in
   without a key (`xhost +si:localuser:…`) needs none;

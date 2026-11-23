@@ -2,7 +2,7 @@
 //! daemon gave a fake agent's session (`crates/flottille-fake-agent`), with throwaway
 //! repositories and temporary XDG folders. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -946,7 +946,10 @@ fn stubborn(folder: &Path, seconds: u32) -> Value {
 
 #[test]
 fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    // A grace of two seconds, not five.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "2000");
     let (mcp, folder) = session(&user);
     let run = run_id(&ok(mcp.call("run", stubborn(&folder, 300))));
     eventually("the shell's pid", || folder.join("pid-300").exists());
@@ -960,14 +963,14 @@ fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
     let asked = Instant::now();
     let stopped = ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 
-    // It answers once the run ended: not before the 5 s of grace, since the term was ignored.
+    // It answers once the run ended: not before the 2 s of grace, since the term was ignored.
     assert!(
-        asked.elapsed() >= Duration::from_secs(4),
+        asked.elapsed() >= Duration::from_millis(1600),
         "{:?}",
         asked.elapsed()
     );
     assert!(
-        asked.elapsed() < Duration::from_secs(15),
+        asked.elapsed() < Duration::from_secs(6),
         "{:?}",
         asked.elapsed()
     );
@@ -977,7 +980,9 @@ fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
 
 #[test]
 fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "3000");
     let (mcp, folder) = session(&user);
     let watch = user.watch(&["--after", "0"]);
     let runs: Vec<String> = [301, 302, 303]
@@ -999,9 +1004,9 @@ fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
     );
     let events = watch.until(|e| e["name"] == "daemon.stopping");
 
-    // Each takes the 5 s of grace: one after another would be 15 s.
+    // Each takes the 3 s of grace: one after another would be 9 s.
     assert!(
-        asked.elapsed() < Duration::from_secs(12),
+        asked.elapsed() < Duration::from_secs(7),
         "{:?}",
         asked.elapsed()
     );
@@ -1328,7 +1333,11 @@ fn zombies_of(daemon: u64) -> Vec<u64> {
 
 #[test]
 fn a_client_started_through_run_is_refused_and_nothing_it_sent_is_done() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     std::fs::write(folder.join("client.sh"), stop_script(&user, "client.out")).unwrap();
@@ -1351,7 +1360,11 @@ fn a_client_started_through_run_is_refused_and_nothing_it_sent_is_done() {
 
 #[test]
 fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     // A double fork out of the run's session: `setsid -f` starts `late.sh` in a session of its
@@ -1402,9 +1415,14 @@ fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
 
 #[test]
 fn daemon_stop_from_a_run_never_ends_a_stuck_daemon() {
+    // The test's own end asks the stuck daemon to stop too: it is not waited for 30 s to be ended.
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
     let user = User::with_fake_agent()
         .with_allowing_judge()
-        .with_env("FLOTTILLE_TEST_HOLD", "1");
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1")
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
     project(&user);
     let folder = workspace(&user);
     let (_, url, authorization) = agent(&user, json!({"workspace": "w"}));

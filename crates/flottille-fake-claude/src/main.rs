@@ -61,6 +61,10 @@
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
 //!
+//! `claude auth status`, `claude auth login` and `claude auth logout` play the scripted sign-in
+//! every fake shares (`crates/flottille-fake-gh/src/sign_in.rs`, #1185); `account` is the email
+//! the status says.
+//!
 //! Each of the steps that say something is a message of the API, with an id of its own
 //! (`msg_fake_1`, `msg_fake_2`…) that its `message_start` stream event and its `assistant`
 //! message carry; `"message": "m1"` on a step gives it that id instead, so that steps with the
@@ -76,6 +80,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+
+#[path = "../../flottille-fake-gh/src/sign_in.rs"]
+mod sign_in;
 
 /// The version the bridge was checked against: `claude --version` prints it.
 const VERSION: &str = "2.1.295";
@@ -97,6 +104,45 @@ fn models() -> Value {
     ])
 }
 
+/// `claude auth status`, `login` and `logout` (Claude Code's CLI reference: the status a JSON
+/// object, its exit 0 when logged in, 1 when not), as the sign-in every fake shares
+/// (`crates/flottille-fake-gh/src/sign_in.rs`) plays them. Its sign-in says the address, then
+/// asks for the code the browser shows ("Paste code here if prompted"), without a line's end;
+/// none for a session.
+fn auth(dir: &std::path::Path, args: &[String]) -> Option<i32> {
+    let script = std::fs::read_to_string(dir.join("script.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    Some(match words.as_slice() {
+        ["auth", "status", ..] => {
+            let signed = sign_in::signed_in(dir, &script);
+            let email = script["account"].as_str().unwrap_or("someone@example.com");
+            let said = match signed {
+                true => json!({"loggedIn": true, "authMethod": "claude.ai", "email": email}),
+                false => json!({"loggedIn": false, "authMethod": "none"}),
+            };
+            println!("{said}");
+            if signed { 0 } else { 1 }
+        }
+        ["auth", "login", ..] => {
+            let mut script = script;
+            if script["sign_in"]["asks_code"].is_null() {
+                script["sign_in"]["asks_code"] = json!(true);
+            }
+            sign_in::login(dir, &script, args, |address, _| {
+                println!("Opening browser to sign in…");
+                // As Claude Code 2.1.330 prints it: the address on the line under.
+                println!("If the browser didn't open, visit:\n{address}");
+                print!("Paste code here if prompted > ");
+            })
+        }
+        ["auth", "logout", ..] => sign_in::logout(dir, args),
+        _ => return None,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--version") {
@@ -107,6 +153,9 @@ fn main() {
         std::env::var_os("FLOTTILLE_FAKE_CLAUDE_DIR")
             .expect("FLOTTILLE_FAKE_CLAUDE_DIR is not set"),
     );
+    if let Some(code) = auth(&dir, &args) {
+        std::process::exit(code);
+    }
     let record = Record(dir.join("received.jsonl"));
     let mcp_config = flag(&args, "--mcp-config")
         .and_then(|path| std::fs::read_to_string(path).ok())

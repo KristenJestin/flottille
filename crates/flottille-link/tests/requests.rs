@@ -5,8 +5,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
-    Action, DeviceKey, Keyring, KeyringError, MemberList, Members, NONCES_PER_DEVICE, Request,
-    Requests, Role, Signature,
+    Action, CLOSES_SERVED_MOST, ClosesServed, DeviceKey, Keyring, KeyringError, MemberList,
+    Members, NONCES_PER_DEVICE, Request, Requests, Role, Signature, full_switch, kept_close,
+    runs_agents,
 };
 use flottille_protocol::{Class, METHODS};
 use serde_json::{Value, json};
@@ -56,8 +57,9 @@ fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
     (pc, pixel, tablet, list)
 }
 
+/// The list's members, its hub's key that of no member: the list was made before pair mode.
 fn members(list: &MemberList) -> Members {
-    list.check(&key(1).public()).unwrap()
+    list.check(&key(1).public(), &key(9).public()).unwrap()
 }
 
 /// A fixed moment, the time of the tests.
@@ -344,7 +346,7 @@ fn a_viewer_may_read_but_not_drive_and_the_refusal_says_which_role_may() {
     let text = signed(&tablet, "approval.approve", json!({"request": 3}), 0);
     assert_eq!(
         refused(&mut requests, &text, &members, 0),
-        "refused: tablet may only view: a controller or a runner may call approval.approve"
+        "refused: tablet may only view: a controller or a runner may answer a request"
     );
 
     for driver in [&pc, &pixel] {
@@ -396,12 +398,15 @@ fn every_method_of_the_catalogue_has_a_class() {
         match class {
             Class::Read => assert!(viewed.is_ok(), "a viewer may call {method}"),
             Class::Local => unreachable!("checked above"),
-            Class::Drive => assert_eq!(
-                viewed.unwrap_err().to_string(),
-                format!(
-                    "refused: tablet may only view: a controller or a runner may call {method}"
-                )
-            ),
+            Class::Drive => {
+                let refusal = viewed.unwrap_err().to_string();
+                assert!(
+                    refusal.starts_with(
+                        "refused: tablet may only view: a controller or a runner may "
+                    ),
+                    "{method}: {refusal}"
+                );
+            }
         }
     }
 }
@@ -512,22 +517,270 @@ fn a_refusal_shows_no_control_character_nor_a_long_text() {
 }
 
 #[test]
-fn remote_setup_is_answered_only_on_its_own_machine() {
+fn remote_pair_is_answered_only_on_its_own_machine() {
     let (_, pixel, _, list) = three();
     let members = members(&list);
     let mut requests = Requests::new(time(0));
-    let text = signed(
-        &pixel,
-        "remote.setup",
-        json!({"url": "http://hub.example.net"}),
-        0,
-    );
+    let text = signed(&pixel, "remote.pair", json!({"code": "0123"}), 0);
     let refused = requests
         .check(&text, "pc", &members, time(0))
         .unwrap_err()
         .to_string();
     assert!(
-        refused.contains("remote.setup is answered only on its own machine"),
+        refused.contains("remote.pair is answered only on its own machine"),
         "{refused}"
     );
+}
+
+#[test]
+fn a_refusal_says_which_role_allows_it() {
+    let (_, _, tablet, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    for (method, deed) in [
+        ("approval.approve", "answer a request"),
+        ("approval.deny", "answer a request"),
+        ("agent.answer", "answer a question"),
+        ("agent.send", "send a message"),
+        ("agent.start", "start a session"),
+        ("agent.run", "start a session"),
+        ("agent.stop", "stop a session"),
+        ("agent.cancel", "stop a turn"),
+        ("agent.mode", "switch the mode"),
+        ("remote.change", "remove, rename or restyle a device"),
+        // A method with no words of its own is named.
+        ("project.add", "call project.add"),
+    ] {
+        let text = signed(&tablet, method, Value::Null, 0);
+        assert_eq!(
+            refused(&mut requests, &text, &members, 0),
+            format!("refused: tablet may only view: a controller or a runner may {deed}"),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn a_launch_on_a_machine_that_is_no_runner_is_refused() {
+    let (pc, pixel, _, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    // `pixel` and `tablet` checking a launch of the user's: their member runs no agent.
+    for (machine, role) in [("pixel", "controller"), ("tablet", "viewer")] {
+        let request = Request::sign(
+            &pc,
+            "7",
+            machine,
+            "agent.start",
+            &json!({"project": "app"}),
+            time(0),
+        )
+        .unwrap();
+        let text = serde_json::to_string(&request).unwrap();
+        let why = format!("refused: {machine} is a {role}: it runs no agent, a runner does");
+        assert_eq!(
+            requests
+                .check(&text, machine, &members, time(0))
+                .unwrap_err()
+                .to_string(),
+            why
+        );
+        // The same sentence for the machine that carries it, before it is sent.
+        assert_eq!(
+            runs_agents(&members, machine, "agent.start")
+                .unwrap_err()
+                .to_string(),
+            why
+        );
+        // What starts no session is served there.
+        assert!(runs_agents(&members, machine, "agent.list").is_ok());
+    }
+    // A runner takes it, and a name that is no member's is the carrier's to say.
+    assert!(runs_agents(&members, "pc", "agent.start").is_ok());
+    assert!(runs_agents(&members, "nowhere", "agent.start").is_ok());
+    let text = signed(&pixel, "agent.start", json!({"project": "app"}), 0);
+    assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
+}
+
+#[test]
+fn every_method_that_starts_an_agent_is_refused_on_a_machine_that_is_no_runner() {
+    let (_, _, _, list) = three();
+    let members = members(&list);
+    for method in [
+        "agent.resume",
+        "agent.quota_resume",
+        "spec.new",
+        "spec.from_ticket",
+        "spec.develop",
+        "review.start",
+    ] {
+        assert_eq!(
+            runs_agents(&members, "pixel", method)
+                .unwrap_err()
+                .to_string(),
+            "refused: pixel is a controller: it runs no agent, a runner does",
+            "{method}"
+        );
+        assert!(runs_agents(&members, "pc", method).is_ok(), "{method}");
+    }
+    // A command of the project's runs no agent.
+    assert!(runs_agents(&members, "pixel", "task.run").is_ok());
+}
+
+#[test]
+fn a_switch_to_full_is_taken_only_as_a_member_that_may_switch_signed_it() {
+    let (pc, pixel, tablet, list) = three();
+    let members = members(&list);
+    let switch = |key: &DeviceKey, params: Value| signed(key, "agent.mode", params, 0);
+    let full = json!({"agent": "a1", "mode": "full"});
+    let now = time(MINUTE);
+
+    let taken = full_switch(&switch(&pixel, full.clone()), "pc", "a1", &members, now).unwrap();
+    assert_eq!(taken.name, "pixel");
+    assert!(full_switch(&switch(&pc, full.clone()), "pc", "a1", &members, now).is_ok());
+
+    let refusal = |text: &str, machine: &str, tree: &str| {
+        full_switch(text, machine, tree, &members, now)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(refusal(&switch(&tablet, full.clone()), "pc", "a1").contains("may only view"));
+    assert!(refusal(&switch(&pixel, full.clone()), "server", "a1").contains("not one of server"));
+    let auto = json!({"agent": "a1", "mode": "auto"});
+    assert!(refusal(&switch(&pixel, auto), "pc", "a1").contains("another mode"));
+    let other = signed(
+        &pixel,
+        "agent.stop",
+        json!({"agent": "a1", "mode": "full"}),
+        0,
+    );
+    assert!(refusal(&other, "pc", "a1").contains("not one of pc"));
+    // A key that is no member's, and a signature over other bytes.
+    let stranger = signed(&key(9), "agent.mode", full.clone(), 0);
+    assert!(refusal(&stranger, "pc", "a1").contains("not signed by a member"));
+    let forged = switch(&pixel, full).replace(r#"\"a1\""#, r#"\"a2\""#);
+    assert!(refusal(&forged, "pc", "a2").contains("not signed by a member"));
+    assert!(refusal("{}", "pc", "a1").contains("not a signed request"));
+}
+
+#[test]
+fn a_switch_kept_for_another_tree_is_refused() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let switch = signed(
+        &pixel,
+        "agent.mode",
+        json!({"agent": "a1", "mode": "full"}),
+        0,
+    );
+
+    let refused = full_switch(&switch, "pc", "b2", &members, time(MINUTE))
+        .unwrap_err()
+        .to_string();
+
+    assert!(refused.contains("another tree"), "{refused}");
+}
+
+#[test]
+fn a_switch_to_full_counts_for_twelve_hours_from_its_signing() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let switch = signed(
+        &pixel,
+        "agent.mode",
+        json!({"agent": "a1", "mode": "full"}),
+        0,
+    );
+    let hour = 60 * MINUTE;
+
+    // One night's work: still the user's switch.
+    assert!(full_switch(&switch, "pc", "a1", &members, time(12 * hour)).is_ok());
+    let refusal = |at: u64| {
+        full_switch(&switch, "pc", "a1", &members, time(at))
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        refusal(12 * hour + MINUTE).contains("is older than twelve hours"),
+        "{}",
+        refusal(12 * hour + MINUTE)
+    );
+    // Dated ahead of the clock beyond the window a request is given.
+    let ahead = signed(
+        &pixel,
+        "agent.mode",
+        json!({"agent": "a1", "mode": "full"}),
+        10 * MINUTE,
+    );
+    let refused = full_switch(&ahead, "pc", "a1", &members, time(0))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("ahead of this machine's clock"),
+        "{refused}"
+    );
+}
+
+/// `text` as the request it is.
+fn request_of(text: &str) -> Request {
+    serde_json::from_str(text).unwrap()
+}
+
+#[test]
+fn a_close_kept_while_its_machine_was_off_is_taken_from_a_member_that_may_stop() {
+    let (pc, pixel, tablet, list) = three();
+    let members = members(&list);
+    let close = |key: &DeviceKey| request_of(&signed(key, "agent.stop", json!({"agent": "a1"}), 0));
+    let day = 24 * 60 * MINUTE;
+
+    // Hours later, it is still the user's close.
+    let first = close(&pixel);
+    let (member, agent) = kept_close(&first, "pc", &members, time(2 * day)).unwrap();
+    assert_eq!((member.name.as_str(), agent.as_str()), ("pixel", "a1"));
+    assert!(kept_close(&close(&pc), "pc", &members, time(MINUTE)).is_ok());
+
+    // Served once: the same close played again, by the outbox after a lost answer or by a member
+    // that saw it signed, is answered and does nothing.
+    let mut served = ClosesServed::default();
+    assert!(served.serve(&first, time(2 * day)));
+    assert!(!served.serve(&first, time(2 * day + MINUTE)));
+    assert!(served.serve(&close(&pixel), time(2 * day)), "another close");
+    // A close whose service failed for now is served again when it is sent again.
+    let retried = close(&pixel);
+    assert!(served.serve(&retried, time(2 * day)));
+    served.release(&retried);
+    assert!(served.serve(&retried, time(2 * day)));
+    // Remembered for its 30 days, never longer, and bounded: the oldest leave first.
+    assert!(
+        served.serve(&first, time(33 * day)),
+        "forgotten after 30 days"
+    );
+    let mut full = ClosesServed::default();
+    let oldest = close(&pixel);
+    assert!(full.serve(&oldest, time(0)));
+    for _ in 0..CLOSES_SERVED_MOST {
+        assert!(full.serve(&close(&pixel), time(0)));
+    }
+    assert!(full.serve(&oldest, time(0)), "the oldest was let go");
+
+    let refusal = |request: &Request, machine: &str, at: u64| {
+        kept_close(request, machine, &members, time(at))
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(refusal(&close(&tablet), "pc", MINUTE).contains("may only view"));
+    assert!(refusal(&close(&pixel), "server", MINUTE).contains("not for server"));
+    let send = request_of(&signed(&pixel, "agent.send", json!({"agent": "a1"}), 0));
+    assert!(refusal(&send, "pc", MINUTE).contains("not agent.stop"));
+    let none = request_of(&signed(&pixel, "agent.stop", json!({}), 0));
+    assert!(refusal(&none, "pc", MINUTE).contains("names no session"));
+    assert!(refusal(&close(&key(9)), "pc", MINUTE).contains("not signed by a member"));
+    assert!(refusal(&close(&pixel), "pc", 30 * day + MINUTE).contains("older than thirty days"));
+    let ahead = request_of(&signed(
+        &pixel,
+        "agent.stop",
+        json!({"agent": "a1"}),
+        10 * MINUTE,
+    ));
+    assert!(refusal(&ahead, "pc", 0).contains("ahead"));
 }
