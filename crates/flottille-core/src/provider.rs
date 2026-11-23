@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use crate::agent::GateMode;
 use crate::paths::Paths;
 
 /// Every provider Flottille knows, in the order they are listed and chosen by default.
@@ -154,6 +155,9 @@ pub struct Settings {
     /// What a new session starts on (`[new_session]`), when the user chose: none follows what the
     /// provider proposes.
     pub new_session: Option<NewSession>,
+    /// The mode a session the user starts is in (`new_session_mode`): the user's choice, Auto when
+    /// the file says none. A session an agent starts, and a child, keep their own rules.
+    pub new_session_mode: GateMode,
 }
 
 /// The provider, model and effort a new session starts on, as `[new_session]` holds them. The
@@ -212,6 +216,7 @@ impl Default for Settings {
             judge: None,
             judge_set: false,
             new_session: None,
+            new_session_mode: GateMode::default(),
         }
     }
 }
@@ -245,6 +250,7 @@ impl Settings {
             .map_err(|e: toml::de::Error| refuse(e.message().into()))?;
         let judge = table.remove("judge");
         let new_session = table.remove("new_session");
+        let new_session_mode = table.remove("new_session_mode");
         let entries: BTreeMap<String, Entry> = serde_path_to_error::deserialize(table)
             .map_err(|error| refuse(format!("{}: {}", error.path(), error.inner().message())))?;
         let mut settings = Settings {
@@ -267,6 +273,12 @@ impl Settings {
                 )));
             }
             settings.judge = Some(judge);
+        }
+        if let Some(mode) = new_session_mode {
+            settings.new_session_mode =
+                mode.as_str().and_then(GateMode::parse).ok_or_else(|| {
+                    refuse("new_session_mode: the modes are ask, auto and full".into())
+                })?;
         }
         if let Some(new_session) = new_session {
             let chosen: NewSession =
@@ -487,6 +499,19 @@ mod tests {
         );
         let key = Settings::parse("[new_session]\nprovider = \"claude\"\nwho = 1\n").unwrap_err();
         assert!(key.contains("new_session"), "{key}");
+    }
+
+    #[test]
+    fn the_mode_a_new_session_starts_in_is_auto_unless_the_file_says_another() {
+        assert_eq!(Settings::default().new_session_mode, GateMode::Auto);
+        let full =
+            Settings::parse("new_session_mode = \"full\"\n[claude]\nenabled = true\n").unwrap();
+        assert_eq!(full.new_session_mode, GateMode::Full);
+        let error = Settings::parse("new_session_mode = \"yolo\"\n").unwrap_err();
+        assert!(
+            error.starts_with("providers.toml: new_session_mode"),
+            "{error}"
+        );
     }
 
     #[test]

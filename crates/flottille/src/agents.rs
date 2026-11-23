@@ -803,19 +803,17 @@ async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
              and a permission mode of the agent's could only loosen it"
         )));
     }
-    // The user's door alone reaches this method, so it is the user who names the session's mode.
-    let gate_mode = asked
-        .gate_mode
-        .as_deref()
-        .map(|text| {
-            GateMode::parse(text).ok_or_else(|| {
-                Failure::new(
-                    "invalid-params",
-                    format!("there is no mode {text}: the modes are ask, auto and full"),
-                )
-            })
-        })
-        .transpose()?;
+    // The user's door alone reaches this method, so it is the user who names the session's mode,
+    // or who chose the one a new session starts in (`new_session_mode` of `providers.toml`).
+    let gate_mode = match asked.gate_mode.as_deref() {
+        Some(text) => GateMode::parse(text).ok_or_else(|| {
+            Failure::new(
+                "invalid-params",
+                format!("there is no mode {text}: the modes are ask, auto and full"),
+            )
+        })?,
+        None => providers::new_session_mode(daemon)?,
+    };
     let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
         Failure::refused(format!(
             "there is no role {}: the roles are {}",
@@ -887,7 +885,7 @@ async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
-            gate_mode,
+            gate_mode: Some(gate_mode),
             launched_by: None,
             led: false,
             launched: None,
