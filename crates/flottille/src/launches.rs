@@ -254,6 +254,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         repositories: repositories.clone(),
         identities,
         settings: Some(settings),
+        launched: launched(daemon, caller),
         depth: caller.depth,
         copied: crate::travelled::copied(&project, &repositories),
     };
@@ -686,7 +687,19 @@ async fn judged(
     );
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
-    let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    let mut classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    // No chain without the user, across machines as here: a session another agent started
+    // starts a session only as base (`gate::LAUNCHED_LAUNCH`). A child is not held for it, as a
+    // launched session's children are not here. A session this machine itself started on the
+    // sender is such a session whatever the launch says; of any other caller, the sender's word
+    // is taken (the machines are the user's own).
+    let launched = asked.launched || started_there(daemon, &machine, &asked.caller);
+    if launched && kind != LaunchKind::Child {
+        classed.base = true;
+        classed
+            .reasons
+            .push(crate::gate::LAUNCHED_LAUNCH.to_owned());
+    }
     // The files its setup copies that the project here lacks: made from the vault entries the
     // user shares from the caller's machine. A secret written into a file is the user's to allow,
     // whatever the mode, those shared already named, those not yet asked for.
@@ -1528,6 +1541,22 @@ pub(crate) fn launched_from_shown(daemon: &Daemon, agent: &str) -> Value {
         Some((caller, machine, kind)) => json!({"machine": machine, "agent": caller, "kind": kind}),
         None => Value::Null,
     }
+}
+
+/// Whether `agent` is a session another agent started: here (`launched_by`), or on another
+/// machine. Its own launches come to the user (`gate::LAUNCHED_LAUNCH`).
+pub(crate) fn launched(daemon: &Daemon, agent: &Agent) -> bool {
+    agent.launched_by.is_some() || launched_from(daemon, &agent.id).is_some()
+}
+
+/// Whether `agent` of the machine `machine` (its key in hex) is a session an agent of this
+/// machine launched there.
+fn started_there(daemon: &Daemon, machine: &str, agent: &str) -> bool {
+    daemon
+        .read(|store| store.launches("out", Some(machine), LaunchFilter::Agent(agent)))
+        .unwrap_or_default()
+        .iter()
+        .any(|launch| launch.state != "refused")
 }
 
 /// Whether `agent` was started here for another machine's agent, and allowed: its first message

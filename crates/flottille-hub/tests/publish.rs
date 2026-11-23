@@ -546,7 +546,7 @@ fn verify_fails_when_the_hub_job_ran_and_failed() {
     // `publish` needs `hub`: a red hub check merged would stop every release.
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
         ),
         "{verify}"
     );

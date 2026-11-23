@@ -191,6 +191,11 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   and `effort`, each optional) is the user's choice, made in the window's settings page ("New
   sessions") or with `flottille provider new-session <provider> [--model <model>] [--effort
   <effort>]` (`--clear` goes back; the method `provider.set_new_session`, `docs/protocol.md`).
+  Beside it, **the mode a session the user starts is in** (`new_session_mode` in `providers.toml`,
+  `ask`, `auto` or `full`, Auto when the file says none): the window's Mode, or `flottille provider
+  new-session --mode <mode>` (the method `provider.set_new_session_mode`). It is per machine, and
+  it is the user's door's: a session an agent starts and a child keep their own rules
+  (`docs/design.md` §7.1).
   Without it, a new session follows what the provider proposes, as it always did. The order is
   the project's file (its `provider` and `model`), then this setting, then what the provider
   proposes (and, in the window, the last pick). The setting's model and effort apply to its own

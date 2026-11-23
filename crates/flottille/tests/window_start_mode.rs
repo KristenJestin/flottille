@@ -261,3 +261,107 @@ fn after_a_start_the_composer_is_back_on_auto(cx: &mut TestAppContext) {
     open_atlas(&shell, cx);
     on_auto_in_the_bar(&composer, cx);
 }
+
+#[gpui_kit::test]
+fn a_new_session_s_composer_shows_the_default_mode_before_the_first_message(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+    let (shell, composer, cx) = atlas(&user, cx);
+
+    // Before any message, the control says Full, in the alarm colour, with no judge to warn of.
+    until(&shell, cx, "the composer shows the default", |cx| {
+        shown(&composer, cx) == (Some("full".into()), true)
+    });
+    cx.update(|window, _| {
+        assert_eq!(window.find("start-mode").label(), Some("Full"));
+        assert!(window.try_find("start-mode-warning").is_none());
+    });
+
+    // A choice for one session is the session's: the composer is back on the default after it.
+    choose_mode("ask", cx);
+    assert_eq!(shown(&composer, cx), (Some("ask".into()), false));
+    shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
+    settle(cx);
+    open_atlas(&shell, cx);
+    assert_eq!(shown(&composer, cx), (Some("full".into()), true));
+
+    // Started with nothing touched, the session is in the default.
+    type_task("Fix the login", cx);
+    cx.update(|window, cx| window.click("send", cx));
+    until(&shell, cx, "the session started", |cx| {
+        !composer.read_with(cx, |c, _| c.is_sending())
+            && user.call("agent.list", json!({})).unwrap()["agents"]
+                .as_array()
+                .is_some_and(|agents| agents.len() == 1)
+    });
+    let agents = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+    let id = agents[0]["id"].as_str().unwrap();
+    assert_eq!(
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["gate_mode"],
+        "full"
+    );
+    assert_eq!(shown(&composer, cx), (Some("full".into()), true));
+}
+
+#[gpui_kit::test]
+fn a_default_chosen_while_the_composer_is_open_is_shown_unless_the_session_chose(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (shell, composer, cx) = atlas(&user, cx);
+    on_auto_in_the_bar(&composer, cx);
+
+    // The default changes under an open composer that nobody touched: it follows.
+    user.call("provider.set_new_session_mode", json!({"mode": "ask"}))
+        .unwrap();
+    until(&shell, cx, "the composer follows the default", |cx| {
+        shown(&composer, cx) == (Some("ask".into()), false)
+    });
+
+    // Once the user chose for this session, the default no longer moves it.
+    choose_mode("full", cx);
+    user.call("provider.set_new_session_mode", json!({"mode": "auto"}))
+        .unwrap();
+    // Once the window has read the new default, which the composer had to ignore.
+    until(&shell, cx, "the providers are read again", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.providers().new_session_mode.as_deref() == Some("auto")
+        })
+    });
+    assert_eq!(shown(&composer, cx), (Some("full".into()), true));
+}
+
+#[gpui_kit::test]
+fn a_composer_nobody_touched_leaves_the_mode_to_the_daemon(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, composer, cx) = atlas(&user, cx);
+    // The window shows Auto: the default it last read. The daemon's has changed since, which the
+    // window has not heard of (it hears of it by polling, and nothing polls until the start).
+    on_auto_in_the_bar(&composer, cx);
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+
+    type_task("Fix the login", cx);
+    cx.update(|window, cx| window.click("send", cx));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let agents = loop {
+        let agents = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+        if agents.as_array().is_some_and(|agents| agents.len() == 1) {
+            break agents;
+        }
+        assert!(Instant::now() < deadline, "the session never started");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    // The start named no mode, so that the daemon's default applied: what the user chose for this
+    // session is the only mode the composer sends.
+    let id = agents[0]["id"].as_str().unwrap();
+    assert_eq!(
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["gate_mode"],
+        "full"
+    );
+}
