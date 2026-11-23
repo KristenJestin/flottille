@@ -1778,7 +1778,14 @@ async fn session_call(
         )
         .into());
     }
-    if call.project.trim().is_empty() || !one_line(&call.project, 64) {
+    // A daemon that names no project is older than this one.
+    if call.project.trim().is_empty() {
+        return Err(format!(
+            "the daemon of {name} needs updating to call the sessions of this machine"
+        )
+        .into());
+    }
+    if !one_line(&call.project, 64) {
         return Err("a project is named by one line of 64 characters at most"
             .to_owned()
             .into());
@@ -1991,7 +1998,11 @@ async fn forward_to(
                 Some("ok") => Outcome::Done(text),
                 Some("held") => Outcome::Held(text),
                 Some("failed") => Outcome::Failed(text),
-                _ => Outcome::Refused(text),
+                Some("refused") => Outcome::Refused(text),
+                // An answer this daemon cannot read comes from an older one.
+                _ => Outcome::Refused(format!(
+                    "refused: the daemon of {name} needs updating to answer this call: {text}"
+                )),
             }
         }
         Err(LinkError::Declined { reason, .. }) => {

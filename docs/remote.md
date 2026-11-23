@@ -1083,8 +1083,10 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   caller of another machine more than an agent of that machine: no other tool than
   `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
   the tree later is not given until it is written there), no secret, no file: when its project is
-  not on that machine, its place is a folder that does not exist. Its answer is masked again of
-  the caller's machine's secrets. A machine stands in 64 callers of one other machine at most
+  not on that machine, its place is a folder that does not exist. Its answer, whatever its
+  outcome (a refusal too), is masked again of the caller's machine's secrets; an answer without
+  an outcome, or a call without a project, comes from an older daemon and is refused saying that
+  daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
   the members, with their leaves.
 - **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a

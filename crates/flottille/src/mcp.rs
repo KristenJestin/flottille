@@ -2685,14 +2685,16 @@ async fn played_whole(
     );
     let word = outcome.word();
     let (text, limit) = match (shaped, outcome) {
-        // Masked there of that machine's secrets, and here of this one's: a secret only this
-        // machine knows is never shown its agent either. Escaped and cut there.
-        (true, Outcome::Done(text) | Outcome::Failed(text)) => {
-            (masked(&text, &grant.place), RESULT_LIMIT)
-        }
-        (true, Outcome::Held(text) | Outcome::Refused(text) | Outcome::Invalid(text)) => {
-            (text, RESULT_LIMIT)
-        }
+        // Masked there of that machine's secrets, and here of this one's, whatever its outcome: a
+        // secret only this machine knows is never shown its agent either. Escaped and cut there.
+        (
+            true,
+            Outcome::Done(text)
+            | Outcome::Failed(text)
+            | Outcome::Held(text)
+            | Outcome::Refused(text)
+            | Outcome::Invalid(text),
+        ) => (masked(&text, &grant.place), RESULT_LIMIT),
         (false, outcome) => shown(outcome, &grant.place),
     };
     // Notes left for the session that replaced this one are its own, not this late call's.
