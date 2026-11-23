@@ -2768,11 +2768,14 @@ pub fn remind_integrated_due(daemon: &Arc<Daemon>) {
             let Ok(Some(session)) = daemon.read(|store| store.agent(&id)) else {
                 continue;
             };
+            // A pilot of another machine is told between its turns there, whatever its
+            // stand-in here says.
             let pilot_idle = session.launched_by.as_deref().is_some_and(|pilot| {
-                matches!(
-                    daemon.read(|store| store.agent(pilot)),
-                    Ok(Some(pilot)) if pilot.state == AgentState::Idle
-                )
+                crate::across::is_stand_in(pilot)
+                    || matches!(
+                        daemon.read(|store| store.agent(pilot)),
+                        Ok(Some(pilot)) if pilot.state == AgentState::Idle
+                    )
             });
             if pilot_idle {
                 remind_once(&daemon, &session).await;

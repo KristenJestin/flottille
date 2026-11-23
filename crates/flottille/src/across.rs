@@ -40,7 +40,7 @@ const CALLED: [&str; 6] = [
 ];
 
 /// The kinds of delivery a session on another machine sends the agent that started it.
-const KINDS: [&str; 12] = [
+const KINDS: [&str; 13] = [
     "child-report",
     "child-question",
     "child-asks",
@@ -53,6 +53,7 @@ const KINDS: [&str; 12] = [
     "session-turn-ended",
     DETACHED,
     crate::tree::LED_INTEGRATED,
+    crate::extensions::review::EXTENSION.name,
 ];
 
 /// The kind of the delivery that tells a pilot of another machine the user detached the session

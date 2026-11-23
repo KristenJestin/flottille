@@ -7,7 +7,7 @@ mod automatic;
 mod command;
 mod connections;
 mod guidance;
-mod review;
+pub(crate) mod review;
 mod specs;
 
 pub use connections::command::ConnectionAction;
