@@ -683,7 +683,13 @@ fn the_name_icon_and_role_proposed_are_this_machines_own() {
         ["desktop", "laptop", "server"].contains(&proposed["icon"].as_str().unwrap()),
         "{proposed}"
     );
-    assert_eq!(proposed["role"], "controller", "{proposed}");
+    // A machine with no screen is a runner without agents signed in, any other a controller.
+    let role = if proposed["icon"] == "server" {
+        "runner"
+    } else {
+        "controller"
+    };
+    assert_eq!(proposed["role"], role, "{proposed}");
     // Paired with nothing given, the device is what was proposed.
     let output = pc
         .user
@@ -697,9 +703,50 @@ fn the_name_icon_and_role_proposed_are_this_machines_own() {
     let this = &members["members"][0];
     assert_eq!(this["name"], proposed["name"]);
     assert_eq!(this["icon"], proposed["icon"]);
-    assert_eq!(this["role"], "controller");
+    assert_eq!(this["role"], role);
     assert_eq!(this["added_by"], "the hub");
     assert_eq!(this["colour"], json!(Colour::of(&pc.device().public())));
+}
+
+#[test]
+fn pair_says_the_role_it_takes() {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let proposed = pc.remote()["proposed"]["role"].as_str().unwrap().to_owned();
+    // Before it asks the hub: the role proposed, and how to choose another.
+    let output = pc
+        .user
+        .run_with_input(&["remote", "pair"], &format!("{}\n", hub.code()));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains(&format!("pairing as a {proposed}")) && said.contains("--role"),
+        "{said}"
+    );
+}
+
+#[test]
+fn pair_says_the_role_it_was_given() {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let output = pc.user.run_with_input(
+        &["remote", "pair", "--role", "viewer"],
+        &format!("{}\n", hub.code()),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("pairing as a viewer") && !said.contains("--role"),
+        "{said}"
+    );
 }
 
 #[test]

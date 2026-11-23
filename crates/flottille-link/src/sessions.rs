@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::offers::MOST_PROJECTS;
+
 /// The most sessions a list may hold: past it, the sender keeps those of the latest exchange.
 pub const MOST_SESSIONS: usize = 500;
 /// The longest title it may hold, in characters.
@@ -23,6 +25,30 @@ pub const STATES: [&str; 4] = ["running", "needs you", "waiting", "idle"];
 pub struct SessionList {
     pub sessions: Vec<LightSession>,
 }
+
+/// The projects a runner holds, each by its repositories' remotes: what lets another machine say
+/// two projects are one (`docs/remote.md`, "One list of every machine"). A message of its own, not
+/// a field of [`SessionList`]: a machine of before refuses the message alone (it does not know
+/// it), where a field it does not know would make it refuse the whole list of sessions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectList {
+    pub projects: Vec<LightProject>,
+}
+
+/// A project as another machine's list shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightProject {
+    pub name: String,
+    /// The remotes of its repositories, normalised (`flottille_core::remote_key`), sorted, each
+    /// once; empty when one of its repositories has no remote to say it by.
+    pub remotes: Vec<String>,
+}
+
+/// The most remotes a project of a list may hold, and the longest one, in characters.
+const MOST_REMOTES: usize = 64;
+const REMOTE_LIMIT: usize = 256;
 
 /// A session as another machine's list shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +142,36 @@ impl SessionList {
     }
 }
 
+impl ProjectList {
+    /// Whether another machine's projects are ones to keep: within the bounds, every text one a
+    /// client may show as it is.
+    pub fn check(&self) -> Result<(), String> {
+        if self.projects.len() > MOST_PROJECTS {
+            return Err(format!("a list names {MOST_PROJECTS} projects at most"));
+        }
+        for project in &self.projects {
+            if project.name.is_empty() || !showable(&project.name, NAME_LIMIT) {
+                return Err(format!(
+                    "a project of a list is 1 to {NAME_LIMIT} characters, none of them a control \
+                     or an invisible one"
+                ));
+            }
+            if project.remotes.len() > MOST_REMOTES
+                || project
+                    .remotes
+                    .iter()
+                    .any(|remote| remote.is_empty() || !showable(remote, REMOTE_LIMIT))
+            {
+                return Err(format!(
+                    "a project names {MOST_REMOTES} remotes at most, of {REMOTE_LIMIT} characters \
+                     at most"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,7 +208,7 @@ mod tests {
         long.title = "x".repeat(TITLE_LIMIT + 1);
         assert!(
             SessionList {
-                sessions: vec![long]
+                sessions: vec![long],
             }
             .check()
             .is_err()
@@ -161,7 +217,7 @@ mod tests {
         hidden.title = "a\u{202e}b".to_owned();
         assert!(
             SessionList {
-                sessions: vec![hidden]
+                sessions: vec![hidden],
             }
             .check()
             .is_err()
@@ -170,14 +226,14 @@ mod tests {
         odd.state = "sleeping".to_owned();
         assert!(
             SessionList {
-                sessions: vec![odd]
+                sessions: vec![odd],
             }
             .check()
             .is_err()
         );
         assert!(
             SessionList {
-                sessions: vec![session("../x")]
+                sessions: vec![session("../x")],
             }
             .check()
             .is_err()
@@ -199,7 +255,7 @@ mod tests {
         itself.pilot = Some("a1".to_owned());
         assert!(
             SessionList {
-                sessions: vec![itself]
+                sessions: vec![itself],
             }
             .check()
             .is_err()
@@ -222,5 +278,89 @@ mod tests {
         };
         let why = twice.check().unwrap_err();
         assert!(why.contains("twice"), "{why}");
+    }
+
+    #[test]
+    fn the_projects_of_a_machine_are_bounded() {
+        let project = |name: &str, remote: &str| LightProject {
+            name: name.to_owned(),
+            remotes: vec![remote.to_owned()],
+        };
+        let list = ProjectList {
+            projects: vec![project("app", "github.com/acme/app")],
+        };
+        assert_eq!(list.check(), Ok(()));
+        for odd in [
+            project("", "x/y"),
+            project("app", ""),
+            project("app", "a\u{202e}b"),
+        ] {
+            assert!(
+                ProjectList {
+                    projects: vec![odd]
+                }
+                .check()
+                .is_err()
+            );
+        }
+        let many = ProjectList {
+            projects: (0..=MOST_PROJECTS)
+                .map(|at| project(&format!("p{at}"), "x/y"))
+                .collect(),
+        };
+        assert!(many.check().is_err());
+    }
+
+    #[test]
+    fn the_list_of_sessions_keeps_the_shape_a_machine_of_before_reads() {
+        // A list of sessions carries no projects: a machine of before refuses a field it does not
+        // know (`deny_unknown_fields`), and would lose the whole list.
+        let list = SessionList {
+            sessions: vec![session("a1")],
+        };
+        let wire = serde_json::to_value(&list).unwrap();
+        assert_eq!(
+            wire.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["sessions"]
+        );
+    }
+
+    /// What a machine of before knows of this link's messages: its list of sessions as this one
+    /// writes it, and no `projects` message.
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Before {
+        Sessions(Older),
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Older {
+        sessions: Vec<LightSession>,
+    }
+
+    #[test]
+    fn a_machine_of_before_still_reads_the_sessions_and_refuses_the_projects_alone() {
+        use crate::link::{MachineMessage, Message};
+        let sessions = Message::Machine(MachineMessage::Sessions(SessionList {
+            sessions: vec![session("a1")],
+        }));
+        let projects = Message::Machine(MachineMessage::Projects(ProjectList {
+            projects: vec![LightProject {
+                name: "app".to_owned(),
+                remotes: vec!["github.com/acme/app".to_owned()],
+            }],
+        }));
+        let machine = |message: &Message| serde_json::to_value(message).unwrap()["machine"].clone();
+        let read: Before = serde_json::from_value(machine(&sessions)).unwrap();
+        let Before::Sessions(older) = read;
+        assert_eq!(older.sessions.len(), 1);
+        // The message it does not know is refused alone: the link and the sessions go on.
+        assert!(serde_json::from_value::<Before>(machine(&projects)).is_err());
+        // And this version reads both.
+        for message in [sessions, projects] {
+            let back: Message =
+                serde_json::from_value(serde_json::to_value(&message).unwrap()).unwrap();
+            assert_eq!(back, message);
+        }
     }
 }

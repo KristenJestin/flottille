@@ -31,6 +31,12 @@ pub struct Snapshot {
     pub project_changes: u64,
     /// The root of each agent's tree, by the agent's id: the session it belongs to.
     pub roots: HashMap<String, String>,
+    /// The user's machines, this one first, as the sidebar marks them; empty while this machine
+    /// is alone, when no row is marked.
+    pub homes: Vec<Home>,
+    /// The name of the machine this was read from, once there is another machine: this one, or the
+    /// one in front.
+    pub this_machine: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +56,132 @@ pub struct Project {
     pub commands: usize,
     /// It declares a tracker: its page has a Progress tab.
     pub tracked: bool,
+    /// The machines that have it, this one first: empty while this machine is alone.
+    pub homes: Vec<Home>,
+    /// The machine that tells it from a project of the same name it does not match (another
+    /// repository): the row says its name in small after the project's.
+    pub apart: Option<String>,
+}
+
+impl Project {
+    /// What the row says: the name, without what tells it apart from another of the same name.
+    pub fn title(&self) -> &str {
+        match &self.apart {
+            Some(machine) => self
+                .name
+                .strip_suffix(&format!("@{machine}"))
+                .unwrap_or(&self.name),
+            None => &self.name,
+        }
+    }
+
+    /// Whether every machine that has it is off: its row is greyed.
+    pub fn offline(&self) -> bool {
+        !self.homes.is_empty() && self.homes.iter().all(|home| home.offline)
+    }
+}
+
+/// A machine as the sidebar marks it (`docs/design.md` §10): its icon in its colour, its name and
+/// its state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Home {
+    pub machine: String,
+    /// The machine whose window this is.
+    pub here: bool,
+    /// The icon and the colour its member signs, as words (`server`, `teal`).
+    pub icon: String,
+    pub colour: String,
+    /// `online`, `offline since 14:02`, `needs an update`.
+    pub state: String,
+    /// Not online: its projects are greyed.
+    pub offline: bool,
+}
+
+impl Home {
+    /// What hovering its mark says: `server · offline since 14:02`.
+    pub fn said(&self) -> String {
+        match self.here {
+            true => format!("{} · this machine", self.machine),
+            false => format!("{} · {}", self.machine, self.state),
+        }
+    }
+
+    fn of(machines: &crate::machines::Machines, name: &str, here: bool) -> Home {
+        let (icon, colour) = machines
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .map_or_else(
+                || ("desktop".to_owned(), "grey".to_owned()),
+                crate::machines::Member::look,
+            );
+        let seen = machines.machine(name).filter(|_| !here);
+        Home {
+            machine: name.to_owned(),
+            here,
+            icon,
+            colour,
+            state: seen.map_or_else(|| "online".to_owned(), |machine| machine.state_words()),
+            offline: seen.is_some_and(|machine| !machine.online()),
+        }
+    }
+}
+
+/// The projects `machine` says it has: this machine's own, or the ones it last listed.
+fn held_by<'a>(
+    machines: &'a crate::machines::Machines,
+    this: &str,
+    machine: &str,
+) -> &'a [crate::machines::MachineProject] {
+    match machine == this {
+        true => machines.lists.this_projects.as_slice(),
+        false => machines
+            .lists
+            .projects
+            .iter()
+            .find(|(name, _)| name == machine)
+            .map_or(&[][..], |(_, held)| held.as_slice()),
+    }
+}
+
+/// The project of each session `machine` lists.
+fn listed_by<'a>(
+    machines: &'a crate::machines::Machines,
+    this: &str,
+    machine: &str,
+) -> Vec<&'a str> {
+    let sessions = match machine == this {
+        true => machines.lists.this.as_slice(),
+        false => machines
+            .lists
+            .machines
+            .iter()
+            .find(|(name, _)| name == machine)
+            .map_or(&[][..], |(_, listed)| listed.as_slice()),
+    };
+    sessions.iter().map(|s| s.project.as_str()).collect()
+}
+
+/// How a project of a machine is told from another's.
+enum Identity {
+    /// The remotes of its repositories: the same project as any other with the same.
+    Remotes(Vec<String>),
+    /// A repository of it has no remote: it is the same as no other.
+    Alone,
+    /// Its machine does not say (a list from before projects were listed): the same name is the
+    /// same project.
+    Unknown,
+}
+
+/// One row of the projects' list: a project and the machines that have it.
+struct Group {
+    key: String,
+    identity: Identity,
+    machines: Vec<String>,
+    /// The name this machine's own project goes by in it, when this machine has it.
+    own: Option<String>,
+    /// The machine that has a project of this name which this is not.
+    apart: Option<String>,
 }
 
 /// A workspace as its place on the project page shows it.
@@ -1063,6 +1195,8 @@ impl Snapshot {
                     model: project["model"].as_str().map(str::to_owned),
                     commands,
                     tracked: !project["tracker"].is_null(),
+                    homes: Vec::new(),
+                    apart: None,
                 }
             })
             .collect();
@@ -1086,6 +1220,8 @@ impl Snapshot {
                 .keys()
                 .map(|id| ((*id).to_owned(), root_of(&parents, id).to_owned()))
                 .collect(),
+            homes: Vec::new(),
+            this_machine: None,
         }
     }
 
@@ -1333,13 +1469,163 @@ impl Snapshot {
                         model: None,
                         commands: 0,
                         tracked: false,
+                        homes: Vec::new(),
+                        apart: None,
                     });
                 }
             }
         }
-        self.projects.sort_by(|a, b| a.name.cmp(&b.name));
         self.elsewhere.extend(added);
+        self.arrange(machines, front);
+        self.projects.sort_by(|a, b| a.name.cmp(&b.name));
         self
+    }
+
+    /// Makes one row of a project that several machines have (`docs/remote.md`, "One list of
+    /// every machine"): the same repositories, whatever the name, are the same project; the same
+    /// name with other repositories is another row, told apart by its machine. Each row says the
+    /// machines that have it, and each session of another machine moves to its row. With no
+    /// other machine, nothing is marked and the rows are the names.
+    fn arrange(&mut self, machines: &crate::machines::Machines, front: Option<&str>) {
+        let Some(this) = machines.this.as_deref() else {
+            return;
+        };
+        if machines.machines.is_empty() {
+            return;
+        }
+        let own = front.unwrap_or(this);
+        let mut order = vec![own];
+        order.extend([this].into_iter().filter(|name| *name != own));
+        let rest: Vec<&str> = machines
+            .machines
+            .iter()
+            .map(|machine| machine.name.as_str())
+            .filter(|name| !order.contains(name))
+            .collect();
+        order.extend(rest);
+        let held = |machine: &str| held_by(machines, this, machine);
+        let listed = |machine: &str| listed_by(machines, this, machine);
+        let real: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|project| !project.folder.is_empty())
+            .map(|project| project.name.clone())
+            .collect();
+        let mut groups: Vec<Group> = Vec::new();
+        let mut at: HashMap<(String, String), usize> = HashMap::new();
+        for &machine in &order {
+            let mut names: Vec<&str> = match machine == own {
+                true => real.iter().map(String::as_str).collect(),
+                false => held(machine).iter().map(|h| h.name.as_str()).collect(),
+            };
+            if machine != own {
+                names.extend(listed(machine));
+            }
+            let mut seen = HashSet::new();
+            names.retain(|name| seen.insert(*name));
+            for name in names {
+                let identity = match held(machine).iter().find(|h| h.name == name) {
+                    Some(h) if h.remotes.is_empty() => Identity::Alone,
+                    Some(h) => Identity::Remotes(h.remotes.clone()),
+                    None => Identity::Unknown,
+                };
+                // A machine has a project once in a row: two of its own with the same
+                // repositories stay two rows.
+                let found = groups.iter().position(|group| {
+                    !group.machines.iter().any(|m| m == machine)
+                        && match (&group.identity, &identity) {
+                            (Identity::Remotes(a), Identity::Remotes(b)) => a == b,
+                            (Identity::Unknown, _) | (_, Identity::Unknown) => group.key == name,
+                            _ => false,
+                        }
+                });
+                let index = match found {
+                    Some(index) => {
+                        groups[index].machines.push(machine.to_owned());
+                        if machine == own {
+                            groups[index].own = Some(name.to_owned());
+                        }
+                        index
+                    }
+                    None => {
+                        let taken = groups.iter().any(|group| group.key == name);
+                        groups.push(Group {
+                            key: match taken {
+                                true => format!("{name}@{machine}"),
+                                false => name.to_owned(),
+                            },
+                            identity,
+                            machines: vec![machine.to_owned()],
+                            own: (machine == own).then(|| name.to_owned()),
+                            apart: taken.then(|| machine.to_owned()),
+                        });
+                        groups.len() - 1
+                    }
+                };
+                at.insert((machine.to_owned(), name.to_owned()), index);
+            }
+        }
+        let homes: Vec<Home> = std::iter::once(this)
+            .chain(machines.machines.iter().map(|m| m.name.as_str()))
+            .map(|name| Home::of(machines, name, name == this))
+            .collect();
+        let mut records: HashMap<String, Project> = std::mem::take(&mut self.projects)
+            .into_iter()
+            .filter(|project| !project.folder.is_empty())
+            .map(|project| (project.name.clone(), project))
+            .collect();
+        self.projects = groups
+            .iter()
+            .map(|group| {
+                let mut project = group
+                    .own
+                    .as_ref()
+                    .and_then(|name| records.remove(name))
+                    .unwrap_or_else(|| Project {
+                        name: group.key.clone(),
+                        folder: String::new(),
+                        repositories: Vec::new(),
+                        default_repositories: None,
+                        workspaces: Vec::new(),
+                        provider: None,
+                        model: None,
+                        commands: 0,
+                        tracked: false,
+                        homes: Vec::new(),
+                        apart: None,
+                    });
+                project.name = group.key.clone();
+                project.apart = group.apart.clone();
+                project.homes = group
+                    .machines
+                    .iter()
+                    .filter_map(|machine| homes.iter().find(|home| &home.machine == machine))
+                    .cloned()
+                    .collect();
+                project
+            })
+            .collect();
+        for session in &mut self.elsewhere {
+            let Some(there) = session.elsewhere.as_ref().filter(|there| there.listed) else {
+                continue;
+            };
+            if let Some(index) = at.get(&(there.machine.clone(), session.project.clone())) {
+                session.project = groups[*index].key.clone();
+            }
+        }
+        self.homes = homes;
+        self.this_machine = Some(own.to_owned());
+    }
+
+    /// The machine a session runs on, by name.
+    pub fn machine_of<'a>(&'a self, session: &'a Session) -> &'a str {
+        session
+            .elsewhere
+            .as_ref()
+            .map(|there| there.machine.as_str())
+            .or(session.tag.as_deref())
+            .or(self.this_machine.as_deref())
+            .unwrap_or_default()
     }
 
     /// A row of another machine's session, by its id in the tree.
@@ -1424,6 +1710,7 @@ mod tests {
                     "server".to_owned(),
                     vec![listed("s1", "app", 9_000_000), listed("s2", "site", 3)],
                 )],
+                ..crate::machines::Lists::default()
             },
             ..crate::machines::Machines::default()
         }
@@ -1486,6 +1773,174 @@ mod tests {
         assert!(here.elsewhere.as_ref().unwrap().here);
         // The machine in front is read whole: its list is not added again.
         assert!(snapshot.elsewhere("s1@server").is_none());
+    }
+
+    fn held(name: &str, remotes: &[&str]) -> crate::machines::MachineProject {
+        crate::machines::MachineProject {
+            name: name.to_owned(),
+            remotes: remotes.iter().map(|r| (*r).to_owned()).collect(),
+        }
+    }
+
+    /// `pc` holding `app` and `server` holding `held_there`, each one session of its project.
+    fn with_projects(
+        state: &str,
+        this: Vec<crate::machines::MachineProject>,
+        there: Vec<crate::machines::MachineProject>,
+    ) -> Snapshot {
+        let mut machines = two_machines(state);
+        machines.lists.this_projects = this;
+        machines.lists.projects = vec![("server".to_owned(), there)];
+        build(
+            json!({"agents": [agent("r1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_lists(&machines, None)
+    }
+
+    fn homes_of(snapshot: &Snapshot, row: &str) -> Vec<String> {
+        snapshot
+            .projects
+            .iter()
+            .find(|project| project.name == row)
+            .map(|project| project.homes.iter().map(|h| h.machine.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn one_project_on_two_machines_is_one_row_with_both_machines() {
+        // Another name there, the same repositories: one project.
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![
+                held("app", &["git.example/acme/app"]),
+                held("site", &["git.example/acme/site"]),
+            ],
+        );
+        let names: Vec<&str> = snapshot.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["app", "site"]);
+        assert_eq!(
+            homes_of(&snapshot, "app"),
+            ["pc", "server"],
+            "this one first"
+        );
+        assert_eq!(homes_of(&snapshot, "site"), ["server"]);
+        let app = &snapshot.projects[0];
+        assert!(
+            !app.folder.is_empty(),
+            "the row is this machine's own project"
+        );
+        assert!(!app.offline());
+        // The server's session sits in the one row.
+        let rows: Vec<&str> = snapshot
+            .live_sessions_of("app")
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(rows, ["s1@server", "r1"]);
+        assert_eq!(snapshot.machine_of(snapshot.session("r1").unwrap()), "pc");
+        assert_eq!(
+            snapshot.machine_of(snapshot.elsewhere("s1@server").unwrap()),
+            "server"
+        );
+    }
+
+    #[test]
+    fn the_same_repositories_under_another_name_are_one_project() {
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![held("ledgerly", &["git.example/acme/app"])],
+        );
+        // The server's list names its project `ledgerly`; its session says `app`, which that list
+        // does not hold, so it is a row of its own, not the project's.
+        assert_eq!(homes_of(&snapshot, "app"), ["pc", "server"]);
+    }
+
+    #[test]
+    fn two_projects_of_one_name_but_other_repositories_are_told_apart() {
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![held("app", &["git.example/other/app"])],
+        );
+        let rows: Vec<(&str, &str)> = snapshot
+            .projects
+            .iter()
+            .map(|p| (p.name.as_str(), p.title()))
+            .collect();
+        // `site` is the server's second session's project, which its list does not hold.
+        assert_eq!(
+            rows,
+            [("app", "app"), ("app@server", "app"), ("site", "site")]
+        );
+        assert_eq!(homes_of(&snapshot, "app"), ["pc"]);
+        assert_eq!(homes_of(&snapshot, "app@server"), ["server"]);
+        assert_eq!(snapshot.projects[1].apart.as_deref(), Some("server"));
+        // The server's session goes to the server's row.
+        let there: Vec<&str> = snapshot
+            .live_sessions_of("app@server")
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(there, ["s1@server"]);
+    }
+
+    #[test]
+    fn a_project_with_no_remote_is_the_same_as_none_other() {
+        let snapshot = with_projects("online", vec![held("app", &[])], vec![held("app", &[])]);
+        assert_eq!(homes_of(&snapshot, "app"), ["pc"]);
+        assert_eq!(homes_of(&snapshot, "app@server"), ["server"]);
+    }
+
+    #[test]
+    fn a_machine_that_lists_no_projects_is_matched_by_name() {
+        let snapshot = with_projects(
+            "online",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![],
+        );
+        assert_eq!(homes_of(&snapshot, "app"), ["pc", "server"]);
+    }
+
+    #[test]
+    fn a_project_of_an_offline_machine_is_greyed_with_since_when() {
+        let snapshot = with_projects(
+            "offline",
+            vec![held("app", &["git.example/acme/app"])],
+            vec![
+                held("app", &["git.example/acme/app"]),
+                held("site", &["git.example/acme/site"]),
+            ],
+        );
+        let find = |name: &str| snapshot.projects.iter().find(|p| p.name == name).unwrap();
+        // `site` is the server's alone: greyed. `app` is this machine's too: not.
+        assert!(find("site").offline());
+        assert!(!find("app").offline());
+        let server = snapshot
+            .homes
+            .iter()
+            .find(|h| h.machine == "server")
+            .unwrap();
+        assert!(server.offline);
+        assert!(
+            server.said().starts_with("server · offline since "),
+            "{}",
+            server.said()
+        );
+    }
+
+    #[test]
+    fn with_no_other_machine_no_row_is_marked() {
+        let machines = crate::machines::Machines {
+            this: Some("pc".to_owned()),
+            ..crate::machines::Machines::default()
+        };
+        let snapshot = build(json!({"agents": []}), json!({}), &[]).with_lists(&machines, None);
+        assert!(snapshot.homes.is_empty());
+        assert!(snapshot.projects.iter().all(|p| p.homes.is_empty()));
     }
 
     #[test]

@@ -489,8 +489,10 @@ verification words.
    pins, and a secret of 128 bits. The device types nothing else and knows it reaches the right
    hub: one that answers with another key is refused before anything is proved.
 3. **The device proposes its card and confirms it**: its name (the host's name), its icon (a
-   laptop with a battery, a desktop with a screen, a server without either), its role (a computer
-   with agents signed in: `runner`; without: `controller`; a phone: `controller`), and a colour of
+   laptop with a battery, a desktop with a screen, a server without either), its role (a machine
+   with no screen, a server: `runner`, signed in or not, the agents being signed in later; a
+   desktop or a laptop with agents signed in: `runner`, without: `controller`; a phone:
+   `controller`), and a colour of
    its key's; the user changes any of them before confirming. In the window: one modal, **Connect
    to your hub** (paste the code or scan its QR, then the card, then confirm). On the command line:
    `flottille remote pair [--name] [--role] [--icon] [--colour]`, the code on its standard input.
@@ -587,7 +589,9 @@ device is, a select of the five icons, This device can, Run agents / Control onl
 a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
 join request: a device is added on the hub's host. Then the page shows the devices of the
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
-"⋯", Remove asking once); #1177 took this machine's addresses off the page.
+"⋯", Remove asking once; the row of a controller or a viewer, which runs nothing and so is not
+offered in Settings or the composer, says so and shows `flottille-hub role <name> runner`, which
+changes it on the hub's host, copyable, #1247); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
@@ -695,6 +699,9 @@ cannot reach it (its words say that an older hub is updated on its host) instead
 an update; a device of before reads this hub's hello as it did, the signature beside it ignored. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 
+A new kind of message that a machine of before refuses alone, as the projects of a runner (#1181),
+leaves the number: that machine says it so in its log, and nothing else of the link is lost.
+
 Pair mode (#1146) raised it from 1 to 2: its frames and its changes (`hub`, `pair`, `role`,
 `look`) are ones a build of before cannot read, so that a device and a hub of different builds say
 to update rather than refuse each other's frames without saying why.
@@ -800,13 +807,32 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
 ### One list of every machine
 
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
-  project: a project registered on several machines under the same name is one group. Sessions
+  project: a project that several machines have is one group, whatever its name there (the next
+  bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
   chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
   in a project's composer (the machine picker); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
+- **The same project.** Two projects are the same when the remotes of their repositories are the
+  same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
+  `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
+  `.git`, the host in lower case, the case of the path kept), and a project of several
+  repositories matches when all of them match. A repository with no remote, or at a path of the
+  machine, says nothing: its project matches none. Each runner tells the machines it links to its
+  projects by those remotes in a message of its own, after its sessions (`projects`, "What a
+  machine may send"; `remote.sessions` says them), and the copy kept for a machine that is off
+  holds them too, so that its projects stay in the sidebar, greyed. A machine whose list came before projects were
+  listed says none: its sessions' project names are matched by name, as before. The message is
+  one a machine of before does not know, so that it refuses it alone (`not a message a machine may
+  send`) and goes on taking the sessions: the protocol number is not raised, two machines of
+  different builds keep their lists of sessions, and the one that sent the projects says in its
+  log, once for the link, that the other runs an older Flottille (`flottille update`) and sends
+  it no more of them; the older machine, which draws no project by machine, loses nothing. The
+  remote's address is the only thing of a repository that travels in this list: no credential (a user or a
+  password in the address is dropped), no path of the machine. The window draws one row for a
+  project the machines share, with a mark for each (`docs/design.md` §10).
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
   changes (a session that starts, ends, is written to, answers or asks). The window reads it from
@@ -850,11 +876,12 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `projects` | A runner's projects, each one's name and the normalised remotes of its repositories (`github.com/acme/app`), 1024 at most, 64 remotes of 256 characters at most each; sent after the sessions and again when they change, kept by the receiver beside them. A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link ("One list of every machine"). |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
 Nothing else: no user method but the kept close, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
@@ -989,6 +1016,50 @@ local child's work; nothing moves your branch.*
 - **Caps**: the child counts in its parent's project cap on the parent's machine and in the
   project's cap on the receiving machine; refused above either, never queued.
 - **The brief** is the caller's, as today: nothing of its conversation goes with it.
+
+### Sessions of another machine
+
+**A session on another machine of the user's is the same as one on this machine, for every tool
+that addresses a session** (built #1250): an agent finds it, reads it, writes to it, stops it and
+answers it with the same arguments, and gets the same answers and the same refusals; it need not
+know, nor say, on which machine a session runs. The machine is where it runs, nothing more.
+
+- **Found the same way.** A session is named by its id or its title (`tools.md`, "Sessions that
+  read each other") among the roots of this machine and the live roots each other machine last
+  listed (`sessions`, "One list of every machine"), a project of the same name being the same
+  project. A title that two sessions share, here or there, is refused with both listed; every
+  listing a tool gives holds the sessions of every machine, one of another machine said `on
+  server` after its id (`Night lead · 0123456789ab · on server · idle, active 2 min ago`). An id
+  two machines list is refused, naming both: ids are each machine's own. A child an agent of
+  another machine launched is a child there too, never listed nor called as a session.
+  A session the caller started there, named by its title, is called as by its id.
+- **Judged by the machine it runs on, by the same code.** The caller's daemon sends the call as it
+  is (`call`, signed with its machine key) and judges nothing of it. The receiving machine stands
+  the caller in by an agent of its own, `<caller>@<machine's key>` (never an id of its own, never
+  listed, shown as `agent <id> of pc`), in the caller's project by its name and in its tree's mode,
+  and plays the call through the very path of its own agents' calls: the gate, the judge, the
+  user's leave per pair, what is held for the user in every mode (the first message to a session
+  the caller did not start, ending one, a first read across projects), the tool itself. A call
+  held there is a request of that machine's user, answered at once as held; its answer comes back
+  as the `approval` delivery it would be on one machine (`deliver`, its `launch` `request-<n>`,
+  taken only by the agent that waits for that very request of that machine). Nothing gives a
+  caller of another machine more than an agent of that machine: no other tool than
+  `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
+  the tree later is not given until it is written there), no secret, no file: when its project is
+  not on that machine, its place is a folder that does not exist. Its answer is masked again of
+  the caller's machine's secrets. A machine stands in 64 callers of one other machine at most
+  (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
+  the members, with their leaves.
+- **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
+  launch's ("Starting a session on another machine"): a machine alone cannot raise it.
+- **Only two differences, said in one machine's terms.** A machine that cannot be reached: its
+  sessions stay listed with its state (`on server, offline since 22:14`), and a call is refused at
+  once saying so (`refused: server is offline since 22:14: the session "Night lead" (agent …)
+  runs there, and cannot be reached now; …`). A device that may only view: its agents' calls that
+  only read (`session_read`, `agent_status`) are served, every other is refused (`refused: pc may
+  only view: a controller or a runner may call session_send on a session of another machine`).
+- **The version.** A call of a launch is sent as before; a call of another session carries fields
+  a machine of before does not read, and is refused by it, saying so. No protocol change.
 
 ### What travels
 
@@ -1543,6 +1614,47 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **A call to a session of a machine that is off is refused at once** (#1250), every tool alike,
+  never kept: what the session's machine would answer (held, refused, the leave) cannot be known
+  before it is back. Messages to a session the caller started stay kept, as before.
+- **The leave given to a caller of another machine lasts until the session written to ends** or
+  the user withdraws it (#1250): its machine does not tell when the caller ends, so the end of the
+  writer does not take it, as it does on one machine.
+- **A session of another machine is in the caller's project when its project has the same name**
+  (#1250), as the sidebar groups them ("One list of every machine"); a title is matched among the
+  live sessions that machine listed, an untitled one by the first line its list gives it. The
+  name only: the identity of a project by its repositories' remotes (#1228's `projects` list) is
+  a follow-up.
+- **A led session writing to its pilot on another machine** is asked the leave as any other pair
+  (#1250): the receiving machine does not stand its caller in as started by that pilot.
+- **The user's signed switch to Full counts for a call as for a launch** (#1250): checked against
+  the machine that sends it and the tree that machine names. The receiving machine cannot tell
+  which tree the caller belongs to; a machine that holds a switch could name its tree for another
+  of its agents, for 12 hours at most, as it already could for a launch.
+- **A machine of before refuses a call of another session** with the link's own refusal of a
+  message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
+- **A held call of a caller of another machine is that machine's user's request** (#1250), as a
+  request of a child there goes to that machine's user. The stand-in's own id (`<caller>@<key>`),
+  seen on a request card, is not refused as a target by an agent of that machine: it holds no
+  conversation and runs nothing, so a call to it reaches no one.
+- **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
+  under the user's runtime folder, never made, rather than refused: a read of a session of another
+  project is served as on one machine. The callers of one machine are capped at 64, forgotten after
+  30 days idle (as long as a message is kept) and when their machine leaves the members.
+- **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
+  an answer the user gave before that (within the same second) is refused. Answers never given are
+  forgotten after 30 days.
+- **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
+  no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
+  signed in or not. The machine has no other reliable signal of having no screen, so the icon is
+  the one already proposed and shown, and a headless machine that has a screen connected is a
+  desktop and stays a `controller` until its role is changed on the hub's host.
+- **A controller or a viewer is explained on its own row, not once for the page** (#1247): each
+  member that runs nothing says, under its row, its role, that it runs nothing and so is not offered
+  in Settings or the composer, and the command of the hub's host that changes it, copyable
+  (`flottille-hub role <name> runner`). One block per member, because the command holds the name and
+  each folds away by itself when the role changes; the window never offers a button that changes a
+  role.
 - **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
   project's choosers switch the whole window, as opening a session there does, rather than a page
   aimed at a machine of its own while the rest stays: one way to address a machine, and the
@@ -1693,7 +1805,8 @@ on a real phone, by hand, and reported.
   paired and last seen) is the hub's word, unsigned: nothing in it gives a right.
 - The proposed icon is the machine's: a battery (`/sys/class/power_supply`, type `Battery`) makes
   it a laptop, a screen connected (`/sys/class/drm`) a desktop, neither a server. The proposed role
-  is `runner` when an agent CLI is signed in on the machine, `controller` otherwise.
+  is `runner` for a server (#1247), and for any machine where an agent CLI is signed in,
+  `controller` otherwise. `flottille remote pair` says the role it takes before it asks the hub.
 - `flottille-hub pair`'s QR is drawn in half blocks, light modules as blocks and dark ones blank,
   as a dark console shows them, with a quiet zone of two modules; the code is printed above it,
   to copy.
@@ -2093,7 +2206,9 @@ on a real phone, by hand, and reported.
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
   `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
   not start agent …`). A call is judged on the caller's machine as one to a session it started
-  there (ending a led session as `end_led`).
+  there (ending a led session as `end_led`). A `call` whose `launch` is empty (and not an
+  `approval_answer`) is one to any other session of the receiver: served there by its own gate
+  and tools for the caller stood in for ("Sessions of another machine").
 - What goes to another machine is kept in the sender's store (`outbox`) before it is sent: in
   order, one at a time, when the link to that machine is made and whenever a message is kept
   while it is up; forgotten once the other machine answered it. `agent_status`, `session_read`
