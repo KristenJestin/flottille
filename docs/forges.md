@@ -148,7 +148,17 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
   and the checks as one mark: `failing` when one fails, else `pending` when one runs, else
   `passing` (skipped ones count as passing in the mark, but a merge needs one that passed: a pull
   request whose checks were all skipped is refused like one with none); none when there are no
-  checks;
+  checks. **Each check counts once, its latest run**: GitHub lists every run of a check on the
+  head (a run again, a workflow run superseded or cancelled and started again, the same name
+  twice). A check is a job of its workflow (`workflowName` and `name`) or a commit status (its
+  `context`), so two workflows with a job of one name, or a status and a run of one name, are
+  two checks. Of the runs of a check, the one that started last (`startedAt`, else `createdAt`;
+  of two that started together the one listed last) is the check, whatever the others said; a
+  run with no start (queued) is placed by the listing alone, the latest when listed after the
+  other. A check is `pending` only when that run is queued or runs, and a cancelled run that is
+  the latest still fails. `forge` `show`, `forge` `merge` and the items read the checks through
+  that one rule; `forge` `checks` runs again the latest run of each workflow of the
+  head (`gh run list … --json …,createdAt`) when it failed, and refuses when none did;
 - its comments (their number; `forge` `show` gives their text, and the reviews');
 - with `detail: full`, its **review threads** ("Review threads" below), counted otherwise where
   they were read;
@@ -380,10 +390,13 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   `ref_name`), its `selector.type` and `selector.pattern`, and, for a pull request's, its
   `destination`: one branch can be the source of two pull requests, and a passing build for one
   does not hide a failed build for the other. A status no pipeline of the list explains (another
-  CI's, an older build) is kept. When the pipelines cannot be read, the statuses are shown as `bkt`
-  gives them. **Known limits**: only the newest 50 pipelines are read (no second page), so a status
-  of an older build is kept as it is; and a "re-run failed steps" in Bitbucket's page keeps the
-  build number, so the statuses of the build are all that are read. Both fail safe.
+  CI's, an older build) is kept, and of several such statuses of one key (another CI's runs of
+  one check; two jobs that show one name have two keys, so they are two checks), the latest made
+  (`created_on`, Data Center `dateAdded`) counts alone, as on GitHub. When the pipelines cannot
+  be read, the statuses are shown as `bkt` gives them. **Known limits**: only the newest 50
+  pipelines are read (no second page), so a status of an older build is kept as it is; and a
+  "re-run failed steps" in Bitbucket's page keeps the build number, so the statuses of the build
+  are all that are read. Both fail safe.
 - **A status is checked against its pipeline (Cloud).** Bitbucket leaves the status of a stopped
   build at `INPROGRESS`, which would be `pending` for ever. A status that still says it runs
   takes the word of its pipeline when that ended (`state.name` `COMPLETED`: its
