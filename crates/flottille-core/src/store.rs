@@ -9506,6 +9506,38 @@ mod tests {
     }
 
     #[test]
+    fn a_stand_in_that_leads_a_session_is_kept_while_it_does() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
+        store.keep_stand_in(&a_stand_in("c1", "aa"), 3).unwrap();
+        let mut led = an_agent();
+        led.launched_by = Some("c0@aa".into());
+        led.led = true;
+        store
+            .create_agent(&led, ("agent.created", json!({})))
+            .unwrap();
+
+        // Idle for long, or its machine gone: the pilot of a session stays, the other goes.
+        assert_eq!(store.forget_stand_ins(Some(&[]), now_ms() + 1).unwrap(), 1);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+        assert!(store.agent("c1@aa").unwrap().is_none());
+
+        // Detached, the session still names it.
+        store
+            .change_agent(
+                &led.id,
+                AgentChange {
+                    detached_from: Some("c0@aa".into()),
+                    ..AgentChange::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.forget_stand_ins(Some(&[]), now_ms() + 1).unwrap(), 0);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+    }
+
+    #[test]
     fn a_member_list_never_read_forgets_no_machine_and_still_the_idle() {
         let mut store = Store::open_in_memory().unwrap();
         store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
