@@ -123,7 +123,7 @@ impl Relay {
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
-                let params = request["signed"]["params"]
+                let params: Value = request["signed"]["params"]
                     .as_str()
                     .and_then(|params| serde_json::from_str(params).ok())
                     .unwrap_or_default();
