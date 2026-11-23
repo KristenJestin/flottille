@@ -1266,7 +1266,7 @@ impl Render for ProjectNode {
             div()
                 .flex()
                 .items_center()
-                .gap(px(3.))
+                .gap(space::XS)
                 .opacity(shown)
                 .children(marks)
         });
@@ -1314,8 +1314,8 @@ impl Render for ProjectNode {
             self.offline(),
             div()
                 .id(project_offline_id(&self.name))
-                .pl(px(30.))
-                .pb(px(4.))
+                .pl(space::XXL)
+                .pb(space::XS)
                 .text_size(px(11.5))
                 .text_color(p.faint)
                 .aria_label(SharedString::from(since.clone()))
