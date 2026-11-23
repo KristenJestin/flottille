@@ -730,8 +730,12 @@ so that even the first turn's calls follow it. That composer shows the machine's
 the first message, each time it is shown and after each start: a choice for one session never
 carries over to the next. The default is the user's alone, for the sessions the user starts: a
 session an agent starts, and a child, keep the rules below (a child follows its tree's mode, a
-session an agent starts in another project is in Auto, never above its launcher's tree's), so
-that a default of Full lends nothing to a tree that is not in Full. Choosing Full as the default
+session an agent starts in another project is in Auto, never above its launcher's tree's; the
+pilot door's `agent_start`, which an outside agent drives, starts in Auto; the session an
+extension starts for the user, a spec's writer or its developer, does not go through
+`agent.start` and stays in Auto; a launch from a tree in Full on another machine goes Auto there
+unless the user's signed switch raises it), so that a default of Full lends nothing to a tree that
+is not in Full. Choosing Full as the default
 says once, under the choice, what Full lends: a session's commands run as the user's, as in their
 terminal: nothing is held back, the vault included (§7.2). A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at

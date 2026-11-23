@@ -2193,10 +2193,11 @@ Each method answers `not-found` when the agent does not exist.
 `{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?, "texts"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
 `{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
-§7.1), `auto` when left out: it is the root's before its first message is given, so that the
-first turn's calls already follow it. Only the user's door names it: `agent.start` is answered on
-the user's socket alone (a client an agent started is refused), and no tool of an agent, nor the
-pilot door's `agent_start`, takes a mode. `invalid-params` for another mode, and nothing is
+§7.1), the default mode of new sessions when left out (Auto unless set, `provider.set_new_session_mode`):
+it is the root's before its first message is given, so that the first turn's calls already
+follow it. Only the user's door names it: `agent.start` is answered on the user's socket alone (a
+client an agent started is refused), and no tool of an agent, nor the pilot door's `agent_start`,
+takes a mode; the pilot door starts its session in `auto`, whatever the default. `invalid-params` for another mode, and nothing is
 started. `images` is as in `agent.send`, and goes with the first message; with
 images, the message may be empty (pictures alone are a first message). They are judged and stored
 before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
@@ -2444,8 +2445,8 @@ agent started (a root of the user's, a child) and for one already detached. Ther
 call to judge and every base call passes without a request, and what the gate refuses stays
 refused. A tree has one mode, its root's: a
 child named switches its root, and every agent of the tree reads the root's mode at each call
-(an agent's `gate_mode` is its root's). A new session starts in `auto` unless the user's `agent.start`
-names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
+(an agent's `gate_mode` is its root's). A new session starts in the default mode of new sessions (Auto
+unless set) unless the user's `agent.start` names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
 (no tool of an agent names one); the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
 `agent.gate_mode_changed` for the root (`docs/events.md`).
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door

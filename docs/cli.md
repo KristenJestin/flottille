@@ -1144,8 +1144,8 @@ own. `--workspace <name>` runs it in a ready workspace (the project folder other
 `--provider <provider>` on a provider (the project's otherwise, for the agent's life), `--model
 <model>` asks for a model (the project's otherwise; never replaced by another), `--effort
 <effort>` for an effort of the model, `--role lead|worker` (`lead` by default), `--mode
-ask|auto|full` for the session's mode, its gate's from its first message (`auto` by default,
-design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
+ask|auto|full` for the session's mode, its gate's from its first message (the default mode of
+new sessions by default: Auto unless set, design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
 what is available.
 `--json` prints `agent.start`: `{"agent": {...}, "after": <n>}`, where `after` is the event number
 to follow it from (`flottille watch --after <n>`, `flottille agent read <id> --after <n>`).
