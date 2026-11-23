@@ -215,6 +215,48 @@ fn a_led_session_wakes_its_pilot_at_each_question_with_its_last_message() {
 }
 
 #[test]
+fn a_lead_is_woken_when_its_led_session_ends_a_turn_without_asking() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"say": "Login fixed, nothing left to ask."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+
+    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", "led");
+
+    assert!(!answer.error, "{}", answer.text);
+    let (session, _) = session.unwrap();
+    eventually("the session's turn", || turns(&user, &session) == 1);
+    eventually("the wake", || wakes(&user, &lead).len() == 1);
+    let woken = wakes(&user, &lead).remove(0);
+    for word in [
+        "\"Login\"",
+        session.as_str(),
+        "ended a turn",
+        "Login fixed, nothing left to ask.",
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+    assert!(!woken.contains("asked you"), "{woken}");
+    assert!(!woken.contains("it reported"), "{woken}");
+}
+
+#[test]
+fn a_lead_is_woken_once_when_the_turn_asks_and_ends() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [ask("Scope?"), {"say": "Should the logout be covered too?"}]}
+    ]}));
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+
+    settle();
+
+    let woken = wakes(&user, &lead);
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("asked you"), "{}", woken[0]);
+}
+
+#[test]
 fn a_long_last_message_is_cut_and_the_cut_is_said() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
