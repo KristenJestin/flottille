@@ -1061,6 +1061,12 @@ local child's work; nothing moves your branch.*
   launch's place is never undone by it, and one sent again is taken once. A refused launch leaves
   no row under its pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
+- **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
+  a `led` or `handed` launch whose caller is itself a session another agent started (here, or on
+  a third machine) says so (`launched`), and the receiving machine's gate takes it as base: held
+  for its user in every mode but Full, never the judge's (`this agent is a session another agent
+  started for the user, …`). A `led` or `handed` session a machine started for an agent of
+  another is, to its own gate, a session an agent started: a session it starts comes to the user.
 - **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
@@ -1694,6 +1700,25 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
+  field it does not know, and a launch is read with no unknown field, so the launch is refused
+  with the link's own refusal rather than run as any root's: the agent is answered `refused by
+  server: server refused: not a message a machine may send`, and nothing starts there until that
+  machine is updated. A launch of any other caller leaves the field out and reaches it as before.
+  No protocol bump for it.
+- **The caller's word on `launched` is taken** (#1275), but for a session the receiving machine
+  itself launched on the sender: that one is a session an agent started whatever the launch says.
+  Of any other caller, the receiving machine cannot know better, and the machines are the user's
+  own.
+- **A child on another machine counts as a session an agent started** (#1275): it has no parent
+  there yet, and the launch that started it says it was launched, so its `led` and `handed`
+  launches would be held for its parent, then the user, never the judge's. Since #1274 it is also
+  a real child, whose such launches are refused outright, so the rule is a second line there.
+- **A child on another machine is not held for the chain** (#1275): a session an agent started
+  starts children here as its mode allows, and on another machine likewise; only `led` and
+  `handed` launches are base.
+- **A session started here for another machine's agent cannot be detached yet** (#1275): it has no
+  `launched_by` here (#1272 records its pilot), so its launches stay the user's until then.
 - **A child of another machine's agent stored at depth 0 is put at depth 1 at every open of the
   store** (#1274), not by a numbered migration: the change is done once and does nothing after,
   and every check of a root then reads its depth alone. `agent.trees` still lists it among the

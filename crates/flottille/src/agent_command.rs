@@ -36,7 +36,8 @@ pub enum AgentAction {
         /// Its role: lead (default) or worker
         #[arg(long)]
         role: Option<String>,
-        /// The session's mode from its first message: ask, auto (default) or full
+        /// The session's mode from its first message: ask, auto or full (default: the one set for
+        /// new sessions, Auto unless set)
         #[arg(long)]
         mode: Option<String>,
         #[arg(long)]

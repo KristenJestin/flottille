@@ -1775,7 +1775,10 @@ Both are the same kind of session otherwise:
 - **No chain without the user.** The session keeps who started it (`launched_by`), led or handed.
   A session an agent started may start one in turn only as base, whatever its mode (`this agent
   is a session another agent started for the user, and a session it starts comes to the user,
-  …`): each step of a chain is the user's.
+  …`): each step of a chain is the user's. Across machines too: a session started here for an
+  agent of another machine is one an agent started, and a launch on another machine says its
+  caller was itself started (`launched`), which that machine's gate holds for its user the same
+  way (`remote.md`, "Starting a session on another machine").
 - **The session is the user's to talk to**: no parent, depth 0, in the project's tree list like
   any root (`agent.created` with no parent). **Its first message is the agent's, never the
   user's**: it is delivered as `[flottille:launched]`, under a line naming the agent that wrote it
