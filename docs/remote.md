@@ -650,10 +650,11 @@ the same name). A page of machine A never shows a value of machine B: what B ans
 own copy, wherever it waits. A page reads only what it shows: a session of another machine reads
 that session on that machine (its page, the latest messages first), Settings of another machine
 reads that machine's settings, and a project's page of another machine reads that machine's
-projects and sessions once, by a link of its own that its events then keep current; nothing of
-another machine is read for a page that does not show it. Coming back to a machine already read
-shows its copy at once and refreshes it in place: the page of the last session of each machine
-keeps following it, and its Settings are as they were left, then read again. The first time, the
+projects and sessions by a link of its own, whose events keep them current while one of that
+machine's projects' pages is shown; nothing of another machine is read for a page that does not
+show it. Coming back to a machine already read shows its copy at once and refreshes it in place:
+the page of the last session of each machine keeps following it, and its Settings are as they were
+left, then read again. The first time, the
 page says it is reading that machine (its own skeletons, in the pane). A machine that does not
 answer within the window's limit (30 s) is said on its page only, `server does not answer`, a
 line above it that folds away once it answers or another page is shown; the rest of the window is
@@ -669,8 +670,8 @@ machine it was a page of (Settings, a project's settings and a spec are each mac
 machine answers acts on its own pages only: a project it removed leaves its copy, never this
 machine's list, and a session started from its project's page opens, its row in the list at once.
 The link of a project's page of another machine lives while a project's page of that machine is
-shown, its events filling that machine's pages; left, it ends, and the page coming back reads
-again. A machine removed from the user's lets go of everything the window held of it. Another
+shown, its events filling that machine's pages; left, it ends at once, idle or not, and the page
+coming back reads again. A machine removed from the user's lets go of everything the window held of it. Another
 machine's Settings chosen in the picker enter as a page that shows up, staggered.
 
 ## Roles
