@@ -6,7 +6,7 @@
 //! each with its own temporary HOME and XDG folders and fake agents.
 
 use crate::common;
-use crate::remote_deliveries::{child_on_server, off, prompts_with};
+use crate::remote_deliveries::{child_on_server, off, prompts_with, script};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
     pc_and_server_as, prompted, refused, sent_with, server_user, titled,
@@ -645,6 +645,178 @@ fn a_session_it_started_on_another_machine_named_by_its_title_is_called_as_by_it
     );
     assert!(server.requests().is_empty(), "{:#?}", server.requests());
     assert_eq!(stand_ins(&server), 0);
+}
+
+/// The cursor an answer of `session_read` gives for its next page.
+fn cursor_in(text: &str) -> String {
+    let at = text
+        .find("\"cursor\": \"")
+        .unwrap_or_else(|| panic!("no cursor in {text}"))
+        + "\"cursor\": \"".len();
+    text[at..].split('"').next().unwrap().to_owned()
+}
+
+/// Waits until the agent `id` of `machine` is idle.
+fn idle(machine: &Machine, id: &str) {
+    eventually("the agent idle", || machine.agent(id)["state"] == "idle");
+}
+
+#[test]
+fn the_session_tools_answer_a_session_it_started_on_another_machine_as_on_this_one() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = caller(&pc, &server, "full");
+    // A led session and a child, each started here and on the server: their id and title.
+    let started = |kind: &str, machine: Option<&str>, title: &str| -> (String, String) {
+        let mut args = json!({"kind": kind, "title": title, "brief": "Finish the export."});
+        if let Some(machine) = machine {
+            args["machine"] = json!(machine);
+        }
+        done(&launched(&mcp, args));
+        let on = if machine.is_some() { &server } else { &pc };
+        let id = titled(on, title)["id"].as_str().unwrap().to_owned();
+        idle(on, &id);
+        (id, title.to_owned())
+    };
+    let day = started("led", None, "Day lead");
+    let night = started("led", Some("server"), "Night lead");
+    let day_child = started("child", None, "Day child");
+    let night_child = started("child", Some("server"), "Night child");
+    // Each call of a scenario of one machine, with `{s}` the session or child it addresses.
+    let session_calls: Vec<(&str, Value)> = vec![
+        ("session_read", json!({"session": "{s}", "last": 1})),
+        ("session_read", json!({"session": "{s}", "last": 99})),
+        ("session_read", json!({"session": "{s}", "last": 0})),
+        (
+            "session_read",
+            json!({"session": "{s}", "since": "not a date"}),
+        ),
+        (
+            "session_read",
+            json!({"session": "{s}", "since": "2020-01-01", "until": "2099-01-01"}),
+        ),
+        // The agent_* tools do not reach a session it leads, here or there.
+        ("agent_status", json!({"agent_id": "{s}"})),
+    ];
+    let child_calls: Vec<(&str, Value)> = vec![
+        ("agent_status", json!({"agent_id": "{s}"})),
+        (
+            "agent_status",
+            json!({"agent_id": "{s}", "detail": "short"}),
+        ),
+        (
+            "agent_status",
+            json!({"agent_id": "{s}", "action": "conversation"}),
+        ),
+        (
+            "agent_status",
+            json!({"agent_id": "{s}", "action": "conversation", "after": 1}),
+        ),
+        ("session_read", json!({"session": "{s}"})),
+    ];
+    let aimed = |args: &Value, id: &str| -> Value {
+        serde_json::from_str(&args.to_string().replace("{s}", id)).unwrap()
+    };
+    let same = |tool: &str,
+                here: Value,
+                there: Value,
+                day: &(String, String),
+                night: &(String, String)| {
+        let here_answer = mcp.call(tool, here.clone());
+        let there_answer = mcp.call(tool, there);
+        assert_eq!(
+            (here_answer.error, shape(&here_answer.text, &day.0, &day.1)),
+            (
+                there_answer.error,
+                shape(&there_answer.text, &night.0, &night.1)
+            ),
+            "{tool} {here}: on this machine\n{}\non the other\n{}",
+            here_answer.text,
+            there_answer.text
+        );
+    };
+    for (tool, args) in &session_calls {
+        same(
+            tool,
+            aimed(args, &day.0),
+            aimed(args, &night.0),
+            &day,
+            &night,
+        );
+    }
+    for (tool, args) in &child_calls {
+        same(
+            tool,
+            aimed(args, &day_child.0),
+            aimed(args, &night_child.0),
+            &day_child,
+            &night_child,
+        );
+    }
+    // The next page, by the cursor each machine gave, once each session said more than a page.
+    for (machine, id) in [(&pc, &day.0), (&server, &night.0)] {
+        machine
+            .user
+            .call("agent.send", json!({"agent": id, "message": "Go on."}))
+            .unwrap();
+        eventually("the session's second turn", || {
+            prompts_with(machine, "Go on.") > 0 && machine.agent(id)["state"] == "idle"
+        });
+    }
+    let cursor = |id: &str| {
+        cursor_in(done(
+            &mcp.call("session_read", json!({"session": id, "last": 1})),
+        ))
+    };
+    same(
+        "session_read",
+        json!({"session": day.0, "cursor": cursor(&day.0), "last": 1}),
+        json!({"session": night.0, "cursor": cursor(&night.0), "last": 1}),
+        &day,
+        &night,
+    );
+}
+
+#[test]
+fn a_read_of_a_session_it_started_elsewhere_comes_back_masked() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    // Said by the led session's agent, across the 600th character of its message: a cut made
+    // before the caller's machine masks it would leave the secret's start.
+    let said = format!("{} The token is pc-only-token-7f3a9c.", "x".repeat(570));
+    script(
+        &server,
+        json!([{"when": "Say the token.", "do": [{"say": said}]}]),
+    );
+    let (_root, mcp) = caller(&pc, &server, "full");
+    let led = id_in(done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Night lead",
+            "brief": "Finish the export."}),
+    )));
+    idle(&server, &led);
+    // A secret only pc knows, in a secret file of the caller's place.
+    std::fs::write(pc.folder().join(".env"), "API_TOKEN=pc-only-token-7f3a9c\n").unwrap();
+    server
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": led, "message": "Say the token."}),
+        )
+        .unwrap();
+    eventually("the session's second turn", || {
+        prompts_with(&server, "Say the token.") > 0 && server.agent(&led)["state"] == "idle"
+    });
+
+    for (tool, args) in [
+        ("session_read", json!({"session": led})),
+        ("session_read", json!({"session": led, "last": 1})),
+    ] {
+        let answer = mcp.call(tool, args);
+        let text = done(&answer);
+        assert!(text.contains("The token is"), "{text}");
+        assert!(!text.contains("pc-only"), "{text}");
+    }
 }
 
 /// A call of `caller` of pc to the session `night`, as pc's daemon would send it, in `mode`
