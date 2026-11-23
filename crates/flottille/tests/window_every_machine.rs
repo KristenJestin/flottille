@@ -1817,3 +1817,33 @@ fn a_session_started_on_the_server_is_listed_with_its_brief_before_the_server_li
     });
     assert_eq!(title, "Count the files");
 }
+
+#[gpui_kit::test]
+fn a_connection_request_of_a_removed_machine_closes(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    relay.take();
+
+    // A request's dialog opened from the server's page reads it there.
+    shell.update(cx, |s, cx| s.open_connection_request(7, cx));
+    settle(&shell, cx);
+    let dialog = shell.read_with(cx, |s, _| s.connection_request().clone());
+    assert!(dialog.read_with(cx, |d, _| d.is_open()));
+    assert_eq!(
+        asked_of_the_server(&relay, "7"),
+        vec!["connection.proposed".to_owned()]
+    );
+
+    let removed = pc.user.run(&["remote", "remove", "server"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    until(&shell, cx, "the server's request is let go", |cx| {
+        !dialog.read_with(cx, |d, _| d.is_open())
+    });
+}
