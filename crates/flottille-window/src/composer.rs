@@ -220,8 +220,8 @@ pub struct Composer {
     sending: Option<Target>,
     error: Option<SharedString>,
     blocked: Option<String>,
-    /// The mode the next session starts in: Auto each time the composer is shown and after each
-    /// start, so that Full is never on by mistake.
+    /// The mode the next session starts in: the machine's default each time the composer is shown
+    /// and after each start, so that a choice for one session never carries over to the next.
     mode: Entity<ModeSwitch>,
     /// How many times it was drawn: the tests count them.
     renders: usize,
@@ -403,7 +403,7 @@ impl Composer {
         &self.mode
     }
 
-    /// Back on Auto, as each time the composer is shown.
+    /// Back on the machine's default mode, as each time the composer is shown.
     pub fn reset_mode(&mut self, cx: &mut Context<Self>) {
         self.mode.update(cx, |mode, cx| mode.reset(cx));
     }
@@ -457,6 +457,10 @@ impl Composer {
             let chosen = providers.judge.is_some();
             self.mode
                 .update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
+        }
+        if let Some(default) = &providers.new_session_mode {
+            self.mode
+                .update(cx, |mode, cx| mode.set_default(default, cx));
         }
         if self.providers != *providers || self.pick != pick || self.default != default {
             self.providers = providers.clone();

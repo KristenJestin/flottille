@@ -722,11 +722,19 @@ a malformed call, a login printed, the daemon driven from a command.
 ### 7.1 The mode and the judge
 
 Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
-bar, the same in the composer that starts a session. A session the user starts starts in Auto
-unless the user chose another mode in that composer (or `flottille agent start --mode`), and the
-mode is the root's before its first message, so that even the first turn's calls follow it. That
-composer is back on Auto each time it is shown and after each start: a choice never carries over to
-the next session, so that Full is never on by mistake. A tree has one mode, its
+bar, the same in the composer that starts a session. A session the user starts starts in the
+mode the user chose for new sessions on that machine (Settings, "New sessions", Mode, or
+`flottille provider new-session --mode`; Auto until they choose, `new_session_mode` in
+`providers.toml`, `provider.set_new_session_mode`), unless the user chose another mode in that
+composer (or `flottille agent start --mode`), and the mode is the root's before its first message,
+so that even the first turn's calls follow it. That composer shows the machine's default before
+the first message, each time it is shown and after each start: a choice for one session never
+carries over to the next. The default is the user's alone, for the sessions the user starts: a
+session an agent starts, and a child, keep the rules below (a child follows its tree's mode, a
+session an agent starts in another project is in Auto, never above its launcher's tree's), so
+that a default of Full lends nothing to a tree that is not in Full. Choosing Full as the default
+says once, under the choice, what Full lends: a session's commands run as the user's, with their
+keys and sign-ins, and the vault stays out of reach (§7.2). A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
@@ -1324,7 +1332,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   named "default". Choosing the recommended model of the first provider back clears the choice
   (`provider.set_new_session`, `docs/agents.md`, "Providers": the project's file first, then this choice, then the last
   pick in the composer, then what the provider proposes); a model or an effort its provider no
-  longer offers falls back to what it proposes, and one line under the select says so, once. It
+  longer offers falls back to what it proposes, and one line under the select says so, once. Under
+  it, **Mode**: a segmented choice, Ask, Auto or Full (Full in the alarm colour), with its hint
+  ("Sessions agents start, and children, keep their own rules."), which the machine keeps
+  (`provider.set_new_session_mode`) and the composer that starts a session shows before its first
+  message (§7.1); while Full is chosen, a note under it says once what Full lends ("In Full, a
+  session's commands run as yours, with your keys and sign-ins. The vault stays out of reach."),
+  which unfolds and fades in, and folds away with its gap. It
   enters with the page's other sections and its fold of the line fades in and out. **Rules for every project**
   ("What every agent is told, in every project. A project adds its own, or uses only its own."):
   its editor, Reset to default and Save once it changed; saving says in a toast that the agents
@@ -1680,8 +1694,9 @@ nothing built, in [`extensions.md`](extensions.md).
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- A session the user starts starts in Auto unless the user chose its mode in the composer that
-  starts it, which is back on Auto after each start, and a tree has one mode, its root's, read at
+- A session the user starts starts in the mode the user chose for new sessions on that machine
+  (Auto until they choose) unless the user chose its mode in the composer that
+  starts it, which is back on that default after each start, and a tree has one mode, its root's, read at
   each call; Auto without a judge asks the user as Ask does. Only the user chooses Full, at a
   session's start or later; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
   of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is

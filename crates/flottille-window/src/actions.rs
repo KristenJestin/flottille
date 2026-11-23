@@ -164,6 +164,10 @@ pub enum Command {
         model: Option<String>,
         effort: Option<String>,
     },
+    /// Chooses the mode a new session starts in (`provider.set_new_session_mode`).
+    SetNewSessionMode {
+        mode: String,
+    },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
     /// What the user says of themselves, which every agent reads (`about.show`).
@@ -2363,6 +2367,19 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             let params = json!({"provider": provider, "model": model, "effort": effort});
             let refused = match ask_alone(connect, "provider.set_new_session", params, bounds.quick)
             {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::NewSessionSet { refused }
+        }
+        Command::SetNewSessionMode { mode } => {
+            let params = json!({"mode": mode});
+            let refused = match ask_alone(
+                connect,
+                "provider.set_new_session_mode",
+                params,
+                bounds.quick,
+            ) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
