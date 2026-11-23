@@ -4141,6 +4141,81 @@ fn a_declared_client_id_is_used_where_the_server_registers_none() {
     );
 }
 
+/// Flottille's client id, published on the repository's Pages.
+const CLIENT_ID_URL: &str = "https://kristenjestin.github.io/flottille/oauth/client.json";
+
+#[test]
+fn a_server_that_takes_metadata_documents_signs_in_without_registration() {
+    let user = user();
+    // It still has a registration endpoint: the document is preferred, so it is never used.
+    let (server, url) = protected_server(&user, json!({"cimd": true}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    sign_in(&user);
+    stopped(server);
+    assert!(
+        logged(&user, "notes", "register").is_empty(),
+        "Flottille registered where a metadata document was possible"
+    );
+    assert_eq!(
+        logged(&user, "notes", "authorize")[0]["asked"]["client_id"],
+        CLIENT_ID_URL
+    );
+    assert_eq!(
+        grants(&user, "authorization_code")[0]["client_id"],
+        CLIENT_ID_URL
+    );
+}
+
+#[test]
+fn a_declared_client_id_wins_over_the_metadata_document() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({"cimd": true}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "client_id": "flottille-desk"}),
+    )
+    .unwrap();
+    sign_in(&user);
+    stopped(server);
+    assert!(logged(&user, "notes", "register").is_empty());
+    assert_eq!(
+        logged(&user, "notes", "authorize")[0]["asked"]["client_id"],
+        "flottille-desk"
+    );
+    assert_eq!(
+        grants(&user, "authorization_code")[0]["client_id"],
+        "flottille-desk"
+    );
+}
+
+#[test]
+fn a_server_without_metadata_documents_registers_as_before() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    sign_in(&user);
+    stopped(server);
+    assert_eq!(logged(&user, "notes", "register").len(), 1);
+    let id = logged(&user, "notes", "authorize")[0]["asked"]["client_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(id.starts_with("fake-client-"), "{id}");
+    assert_ne!(id, CLIENT_ID_URL);
+}
+
 /// `notes` declared on `url`, Connections on, and the sign-in begun: the answer of `login`.
 fn begun(user: &User, url: &str) -> Result<Value, (String, String)> {
     turn_on(user);
