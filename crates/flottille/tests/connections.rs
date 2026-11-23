@@ -6967,15 +6967,13 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
         let text = done(answer);
         assert!(!text.contains("not shown"), "{text}");
         // The page's own request, not the icon the browser asks for after it.
-        let last = seen
-            .lock()
+        seen.lock()
             .unwrap()
             .iter()
             .rev()
             .find(|request| request["path"] == path)
             .cloned()
-            .unwrap();
-        last
+            .unwrap()
     };
     let headless = |request: &Value| {
         request["agent"]
