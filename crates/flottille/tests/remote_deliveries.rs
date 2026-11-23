@@ -686,7 +686,8 @@ fn plain_turn_ends_kept_for_a_machine_never_push_out_a_report() {
             {"when": "Finish the export.", "do": [{"say": "Started."}]},
             {"when": "More.", "do": [{"say": "More done."}]},
             {"when": "Report now.", "do": [
-                {"mcp": {"tool": "report", "arguments": {"text": "The export is finished."}}}
+                {"mcp": {"tool": "report", "arguments": {"text": "Done."}}},
+                {"say": "The export is finished."}
             ]}
         ]),
     );
