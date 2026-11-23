@@ -140,6 +140,9 @@ jobs:
           rust=false
           while IFS= read -r path; do
             case "$path" in
+              # The client metadata document is read by a test of the daemon (it must agree
+              # with the client): a change of it runs the suite.
+              site/oauth/*) rust=true; break ;;
               apps/android/* | site/*) ;;
               *)
                 echo "::notice::${path:-no file}: the Rust suite runs."

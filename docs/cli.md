@@ -470,8 +470,8 @@ Declares a connection under `[[connections.server]]` of `extensions.toml`: a com
 without a shell (its words given after `--command`), or an `https://` URL (`http://` on this
 machine alone). `--env` and `--header` name vault entries of every project, `--only` limits the
 values of an argument, `--except` leaves a project out, `--client-id` is the OAuth client id you
-registered with the server's authorization server, when it registers none by itself (`connection
-login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
+registered with the server's authorization server, when it takes neither Flottille's client
+metadata document nor a registration by itself (`connection login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
 once, every action judged: the connection is given to agents as `add` returns (`state` is `ready`),
 and `connection review` is there to turn actions off or set them. A server that does not start
 leaves it waiting for its first review, `failing` saying why; one added while Connections or the
