@@ -17,8 +17,8 @@ use flottille_window::device::Device;
 use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::tree::{
-    by_machine_id, machine_id, machine_mark_id, project_apart_id, project_id, project_mark_id,
-    project_offline_id, projects_menu_id, session_id,
+    by_machine_id, group_header_id, machine_id, machine_mark_id, project_apart_id, project_id,
+    project_mark_id, project_offline_id, projects_menu_id, session_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -434,6 +434,46 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
         present(cx, machine_id("pc")) && present(cx, machine_id("server"))
     });
     assert!(again.read_with(cx, |s, _| s.is_by_machine()));
+}
+
+#[gpui_kit::test]
+fn group_by_machine_off_brings_the_users_groups_back_as_they_were(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&pc, "docs", "");
+    add(&server, "site", SITE);
+    told(&pc, &["site"]);
+    let (shell, cx) = with_row(&pc, "docs", cx);
+    until(&shell, cx, "the choice is offered", |cx| {
+        shell.read_with(cx, |s, cx| s.offers_grouping(cx))
+    });
+    // The user's own arrangement: a group holding docs, app outside it.
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_group("Work", cx);
+        let id = shell.listing().groups[0].id.clone();
+        shell.project_moved("docs", Some(&id), 0, window, cx);
+    });
+    settle(&shell, cx);
+    let id = shell.read_with(cx, |s, _| s.listing().groups[0].id.clone());
+    assert!(present(cx, group_header_id(&id)));
+
+    // By machine the user's groups give way to the sections, and the rows are the sections'.
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && !present(cx, group_header_id(&id))
+    });
+    assert!(!present(cx, project_id("docs")), "the one list is gone");
+
+    // Switched off, the groups and the order are back as they were.
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the user's list", |cx| {
+        !present(cx, machine_id("pc")) && present(cx, group_header_id(&id))
+    });
+    settle(&shell, cx);
+    let listing = shell.read_with(cx, |s, _| s.listing());
+    assert_eq!(listing.groups[0].projects, ["docs"]);
+    assert!(listing.loose.contains(&"app".to_owned()));
+    assert!(present(cx, project_id("docs")) && present(cx, project_id("app")));
 }
 
 /// The frames the window draws, and the animation frames it asks, over ten seconds of its clock.
