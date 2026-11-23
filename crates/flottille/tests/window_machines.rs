@@ -1861,3 +1861,76 @@ fn the_machines_page_shows_no_addresses(cx: &mut TestAppContext) {
         assert!(!present(cx, id), "{id} is on the page");
     }
 }
+
+/// Whether the window's read of the machines says the phone is notified `always` or `away`.
+fn notify_read(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, cx| {
+        s.machines()
+            .read(cx)
+            .machines()
+            .map(|read| read.notify.clone())
+    })
+}
+
+#[gpui_kit::test]
+fn notify_the_phone_is_chosen_in_settings_machines(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the phone's section", |cx| {
+        present(cx, "phone-title")
+    });
+    settle(&shell, cx);
+    for choice in ["notify-phone-away", "notify-phone-always"] {
+        assert!(visible(cx, choice), "{choice}");
+    }
+    assert_eq!(notify_read(&shell, cx).as_deref(), Some("away"));
+
+    click(&shell, cx, "notify-phone-always");
+    until(&shell, cx, "the daemon says always", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["notify"] == "always"
+            && notify_read(&shell, cx).as_deref() == Some("always")
+    });
+    let file = std::fs::read_to_string(pc.user.path("config/flottille/daemon.toml")).unwrap();
+    assert!(file.contains("notify = \"always\""), "{file}");
+    assert!(file.contains("on = true"), "remote stays on: {file}");
+
+    click(&shell, cx, "notify-phone-away");
+    until(&shell, cx, "the daemon says away", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["notify"] == "away"
+            && notify_read(&shell, cx).as_deref() == Some("away")
+    });
+}
+
+#[gpui_kit::test]
+fn the_window_tells_the_hub_its_presence_on_input(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let member: flottille_link::PublicKey =
+        serde_json::from_value(pc.member("pc").unwrap()["key"].clone()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while pc.remote()["hub"]["state"] != "connected" {
+        assert!(Instant::now() < deadline, "the hub never connected");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (shell, cx) = window(&pc, cx);
+    settle(&shell, cx);
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 1;
+
+    // A click, as any input.
+    click(&shell, cx, "settings");
+
+    let served = hub.served.as_ref().unwrap();
+    until(&shell, cx, "the hub has the window's input", |_| {
+        served
+            .with_hub(|hub| hub.presence(&member))
+            .is_some_and(|presence| presence.last_input >= before)
+    });
+}

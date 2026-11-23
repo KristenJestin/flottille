@@ -1942,6 +1942,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_notice_holds_a_kind_and_ids_and_nothing_else() {
+        let notice: Notice = serde_json::from_value(serde_json::json!({
+            "kind": "question", "notification": 12, "session": "3f2a91bc0d4e"
+        }))
+        .unwrap();
+        assert_eq!(notice.kind, NoticeKind::Question);
+        // A word of what it is about, a path or a command, is no notice.
+        for wrong in [
+            serde_json::json!({"kind": "request", "notification": 1, "title": "Read .env"}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": "../.env"}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": "rm -rf"}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": "a".repeat(65)}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": ""}),
+            serde_json::json!({"kind": "excerpt", "notification": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<Notice>(wrong.clone()).is_err(),
+                "{wrong}"
+            );
+        }
+        assert!("../.env".parse::<NoticeId>().is_err());
+    }
+
+    #[test]
     fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
         // What is stored and reached keeps the port and the path whole; what is shown is how a
         // user writes it.
