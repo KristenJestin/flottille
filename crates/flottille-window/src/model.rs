@@ -2754,7 +2754,7 @@ mod tests {
         let online = machine("online");
         let words = |l, m| last_known(&l, m).0;
         assert_eq!(words(launched("started", None), Some(&online)), "running");
-        assert_eq!(words(launched("held", None), Some(&online)), "waiting");
+        assert_eq!(words(launched("held", None), Some(&online)), "needs you");
         // Allowed there, it sends nothing back but what it does: what is heard wins over the hold.
         let report = Some("child-report");
         assert_eq!(words(launched("held", report), Some(&online)), "reported");
@@ -2768,5 +2768,93 @@ mod tests {
         let off = machine("offline");
         assert!(words(launched("started", None), Some(&off)).starts_with("offline since "));
         assert_eq!(last_known(&launched("started", None), Some(&off)).1, None);
+    }
+
+    /// `server` online, with a session `a1` led by `r1` of this machine, in `state` and having
+    /// sent `heard` here; `server` listing it as `listed_as`, when it lists it.
+    fn led_on_server(
+        state: &str,
+        heard: Option<&str>,
+        listed_as: Option<&str>,
+    ) -> crate::machines::Machines {
+        let mut machines = two_machines("online");
+        machines.launches = vec![crate::machines::Launched {
+            machine: "server".into(),
+            caller: "r1".into(),
+            kind: "led".into(),
+            title: "Finish the export".into(),
+            agent: "a1".into(),
+            state: state.into(),
+            heard: heard.map(str::to_owned),
+            heard_at: None,
+            at: 1,
+            making: None,
+        }];
+        if let Some(state) = listed_as {
+            machines.lists.machines[0].1.push(crate::machines::Listed {
+                state: state.to_owned(),
+                ..listed("a1", "app", 7)
+            });
+        }
+        machines
+    }
+
+    /// The row of `a1` under its pilot `r1`, as the tree shows it with `machines`.
+    fn the_led_row(machines: &crate::machines::Machines) -> Session {
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_elsewhere(machines)
+        .with_lists(machines, None);
+        let rows: Vec<&Session> = snapshot
+            .elsewhere
+            .iter()
+            .filter(|session| session.id == "a1@server")
+            .collect();
+        assert_eq!(rows.len(), 1, "one row of it");
+        assert_eq!(rows[0].pilot.as_deref(), Some("r1"), "under its pilot");
+        rows[0].clone()
+    }
+
+    #[test]
+    fn a_row_under_its_pilot_needs_you_when_its_session_does_on_another_machine() {
+        // It sent a turn's end here: what its machine lists says, never a guess from it.
+        let turn = Some("session-turn-ended");
+        let row = the_led_row(&led_on_server("started", turn, Some("needs you")));
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        assert_eq!(row.mark_said, "Needs you on server");
+        assert_eq!(row.elsewhere.as_ref().unwrap().state, "needs you");
+
+        let row = the_led_row(&led_on_server("started", turn, Some("running")));
+        assert_eq!(row.mark, Some(AgentState::Running));
+        assert_eq!(row.mark_said, "Running on server");
+        let row = the_led_row(&led_on_server("started", turn, Some("idle")));
+        assert_eq!(row.mark, None);
+        assert_eq!(row.elsewhere.as_ref().unwrap().state, "idle");
+
+        // The agents of its pilot's page say the same.
+        let agents = remote_agents(&led_on_server("started", turn, Some("needs you")));
+        assert_eq!(agents[0].mark, AgentState::NeedsYou);
+        assert_eq!(agents[0].state, "needs you");
+    }
+
+    #[test]
+    fn a_held_launch_needs_you_before_its_machine_lists_it() {
+        let row = the_led_row(&led_on_server("held", None, None));
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        assert_eq!(row.mark_said, "Needs you on server");
+        // Allowed there, its machine lists it as it runs now.
+        let row = the_led_row(&led_on_server("held", None, Some("running")));
+        assert_eq!(row.mark, Some(AgentState::Running));
+    }
+
+    #[test]
+    fn a_session_its_launch_titled_keeps_that_title_rather_than_its_brief() {
+        let mut launched = agent("r1", None, "idle", None);
+        launched["title"] = json!("Rework the login");
+        let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Rework the login");
     }
 }
