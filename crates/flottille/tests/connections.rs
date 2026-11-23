@@ -4859,6 +4859,32 @@ fn agent_browser_logs_in_with_a_vault_entry() {
 }
 
 #[test]
+fn without_isolation_the_login_refuses_to_fill() {
+    // No pasta: the browser's network would be the runs', whose DevTools any run reaches. The
+    // login refuses before it opens anything, and says what to install; the rest of the
+    // connection still answers.
+    let user = user().with_env("FLOTTILLE_TEST_PASTA", "flottille-test-no-pasta");
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(
+        said.contains("install passt (pasta) to let the agent's browser sign in"),
+        "{said}"
+    );
+    assert!(form(&user).is_none(), "the form was filled");
+    assert!(logged(&user, "browser", "open").is_empty());
+    assert!(logged(&user, "browser", "login").is_empty());
+    let opened = done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    assert!(opened.contains("opened"), "{opened}");
+}
+
+#[test]
 fn a_login_entry_of_another_use_is_refused() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
@@ -5595,34 +5621,40 @@ impl Drop for Closed {
     }
 }
 
-#[test]
-fn the_real_agent_browser_signs_in_with_a_vault_entry() {
-    // The whole path with the real tool: the connection runs the real `agent-browser mcp`, its
-    // adapter applies, login runs agent-browser's command line in the run's sandbox, agent-browser's
-    // daemon starts Flottille's plugin, which asks the daemon for the entry; the page is a local
-    // one, headless, and the account an invented one in the in-memory keyring.
-    let user = User::with_fake_agent();
+/// A user for a test of the real agent-browser, with passt's real `pasta` (the network of its
+/// browser), and the program to run: none, said, when this machine lacks either. Its Auto judge
+/// allows everything.
+fn real_user() -> Option<(User, PathBuf)> {
+    let user = User::with_fake_agent().with_allowing_judge();
     // The test's runtime folder is under `/tmp`, so the sandbox rules each entry of `/tmp` and
     // not `/tmp` itself (`landlock.rs`): Chrome makes its profile in a temporary folder of the
     // test's own, as it does in `/tmp` on a machine whose runtime folder is `/run/user/<uid>`.
     let temporary = user.path("tmp");
     std::fs::create_dir(&temporary).unwrap();
-    let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
+    let user = user
+        .with_env("TMPDIR", temporary.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let program = match real_agent_browser(&user.path("home")) {
         Ok(program) => program,
         Err(why) => {
             eprintln!("skipped: {why}");
-            return;
+            return None;
         }
     };
-    let _closed = Closed {
-        program: program.clone(),
-        home: user.path("home"),
-        vault: vault_folder(&user),
-    };
-    let (url, signed_in) = login_page();
-    turn_on(&user);
+    let pasta = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|folder| folder.join("pasta").is_file());
+    if !pasta {
+        eprintln!("skipped: no pasta (passt) on the PATH");
+        return None;
+    }
+    Some((user, program))
+}
+
+/// The connection `browser` running the real `agent-browser mcp`, headless, its actions as the
+/// adapter sets them.
+fn real_connection(user: &User, program: &Path) {
+    turn_on(user);
     let added = user
         .call(
             "connection.add",
@@ -5639,6 +5671,271 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
         )
         .unwrap();
     }
+}
+
+/// A page on this machine's loopback, as a developer's server is: each path asked is sent on the
+/// channel. It serves until the test ends.
+fn local_page() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                    break;
+                }
+            }
+            let _ = sent.send(first.split_whitespace().nth(1).unwrap_or("/").to_owned());
+            let body = "<!doctype html><title>The local page</title><p>Served here.</p>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (format!("http://127.0.0.1:{port}/local"), received)
+}
+
+/// Has the browser of the connection open `url` (`agent_browser_open`), the agent in Full: what
+/// agent-browser answered.
+fn opened(mcp: &Mcp, url: &str) -> String {
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": url}}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    answer.text
+}
+
+/// What a run of the agent's, in `mode`, finds of Chrome's DevTools while the connection's
+/// browser runs: it reads every listening TCP port it can see (its own `/proc/net/tcp`, and every
+/// process's), asks each on the loopback for `/json/version`, and tries agent-browser's own port
+/// (its daemon's `stream`, which the test reads in the socket folder). `{"ports": <how many it
+/// tried>, "devtools": [what answered as a browser's DevTools], "stream": <connected or the
+/// error>}`.
+fn devtools_probed(user: &User, mcp: &Mcp, agent: &str, mode: &str) -> Value {
+    let sockets = socket_folder_in(&vault_folder(user)).expect("no browser runs");
+    let stream: u16 = std::fs::read_to_string(sockets.join("default.stream"))
+        .expect("agent-browser's daemon says no port")
+        .trim()
+        .parse()
+        .unwrap();
+    let result = user.path(&format!("work/app/probe-{mode}.json"));
+    std::fs::write(
+        user.path("work/app/probe.py"),
+        format!(
+            "import glob, json, socket\n\
+             result, stream = {result:?}, {stream}\n\
+             ports = set()\n\
+             tables = ['/proc/net/tcp', '/proc/net/tcp6'] + glob.glob('/proc/[0-9]*/net/tcp') \\\n\
+             \x20   + glob.glob('/proc/[0-9]*/net/tcp6')\n\
+             for table in tables:\n\
+             \x20   try:\n\
+             \x20       lines = open(table).read().splitlines()[1:]\n\
+             \x20   except Exception:\n\
+             \x20       continue\n\
+             \x20   for line in lines:\n\
+             \x20       fields = line.split()\n\
+             \x20       if len(fields) > 3 and fields[3] == '0A':\n\
+             \x20           ports.add(int(fields[1].rsplit(':', 1)[1], 16))\n\
+             out = {{'ports': len(ports), 'devtools': []}}\n\
+             for port in sorted(ports):\n\
+             \x20   for host in ('127.0.0.1', '::1'):\n\
+             \x20       try:\n\
+             \x20           s = socket.create_connection((host, port), timeout=1)\n\
+             \x20           s.settimeout(2)\n\
+             \x20           s.sendall(b'GET /json/version HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n')\n\
+             \x20           data = b''\n\
+             \x20           while len(data) < 65536:\n\
+             \x20               chunk = s.recv(4096)\n\
+             \x20               if not chunk:\n\
+             \x20                   break\n\
+             \x20               data += chunk\n\
+             \x20           s.close()\n\
+             \x20           if b'webSocketDebuggerUrl' in data:\n\
+             \x20               out['devtools'].append(data.decode('utf-8', 'replace')[-400:])\n\
+             \x20       except Exception:\n\
+             \x20           pass\n\
+             try:\n\
+             \x20   socket.create_connection(('127.0.0.1', stream), timeout=1).close()\n\
+             \x20   out['stream'] = 'connected'\n\
+             except Exception as error:\n\
+             \x20   out['stream'] = type(error).__name__\n\
+             open(result, 'w').write(json.dumps(out))\n",
+            result = result.display().to_string(),
+        ),
+    )
+    .unwrap();
+    set_mode(user, agent, mode);
+    let asked = mcp.call("run", json!({"line": "python3 probe.py"}));
+    if held(&asked) {
+        let number: u64 = asked
+            .text
+            .strip_prefix("Waiting for the user's approval, request #")
+            .and_then(|rest| rest.split_once('.'))
+            .map(|(number, _)| number.parse().unwrap())
+            .unwrap();
+        user.call("approval.approve", json!({"number": number}))
+            .unwrap();
+    } else {
+        assert!(!asked.error, "{}", asked.text);
+    }
+    // Each port it tries may take seconds: longer than `eventually` waits.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let probe: Option<Value> = std::fs::read_to_string(&result)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        if let Some(probe) = probe {
+            return probe;
+        }
+        assert!(Instant::now() < deadline, "the run in {mode} never ended");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// That a run's probe found the loopback's ports and none of the browser's.
+fn found_nothing(probe: &Value, mode: &str) {
+    assert!(probe["ports"].as_u64().unwrap_or(0) > 0, "{mode}: {probe}");
+    let headless: Vec<&Value> = probe["devtools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|said| said.as_str().unwrap_or("").contains("HeadlessChrome"))
+        .collect();
+    assert!(
+        headless.is_empty(),
+        "{mode}: a run reached the browser's DevTools: {probe}"
+    );
+    assert_ne!(
+        probe["stream"], "connected",
+        "{mode}: a run reached agent-browser's own port: {probe}"
+    );
+}
+
+#[test]
+fn a_run_cannot_reach_the_browsers_devtools() {
+    // The real agent-browser, headless: its daemon and Chrome run in a network of their own, so a
+    // confined run of the agent's, in Ask as in Auto, finds no DevTools port on its loopback,
+    // whatever it reads of /proc, and not agent-browser's own port either.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, _asked) = local_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    opened(&mcp, &url);
+    for mode in ["ask", "auto"] {
+        let probe = devtools_probed(&user, &mcp, &id, mode);
+        found_nothing(&probe, mode);
+    }
+}
+
+#[test]
+fn the_browser_reaches_a_local_server_of_the_host() {
+    // A developer's server on the host's loopback, as a run of the agent's may start one: the
+    // browser, in its own network, still opens its page.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, asked) = local_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let said = opened(&mcp, &url);
+    let path = asked
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|_| panic!("the local server was never asked: {said}"));
+    assert_eq!(path, "/local", "{said}");
+    assert!(said.contains("The local page"), "{said}");
+}
+
+#[test]
+fn the_login_fills_and_no_run_reads_it() {
+    // The login fills the form of a local page with the entry's password; a run of the agent's
+    // then looks for the browser's DevTools, which would read the page and its cookies: it finds
+    // none, and nothing of the secret.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, signed_in) = login_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": PASSWORD, "username": "tester@example.com",
+            "url": url, "for": "connection:browser",
+            "description": "The test account of the shop."}),
+    )
+    .unwrap();
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let query = signed_in
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the form was never sent");
+    // Never printed: compared only.
+    assert!(
+        query
+            .split('&')
+            .any(|pair| pair == format!("password={PASSWORD}")),
+        "the password sent is not the entry's"
+    );
+    let probe = devtools_probed(&user, &mcp, &id, "auto");
+    found_nothing(&probe, "auto");
+    assert!(
+        !probe.to_string().contains(PASSWORD),
+        "a run read the secret"
+    );
+}
+
+#[test]
+fn the_real_agent_browser_signs_in_with_a_vault_entry() {
+    // The whole path with the real tool: the connection runs the real `agent-browser mcp`, its
+    // adapter applies, login runs agent-browser's command line in the run's sandbox, agent-browser's
+    // daemon starts Flottille's plugin, which asks the daemon for the entry; the page is a local
+    // one, headless, and the account an invented one in the in-memory keyring.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, signed_in) = login_page();
+    real_connection(&user, &program);
     project(&user, "app");
     user.call(
         "vault.set",

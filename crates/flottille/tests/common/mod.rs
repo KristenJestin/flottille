@@ -206,7 +206,16 @@ impl User {
         let mut user = User {
             dir,
             _runtime: runtime,
-            env: vec![("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs)],
+            // A connection's browser runs in a network of its own, which passt's `pasta` gives a
+            // way out (`docs/vault.md`, "The browser's network"): a test's stands on `true`, which
+            // gives none, so that no test needs passt. A test of the real one names `pasta`.
+            env: vec![
+                ("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs),
+                (
+                    "FLOTTILLE_TEST_PASTA".to_owned(),
+                    program("true").display().to_string(),
+                ),
+            ],
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
         };
