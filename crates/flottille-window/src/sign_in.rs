@@ -126,7 +126,7 @@ impl SignInRow {
                 format!("Could not check: {problem}")
             }
             (None, _, Some(_)) if self.unreached => {
-                "Could not check: Flottille could not ask the daemon".into()
+                "Could not check: Flottille is not answering".into()
             }
             (None, _, Some(_)) => format!("Could not check: {} failed", self.program),
             (None, _, None) => format!("{} did not say whether it is signed in", self.program),
