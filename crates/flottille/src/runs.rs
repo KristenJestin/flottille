@@ -2,8 +2,9 @@
 //! `docs/reference/hemera.md` §3 "Commands"), and the tasks the user runs from the window.
 //!
 //! A run is a line split without a shell and spawned in a session of its own, with the
-//! place's variables and an environment that keeps forges out of reach: no forge token, the forge
-//! command lines' configuration in an empty folder, and no git hook. The call waits
+//! place's variables and, in Ask and Auto, an environment that keeps forges out of reach: no forge
+//! token, the forge command lines' configuration in an empty folder, and no git hook (a run in
+//! Full gets the daemon's environment as it is, `docs/tools.md`). The call waits
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
 //! when shown or stored.
 

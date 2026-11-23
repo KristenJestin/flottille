@@ -577,7 +577,12 @@ pending requests.
   agent of the tree is told so, between turns; a command started in Full and still running, a
   service or a watcher among them, keeps what it started with until it ends. What a run in Full
   wrote outlives it (`~/.ssh`, `~/.gitconfig`, a file of `~/.config`): a later push in Ask or
-  Auto still judges those files each time, as below and in `docs/vault.md`, "The gaps". The tools
+  Auto still judges those files each time, as below and in `docs/vault.md`, "The gaps". **A
+  `git config --global` in Full (run by a program, as the gate refuses it on a line) replaces
+  `~/.gitconfig`** (git writes a new file and renames it
+  over the old), which is no longer the file the daemon found at its start: from then on every
+  push over SSH in Ask or Auto is refused, saying so, until the daemon restarts, or the work is
+  done in Full (#1322). The tools
   `forge` and `tickets` stay for what only they do: following checks and reviews, which wakes the
   agent, the window's view of pull requests and tickets, and every write to Jira.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
@@ -589,8 +594,10 @@ pending requests.
   or a task the user runs) gets a runtime folder of its own,
   `$XDG_RUNTIME_DIR/flottille/display/run-<id>` (mode 0700), holding only a hard link of the
   session's Wayland socket, removed when the run ends; its `XDG_RUNTIME_DIR` is that folder and
-  `WAYLAND_DISPLAY` names the socket: no session bus, no keyring, no other socket, and Landlock
-  still keeps the real runtime folder out of reach. X11's `DISPLAY` (with `XAUTHORITY`) is given
+  `WAYLAND_DISPLAY` names the socket: in Ask and Auto, no session bus, no keyring, no other
+  socket, and Landlock still keeps the real runtime folder out of reach. **In Full the setting
+  changes nothing**: a run there is the user's own (above), with their display, session bus and
+  keyring, and no runtime folder of its own is made for it. X11's `DISPLAY` (with `XAUTHORITY`) is given
   only when the session has no Wayland, which the setting's help says: an X11 client can read the
   keys typed in other windows and type into them; Landlock then leaves every abstract socket of
   the session within the run's reach, X11's and a session bus `dbus-launch` put on one alike,

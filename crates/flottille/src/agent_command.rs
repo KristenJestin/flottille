@@ -145,7 +145,8 @@ pub enum AgentAction {
     },
     /// Set a session's mode: in ask, every call to judge comes to you; in auto, the judge you
     /// chose in Settings decides it; in full, nothing is asked: every call the gate would hold
-    /// passes, and what it refuses stays refused (`docs/design.md` §7)
+    /// passes, what it refuses stays refused, and a command it runs is unconfined, as yours
+    /// (`docs/design.md` §7)
     Mode {
         agent: String,
         /// ask, auto or full

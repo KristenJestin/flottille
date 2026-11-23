@@ -713,9 +713,10 @@ says what kind of call it is, and the session's **mode** says who answers it.
   every end of a line whose program the gate does not know, so that no wrapper turns them into
   calls to judge.
 
-Only a push the gate read and let through goes out: every run's environment rewrites push URLs
-to nowhere, but a run that is itself a `git push` the user, the judge or Full mode allowed (`docs/tools.md`,
-"Tasks and runs").
+Only a push the gate read and let through goes out: in Ask and Auto, every run's environment
+rewrites push URLs to nowhere, but a run that is itself a `git push` the user or the judge allowed
+(`docs/tools.md`, "Tasks and runs"). In Full a run has no such environment: a push from a script
+is neither walled nor checked (the gate still reads a `git push` that is a line of its own).
 
 What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
 a malformed call, a login printed, the daemon driven from a command.

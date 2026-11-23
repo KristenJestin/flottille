@@ -683,6 +683,21 @@ The gaps, where the platform does not allow more:
   nor changed (its change time) since the daemon's start, else the push says so and a restart of
   the daemon trusts it again. What is not judged is data: a key, a `known_hosts`, a setting that
   runs nothing (a push's remote URL is the user's to change, "Where the remote leads");
+- **the change-time rule on `core.sshCommand`'s program is best effort**, not a boundary: it
+  races with a run in Full at the same time (a change made, then the push, within the clock's
+  grain, or after the push has read it); it judges that one program, and not the other files it
+  reads or runs (a script the wrapper calls, a library, its own configuration); a restart of the
+  daemon trusts whatever is there then, a changed wrapper included; and a clock set back can
+  make a later change look older. It is kept because it costs a user nothing but a restart after
+  they edit their own wrapper, and refuses what a run in Full plants in the common way;
+- **the settings of a lent HTTPS push** are the user's, read from the files found at the daemon's
+  start: an included file that was not there then (or is another file at its path now) is left
+  out of what the push is given, with a `hasconfig` include of one, so that a file made since
+  (by a run in Full, a dotfiles update) cannot set `http.proxy`, `http.sslVerify` or
+  `http.sslCAInfo` for it, and the user's settings of such a file apply from the next restart of
+  the daemon. A file that was there is trusted as it is, even when written in place since, and so
+  is the settings file itself, which the user changes as they like: neither is judged for what
+  it says;
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
   cannot be opened, but a process that guesses the bus's path could still connect to it: the
