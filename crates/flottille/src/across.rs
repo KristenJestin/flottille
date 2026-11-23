@@ -477,6 +477,13 @@ pub(crate) fn relinked(daemon: &Arc<Daemon>, machine: &str) {
     }
 }
 
+/// `body` as it goes to another machine, which takes `LONGEST` characters at most: cut, and told
+/// where the whole is read, the session `session` on this machine, named `here`.
+pub(crate) fn fitted(body: &str, session: &str, here: &str) -> String {
+    let _ = (session, here);
+    body.to_owned()
+}
+
 /// Tells the agent of another machine that started `agent` here: a delivery of `kind`, kept until
 /// that machine takes it. With `back`, the commits of its place go back first, and the delivery
 /// names where they came; `ended` says the session ended with it. False when `agent` was started
@@ -2509,6 +2516,28 @@ fn delivered_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_text_too_long_for_another_machine_is_cut_saying_where_to_read_it() {
+        let long = format!("Round 1 found {}", "x".repeat(LONGEST));
+
+        let fitted = fitted(&long, "ab12", "server");
+
+        assert!(fitted.chars().count() <= LONGEST, "{}", fitted.len());
+        assert!(fitted.starts_with("Round 1 found x"), "{fitted}");
+        assert!(fitted.contains("[cut: "), "{fitted}");
+        assert!(
+            fitted.ends_with("session_read {\"session\": \"ab12\"} on server reads the rest]"),
+            "{}",
+            &fitted[fitted.len() - 120..]
+        );
+        // What fits goes as it is.
+        assert_eq!(fitted_short(), "Round 1 found nothing.");
+    }
+
+    fn fitted_short() -> String {
+        fitted("Round 1 found nothing.", "ab12", "server")
+    }
 
     #[test]
     fn an_answer_sent_again_after_a_refusal_still_finds_its_launch() {
