@@ -3556,11 +3556,14 @@ impl Store {
     }
 
     /// Settles the launch `out` `launch` to `machine`, held for the user there, as their answer
-    /// came: `started` or `refused`. Only a launch still held: an answer sent again changes nothing.
+    /// came: `started` or `refused`. Only a launch not settled yet, still `accepted` when the
+    /// answer came before its place was recorded: an answer sent again changes nothing. A launch
+    /// started told it is refused ended there: it is `ended`.
     pub fn decide_launch(&mut self, machine: &str, launch: &str, state: &str) -> Result<()> {
         self.connection.execute(
-            "UPDATE launches SET state = ?3 WHERE way = 'out' AND machine = ?1 \
-             AND launch = ?2 AND state = 'held'",
+            "UPDATE launches SET state = CASE WHEN state = 'started' THEN 'ended' ELSE ?3 END \
+             WHERE way = 'out' AND machine = ?1 AND launch = ?2 \
+             AND (state IN ('held', 'accepted') OR (state = 'started' AND ?3 = 'refused'))",
             params![machine, launch, state],
         )?;
         Ok(())
@@ -5166,13 +5169,18 @@ impl Space<'_> {
 
 /// Records a launch, in place of the one of the same name with the same machine: a launch `in`
 /// already recorded keeps its workspace, its name and its id, as `place_launch` alone writes them.
+/// A launch `out` the user's answer settled (`decide_launch`) is never made held again by the
+/// record of its place, which may come after that answer.
 fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
     connection.execute(
         "INSERT INTO launches (way, machine, launch, caller, kind, project, state, request, \
          agent, workspace, workspace_id, asked, at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT (way, machine, launch) DO UPDATE SET caller = excluded.caller, \
-         kind = excluded.kind, project = excluded.project, state = excluded.state, \
+         kind = excluded.kind, project = excluded.project, \
+         state = CASE WHEN launches.way = 'out' AND excluded.state IN ('held', 'accepted') \
+         AND launches.state IN ('started', 'refused', 'ended') THEN launches.state \
+         ELSE excluded.state END, \
          request = excluded.request, agent = excluded.agent, \
          workspace = CASE WHEN launches.way = 'in' THEN launches.workspace \
          ELSE excluded.workspace END, asked = excluded.asked, at = excluded.at",
