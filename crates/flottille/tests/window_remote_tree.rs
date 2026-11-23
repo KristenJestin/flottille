@@ -199,13 +199,16 @@ fn frame_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Opti
     Some(format!("tree-row-{}", row.as_u64()))
 }
 
-/// The height of `frame`, `None` once it is gone, and while it is in two places at once: a row
-/// that moves between two projects of the tree (the one its pilot has and the one its machine
-/// lists) is in both until the one it leaves has folded away.
-fn height(cx: &mut VisualTestContext, frame: &str) -> Option<f32> {
-    cx.update(|window, _| match window.find_all(frame.to_owned()).as_slice() {
-        [found] => Some(f32::from(found.bounds().size.height)),
-        _ => None,
+/// The heights of `frame`: none once it is gone, two while a row that moves between two projects
+/// of the tree (the one its pilot has and the one its machine lists) is in both, the one it
+/// leaves folding away.
+fn heights(cx: &mut VisualTestContext, frame: &str) -> Vec<f32> {
+    cx.update(|window, _| {
+        window
+            .find_all(frame.to_owned())
+            .iter()
+            .map(|found| f32::from(found.bounds().size.height))
+            .collect()
     })
 }
 
@@ -355,12 +358,12 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
     let agent = led_on_server(&mcp);
     let row = elsewhere_id("server", &agent);
     until(&shell, cx, "the row comes", |cx| {
-        frame_of(&shell, &row, cx).is_some_and(|frame| height(cx, &frame).is_some())
+        frame_of(&shell, &row, cx).is_some_and(|frame| !heights(cx, &frame).is_empty())
     });
     let frame = frame_of(&shell, &row, cx).unwrap();
-    let coming = height(cx, &frame).unwrap();
+    let coming = heights(cx, &frame).into_iter().fold(f32::MAX, f32::min);
     settle(&shell, cx);
-    let full = height(cx, &frame).unwrap();
+    let full = heights(cx, &frame).into_iter().fold(0., f32::max);
     assert!(full > 0., "{full}");
     assert!(
         coming < full,
@@ -377,11 +380,11 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
             == "ended"
     });
     until(&shell, cx, "the row starts folding away", |cx| {
-        height(cx, &frame).is_none_or(|height| height < full)
+        heights(cx, &frame).into_iter().all(|height| height < full)
     });
-    let going = height(cx, &frame);
+    let going = heights(cx, &frame);
     assert!(
-        going.is_some_and(|height| height > 0.),
+        going.iter().any(|height| *height > 0.),
         "the row folds away, it does not vanish: {going:?}"
     );
     settle(&shell, cx);
