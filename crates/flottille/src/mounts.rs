@@ -14,6 +14,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
@@ -165,6 +166,8 @@ pub struct Plan {
 struct Copies {
     staging: Option<CString>,
     files: Vec<Copy>,
+    /// Where the child says why they were not given.
+    failed: Option<&'static AtomicI32>,
 }
 
 struct Copy {
@@ -355,6 +358,7 @@ impl Plan {
         self.copies = Copies {
             staging: Some(c(&staging)?),
             files,
+            failed: failed(),
         };
         Some(self)
     }
@@ -469,8 +473,13 @@ impl Plan {
                     std::ptr::null(),
                 ) as libc::c_long)?;
             }
-            if let Some(staging) = &self.copies.staging {
-                give(staging, &mut self.copies.files)?;
+            // At best: a command started without them meets the refusal of `ssh` alone, where
+            // failing its start would fail every command, git's and the daemon's too.
+            if let Some(staging) = &self.copies.staging
+                && let Err(error) = give(staging, &mut self.copies.files)
+                && let Some(failed) = self.copies.failed
+            {
+                failed.store(error.raw_os_error().unwrap_or(libc::EIO), Ordering::Relaxed);
             }
             for (kept, tree) in self.kept.iter().zip(self.trees.iter_mut()) {
                 let fd = libc::syscall(
@@ -557,12 +566,12 @@ impl Plan {
 
 /// Writes each copy into a file system of the namespace's own mounted on `staging`, makes it
 /// read-only, takes each file out of it, takes the file system away, and puts each file over its
-/// target. A target gone since the plan was made is not there to cover.
+/// target. A target gone since the plan was made is not there to cover. Whatever fails, the file
+/// system does not stay over `staging`.
 ///
 /// # Safety
 /// In the child, before its program: plain system calls on what the plan allocated.
 unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
-    let none = std::ptr::null::<libc::c_char>();
     let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
     // SAFETY: as the function says.
     unsafe {
@@ -573,6 +582,43 @@ unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
             flags,
             c"mode=0755".as_ptr().cast(),
         ) as libc::c_long)?;
+        let staged = stage(staging, copies, flags);
+        if staged.is_err() {
+            for copy in copies.iter_mut().filter(|copy| copy.tree >= 0) {
+                libc::close(copy.tree);
+            }
+        }
+        // What the staging folder held before, shown again, whatever came of the copies.
+        check(libc::umount2(staging.as_ptr(), libc::MNT_DETACH) as libc::c_long)?;
+        staged?;
+        for copy in copies.iter() {
+            let moved = libc::syscall(
+                libc::SYS_move_mount,
+                copy.tree,
+                c"".as_ptr(),
+                libc::AT_FDCWD,
+                copy.target.as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH,
+            );
+            let error = io::Error::last_os_error();
+            libc::close(copy.tree);
+            if moved != 0 && error.raw_os_error() != Some(libc::ENOENT) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes each copy into the file system on `staging`, makes it read-only and takes each file out
+/// of it.
+///
+/// # Safety
+/// As `give`.
+unsafe fn stage(staging: &CStr, copies: &mut [Copy], flags: libc::c_ulong) -> io::Result<()> {
+    let none = std::ptr::null::<libc::c_char>();
+    // SAFETY: as the function says.
+    unsafe {
         for copy in copies.iter() {
             let fd = libc::open(
                 copy.staged.as_ptr(),
@@ -612,23 +658,40 @@ unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
             check(fd)?;
             copy.tree = fd as libc::c_int;
         }
-        check(libc::umount2(staging.as_ptr(), libc::MNT_DETACH) as libc::c_long)?;
-        for copy in copies.iter() {
-            let moved = libc::syscall(
-                libc::SYS_move_mount,
-                copy.tree,
-                c"".as_ptr(),
-                libc::AT_FDCWD,
-                copy.target.as_ptr(),
-                MOVE_MOUNT_F_EMPTY_PATH,
-            );
-            libc::close(copy.tree);
-            if moved != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
-                return Err(io::Error::last_os_error());
-            }
-        }
     }
     Ok(())
+}
+
+/// Where a confined command's child says why the copies were not given: a page every child shares
+/// with the daemon. None where it cannot be mapped.
+fn failed() -> Option<&'static AtomicI32> {
+    static PAGE: OnceLock<usize> = OnceLock::new();
+    let page = *PAGE.get_or_init(|| {
+        // SAFETY: a new anonymous mapping of the daemon's, never unmapped.
+        let page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                std::mem::size_of::<AtomicI32>(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        match page == libc::MAP_FAILED {
+            true => 0,
+            false => page as usize,
+        }
+    });
+    // SAFETY: a mapping of the right size and alignment, zeroed, alive for ever.
+    (page != 0).then(|| unsafe { &*(page as *const AtomicI32) })
+}
+
+/// Why a confined command started without the copies of the files `ssh` includes, the last time
+/// one did.
+pub fn copies_failed() -> Option<io::Error> {
+    let errno = failed()?.load(Ordering::Relaxed);
+    (errno != 0).then(|| io::Error::from_raw_os_error(errno))
 }
 
 #[cfg(test)]

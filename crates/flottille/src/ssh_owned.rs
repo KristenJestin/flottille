@@ -11,6 +11,7 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The machine's `ssh` configuration.
 const SYSTEM_CONFIG: &str = "/etc/ssh/ssh_config";
@@ -30,6 +31,16 @@ const CONFIG_MAX: u64 = 1024 * 1024;
 /// Each root-owned file the machine's configuration and the user's include, with its text now:
 /// its real path (links followed, as `ssh` opens it) and what it holds.
 pub fn copies() -> Vec<(PathBuf, Vec<u8>)> {
+    // A command's child cannot log: a failure of one is said here, at a later start, once.
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if let Some(error) = crate::mounts::copies_failed()
+        && !SAID.swap(true, Ordering::Relaxed)
+    {
+        eprintln!(
+            "flottille daemon: a command started without the root-owned files ssh includes, \
+             which ssh then refuses ({error})"
+        );
+    }
     // SAFETY: getuid cannot fail.
     if unsafe { libc::getuid() } == 0 {
         return Vec::new();
