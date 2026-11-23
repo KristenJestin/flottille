@@ -1039,3 +1039,108 @@ fn the_page_of_a_held_launch_says_it_waits_for_the_user_s_decision(cx: &mut Test
         "{lines:?}"
     );
 }
+
+#[gpui_kit::test]
+fn a_running_root_of_another_machine_with_a_question_shows_needs_you(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    // Its own repository on server, for a session started there.
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    // It runs, then asks the user and goes on working: an ask does not hold the turn.
+    server.user.fake_script(json!({"turns": [
+        {"when": "Export the totals", "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "ask", "arguments": {"question": "CSV or JSON first?"}}},
+            {"wait": 60000},
+            {"say": "done"}
+        ]}
+    ]}));
+    let started = server
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "Export the totals of the year"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+
+    // Its row in the server's group of the tree, running, the window open before it asks.
+    let (shell, cx) = window(&pc, cx);
+    let row = elsewhere_id("server", &id);
+    until(&shell, cx, "the running root of server", |cx| {
+        label(cx, session_mark_id(&row)).as_deref() == Some("Running")
+    });
+
+    std::fs::write(server.user.path("fake/release"), "").unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let agent = server
+            .user
+            .call("agent.show", json!({"agent": id}))
+            .unwrap()["agent"]
+            .clone();
+        if agent["waiting_on_answer"] == true && agent["state"] == "working" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "it never asked while its turn ran: {agent}\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Needs you wins over running, as on its machine.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_mark_id(&row));
+        if said.as_deref() == Some("Needs you") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}, server lists it {:?}",
+            listed_state(&server, &id)
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let mark = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .elsewhere(&row)
+            .and_then(|session| session.mark)
+    });
+    assert_eq!(mark, Some(flottille_window::state::AgentState::NeedsYou));
+
+    // Opened, its machine comes in front: its row there still needs you while its turn runs.
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    until(&shell, cx, "the root's row with server in front", |cx| {
+        present(cx, session_id(&id))
+    });
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_mark_id(&id));
+        if said
+            .as_deref()
+            .is_some_and(|said| said.starts_with("Needs you"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "with server in front the row says {said:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let agent = server
+        .user
+        .call("agent.show", json!({"agent": id}))
+        .unwrap()["agent"]
+        .clone();
+    assert_eq!(agent["state"], "working", "its turn still runs");
+}
