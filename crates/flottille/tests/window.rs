@@ -9880,6 +9880,7 @@ fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has
                 "instructions" => &["add-skill", "add-command", "message-checks-text-atlas"],
                 "features" => &["project-features-list"],
                 "vault" => &["project-vault-add"],
+                "notifications" => &["notify-project-request-field-label"],
                 other => panic!("no editor known for {other}"),
             };
             for editor in editors {
@@ -9898,6 +9899,7 @@ fn tab_title(tab: &str) -> &'static str {
         "instructions" => "rules-title",
         "features" => "project-features-list",
         "vault" => "project-vault-title",
+        "notifications" => "notifications-project-title",
         other => panic!("no tab {other}"),
     }
 }
