@@ -2453,6 +2453,11 @@ impl Shell {
             })
     }
 
+    /// The visit the history is at: the page shown, unless one is on its way.
+    pub fn visit_shown(&self) -> Option<&crate::history::Visit> {
+        self.history.current()
+    }
+
     /// How many dialogs the window holds, open or not: each machine's Settings has its own.
     pub fn dialogs_held(&self, cx: &App) -> usize {
         self.shared.modals.read(cx).held()

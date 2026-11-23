@@ -55,6 +55,8 @@ struct Relay {
     silent: Arc<AtomicBool>,
     /// The methods whose request ends its connection there: the window hears it refused.
     cut: Arc<Mutex<Vec<&'static str>>>,
+    /// The methods this machine's daemon is asked under a name it does not know: it refuses them.
+    refuse: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl Relay {
@@ -89,7 +91,14 @@ impl Relay {
                 Ok(0) | Err(_) => return,
                 Ok(_) => {}
             }
-            let request: Value = serde_json::from_str(line.trim_end()).unwrap_or_default();
+            let mut request: Value = serde_json::from_str(line.trim_end()).unwrap_or_default();
+            let refused = request["method"]
+                .as_str()
+                .is_some_and(|method| self.refuse.lock().unwrap().contains(&method));
+            if refused {
+                request["method"] = json!("test.refused");
+                line = format!("{request}\n");
+            }
             if request["machine"] == "server" {
                 let method = request["signed"]["method"]
                     .as_str()
@@ -1543,4 +1552,79 @@ fn renaming_the_server_s_session_from_its_header_renames_it_there(cx: &mut TestA
             .call("agent.show", json!({"agent": there, "after": 0}))
             .is_ok_and(|shown| shown["agent"]["title"] == "Renamed there")
     });
+}
+
+#[gpui_kit::test]
+fn a_failed_read_of_the_machines_forgets_no_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+    assert!(shell.read_with(cx, |s, _| s.holds_pages_of("server")));
+
+    relay.refuse.lock().unwrap().push("remote.machines");
+    until(&shell, cx, "the machines' read fails", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .is_some_and(|read| read.off.is_some())
+        })
+    });
+    settle(&shell, cx);
+    assert!(
+        shell.read_with(cx, |s, _| s.holds_pages_of("server")),
+        "a read that failed dropped the server's pages"
+    );
+}
+
+#[gpui_kit::test]
+fn back_to_a_machine_gone_offline_leaves_the_history_where_it_was(cx: &mut TestAppContext) {
+    let (_hub, pc, server, here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn again", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the window knows the server is offline", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| !server.online())
+        })
+    });
+    let before = shell.read_with(cx, |s, _| s.visit_shown().cloned());
+    back(&shell, cx);
+    settle(&shell, cx);
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|title| title == "server cannot be shown"),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+    assert!(shows_reply(&shell, cx, &here), "the page left");
+    let after = shell.read_with(cx, |s, _| s.visit_shown().cloned());
+    assert_eq!(
+        after.map(|visit| visit.selection),
+        before.map(|visit| visit.selection),
+        "the history moved to a page not shown"
+    );
 }
