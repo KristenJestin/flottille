@@ -313,7 +313,8 @@ impl Adapter {
              browser can read the keys typed in other windows and type into them (a terminal's \
              included), and on some Wayland compositors a client can capture the screen and the \
              clipboard; its profile (cookies, sign-ins) is kept from one browser to the next in a \
-             folder of the connection's own, unless its command keeps it to some domains"
+             folder of the connection's own, which no other command Flottille runs reaches, \
+             unless its command keeps it to some domains"
                 .to_owned(),
         );
         said
@@ -493,13 +494,15 @@ pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<Strin
 /// flags: agent-browser's MCP tool calls run in child processes that load only the `--config`
 /// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file.
 ///
-/// It names the browser's profile too, a folder of the connection's own: each browser started
-/// in the other mode is a new one, and agent-browser's own profile of a browser is gone when it
-/// closes; with it the user signs in shown and the agent goes on headless, signed in. A command
-/// kept to some domains gets none: agent-browser refuses `--allowed-domains` beside a profile.
+/// It names the browser's profile too, in the folder of the connection's browser (`browsers.rs`),
+/// which no other command Flottille runs reaches: each browser started in the other mode is a
+/// new one, and agent-browser's own profile of a browser is gone when it closes; with it the user
+/// signs in shown and the agent goes on headless, signed in. A command kept to some domains gets
+/// none: agent-browser refuses `--allowed-domains` beside a profile.
 pub fn start_options(
     declaration: &Declaration,
     folder: &Path,
+    browser: &crate::browsers::Folder,
     headed: bool,
 ) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
@@ -511,7 +514,7 @@ pub fn start_options(
         "capabilities": ["credential.read"],
     }]});
     if !kept_to_domains(declaration) {
-        config["profile"] = json!(folder.join("profile"));
+        config["profile"] = json!(browser.profile());
     }
     if headed {
         config["headed"] = json!(true);
@@ -839,6 +842,13 @@ fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
     (at > 0).then(|| words[..at].to_vec())
 }
 
+/// What a login's commands are given back of what every confined command is kept out of: the
+/// display folder of the browser that is shown, if one is, and the folder of its browser.
+struct Reached {
+    display: Option<crate::display::Folder>,
+    browser: crate::browsers::Folder,
+}
+
 /// One login: the entry it may give, to whom.
 struct Login {
     connection: String,
@@ -867,7 +877,8 @@ async fn run(
         // A login never shows a browser by itself: it goes on in the one that is shown, if any.
         None => super::client::browser_display(daemon, &declaration.name),
     };
-    let options = start_options(declaration, &folder, shown.is_some())?;
+    let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
+    let options = start_options(declaration, &folder, &given, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }
@@ -881,9 +892,12 @@ async fn run(
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
     display(&mut env, shown.as_ref().map(|shown| &shown.env), &folder);
-    // The one folder the login's commands may reach: the daemon's own, never what a variable of
-    // the connection (the vault's, below) names.
-    let reached = shown.as_ref().map(|shown| shown.folder.clone());
+    // The folders the login's commands may reach: the daemon's own, never what a variable of the
+    // connection (the vault's, below) names. Its browser's, since a login may start the browser.
+    let reached = Reached {
+        display: shown.as_ref().map(|shown| shown.folder.clone()),
+        browser: given,
+    };
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
@@ -895,16 +909,9 @@ async fn run(
     // Loaded first, then filled without navigating: agent-browser then checks, before each field
     // and the submit, that the page is still of the URL's origin (scheme, host and port), so a
     // page that redirects elsewhere gets no secret. Its own navigation checks nothing after it.
-    reload(
-        program,
-        &options,
-        &without_token,
-        reached.as_ref(),
-        &folder,
-        url,
-    )
-    .await
-    .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
+    reload(program, &options, &without_token, &reached, &folder, url)
+        .await
+        .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
     let mut command = tokio::process::Command::new(&program[0]);
     command
         .args(&program[1..])
@@ -928,9 +935,10 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined_but(
+    let mut child = crate::children::spawn(crate::landlock::confined_browser(
         crate::children::in_own_session(&mut command),
-        reached.as_ref(),
+        reached.display.as_ref(),
+        &reached.browser,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
@@ -966,7 +974,7 @@ async fn run(
                 program,
                 &options,
                 &without_token,
-                reached.as_ref(),
+                &reached,
                 &folder,
                 url,
                 &mut why,
@@ -994,7 +1002,7 @@ async fn run(
         program,
         &options,
         &without_token,
-        reached.as_ref(),
+        &reached,
         &folder,
         url,
         &mut why,
@@ -1010,7 +1018,7 @@ async fn reloaded(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: Option<&crate::display::Folder>,
+    reached: &Reached,
     folder: &Path,
     url: &str,
     why: &mut String,
@@ -1026,7 +1034,7 @@ async fn reload(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: Option<&crate::display::Folder>,
+    reached: &Reached,
     folder: &Path,
     url: &str,
 ) -> Result<(), String> {
@@ -1042,9 +1050,10 @@ async fn reload(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined_but(
+    let mut child = crate::children::spawn(crate::landlock::confined_browser(
         crate::children::in_own_session(&mut command),
-        reached,
+        reached.display.as_ref(),
+        &reached.browser,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();

@@ -150,6 +150,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
     crate::mounts::find_bus();
+    // Before anything runs: the browsers' profiles, which every command it confines is kept out of.
+    crate::browsers::find(paths)?;
     if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
         eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
     }

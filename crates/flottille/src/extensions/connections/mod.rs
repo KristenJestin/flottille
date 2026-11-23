@@ -2720,6 +2720,8 @@ async fn remove_if(
         Ok(())
     })?;
     client::stop(daemon, &name).await;
+    // Its browser closed with the server: its profile, the sign-ins made in it, goes with it.
+    crate::browsers::remove(&daemon.paths, &name);
     forget_row(daemon, &name)?;
     oauth::forget(daemon, &name)
         .await

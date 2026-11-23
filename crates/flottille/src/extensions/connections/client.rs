@@ -597,8 +597,12 @@ async fn start_with(
             let folder = super::adapters::folder(daemon, &declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
+            // The folder of the connection's browser, its profile in it: given back to its server
+            // alone (`browsers.rs`).
+            let mut profile = None;
             let options = match adapter {
                 Some(_) => {
+                    let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
                     (display, headless) =
                         super::adapters::shown(daemon, declaration, &declaration.name, headed);
                     if let Some(browser) =
@@ -606,7 +610,14 @@ async fn start_with(
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(declaration, &folder, display.is_some())?
+                    let options = super::adapters::start_options(
+                        declaration,
+                        &folder,
+                        &given,
+                        display.is_some(),
+                    )?;
+                    profile = Some(given);
+                    options
                 }
                 None => Vec::new(),
             };
@@ -635,11 +646,14 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::landlock::confined_but(
-                crate::children::in_own_session(&mut command),
-                display.as_ref().map(|shown| &shown.folder),
-            ))
-            .map_err(|error| format!("{}: {error}", words[0]))?;
+            let shown = display.as_ref().map(|shown| &shown.folder);
+            crate::children::in_own_session(&mut command);
+            match &profile {
+                Some(profile) => crate::landlock::confined_browser(&mut command, shown, profile),
+                None => crate::landlock::confined_but(&mut command, shown),
+            };
+            let mut child = crate::children::spawn(&mut command)
+                .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())

@@ -11,6 +11,10 @@
 //! their path under `/tmp/.X11-unix` stay open to Landlock: a rule on `/tmp` would take from a
 //! program what it makes there, and the private mount namespace empties the folder instead
 //! (`mounts.rs`).
+//!
+//! The connections' browsers' profiles (`browsers.rs`) are kept out the same way: the namespace
+//! empties their folder, and Landlock denies it only where there is no namespace, for the same
+//! reason; the server of a connection and its login are given back their own folder.
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -135,23 +139,37 @@ pub fn confined_but<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
-    confine(command, open, false)
+    confine(command, open, false, None)
+}
+
+/// [`confined_but`], given back the folder of one connection's browser too, its profile in it,
+/// which every other confined command is kept out of. A [`crate::browsers::Folder`] and no path:
+/// only the daemon's own folder is ever an exception. For the connection's server and its login.
+pub fn confined_browser<'a>(
+    command: &'a mut tokio::process::Command,
+    open: Option<&crate::display::Folder>,
+    browser: &crate::browsers::Folder,
+) -> &'a mut tokio::process::Command {
+    confine(command, open, false, Some(browser.path()))
 }
 
 /// [`confined`], lent the user's SSH agent: the right to connect to the socket found at the
 /// daemon's start, and nothing else of the folder it is in. Never a path a variable or a
 /// request names. For the daemon's own fetch of an SSH remote (`git::remote`).
 pub fn confined_lent(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    confine(command, None, true)
+    confine(command, None, true, None)
 }
 
 fn confine<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
     lent: bool,
+    browser: Option<&Path>,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
+    // The browsers' profiles (`browsers.rs`), emptied in the namespace with the runtime folders.
+    let browsers = crate::browsers::base().filter(|base| base.is_dir());
     // The private mount namespace first: the runtime folders and, unless it is given X11,
     // X11's socket folder emptied, with what the daemon gives the command put back.
     let given_x11 = open.is_some_and(crate::display::Folder::x11);
@@ -161,10 +179,12 @@ fn confine<'a>(
                 .iter()
                 .cloned()
                 .chain(x11_folder().filter(|_| !given_x11))
+                .chain(browsers.map(Path::to_owned))
                 .collect();
             let kept: Vec<PathBuf> = open
                 .and_then(|folder| folder.path().canonicalize().ok())
                 .into_iter()
+                .chain(browser.map(Path::to_owned))
                 .chain(
                     crate::ssh_agent::socket()
                         .filter(|_| lent)
@@ -188,10 +208,16 @@ fn confine<'a>(
                 .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())
         })
         .flatten();
+    // Without the namespace, Landlock denies the browsers' folder itself. Only then: Landlock
+    // grants and never takes away, so the folders on the way to a denied one lose the right to
+    // make or remove an entry in them, the home among them.
+    let hidden = namespace.is_some();
     if let Some(mut plan) = namespace {
         // SAFETY: `Plan::enter` makes system calls alone on what the plan allocated before.
         unsafe { command.pre_exec(move || plan.enter()) };
     }
+    let browsers = browsers.filter(|_| !hidden);
+    denied.extend(browsers.map(Path::to_owned));
     let rights = rights(abi);
     let connecting = rights & RESOLVE_UNIX != 0;
     // The user's SSH agent's socket outside the runtime folders: denied by its own path, and each
@@ -222,6 +248,12 @@ fn confine<'a>(
     }
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
+    // The connection's own browser folder given back, with every right, where it is denied.
+    paths.extend(
+        browser
+            .filter(|_| browsers.is_some())
+            .and_then(|folder| CString::new(folder.as_os_str().as_bytes()).ok()),
+    );
     let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
     // A rule on the lent socket itself: Landlock checks connecting from the socket's own path up,
     // so the folder it is in stays denied. One outside the runtime folders is not denied at all.
