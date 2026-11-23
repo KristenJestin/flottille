@@ -9715,7 +9715,7 @@ mod tests {
     #[test]
     fn an_ended_pilot_starts_counting_again_only_where_the_cap_has_room() {
         let mut store = Store::open_in_memory().unwrap();
-        let mut lead = |store: &mut Store, name: &str, ended: bool| {
+        let lead = |store: &mut Store, name: &str, ended: bool| {
             store.keep_stand_in(&a_stand_in(name, "aa"), 64).unwrap();
             let mut led = an_agent();
             led.id = format!("led-{name}");
