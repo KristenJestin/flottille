@@ -511,7 +511,7 @@ pub fn remote_agents(machines: &crate::machines::Machines) -> Vec<RemoteAgent> {
         .filter(|launched| under_its_pilot(launched))
         .map(|launched| {
             let machine = machines.machine(&launched.machine);
-            let (state, mark) = last_known(launched, machine);
+            let (state, mark) = last_known(launched, machine, machines.listed(launched));
             let offline = machine.is_some_and(|machine| !machine.online());
             let mark = match (mark, state.as_str()) {
                 (Some(mark), _) => mark,
@@ -547,18 +547,44 @@ pub fn remote_agents(machines: &crate::machines::Machines) -> Vec<RemoteAgent> {
         .collect()
 }
 
+/// The mark of a session as its machine's light list says its state.
+fn listed_mark(state: &str) -> Option<AgentState> {
+    match state {
+        "running" => Some(AgentState::Running),
+        "needs you" => Some(AgentState::NeedsYou),
+        "waiting" => Some(AgentState::Waiting),
+        _ => None,
+    }
+}
+
 /// The state of a session started on another machine as last known here, in words, and its mark:
-/// what its machine last told, unless that machine is off now.
+/// the state its machine lists it in (`listed`), else what it last told here, unless that machine
+/// is off now.
 fn last_known(
     launched: &crate::machines::Launched,
     machine: Option<&crate::machines::Machine>,
+    listed: Option<&crate::machines::Listed>,
 ) -> (String, Option<AgentState>) {
     if let Some(machine) = machine.filter(|machine| !machine.online()) {
         return (machine.state_words(), None);
     }
+    // Nothing said here yet, in a project made for it: the row cannot tell that machine's setup
+    // from its first turn, which its list says `running` (or `idle` before the turn starts), so
+    // only a list that says it asks the user is believed before the first delivery.
+    let preparing = launched.heard.is_none() && launched.making.is_some();
+    // Held, it waits for the user there: a machine of before lists it idle, which says less.
+    let held = launched.state == "held";
+    let says_less = |state: &str| match (held, preparing) {
+        (true, _) => state == "idle",
+        (_, true) => matches!(state, "idle" | "running"),
+        _ => false,
+    };
+    if let Some(listed) = listed.filter(|listed| !says_less(&listed.state)) {
+        return (listed.state.clone(), listed_mark(&listed.state));
+    }
     // A held launch is `held` until the user's answer there comes back: allowed, it is `started`.
     match launched.heard.as_deref() {
-        None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
+        None if launched.state == "held" => ("needs you".to_owned(), Some(AgentState::NeedsYou)),
         // Nothing heard yet of a project made for it there: that machine is preparing it.
         None => match &launched.making {
             Some(project) => (format!("preparing {project}"), Some(AgentState::Running)),
@@ -820,10 +846,15 @@ pub fn title_of(brief: &str) -> String {
         .to_owned()
 }
 
-/// The title of the session of `root`: the one its agent or the user gave it, else the first line
-/// of its first message; the neutral `agent <id>` while none says what the work is.
+/// The title of the session of `root`: the one its agent or the user gave it, or the one of the
+/// launch of another machine that started it, else the first line of its first message; the
+/// neutral `agent <id>` while none says what the work is.
 fn session_title(root: &Value, id: &str, brief: Option<&String>) -> String {
-    if !root["titled_by"].is_null()
+    // A root none named that has a title and no agent of this machine that launched it, nor was
+    // detached from one (which forgets who launched it), was launched with that title by another
+    // machine's agent, or by an extension: its brief is written for the agent, not the user.
+    if (!root["titled_by"].is_null()
+        || (root["launched_by"].is_null() && root["detached_from"].is_null()))
         && let Some(title) = root["title"].as_str().filter(|title| !title.is_empty())
     {
         return title.to_owned();
@@ -1279,7 +1310,11 @@ impl Snapshot {
             let Some(pilot) = self.session(&root).filter(|pilot| !pilot.ended) else {
                 continue;
             };
-            let (state, mark) = last_known(launched, machines.machine(&launched.machine));
+            let (state, mark) = last_known(
+                launched,
+                machines.machine(&launched.machine),
+                machines.listed(launched),
+            );
             let said = |words: &str| {
                 format!(
                     "{}{} on {}",
@@ -1377,13 +1412,7 @@ impl Snapshot {
                 if launched.contains(&(name, session.id.as_str())) {
                     continue;
                 }
-                let mark = match (off, session.state.as_str()) {
-                    (Some(_), _) => None,
-                    (None, "running") => Some(AgentState::Running),
-                    (None, "needs you") => Some(AgentState::NeedsYou),
-                    (None, "waiting") => Some(AgentState::Waiting),
-                    _ => None,
-                };
+                let mark = off.map_or_else(|| listed_mark(&session.state), |_| None);
                 let state = match off {
                     Some(machine) => machine.state_words(),
                     None => session.state.clone(),
@@ -2799,9 +2828,9 @@ mod tests {
             projects: None,
         };
         let online = machine("online");
-        let words = |l, m| last_known(&l, m).0;
+        let words = |l, m| last_known(&l, m, None).0;
         assert_eq!(words(launched("started", None), Some(&online)), "running");
-        assert_eq!(words(launched("held", None), Some(&online)), "waiting");
+        assert_eq!(words(launched("held", None), Some(&online)), "needs you");
         // Allowed there, it sends nothing back but what it does: what is heard wins over the hold.
         let report = Some("child-report");
         assert_eq!(words(launched("held", report), Some(&online)), "reported");
@@ -2814,6 +2843,150 @@ mod tests {
         assert_eq!(words(launched("ended", report), Some(&online)), "reported");
         let off = machine("offline");
         assert!(words(launched("started", None), Some(&off)).starts_with("offline since "));
-        assert_eq!(last_known(&launched("started", None), Some(&off)).1, None);
+        assert_eq!(
+            last_known(&launched("started", None), Some(&off), None).1,
+            None
+        );
+    }
+
+    /// `server` online, with a session `a1` led by `r1` of this machine, in `state` and having
+    /// sent `heard` here; `server` listing it as `listed_as`, when it lists it.
+    fn led_on_server(
+        state: &str,
+        heard: Option<&str>,
+        listed_as: Option<&str>,
+    ) -> crate::machines::Machines {
+        let mut machines = two_machines("online");
+        machines.launches = vec![crate::machines::Launched {
+            machine: "server".into(),
+            caller: "r1".into(),
+            kind: "led".into(),
+            title: "Finish the export".into(),
+            agent: "a1".into(),
+            state: state.into(),
+            heard: heard.map(str::to_owned),
+            heard_at: None,
+            at: 1,
+            making: None,
+        }];
+        if let Some(state) = listed_as {
+            machines.lists.machines[0].1.push(crate::machines::Listed {
+                state: state.to_owned(),
+                ..listed("a1", "app", 7)
+            });
+        }
+        machines
+    }
+
+    /// The row of `a1` under its pilot `r1`, as the tree shows it with `machines`.
+    fn the_led_row(machines: &crate::machines::Machines) -> Session {
+        let snapshot = build(
+            json!({"agents": [agent("r1", None, "idle", None)]}),
+            json!({}),
+            &[],
+        )
+        .with_elsewhere(machines)
+        .with_lists(machines, None);
+        let rows: Vec<&Session> = snapshot
+            .elsewhere
+            .iter()
+            .filter(|session| session.id == "a1@server")
+            .collect();
+        assert_eq!(rows.len(), 1, "one row of it");
+        assert_eq!(rows[0].pilot.as_deref(), Some("r1"), "under its pilot");
+        rows[0].clone()
+    }
+
+    #[test]
+    fn a_row_under_its_pilot_needs_you_when_its_session_does_on_another_machine() {
+        // It sent a turn's end here: what its machine lists says, never a guess from it.
+        let turn = Some("session-turn-ended");
+        let row = the_led_row(&led_on_server("started", turn, Some("needs you")));
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        assert_eq!(row.mark_said, "Needs you on server");
+        assert_eq!(row.elsewhere.as_ref().unwrap().state, "needs you");
+
+        let row = the_led_row(&led_on_server("started", turn, Some("running")));
+        assert_eq!(row.mark, Some(AgentState::Running));
+        assert_eq!(row.mark_said, "Running on server");
+        let row = the_led_row(&led_on_server("started", turn, Some("idle")));
+        assert_eq!(row.mark, None);
+        assert_eq!(row.elsewhere.as_ref().unwrap().state, "idle");
+
+        // The agents of its pilot's page say the same.
+        let agents = remote_agents(&led_on_server("started", turn, Some("needs you")));
+        assert_eq!(agents[0].mark, AgentState::NeedsYou);
+        assert_eq!(agents[0].state, "needs you");
+    }
+
+    #[test]
+    fn a_held_launch_needs_you_before_its_machine_lists_it() {
+        let row = the_led_row(&led_on_server("held", None, None));
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        assert_eq!(row.mark_said, "Needs you on server");
+        // A project made for it there, which that machine prepares while it lists it idle.
+        let mut machines = led_on_server("started", None, Some("idle"));
+        machines.launches[0].making = Some("app".into());
+        let row = the_led_row(&machines);
+        assert_eq!(row.mark, Some(AgentState::Running));
+        assert_eq!(row.mark_said, "Preparing app on server");
+        // Allowed there, its machine lists it as it runs now.
+        let row = the_led_row(&led_on_server("held", None, Some("running")));
+        assert_eq!(row.mark, Some(AgentState::Running));
+    }
+
+    #[test]
+    fn a_project_made_for_a_launch_is_preparing_until_its_machine_says_something() {
+        // Its machine lists the session `running` as soon as its first turn starts, which the row
+        // cannot tell from the setup's end: it says `preparing` until the first delivery here.
+        for listed in ["running", "idle"] {
+            let mut machines = led_on_server("started", None, Some(listed));
+            machines.launches[0].making = Some("app".into());
+            let row = the_led_row(&machines);
+            assert_eq!(row.mark, Some(AgentState::Running), "listed {listed}");
+            assert_eq!(row.mark_said, "Preparing app on server", "listed {listed}");
+            assert_eq!(row.elsewhere.as_ref().unwrap().state, "preparing app");
+        }
+        // It asks the user: that says more than the setup does.
+        let mut machines = led_on_server("started", None, Some("needs you"));
+        machines.launches[0].making = Some("app".into());
+        let row = the_led_row(&machines);
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        // It said something here: its list says the rest.
+        let mut machines = led_on_server("started", Some("session-turn-ended"), Some("running"));
+        machines.launches[0].making = Some("app".into());
+        let row = the_led_row(&machines);
+        assert_eq!(row.mark_said, "Running on server");
+        // The agents of its pilot's page say the same.
+        let mut machines = led_on_server("started", None, Some("running"));
+        machines.launches[0].making = Some("app".into());
+        assert_eq!(remote_agents(&machines)[0].state, "preparing app");
+    }
+
+    #[test]
+    fn a_session_its_launch_titled_keeps_that_title_rather_than_its_brief() {
+        // Launched by another machine's agent: no agent of this one launched it.
+        let mut launched = agent("r1", None, "idle", None);
+        launched["title"] = json!("Rework the login");
+        let snapshot = build(json!({"agents": [launched.clone()]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Rework the login");
+        // Launched by an agent of this machine, it keeps its brief's first line until named.
+        launched["launched_by"] = json!("r0");
+        let snapshot = build(json!({"agents": [launched.clone()]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Fix the login");
+        // Detached from that agent, which clears who launched it, it still keeps its brief's.
+        launched["launched_by"] = Value::Null;
+        launched["detached_from"] = json!("r0");
+        let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Fix the login");
+    }
+
+    #[test]
+    fn a_held_launch_an_older_machine_lists_idle_still_needs_you() {
+        // A machine before the list said `needs you` for a held launch lists it idle.
+        let row = the_led_row(&led_on_server("held", None, Some("idle")));
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        assert_eq!(row.mark_said, "Needs you on server");
+        assert_eq!(row.elsewhere.as_ref().unwrap().state, "needs you");
     }
 }

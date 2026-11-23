@@ -715,7 +715,6 @@ fn led_first_message_says_where_questions_go() {
 }
 
 #[test]
-#[ignore = "#1275: a session started across launches as a plain root, not as base"]
 fn led_launches_a_session() {
     parity(|topology| {
         let play = Play::new(

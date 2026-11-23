@@ -1621,7 +1621,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
         epoch: agent.epoch,
         tools,
         place,
-        launched: agent.launched_by.is_some(),
+        launched: crate::launches::launched(daemon, agent),
         reads: None,
     })
 }
