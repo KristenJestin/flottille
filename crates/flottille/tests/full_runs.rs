@@ -1,9 +1,10 @@
-//! The scenarios of #1321: in Full, a command an agent runs is the user's own (no user nor mount
-//! namespace, the daemon's environment: the SSH agent, the display, the sign-ins), Landlock alone
-//! keeping Flottille's own folders out of its reach; out of Full, the next run is confined again;
-//! and a session is told where its project's pull requests and tickets are. The agents are the fake
-//! ACP agent, in throwaway repositories and temporary XDG folders. Only `ssh` is the machine's:
-//! real, given a temporary home with an empty `~/.ssh`, its exit status alone read.
+//! The scenarios of #1321: in Full, a command an agent runs is the user's own, as in their
+//! terminal (no namespace, no Landlock, the daemon's environment: the SSH agent, the session bus,
+//! the display, the sign-ins), nothing held back; out of Full, the next run is confined again and
+//! the agent is told; and a session is told where its project's pull requests and tickets are.
+//! The agents are the fake ACP agent, in throwaway repositories and temporary XDG folders, with
+//! the test's own session bus and SSH agent. Only `ssh` is the machine's: real, given a temporary
+//! home with an empty `~/.ssh`, its exit status alone read.
 
 use crate::common;
 
@@ -11,8 +12,8 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use common::User;
 use common::mcp::{Answer, Mcp, server_of};
-use common::{User, landlock_abi};
 use flottille_core::store::Store;
 use serde_json::json;
 
@@ -166,41 +167,99 @@ fn a_run_in_full_has_the_daemon_s_ssh_agent_and_display() {
 }
 
 #[test]
-fn a_run_in_full_still_cannot_reach_the_vault_socket_nor_a_login_token() {
-    if landlock_abi() < 2 {
-        eprintln!(
-            "skipped: this kernel's Landlock (ABI {}) is not used",
-            landlock_abi()
-        );
-        return;
-    }
+fn a_run_in_full_is_held_back_from_nothing_flottille_s_folders_included() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "full");
-    // A connection's vault socket, a bridge's MCP configuration with its token, another session's
-    // own folder, where the daemon keeps them.
+    // A connection's vault socket, a bridge's MCP configuration with its (invented) token,
+    // another session's own folder, where the daemon keeps them.
     let vault = user.path("state/flottille/connections/web");
     std::fs::create_dir_all(&vault).unwrap();
     let _vault = std::os::unix::net::UnixListener::bind(vault.join("vault.sock")).unwrap();
     let bridge = user.path("runtime/flottille/bridge");
     std::fs::create_dir_all(&bridge).unwrap();
-    std::fs::write(bridge.join("1.mcp.json"), "{\"token\": \"kept\"}").unwrap();
+    std::fs::write(bridge.join("1.mcp.json"), "{\"token\": \"invented\"}").unwrap();
     let codex = user.path("data/flottille/agents/codex/codex");
     std::fs::create_dir_all(&codex).unwrap();
-    std::fs::write(codex.join("session.json"), "kept").unwrap();
-    let open = user.path("home/note");
-    std::fs::write(&open, "open to runs").unwrap();
+    std::fs::write(codex.join("session.json"), "invented").unwrap();
 
-    for kept in [bridge.join("1.mcp.json"), codex.join("session.json")] {
-        let (read, ran) = exits_zero(&mcp, &reads(&kept));
-        assert!(!read, "{} is in reach: {ran}", kept.display());
+    for open in [bridge.join("1.mcp.json"), codex.join("session.json")] {
+        let (read, ran) = exits_zero(&mcp, &reads(&open));
+        assert!(read, "{} is held back: {ran}", open.display());
     }
-    let (read, ran) = exits_zero(&mcp, &reads(&open));
-    assert!(read, "{ran}");
-    // Connecting to a socket by its path is a right of Landlock's ninth ABI only.
-    if landlock_abi() >= 9 {
-        let (reached, ran) = exits_zero(&mcp, &connects(&vault.join("vault.sock")));
-        assert!(!reached, "the vault socket is in reach: {ran}");
+    let (reached, ran) = exits_zero(&mcp, &connects(&vault.join("vault.sock")));
+    assert!(reached, "the vault socket is held back: {ran}");
+}
+
+#[test]
+fn a_run_in_full_does_what_the_user_s_terminal_does() {
+    // Flottille's state in the home, where it is on a machine: the folders on the way to it
+    // (`~`, `~/.local`) are the user's as any other.
+    let user = User::with_fake_agent().with_allowing_judge();
+    let home = user.path("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let state = home.join(".local/state");
+    let settings = home.join(".gitconfig");
+    let user = user
+        .with_env("XDG_STATE_HOME", state.to_str().unwrap())
+        .with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let (id, mcp) = session(&user);
+    set_mode(&user, &id, "full");
+    std::fs::write(home.join("listed"), "").unwrap();
+
+    // A file made and renamed at the home's root, as an editor or `~/.claude.json` does.
+    let (made, ran) = exits_zero(
+        &mcp,
+        &python(&format!(
+            "import os; open('{h}/draft', 'w').write('x'); os.rename('{h}/draft', '{h}/kept')",
+            h = home.display()
+        )),
+    );
+    assert!(made, "a file cannot be made at the home's root: {ran}");
+    assert!(home.join("kept").is_file());
+    // The user's own git settings, which `git config` writes through a lock file beside them.
+    let (configured, ran) = exits_zero(&mcp, "git config --global flottille.tried yes");
+    assert!(configured, "git config --global failed: {ran}");
+    assert!(
+        std::fs::read_to_string(&settings)
+            .unwrap()
+            .contains("tried = yes")
+    );
+    // The home listed.
+    let listed = done(mcp.call("run", json!({"line": format!("ls {}", home.display())})));
+    assert!(listed.contains("exited with code 0"), "{listed}");
+    assert!(listed.contains("listed"), "{listed}");
+}
+
+#[test]
+fn in_full_the_bus_and_ssh_agent_a_run_gets_are_the_test_s_own() {
+    let socket = tempfile::Builder::new()
+        .prefix("flottille-agent")
+        .tempdir()
+        .unwrap();
+    let agent = socket.path().join("agent.sock");
+    let _listening = std::os::unix::net::UnixListener::bind(&agent).unwrap();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers()
+        .with_env("SSH_AUTH_SOCK", agent.to_str().unwrap());
+    let (id, mcp) = session(&user);
+    set_mode(&user, &id, "full");
+
+    // Compared inside the run: a value is never printed.
+    let own = python(&format!(
+        "import os, sys; sys.exit(0 if os.environ.get('DBUS_SESSION_BUS_ADDRESS') ==          'unix:path={}' and os.environ.get('SSH_AUTH_SOCK') == '{}' else 1)",
+        user.path("runtime/bus").display(),
+        agent.display()
+    ));
+    let (given, ran) = exits_zero(&mcp, &own);
+    assert!(given, "the bus or the SSH agent is not the test's: {ran}");
+    for launcher in ["systemd-run", "tmux", "docker", "systemctl", "ssh"] {
+        let found = done(mcp.call("run", json!({"line": format!("which {launcher}")})));
+        assert!(
+            found.contains(user.path("launcher-bin").to_str().unwrap()),
+            "{launcher} is not the fake one: {found}"
+        );
     }
 }
 
@@ -236,6 +295,41 @@ fn leaving_full_confines_the_next_run() {
 
     let (bus, ran) = exits_zero(&mcp, "printenv DBUS_SESSION_BUS_ADDRESS");
     assert!(!bus, "the run after Full is not confined: {ran}");
+}
+
+/// The deliveries of `kind` the agent `id` was given, queued or sent.
+fn delivered(user: &User, id: &str, kind: &str) -> Vec<String> {
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
+    ["queued", "sent"]
+        .iter()
+        .flat_map(|state| store.deliveries(id, state).unwrap())
+        .filter(|delivery| delivery.kind == kind)
+        .map(|delivery| delivery.body)
+        .collect()
+}
+
+#[test]
+fn leaving_full_tells_the_agent_its_commands_are_confined_again() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, _mcp) = session(&user);
+    set_mode(&user, &id, "full");
+    eventually("the delivery of the switch to Full", || {
+        delivered(&user, &id, "mode").len() == 1
+    });
+
+    set_mode(&user, &id, "auto");
+
+    eventually("the delivery of the switch out of Full", || {
+        delivered(&user, &id, "mode").len() == 2
+    });
+    let told = delivered(&user, &id, "mode")
+        .into_iter()
+        .find(|body| body.contains("confined again"));
+    assert!(told.is_some(), "{:?}", delivered(&user, &id, "mode"));
+    // Out of Full to another mode than Full: nothing more.
+    set_mode(&user, &id, "ask");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(delivered(&user, &id, "mode").len(), 2);
 }
 
 #[test]
@@ -320,6 +414,7 @@ fn says_the_map(text: &str) {
         "Jira on example.atlassian.net",
         "ABC",
         "`acli`",
+        "Jira stays read-only",
         "work/shop",
     ] {
         assert!(text.contains(said), "{said:?} is not said: {text}");
@@ -371,4 +466,38 @@ fn a_session_in_full_is_told_where_its_pull_requests_and_tickets_are() {
         .filter(|delivery| delivery.kind == "mode")
         .count();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn the_map_of_a_project_of_several_repositories_names_each_one_s_folder() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let folder = user.path("work/suite");
+    for repository in ["api", "web"] {
+        let at = folder.join(repository);
+        user.git_init(&at);
+        std::fs::write(at.join("README.md"), "suite\n").unwrap();
+        user.git(&at, &["add", "README.md"]);
+        user.git(&at, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.write_project_file(
+        "suite",
+        &format!(
+            "folder = \"{}\"\n\n\
+             [[repositories]]\npath = \"api\"\n\n\
+             [[repositories]]\npath = \"web\"\n",
+            folder.display()
+        ),
+    );
+
+    let (id, _mcp) = started(&user, "suite");
+
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    let instructions = shown["agent"]["instructions"].as_str().unwrap();
+    for repository in ["api", "web"] {
+        let said = format!(
+            "Repository `{repository}`, in the folder {}:",
+            folder.join(repository).display()
+        );
+        assert!(instructions.contains(&said), "{said:?}: {instructions}");
+    }
 }
