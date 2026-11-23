@@ -1851,6 +1851,183 @@ mod removal {
         user.call("project.show", json!({"name": "other"})).unwrap();
     }
 
+    /// A root the user starts in the workspace whose turn has ended: its id.
+    fn idle_root(user: &User, project: &str, workspace: &str) -> String {
+        let answer = user
+            .call(
+                "agent.run",
+                json!({"project": project, "workspace": workspace, "message": "hello"}),
+            )
+            .unwrap();
+        let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+        eventually("the root is idle", || state(user, &id) == "idle");
+        id
+    }
+
+    /// The project's file deleted while the daemon runs, whatever removed it: what Flottille made
+    /// for the project stays in its store.
+    fn lose_the_file(user: &User, project: &str) {
+        std::fs::remove_file(user.project_file(project)).unwrap();
+    }
+
+    #[test]
+    fn a_project_whose_configuration_is_gone_can_still_be_removed() {
+        let user = user();
+        let folder = project(&user, "app");
+        std::fs::write(folder.join("notes.txt"), "mine\n").unwrap();
+        let (w, branch) = workspace(&user, "app", "w");
+        let first = idle_root(&user, "app", "w");
+        let second = idle_root(&user, "app", "w");
+        let before = checkout(&user, &folder);
+        lose_the_file(&user, "app");
+
+        let removed = remove(&user, false);
+
+        assert_eq!(removed["removed"], "app", "{removed}");
+        let mut both = vec![first.clone(), second.clone()];
+        both.sort();
+        assert_eq!(ids(&removed["stopped"]["agents"]), both, "{removed}");
+        assert_eq!(state(&user, &first), "ended");
+        assert_eq!(state(&user, &second), "ended");
+        assert_eq!(ids(&removed["workspaces"]["removed"]), ["w"], "{removed}");
+        assert!(!w.exists(), "its worktree is gone");
+        assert!(!workspace_exists(&user, "app", "w"));
+        assert!(!branches(&user, &folder).contains(&branch));
+        assert_eq!(
+            checkout(&user, &folder),
+            before,
+            "the folder is never touched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+            "mine\n"
+        );
+        let (code, _) = user
+            .call("project.remove", json!({"name": "app"}))
+            .unwrap_err();
+        assert_eq!(code, "not-found", "nothing is left to remove");
+    }
+
+    #[test]
+    fn a_project_whose_configuration_is_gone_keeps_a_workspace_that_holds_work_and_says_why() {
+        let user = user();
+        project(&user, "app");
+        let (w, _) = workspace(&user, "app", "w");
+        std::fs::write(w.join("draft.txt"), "not committed\n").unwrap();
+        workspace(&user, "app", "clean");
+        lose_the_file(&user, "app");
+
+        let removed = remove(&user, false);
+
+        assert_eq!(
+            ids(&removed["workspaces"]["removed"]),
+            ["clean"],
+            "{removed}"
+        );
+        let kept = &removed["workspaces"]["kept"][0];
+        assert_eq!(kept["name"], "w", "{removed}");
+        assert!(kept["why"].to_string().contains("draft.txt"), "{kept}");
+        assert_eq!(
+            std::fs::read_to_string(w.join("draft.txt")).unwrap(),
+            "not committed\n"
+        );
+        // Still there, with no file: it is listed to be removed again once its work is saved.
+        let listed = user.call("project.list", json!({})).unwrap();
+        assert_eq!(listed["unconfigured"][0]["name"], "app", "{listed}");
+        std::fs::remove_file(w.join("draft.txt")).unwrap();
+        remove(&user, false);
+        assert!(!w.exists());
+        let listed = user.call("project.list", json!({})).unwrap();
+        assert_eq!(listed["unconfigured"], json!([]), "{listed}");
+    }
+
+    #[test]
+    fn a_project_whose_configuration_is_gone_says_beforehand_what_its_removal_would_do() {
+        let user = user();
+        project(&user, "app");
+        workspace(&user, "app", "w");
+        let root = idle_root(&user, "app", "w");
+        lose_the_file(&user, "app");
+
+        let said = user
+            .call("project.removal", json!({"name": "app"}))
+            .unwrap();
+
+        assert_eq!(ids(&said["sessions"]), [root], "{said}");
+        assert_eq!(said["workspaces"][0]["name"], "w", "{said}");
+        assert_eq!(said["workspaces"][0]["state"], "clean", "{said}");
+    }
+
+    #[test]
+    fn a_project_whose_configuration_is_gone_shows_on_its_own_machine() {
+        let user = user();
+        project(&user, "app");
+        project(&user, "other");
+        workspace(&user, "app", "w");
+        idle_root(&user, "app", "w");
+        idle_root(&user, "app", "w");
+        let listed = user.call("project.list", json!({})).unwrap();
+        assert_eq!(
+            listed["unconfigured"],
+            json!([]),
+            "a known project is not one"
+        );
+        lose_the_file(&user, "app");
+
+        let listed = user.call("project.list", json!({})).unwrap();
+
+        let names: Vec<&str> = listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["other"], "{listed}");
+        assert_eq!(
+            listed["unconfigured"],
+            json!([{"name": "app", "sessions": 2, "workspaces": 1}]),
+            "{listed}"
+        );
+        remove(&user, false);
+        let listed = user.call("project.list", json!({})).unwrap();
+        assert_eq!(listed["unconfigured"], json!([]), "{listed}");
+    }
+
+    #[test]
+    fn the_command_line_lists_a_project_without_a_file_and_removes_it() {
+        let user = user();
+        project(&user, "app");
+        workspace(&user, "app", "w");
+        idle_root(&user, "app", "w");
+        lose_the_file(&user, "app");
+
+        let listed = user.run(&["project", "list"]);
+        let text = String::from_utf8_lossy(&listed.stdout).into_owned();
+        assert!(text.contains("app  1 sessions  1 workspaces"), "{text}");
+        assert!(text.contains("flottille project remove"), "{text}");
+
+        let removed = user.run(&["project", "remove", "app"]);
+        assert!(removed.status.success(), "{removed:?}");
+        let text = String::from_utf8_lossy(&removed.stdout).into_owned();
+        assert!(text.contains("Removed the workspace w."), "{text}");
+        let listed = user.run(&["project", "list"]);
+        let text = String::from_utf8_lossy(&listed.stdout).into_owned();
+        assert!(!text.contains("app"), "{text}");
+    }
+
+    #[test]
+    fn a_name_nothing_holds_is_still_not_found() {
+        let user = user();
+        let (code, _) = user
+            .call("project.remove", json!({"name": "ghost"}))
+            .unwrap_err();
+        assert_eq!(code, "not-found");
+        let (code, _) = user
+            .call("project.removal", json!({"name": "ghost"}))
+            .unwrap_err();
+        assert_eq!(code, "not-found");
+    }
+
     #[test]
     fn the_removal_says_beforehand_what_runs_and_each_workspace_s_state() {
         let user = user();

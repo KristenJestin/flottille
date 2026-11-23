@@ -153,6 +153,39 @@ fn a_runner_s_sessions_are_kept_by_the_other_machine_without_their_conversation(
 }
 
 #[test]
+fn another_machine_never_lists_a_session_its_own_window_hides() {
+    let (_hub, pc, server) = pc_and_server();
+    let gone = session(&server, "Left in a project without a file");
+    eventually("pc keeps server's session", || {
+        kept_ids(&pc, "server").contains(&gone)
+    });
+
+    // The project's file deleted, whatever removed it: the server's own window shows no project
+    // `app`, nor its sessions.
+    std::fs::remove_file(server.user.project_file("app")).unwrap();
+    server.user.call("project.list", json!({})).unwrap();
+
+    eventually("pc no longer lists it", || {
+        !kept_ids(&pc, "server").contains(&gone)
+    });
+    let own = server.user.call("remote.sessions", json!({})).unwrap();
+    assert!(
+        own["this"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != gone.as_str()),
+        "{own}"
+    );
+    // A session of a project the machine knows is still told.
+    add_app(&server.user);
+    let again = session(&server, "Back in a project with a file");
+    eventually("pc lists the session of a known project", || {
+        kept_ids(&pc, "server").contains(&again)
+    });
+}
+
+#[test]
 fn the_copy_of_a_machine_that_is_off_stays_across_a_restart() {
     let (_hub, pc, server) = pc_and_server();
     let agent = session(&server, "Ship the server part");
