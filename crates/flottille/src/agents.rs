@@ -437,8 +437,16 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Ok(((), event))
             })?;
             let agent = find(daemon, &agent.id)?;
-            if mode == GateMode::Full && was != GateMode::Full {
-                crate::project_map::tell_switched_to_full(daemon, &agent);
+            match (was, mode) {
+                (GateMode::Full, GateMode::Full) => {}
+                (_, GateMode::Full) => crate::project_map::tell_switched_to_full(daemon, &agent),
+                (GateMode::Full, GateMode::Ask) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Ask")
+                }
+                (GateMode::Full, GateMode::Auto) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Auto")
+                }
+                _ => {}
             }
             Ok(json!({"agent": agent.to_json()}))
         }
