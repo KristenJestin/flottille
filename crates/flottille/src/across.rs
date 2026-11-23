@@ -40,7 +40,7 @@ const CALLED: [&str; 6] = [
 ];
 
 /// The kinds of delivery a session on another machine sends the agent that started it.
-const KINDS: [&str; 13] = [
+const KINDS: [&str; 12] = [
     "child-report",
     "child-question",
     "child-asks",
@@ -53,7 +53,6 @@ const KINDS: [&str; 13] = [
     "session-turn-ended",
     DETACHED,
     crate::tree::LED_INTEGRATED,
-    crate::extensions::review::EXTENSION.name,
 ];
 
 /// The kind of the delivery that tells a pilot of another machine the user detached the session
@@ -1041,7 +1040,11 @@ fn delivered(
         })?;
     // The user's answer there to a launch held for them.
     let decided = deliver.kind == "approval";
-    if !KINDS.contains(&deliver.kind.as_str()) && !decided {
+    // An extension tells a lead of another machine under its own name, as it does one here.
+    let extension = crate::extensions::ALL
+        .iter()
+        .any(|extension| extension.name == deliver.kind);
+    if !KINDS.contains(&deliver.kind.as_str()) && !extension && !decided {
         return Err(format!(
             "no delivery of kind {:?} is taken from another machine",
             deliver.kind
