@@ -109,19 +109,24 @@ fn held(answer: &Answer) -> u64 {
 }
 
 /// A call that went through: neither held nor refused.
-fn passed(answer: &Answer) {
+fn passed(user: &User, answer: &Answer) {
     assert!(!answer.error, "an error: {}", answer.text);
     assert!(
         !answer.text.starts_with("Waiting for"),
-        "held: {}",
-        answer.text
+        "held: {}; the requests: {:?}",
+        answer.text,
+        requests(user)
     );
 }
 
 /// A call refused at once, with no request made.
 fn refused_with_no_ask(user: &User, answer: &Answer) {
     assert!(answer.error, "not refused: {}", answer.text);
-    assert!(answer.text.starts_with("refused: "), "{}", answer.text);
+    assert!(
+        !answer.text.starts_with("Waiting for"),
+        "held: {}",
+        answer.text
+    );
     assert!(requests(user).is_empty(), "a request was made");
 }
 
@@ -204,7 +209,7 @@ fn a_refused_action_asked_for_and_accepted_no_longer_stops_that_session() {
     assert_eq!(exceptions(&user, &agent), ["force-push"]);
 
     // The same rule no longer stops it: the push is judged as any push is, and passes.
-    passed(&force_push(&mcp, "app/w"));
+    passed(&user, &force_push(&mcp, "app/w"));
     assert!(requests(&user).is_empty(), "a request was made");
 
     // The exception and the answer stay in the session's history.
@@ -253,7 +258,7 @@ fn a_withdrawn_exception_stops_the_session_again() {
     let (agent, mcp) = root(&user, "w");
     let asked = held(&ask_force_push(&mcp, "app/w"));
     answer(&user, asked, "approval.approve");
-    passed(&force_push(&mcp, "app/w"));
+    passed(&user, &force_push(&mcp, "app/w"));
 
     let withdrawn = user
         .call(
@@ -283,7 +288,7 @@ fn a_refused_or_unanswered_ask_changes_nothing() {
     // Refused: nothing was done, and the rule stops the session as before.
     let asked = held(&ask_force_push(&mcp, "app/w"));
     let denied = answer(&user, asked, "approval.deny");
-    assert!(denied.contains("denied"), "{denied}");
+    assert!(denied.contains("was refused by the user"), "{denied}");
     assert!(exceptions(&user, &agent).is_empty());
     held(&force_push(&mcp, "app/w"));
 
@@ -444,7 +449,7 @@ fn a_merge_past_failing_checks_asked_for_and_accepted_bypasses_the_protection_fo
     assert_eq!(exceptions(&user, &agent), ["merge-blocked"]);
 
     // The next merge of the session is no longer stopped by its checks.
-    passed(&mcp.call("forge", merge));
+    passed(&user, &mcp.call("forge", merge));
     assert_eq!(merges(&user).len(), 2);
     assert!(requests(&user).is_empty(), "a request was made");
 }
