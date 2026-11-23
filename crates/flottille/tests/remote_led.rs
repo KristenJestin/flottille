@@ -222,7 +222,13 @@ fn a_led_session_from_another_machine_is_told_where_its_questions_go() {
 fn the_window_shows_a_session_led_from_another_machine_without_the_agent_only_paragraphs() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (_session, _root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
-    let first = prompt_with(&server, "Finish the export.");
+    // The fake agent keeps the prompt as the ACP content blocks it was sent.
+    let first: String =
+        serde_json::from_str::<Vec<Value>>(&prompt_with(&server, "Finish the export."))
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect();
 
     // What the daemon really sent, folded as the window folds it: a session led here shows its
     // brief alone, and so does this one.
