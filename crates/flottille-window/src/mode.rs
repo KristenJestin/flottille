@@ -41,7 +41,7 @@ const MODES: [(&str, &str, &str, Tone); 3] = [
     (
         "full",
         "Full",
-        "Nothing is asked: the agent acts as you.",
+        "Nothing is asked: commands run as yours, with your keys and sign-ins.",
         Tone::Fail,
     ),
 ];
