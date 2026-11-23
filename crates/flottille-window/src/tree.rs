@@ -116,6 +116,9 @@ pub fn group_count_id(group: &str) -> ElementId {
     ElementId::Name(format!("projects-list-group-{group}-count").into())
 }
 
+/// Why New group… cannot be picked while the projects are shown by machine.
+const SHOWN_BY_MACHINE: &str = "Shown by machine";
+
 /// The element id of New group… in the Projects header's menu.
 pub fn new_group_id() -> ElementId {
     ElementId::Name("projects-new-group".into())
@@ -478,6 +481,11 @@ impl Sidebar {
                                 .ok();
                         },
                     );
+                // The groups are the user's own list: shown by machine, there is none to add to.
+                let menu = match by_machine {
+                    true => menu.disabled(SHOWN_BY_MACHINE),
+                    false => menu,
+                };
                 match offered {
                     true => menu.switch(
                         by_machine_id(),
@@ -496,10 +504,16 @@ impl Sidebar {
         }
         if self.by_machine != by_machine
             && let Some(menu) = &self.arrange
-            && offered
         {
             menu.update(cx, |menu, cx| {
-                menu.set_switch(&by_machine_id(), by_machine, cx)
+                menu.set_disabled(
+                    &new_group_id(),
+                    by_machine.then(|| SHOWN_BY_MACHINE.into()),
+                    cx,
+                );
+                if offered {
+                    menu.set_switch(&by_machine_id(), by_machine, cx);
+                }
             });
         }
         if self.by_machine != by_machine || self.offered != offered {
@@ -741,6 +755,11 @@ impl Sidebar {
         self.drawn = order.clone();
         if self.opening.is_none() && !order.is_empty() {
             self.opening = Some(order.iter().map(|(key, _)| key.clone()).collect());
+        }
+        // A project that left is no longer one the window opened with: the same name coming back
+        // is a new row, which unfolds.
+        if let Some(rows) = &mut self.opening {
+            rows.retain(|key| order.iter().any(|(held, _)| held == key));
         }
 
         let mut list = Reorderable::new(projects_list_id());
