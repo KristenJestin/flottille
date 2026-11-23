@@ -528,3 +528,68 @@ fn a_failed_check_never_offers_to_sign_in_again(cx: &mut TestAppContext) {
         );
     }
 }
+
+#[gpui_kit::test]
+fn a_row_being_checked_waits_behind_the_kit_s_skeleton_not_a_progress_bar(cx: &mut TestAppContext) {
+    let user = user(&["gh"]);
+    user.sign_in_script("gh", json!({"delay_ms": 2500}));
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+
+    until(&shell, cx, "gh's row says it checks", |cx| {
+        label(cx, "sign-in-state-gh").as_deref() == Some("Checking…")
+    });
+    until(&shell, cx, "the skeleton is drawn", |cx| {
+        visible(cx, "sign-in-checking-gh-skeleton")
+    });
+    // The state's text stays; a progress bar is for transfers.
+    assert_eq!(label(cx, "sign-in-state-gh").as_deref(), Some("Checking…"));
+    assert!(!visible(cx, "sign-in-checking-gh"), "no progress bar");
+
+    until(&shell, cx, "gh's row says its result", |cx| {
+        label(cx, "sign-in-state-gh").as_deref() == Some("Signed in as s***")
+    });
+    settle(cx);
+    assert!(!visible(cx, "sign-in-checking-gh-skeleton"));
+}
+
+#[gpui_kit::test]
+fn a_terminal_line_is_offered_only_to_a_program_known_not_to_be_signed_in(cx: &mut TestAppContext) {
+    let user = user(&["bkt"]);
+    user.sign_in_script("bkt", json!({"delay_ms": 2500}));
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+
+    // While it checks, nothing is said of how to sign in.
+    until(&shell, cx, "bkt's row says it checks", |cx| {
+        label(cx, "sign-in-state-bkt").as_deref() == Some("Checking…")
+    });
+    settle(cx);
+    assert!(!visible(cx, "sign-in-line-bkt"), "no line while it checks");
+
+    until(&shell, cx, "bkt's row says its result", |cx| {
+        label(cx, "sign-in-state-bkt").as_deref() == Some("Signed in")
+    });
+
+    // Known not to be signed in: the line to type is there.
+    user.sign_in_script("bkt", json!({"signed_in": false}));
+    click(cx, "sign-in-check-bkt");
+    until(&shell, cx, "bkt's row says it is not signed in", |cx| {
+        label(cx, "sign-in-state-bkt").as_deref() == Some("Not signed in")
+    });
+    until(&shell, cx, "the line to type", |cx| {
+        visible(cx, "sign-in-line-bkt")
+    });
+
+    // Could not be checked: it says why, and offers no line.
+    user.sign_in_script(
+        "bkt",
+        json!({"status_fail": "Error: 503 Service Unavailable (api.bitbucket.org)"}),
+    );
+    click(cx, "sign-in-check-bkt");
+    until(&shell, cx, "bkt's row says it could not check", |cx| {
+        label(cx, "sign-in-state-bkt").as_deref() == Some("Could not check: bkt failed")
+    });
+    settle(cx);
+    assert!(!visible(cx, "sign-in-line-bkt"), "no line after a failure");
+}

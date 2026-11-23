@@ -47,6 +47,12 @@ pub const NO_CODE_SENTENCE: &str = "Finish in your browser with the code the pro
 pub const PASTED_HINT: &str = "If your browser shows a code, paste it here: it goes to the program \
                                once and is kept nowhere.";
 
+/// The row of `program` in what `signin.list` answered: an older daemon answers the whole list
+/// whatever the program asked.
+fn row_of(answer: &Value, program: &str) -> Option<SignInRow> {
+    answer["programs"].as_array()?.first().map(SignInRow::of)
+}
+
 /// A program as `signin.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignInRow {
@@ -114,6 +120,13 @@ impl SignInRow {
             (None, _, Some(_)) => format!("Could not check: {} failed", self.program),
             (None, _, None) => format!("{} did not say whether it is signed in", self.program),
         }
+    }
+
+    /// The window's own request for this row's check failed: the daemon never said anything.
+    fn failed(&mut self, why: String) {
+        self.checking = false;
+        self.signed_in = None;
+        self.problem = Some(why);
     }
 
     /// What the command line said of the failure, under the row: none for a check that got no
@@ -288,15 +301,11 @@ impl SignInSection {
         };
         match answer {
             Ok(answer) => {
-                if let Some(checked) = answer["programs"].as_array().and_then(|rows| rows.first()) {
-                    *row = SignInRow::of(checked);
+                if let Some(checked) = row_of(&answer, program) {
+                    *row = checked;
                 }
             }
-            Err(why) => {
-                row.checking = false;
-                row.signed_in = None;
-                row.problem = Some(why);
-            }
+            Err(why) => row.failed(why),
         }
         cx.notify();
     }
@@ -840,7 +849,35 @@ fn opens(address: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::opens;
+    use super::{SignInRow, opens, row_of};
+    use serde_json::json;
+
+    #[test]
+    fn a_check_is_found_by_its_program_whatever_the_order_of_the_answer() {
+        // An older daemon answers every program, not the one asked.
+        let answer = json!({"programs": [
+            {"program": "gh", "found": true, "signed_in": true},
+            {"program": "glab", "found": true, "signed_in": false},
+        ]});
+
+        let row = row_of(&answer, "glab").expect("glab's row");
+
+        assert_eq!(row.program, "glab");
+        assert_eq!(row.signed_in, Some(false));
+        assert!(row_of(&answer, "bkt").is_none());
+    }
+
+    #[test]
+    fn a_request_the_window_could_not_make_does_not_blame_the_program() {
+        let mut row = SignInRow::of(&json!({"program": "gh", "found": true, "checking": true}));
+
+        row.failed("the daemon did not answer".to_owned());
+
+        let said = row.said();
+        assert!(!said.contains("gh failed"), "{said}");
+        assert!(said.starts_with("Could not check"), "{said}");
+        assert_eq!(row.reason(), Some("the daemon did not answer"));
+    }
 
     /// #1185 round 2: the dialog opens an address of the web only, whatever a daemon answered.
     #[test]

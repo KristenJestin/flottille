@@ -570,14 +570,17 @@ fn a_cli_that_cannot_reach_its_service_shows_could_not_check_with_its_reason() {
     let user = User::new().with_sign_in_programs(&["gh", "glab", "acli", "bkt"]);
     let said = [
         ("gh", "error connecting to api.github.com"),
-        ("glab", "x gitlab.com: 502 Bad Gateway"),
+        ("glab", "502 Bad Gateway"),
         ("acli", "✗ Error: Something went wrong"),
         ("bkt", "Error: 503 Service Unavailable (api.bitbucket.org)"),
     ];
     for (program, why) in said {
         // A token the command line printed with its error is never shown.
         let failing = format!("{why}\n  - Token: {TOKEN}");
-        user.sign_in_script(program, json!({"status_fail": failing}));
+        user.sign_in_script(
+            program,
+            json!({"status_fail": failing, "user": {"login": "octocat"}}),
+        );
     }
 
     let listed = list(&user);
@@ -586,9 +589,15 @@ fn a_cli_that_cannot_reach_its_service_shows_could_not_check_with_its_reason() {
         let row = row(&listed, program);
         assert_eq!(row["found"], true, "{row}");
         assert_eq!(row["signed_in"], Value::Null, "{row}");
+        // glab's own line says its API call failed, not the host it asked.
+        let why = match program {
+            "glab" => format!("API call failed: {why}"),
+            _ => why.to_owned(),
+        };
         assert_eq!(row["problem"], why, "{row}");
     }
     assert!(!listed.to_string().contains(TOKEN), "{listed}");
+    assert!(!listed.to_string().contains("octocat"), "{listed}");
 }
 
 #[test]

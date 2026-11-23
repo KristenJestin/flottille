@@ -4299,6 +4299,86 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
 mod tests {
     use super::*;
 
+    /// What `gh auth status` prints when its API call fails with `cause` (cli/cli,
+    /// `auth/status/status.go`): the shape of a bad token, whatever the cause.
+    fn gh_failing(cause: &str) -> Result<(bool, String, String), Gh> {
+        Ok((
+            false,
+            String::new(),
+            format!(
+                "github.com\n  X Failed to log in to github.com account octocat (keyring)\n  - \
+                 Active account: true\n  - The token in keyring is invalid.\n  - Error: {cause}\n"
+            ),
+        ))
+    }
+
+    #[test]
+    fn gh_failing_on_its_api_is_judged_by_its_error_line_not_by_its_bad_token_shape() {
+        for cause in [
+            "Get \"https://api.github.com/user\": dial tcp: lookup api.github.com: no such host",
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+            "HTTP 403: API rate limit exceeded (https://api.github.com/graphql)",
+        ] {
+            assert_eq!(
+                auth_of("gh", gh_failing(cause)),
+                Auth::Unchecked(cause.to_owned()),
+                "{cause}"
+            );
+        }
+        for cause in [
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            "HTTP 401: The token has expired",
+        ] {
+            assert_eq!(
+                auth_of("gh", gh_failing(cause)),
+                Auth::NotSignedIn,
+                "{cause}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reason_never_shows_the_login_of_an_account() {
+        // gh's timeout has no `- Error:` line: its first line names the account.
+        let ran = Ok((
+            false,
+            String::new(),
+            "github.com\n  X Timeout trying to log in to github.com account octocat (keyring)\n"
+                .to_owned(),
+        ));
+        let Auth::Unchecked(why) = auth_of("gh", ran) else {
+            panic!("a timeout says nothing of the login");
+        };
+        assert!(!why.contains("octocat"), "{why}");
+        assert!(why.contains("Timeout"), "{why}");
+    }
+
+    #[test]
+    fn glab_s_reason_is_its_failed_call_not_its_host() {
+        let ran = Ok((
+            false,
+            String::new(),
+            "gitlab.com\n  x gitlab.com: API call failed: 502 Bad Gateway\n".to_owned(),
+        ));
+
+        assert_eq!(
+            auth_of("glab", ran),
+            Auth::Unchecked("API call failed: 502 Bad Gateway".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_reason_is_masked_before_it_is_cut() {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        // The token starts before the cut and ends after it: cut first, it would be half shown.
+        let line = format!("Error: {}{token}", "x".repeat(180));
+
+        let said = error_line(&line, "").unwrap();
+
+        assert!(!said.contains("ghp_"), "{said}");
+        assert!(!said.contains("abcdefghij"), "{said}");
+    }
+
     #[test]
     fn a_recorded_url_keeps_no_credentials() {
         for (url, kept) in [
