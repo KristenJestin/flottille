@@ -71,7 +71,7 @@ fn root(user: &User, message: &str) -> (String, Mcp) {
     let answer = user
         .call(
             "agent.run",
-            json!({"project": "app", "message": message, "mode": "full"}),
+            json!({"project": "app", "message": message, "gate_mode": "full"}),
         )
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
