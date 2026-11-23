@@ -828,6 +828,7 @@ fn a_detached_session_asks_the_user() {
     let (lead, mcp) = lead(&user);
     let (session, session_mcp) = led(&user, &mcp, "Fix the login.");
     eventually("its first turn", || turns(&user, &session) == 1);
+    eventually("the first turn's wake", || wakes(&user, &lead).len() == 1);
 
     detach(&user, &session);
     user.call(
@@ -840,7 +841,8 @@ fn a_detached_session_asks_the_user() {
         questions_in_inbox(&user, &session) == ["Ship it?"]
     });
     settle();
-    assert!(wakes(&user, &lead).is_empty());
+    // Detached, its pilot hears nothing of it any more.
+    assert_eq!(wakes(&user, &lead).len(), 1, "{:?}", wakes(&user, &lead));
     let ask = session_mcp
         .tools()
         .into_iter()
