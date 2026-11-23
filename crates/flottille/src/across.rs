@@ -2040,10 +2040,16 @@ pub(crate) fn pilot_stand_in(
     mode: flottille_core::agent::GateMode,
 ) -> Result<String, String> {
     let id = format!("{}@{}", launch.caller, launch.machine);
-    if let Ok(Some(kept)) = daemon.read(|store| store.agent(&id)) {
-        return Ok(kept.id);
-    }
     let name = launch.asked["from"].as_str().unwrap_or("another machine");
+    if let Ok(Some(kept)) = daemon.read(|store| store.agent(&id)) {
+        // One whose sessions all ended counts no more, and counts again with this one: where the
+        // cap has no room for it, it is refused as a new one is.
+        return match daemon.read(|store| store.stand_in_fits(&id, MOST_STAND_INS)) {
+            Ok(true) => Ok(kept.id),
+            Ok(false) => Err(stand_in_cap(name)),
+            Err(error) => Err(error.to_string()),
+        };
+    }
     let agent = stand_in_agent(daemon, id, project, "", name, mode);
     match keep_stand_in(daemon, &agent, name) {
         Ok(agent) => Ok(agent.id),
@@ -2112,13 +2118,15 @@ fn keep_stand_in(daemon: &Daemon, agent: &Agent, name: &str) -> Result<Agent, Re
                 .map(|agent| (agent, None))
         })
         .map_err(|error| Refused::Now(error.to_string()))?
-        .ok_or_else(|| {
-            format!(
-                "{name} has {MOST_STAND_INS} agents calling this machine's sessions already: a \
-                 new one calls again once one of them has been idle for 30 days"
-            )
-            .into()
-        })
+        .ok_or_else(|| stand_in_cap(name).into())
+}
+
+/// What a caller refused for the cap of stand-ins of its machine is told.
+fn stand_in_cap(name: &str) -> String {
+    format!(
+        "{name} has {MOST_STAND_INS} agents calling this machine's sessions already: a new one \
+         calls again once one of them has been idle for 30 days"
+    )
 }
 
 /// A `call` of the machine of `from` aimed at a session of this machine its agent did not start:

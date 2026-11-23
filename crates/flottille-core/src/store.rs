@@ -2893,20 +2893,7 @@ impl Store {
     /// `most` of that machine's are kept already.
     pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
         if self.agent(&agent.id)?.is_none() {
-            let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
-            // The pilot of sessions that all ended is kept for them only, never forgotten while
-            // they are: it calls no more, and counts no more.
-            let kept: i64 = self.connection.query_row(
-                "SELECT count(*) FROM agents AS s WHERE instr(s.id, '@') > 0 \
-                 AND substr(s.id, instr(s.id, '@') + 1) = ?1 \
-                 AND NOT (EXISTS (SELECT 1 FROM agents WHERE launched_by = s.id \
-                 OR detached_from = s.id) AND NOT EXISTS (SELECT 1 FROM agents \
-                 WHERE (launched_by = s.id OR detached_from = s.id) \
-                 AND state NOT IN ('ended', 'failed')))",
-                params![machine],
-                |row| row.get(0),
-            )?;
-            if kept as usize >= most {
+            if !self.stand_in_fits(&agent.id, most)? {
                 return Ok(None);
             }
             self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
@@ -2929,11 +2916,27 @@ impl Store {
         ))
     }
 
-    /// Whether the stand-in `id` counts in the cap `most` of its machine once it does (it leads
-    /// a session): it counts already, or the others of its machine leave room.
+    /// Whether the stand-in `id` may count in the cap `most` of its machine, as it does once it
+    /// leads a session: its machine's other stand-ins that count leave it room.
     pub fn stand_in_fits(&self, id: &str, most: usize) -> Result<bool> {
-        let _ = (id, most);
-        Ok(true)
+        Ok(self.counted_stand_ins(id)? < most as i64)
+    }
+
+    /// How many of the stand-ins of the machine of `id` count in its cap, `id` itself not counted.
+    /// The pilot of sessions that all ended is kept for them only, never forgotten while they
+    /// are: it launches nothing more, and counts no more.
+    fn counted_stand_ins(&self, id: &str) -> Result<i64> {
+        let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM agents AS s WHERE instr(s.id, '@') > 0 \
+             AND substr(s.id, instr(s.id, '@') + 1) = ?1 AND s.id != ?2 \
+             AND NOT (EXISTS (SELECT 1 FROM agents WHERE launched_by = s.id \
+             OR detached_from = s.id) AND NOT EXISTS (SELECT 1 FROM agents \
+             WHERE (launched_by = s.id OR detached_from = s.id) \
+             AND state NOT IN ('ended', 'failed')))",
+            params![machine, id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
