@@ -53,9 +53,6 @@ struct Relay {
     asked: Arc<Mutex<Vec<(String, Value)>>>,
     delay: Arc<AtomicU64>,
     silent: Arc<AtomicBool>,
-    /// The connections the window opened, and how many of them are closed.
-    opened: Arc<AtomicU64>,
-    closed: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -64,13 +61,11 @@ impl Relay {
         Arc::new(move || {
             let daemon = local()?;
             let (window, ours) = UnixStream::pair()?;
-            relay.opened.fetch_add(1, Ordering::SeqCst);
             let (to, back) = (ours.try_clone()?, daemon.try_clone()?);
             let (to_daemon, from_window) = (daemon, ours);
             let carried = relay.clone();
             std::thread::spawn(move || {
                 carried.carry(&from_window, &to_daemon);
-                carried.closed.fetch_add(1, Ordering::SeqCst);
                 let _ = from_window.shutdown(std::net::Shutdown::Both);
                 let _ = to_daemon.shutdown(std::net::Shutdown::Both);
             });
@@ -477,7 +472,7 @@ fn this_machine_s_connection_stays_open_while_another_machine_is_shown(cx: &mut 
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     settle(&shell, cx);
-    let closed = relay.closed.load(Ordering::SeqCst);
+    let linked = shell.read_with(cx, |s, _| s.seen().connections.load(Ordering::SeqCst));
     let read = shell.read_with(cx, |s, _| s.seen().snapshots.load(Ordering::SeqCst));
 
     open_there(&shell, cx, &there);
@@ -487,9 +482,9 @@ fn this_machine_s_connection_stays_open_while_another_machine_is_shown(cx: &mut 
     settle(&shell, cx);
 
     assert_eq!(
-        relay.closed.load(Ordering::SeqCst),
-        closed,
-        "a connection of the window was cut to show the server"
+        shell.read_with(cx, |s, _| s.seen().connections.load(Ordering::SeqCst)),
+        linked,
+        "this machine's link was cut to show the server"
     );
     // This machine was not read again from the start: its list is still its own.
     let reads = shell.read_with(cx, |s, _| s.seen().snapshots.load(Ordering::SeqCst));

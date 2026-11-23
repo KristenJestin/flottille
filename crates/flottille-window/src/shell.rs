@@ -1398,7 +1398,7 @@ impl Shell {
         let forms = forms.clone();
         // Shown, the composer is on Auto: a mode chosen for one session never reaches the next.
         forms.0.update(cx, |composer, cx| composer.reset_mode(cx));
-        if let Some(project) = self.snapshot.projects.iter().find(|p| &p.name == name) {
+        if let Some(project) = self.pages().projects.iter().find(|p| &p.name == name) {
             let (repositories, default_set) = (
                 project.repositories.clone(),
                 project.default_repositories.clone(),
@@ -1643,7 +1643,7 @@ impl Shell {
             })
             .collect();
         for change in unasked {
-            self.perform(Command::ArrangementChange { change });
+            self.perform_here(Command::ArrangementChange { change });
         }
     }
 
@@ -2410,7 +2410,7 @@ impl Shell {
         if now == self.kept || self.kept_asked.as_ref() == Some(&now) {
             return;
         }
-        self.perform(Command::WindowSet {
+        self.perform_here(Command::WindowSet {
             key: "sidebar".into(),
             value: now.to_json(),
         });
@@ -3766,26 +3766,25 @@ impl Shell {
             return;
         };
         let name = page.read(cx).name().to_owned();
-        let Some(project) = self.snapshot.projects.iter().find(|p| p.name == name) else {
+        // Another machine's project page reads what was read of it.
+        let read = self.pages().clone();
+        let Some(project) = read.projects.iter().find(|p| p.name == name) else {
             return;
         };
         let work: Work = (
             project.clone(),
-            self.snapshot
-                .workspaces
+            read.workspaces
                 .iter()
                 .filter(|w| w.project == name)
                 .map(|w| (w.name.clone(), w.preparation.clone()))
                 .collect(),
-            self.snapshot
-                .sessions
+            read.sessions
                 .iter()
                 .filter(|s| s.project == name)
                 .map(|s| (s.id.clone(), s.mark))
                 .collect(),
         );
-        let sessions_of: Vec<&crate::model::Session> = self
-            .snapshot
+        let sessions_of: Vec<&crate::model::Session> = read
             .sessions
             .iter()
             .filter(|s| s.project == name && !s.ended)
@@ -3808,8 +3807,7 @@ impl Shell {
             });
             let question = (session.mark == Some(crate::state::AgentState::NeedsYou))
                 .then(|| {
-                    self.snapshot
-                        .bell
+                    read.bell
                         .iter()
                         .rev()
                         .find(|item| {
@@ -3820,8 +3818,13 @@ impl Shell {
                         .map(|item| item.detail.clone())
                 })
                 .flatten();
-            self.sessions.get(&session.id).map(|row| SessionLine {
-                id: session.id.clone(),
+            // Another machine's session is known here by its row of the one list.
+            let id = match &self.front {
+                Some(front) => crate::model::elsewhere_id(front, &session.id),
+                None => session.id.clone(),
+            };
+            self.sessions.get(&id).map(|row| SessionLine {
+                id: id.clone(),
                 title: session.title.clone(),
                 agents: session.agents,
                 mark: session.mark,
@@ -3840,8 +3843,7 @@ impl Shell {
             total_ms: None,
             made: Vec::new(),
             preparation: Preparation::Ready,
-            sessions: self
-                .snapshot
+            sessions: read
                 .sessions_in(&name, &None)
                 .filter(|s| !s.ended)
                 .filter_map(|s| line(s, cx))
@@ -3852,8 +3854,7 @@ impl Shell {
             ready: true,
         }];
         // Work lists the workspaces from the newest to the oldest, in an order nothing changes.
-        let mut workspaces: Vec<&crate::model::Workspace> = self
-            .snapshot
+        let mut workspaces: Vec<&crate::model::Workspace> = read
             .workspaces
             .iter()
             .filter(|w| w.project == name)
@@ -3872,8 +3873,7 @@ impl Shell {
                 total_ms: workspace.total_ms,
                 made: workspace.made.clone(),
                 preparation: workspace.preparation.clone(),
-                sessions: self
-                    .snapshot
+                sessions: read
                     .sessions_in(&name, &place)
                     .filter(|s| !s.ended)
                     .filter_map(|s| line(s, cx))
@@ -3936,7 +3936,7 @@ impl Shell {
             mode.update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
         }
         for (name, (composer, _)) in &self.forms {
-            let project = self.snapshot.projects.iter().find(|p| &p.name == name);
+            let project = self.pages().projects.iter().find(|p| &p.name == name);
             let default = (
                 project.and_then(|p| p.provider.as_deref()),
                 project.and_then(|p| p.model.as_deref()),
@@ -5199,8 +5199,8 @@ impl Shell {
             return;
         };
         let project = page.read(cx).project().to_owned();
-        let sessions = crate::progress::sessions_of(&self.snapshot, &project);
-        let workspaces = crate::progress::workspaces_of(&self.snapshot, &project);
+        let sessions = crate::progress::sessions_of(self.pages(), &project);
+        let workspaces = crate::progress::workspaces_of(self.pages(), &project);
         page.update(cx, |page, cx| page.set_sessions(sessions, workspaces, cx));
     }
 
