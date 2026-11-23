@@ -1358,16 +1358,7 @@ fn launches_sent_at_once_never_leave_more_held_than_the_cap() {
 fn removed_by_the_user(server: &Machine, agent: &Value) -> String {
     let id = agent["id"].as_str().unwrap();
     let name = agent["workspace"].as_str().unwrap().to_owned();
-    server
-        .user
-        .call("agent.stop", json!({"agent": id}))
-        .unwrap();
-    eventually("the agent ended", || {
-        matches!(
-            server.agent(id)["state"].as_str(),
-            Some("ended" | "stopped" | "failed")
-        )
-    });
+    // Its work kept first: once its agent ended, Flottille may remove the workspace at any time.
     let folder = folder_of(agent);
     let branch = server.git(&folder, &["branch", "--show-current"]);
     let kept = server.user.path(&format!("kept-{name}.git"));
@@ -1379,8 +1370,19 @@ fn removed_by_the_user(server: &Machine, agent: &Value) -> String {
     server.git(&folder, &["commit", "--quiet", "-m", "kept"]);
     server.git(&folder, &["remote", "add", "kept", kept.to_str().unwrap()]);
     server.git(&folder, &["push", "--quiet", "kept", &branch]);
-    // The removal the end of its held agent started may still run: the user's waits for it,
-    // and finds the workspace gone when it removed it.
+    server
+        .user
+        .call("agent.stop", json!({"agent": id}))
+        .unwrap();
+    eventually("the agent ended", || {
+        matches!(
+            server.agent(id)["state"].as_str(),
+            Some("ended" | "stopped" | "failed")
+        )
+    });
+    // Two removals of it may meet: Flottille's own of a launch that never started, once the
+    // ended agent's process let go, and the user's. Which one starts first is timing, not load:
+    // the one that comes second is refused while the first runs, and finds it gone after.
     eventually("the workspace removed", || {
         match server
             .user
