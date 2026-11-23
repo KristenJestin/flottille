@@ -1643,7 +1643,7 @@ fn prompt_with(machine: &Machine, text: &str) -> String {
 
 #[test]
 fn a_held_launch_allowed_there_tells_its_caller() {
-    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
     let number = held_launch(&pc, &server, &mcp, "Allowed there");
@@ -1672,7 +1672,7 @@ fn a_held_launch_allowed_there_tells_its_caller() {
 
 #[test]
 fn a_held_launch_refused_there_tells_its_caller() {
-    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
     let number = held_launch(&pc, &server, &mcp, "Refused there");
@@ -1692,7 +1692,7 @@ fn a_held_launch_refused_there_tells_its_caller() {
 
 #[test]
 fn a_refused_launch_leaves_no_waiting_row_under_its_pilot() {
-    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
     let number = held_launch(&pc, &server, &mcp, "No row left");
@@ -1712,7 +1712,7 @@ fn a_refused_launch_leaves_no_waiting_row_under_its_pilot() {
 
 #[test]
 fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
-    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
 
