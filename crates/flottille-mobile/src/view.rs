@@ -424,7 +424,7 @@ impl View {
     /// for the user (`approval.list`).
     pub(crate) fn load(&mut self, machine: &str, agents: &Value, requests: &Value) {
         for agent in agents["agents"].as_array().into_iter().flatten() {
-            if !agent["parent"].is_null() {
+            if !is_session(agent) {
                 continue;
             }
             let Some(id) = agent["id"].as_str() else {
@@ -561,7 +561,7 @@ impl View {
         }
         let key = (machine.to_owned(), agent.clone());
         match name {
-            "agent.created" if data["parent"].is_null() => {
+            "agent.created" if is_session(data) => {
                 self.sessions.insert(
                     key.clone(),
                     Session {
@@ -957,11 +957,37 @@ fn text(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
 }
 
+/// Whether an agent of `agent.list` or `agent.created` is a session, the root of a tree: never a
+/// child, here or one an agent of another machine launched, which has no parent there and is at
+/// depth 1 all the same. A machine of before says no depth.
+fn is_session(agent: &Value) -> bool {
+    agent["parent"].is_null() && agent["depth"].as_u64().unwrap_or(0) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use flottille_link::{Action, DeviceKey, MemberList};
 
     use super::*;
+
+    #[test]
+    fn a_child_launched_from_another_machine_is_not_a_session_on_the_phone() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "a1", "parent": null, "depth": 0, "title": "Export", "project": "app"},
+            {"id": "a2", "parent": null, "depth": 1, "title": "Write the tests", "project": "app",
+                "launched_from": {"machine": "pc", "agent": "b1", "kind": "child"}},
+            {"id": "a3", "parent": "a1", "depth": 1, "title": "Read", "project": "app"},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 1, "data": {"agent": "a4",
+                "parent": null, "depth": 1, "title": "Another", "project": "app"}}),
+        );
+        let listed: Vec<&str> = view.sessions.keys().map(|(_, id)| id.as_str()).collect();
+        assert_eq!(listed, vec!["a1"]);
+    }
 
     #[test]
     fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {

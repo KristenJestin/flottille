@@ -2167,7 +2167,10 @@ that started a root for the user (`null` for a root the user started, and for a 
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
 starts"), `detached_from` the agent the user detached it from (`agent.detach`; `launched_by` is
-then `null`), `reported_at` when it reported,
+then `null`), `launched_from` (in `agent.show`, `agent.list` and the tree) the agent of another
+machine that started it here, `{"machine", "agent", "kind"}`, `null` for any other: with `kind`
+`child` it is that agent's child, at its depth plus one though it has no parent here, and only that
+agent writes to it (`docs/remote.md`, "A tree across machines"), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
@@ -2465,7 +2468,7 @@ does it with `agent_send` (`docs/tools.md`).
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued", "extensions"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `launched_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and

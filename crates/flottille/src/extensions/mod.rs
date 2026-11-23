@@ -1065,7 +1065,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Opt
         .read(|store| store.agent(&grant.agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none());
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
     let launched = launched(daemon, &grant.agent).map(|(by, kind)| (by.name, kind));
     Some(verdict(tool, owner.name, root, launched, args, || {
         (tool.gate)(daemon, grant, args)
@@ -1146,6 +1146,7 @@ pub fn start_session(
             preparing: workspace.is_some(),
             role,
             parent: None,
+            remote_parent_depth: None,
             title: Some(title.to_owned()),
             brief: message.to_owned(),
             provider: None,
