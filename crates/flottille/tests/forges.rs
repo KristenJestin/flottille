@@ -1395,6 +1395,31 @@ fn a_failed_branch_pipeline_fails_the_pull_request_s_checks() {
 }
 
 #[test]
+fn a_bitbucket_check_listed_twice_counts_once() {
+    // Another CI posts a status per run of the same check: the latest counts, once, whichever
+    // the list says first.
+    let status = |key: &str, state: &str, at: &str| {
+        json!({"state": state, "key": key, "name": "Jenkins", "url": "https://ci.example.com",
+            "created_on": at, "updated_on": at})
+    };
+    let text = shown_with(
+        &now_text(),
+        json!([
+            status("jenkins-2", "SUCCESSFUL", "2026-01-01T10:05:00Z"),
+            status("jenkins-1", "FAILED", "2026-01-01T10:01:00Z"),
+            status("jenkins-3", "SUCCESSFUL", "2026-01-01T10:05:00Z")
+        ]),
+        json!([]),
+    );
+
+    assert_eq!(
+        checks_line(&text),
+        "checks: passing (Jenkins passing)",
+        "{text}"
+    );
+}
+
+#[test]
 fn a_failed_build_for_one_destination_is_not_hidden_by_a_passing_one_for_another() {
     // The same branch is the source of two pull requests, into `main` and into `release`: each
     // has its own pipeline on the same head.
