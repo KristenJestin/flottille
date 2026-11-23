@@ -1002,6 +1002,10 @@ impl Shell {
                     .update(cx, |modals, cx| modals.forget(&owners, cx));
             }
             self.copies.remove(&machine);
+            if self.connection_request.read(cx).machine() == Some(machine.as_str()) {
+                self.connection_request
+                    .update(cx, |dialog, cx| dialog.forget(cx));
+            }
             self.kept_pages
                 .retain(|_, page| page.read(cx).machine() != Some(machine.as_str()));
             self.started_there.retain(|(of, _)| *of != machine);
@@ -3587,10 +3591,13 @@ impl Shell {
                     }
                     _ => None,
                 };
-                self.connection_request
-                    .update(cx, |dialog, cx| dialog.answered(then, answer, cx));
-                if let Some(name) = review {
-                    self.review_connection(&name, cx);
+                // The dialog is the request's machine's: another's answer is not its own.
+                let dialog = self.connection_request.clone();
+                if dialog.read(cx).machine() == self.answering.as_deref() {
+                    dialog.update(cx, |dialog, cx| dialog.answered(then, answer, cx));
+                    if let Some(name) = review {
+                        self.review_connection(&name, cx);
+                    }
                 }
             }
             Outcome::Asked {
@@ -5347,7 +5354,22 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let section = self.connections(cx);
+        // The form of the request's machine, whichever machine is in front.
+        let machine = self
+            .connection_request
+            .read(cx)
+            .machine()
+            .map(str::to_owned);
+        let section = match machine == self.front {
+            true => Some(self.connections(cx)),
+            false => self
+                .sides
+                .get(&machine)
+                .map(|pages| pages.settings.read(cx).connections().clone()),
+        };
+        let Some(section) = section else {
+            return;
+        };
         section.update(cx, |section, cx| {
             section.answer_request(number, server, adding, window, cx)
         });

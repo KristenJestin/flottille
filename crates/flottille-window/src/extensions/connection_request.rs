@@ -220,6 +220,9 @@ fn setting_said(setting: &str) -> &'static str {
 
 pub struct ConnectionRequest {
     shell: WeakEntity<Shell>,
+    /// The machine of the request (`None`: this one): the one whose page opened it, which it
+    /// asks and whose answers it takes, whichever is in front (#1271).
+    machine: Option<String>,
     /// The request open, kept while the dialog fades out.
     number: Option<u64>,
     open: bool,
@@ -275,6 +278,7 @@ impl ConnectionRequest {
     pub fn new(shell: WeakEntity<Shell>) -> Self {
         Self {
             shell,
+            machine: None,
             number: None,
             open: false,
             proposal: None,
@@ -303,11 +307,25 @@ impl ConnectionRequest {
             params,
             then: super::Then::ConnectionRequest(then),
         };
-        perform_later(&self.shell, command, cx);
+        crate::commands::acting_as(self.machine.clone(), cx, |cx| {
+            perform_later(&self.shell, command, cx)
+        });
+    }
+
+    /// The machine of the request open (`None`: this one).
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+
+    /// Its machine is no longer the user's: the dialog closes, and its answers are not taken.
+    pub fn forget(&mut self, cx: &mut Context<Self>) {
+        self.number = None;
+        self.close(cx);
     }
 
     /// Opens the dialog on the request `number`: the daemon says what it would write.
     pub fn open(&mut self, number: u64, cx: &mut Context<Self>) {
+        self.machine = crate::commands::acting(cx);
         self.number = Some(number);
         self.open = true;
         self.proposal = None;
