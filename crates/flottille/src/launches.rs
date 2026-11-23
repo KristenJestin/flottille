@@ -77,6 +77,61 @@ fn agent_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The mode of `caller`'s tree as another machine is told it, with a launch or a call: the agent
+/// of the tree a switch names (its root otherwise), the mode's word, and the user's signed switch
+/// to Full, the only way another machine takes Full.
+pub(crate) fn mode_sent(daemon: &Daemon, caller: &Agent) -> (String, &'static str, Option<String>) {
+    let mut tree = crate::tree::root_of(daemon, &caller.id);
+    let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
+        GateMode::Ask => ("ask", None),
+        GateMode::Auto => ("auto", None),
+        GateMode::Full => match daemon.read(|store| store.full_switch(&tree)).ok().flatten() {
+            Some(switch) => {
+                // Kept on the root, it may name any agent of the tree: the tree is named by
+                // that agent, which the other machine checks the switch against.
+                if let Some(named) = switched(&switch) {
+                    tree = named;
+                }
+                ("full", Some(switch))
+            }
+            // Only the user's signed switch raises a launch on another machine to Full.
+            None => ("auto", None),
+        },
+    };
+    (tree, mode, switch)
+}
+
+/// The mode another machine's launch or call is taken in: the one it says, except Full, taken
+/// only with the user's switch signed by a device for `tree`, less than 12 hours old here; Auto
+/// otherwise. A machine alone cannot raise a mode.
+pub(crate) fn mode_taken(
+    mode: &str,
+    switch: Option<&str>,
+    sender: &str,
+    tree: &str,
+    members: &flottille_link::Members,
+) -> GateMode {
+    match mode {
+        "ask" => GateMode::Ask,
+        "full" => match switch {
+            Some(switch)
+                if flottille_link::full_switch(
+                    switch,
+                    sender,
+                    tree,
+                    members,
+                    crate::link::wall_now(),
+                )
+                .is_ok() =>
+            {
+                GateMode::Full
+            }
+            _ => GateMode::Auto,
+        },
+        _ => GateMode::Auto,
+    }
+}
+
 /// The agent a switch to Full the user signed names: one of the tree it switched.
 fn switched(switch: &str) -> Option<String> {
     let request: flottille_link::Request = serde_json::from_str(switch).ok()?;
@@ -107,10 +162,13 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         )));
     }
     flottille_link::runs_agents(&members, machine, "agent.start")
-        .map_err(|why| refused(why.to_string()))?;
-    let (link, key) = remote
-        .link_to(machine)
-        .map_err(|why| refused(format!("refused: {why}")))?;
+        .map_err(|why| refused(actioned(&why.to_string(), machine, &asked.provider)))?;
+    let (link, key) = remote.link_to(machine).map_err(|why| {
+        refused(format!(
+            "refused: {}",
+            actioned(&why, machine, &asked.provider)
+        ))
+    })?;
     let project =
         projects::load_project(daemon, &caller.project).map_err(|f| refused(f.message))?;
     let child = asked.kind == LaunchKind::Child;
@@ -154,6 +212,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
             [one] => format!("; {one} would take it"),
             [rest @ .., last] => format!("; {} and {last} would take it", rest.join(", ")),
         };
+        let why = actioned(&why, machine, &asked.provider);
         return Err(refused(format!("refused: {why}{others}")));
     }
     // A child counts in its parent's project cap here too, refused above it, never queued.
@@ -174,24 +233,9 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
             crate::travelled::LONGEST_SETTINGS / 1024
         )));
     }
-    let mut tree = crate::tree::root_of(daemon, &caller.id);
-    let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
-        GateMode::Ask => ("ask", None),
-        GateMode::Auto => ("auto", None),
-        GateMode::Full => match daemon.read(|store| store.full_switch(&tree)).ok().flatten() {
-            Some(switch) => {
-                // Kept on the root, it may name any agent of the tree: the tree is named by
-                // that agent, which the other machine checks the switch against.
-                if let Some(named) = switched(&switch) {
-                    tree = named;
-                }
-                ("full", Some(switch))
-            }
-            // Only the user's signed switch raises a launch on another machine to Full.
-            None => ("auto", None),
-        },
-    };
+    let (tree, mode, switch) = mode_sent(daemon, caller);
     let launch = flottille_core::agent::new_id().map_err(|error| refused(error.to_string()))?;
+    let repositories: Vec<String> = place.iter().map(|(path, _)| path.clone()).collect();
     let message = LaunchAsk {
         launch: launch.clone(),
         caller: caller.id.clone(),
@@ -207,16 +251,22 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         mode: mode.to_owned(),
         switch,
         branch: branch.clone(),
-        repositories: place.iter().map(|(path, _)| path.clone()).collect(),
+        repositories: repositories.clone(),
         identities,
         settings: Some(settings),
+        copied: crate::travelled::copied(&project, &repositories),
     };
     let judged = link
         .send(&Message::Machine(MachineMessage::Launch(Box::new(
             message.clone(),
         ))))
         .await
-        .map_err(|error| refused(format!("refused by {machine}: {error}")))?;
+        .map_err(|error| {
+            refused(format!(
+                "refused by {machine}: {}",
+                actioned(&error.to_string(), machine, &asked.provider)
+            ))
+        })?;
     let mut record = Launch {
         way: "out".into(),
         machine: hex(key.as_bytes()),
@@ -260,12 +310,41 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
     record.agent = placed["session"].as_str().map(str::to_owned);
     record.request = placed["request"].as_u64();
     record.workspace = placed["workspace"].as_str().map(str::to_owned);
+    record.asked["there"] = json!({"project": placed["project"], "made": placed["made"],
+        "kept": placed["kept"]});
     record.state = match record.request {
         Some(_) => "held".into(),
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
     Ok(Outcome::Done(answer(&asked, machine, &launch, &placed)))
+}
+
+/// `why` a launch on `machine` is refused, with the window's action that would let it through,
+/// when there is one: never a command line, which the agent cannot run and the user would have
+/// to look up (`docs/remote.md`, "Starting a session on another machine").
+fn actioned(why: &str, machine: &str, provider: &str) -> String {
+    let action = if why.contains("is not signed in on") {
+        let title = match provider {
+            "claude" => "Claude",
+            "codex" => "Codex",
+            "opencode" => "OpenCode",
+            other => other,
+        };
+        format!("Sign in to {title} on {machine} in Settings › Agents")
+    } else if why.contains("no agent is signed in on") {
+        format!("Sign in to an agent on {machine} in Settings › Agents")
+    } else if why.contains("is offline since") {
+        format!("Settings › Machines says when {machine} is back")
+    } else if why.contains("it runs no agent") {
+        format!("Settings › Machines says the role of each machine: {machine}'s is not a runner")
+    } else if why.contains("has no slot free") {
+        format!("{machine} takes one once one of its children there ends")
+    } else {
+        return why.to_owned();
+    };
+    let why = why.trim_end_matches('.');
+    format!("{why}. {action}")
 }
 
 /// What the caller is told of its launch on `machine`.
@@ -283,6 +362,21 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
          each repository, which you review and merge as you would a local child's work; nothing \
          moves your branch."
     );
+    let kept = match placed["kept"].as_str() {
+        Some(whose) => {
+            let project = placed["project"].as_str().unwrap_or_default();
+            let whose = match whose {
+                "user" => format!("which the user registered on {machine}: it keeps its own"),
+                _ => format!(
+                    "which Flottille made on {machine} for another machine's launches: it keeps \
+                     that machine's"
+                ),
+            };
+            format!(" It runs in the project {project} there, {whose} settings, not yours.")
+        }
+        None => String::new(),
+    };
+    let back = format!("{back}{kept}");
     if let Some(number) = placed["request"].as_u64() {
         return format!(
             "Not started yet: request #{number} on {machine} is waiting for the user, who allows \
@@ -546,29 +640,21 @@ async fn judged(
         ),
         _ => None,
     };
-    let mode = match asked.mode.as_str() {
-        "ask" => GateMode::Ask,
-        "full" => match &asked.switch {
-            Some(switch)
-                if flottille_link::full_switch(
-                    switch,
-                    sender,
-                    &asked.tree,
-                    members,
-                    crate::link::wall_now(),
-                )
-                .is_ok() =>
-            {
-                GateMode::Full
-            }
-            // A machine alone cannot raise a mode.
-            _ => GateMode::Auto,
-        },
-        _ => GateMode::Auto,
-    };
+    let mode = mode_taken(
+        &asked.mode,
+        asked.switch.as_deref(),
+        sender,
+        &asked.tree,
+        members,
+    );
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
     let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    // The files its setup copies that the project here lacks: made from the vault entries the
+    // user shares from the caller's machine. A secret written into a file is the user's to allow,
+    // whatever the mode, those shared already named, those not yet asked for.
+    let needs = crate::travelled::needs(&asked, &project.folder);
+    let missing = crate::travelled::missing(daemon, &needs, sender);
     let name_of = |key: &str| {
         members
             .members()
@@ -587,13 +673,21 @@ async fn judged(
             1..1,
             crate::travelled::words(found, &asked, (sender, &machine), name_of, &classed),
         );
+        let lays = crate::travelled::lays(&asked.project, sender, &needs, &missing);
+        says.splice(0..0, lays);
+        if !missing.is_empty() {
+            says.insert(
+                0,
+                crate::travelled::asked_to_share(&asked.project, here, &missing),
+            );
+        }
         says
     };
     let says = said(&found);
     let judgement = match mode {
         GateMode::Full => None,
         GateMode::Ask => None,
-        GateMode::Auto if classed.base => None,
+        GateMode::Auto if classed.base || !needs.is_empty() => None,
         GateMode::Auto => match crate::judge::chosen(daemon).await {
             Some(judge) => {
                 let place = Place::main(&project, project.folder.clone());
@@ -606,18 +700,41 @@ async fn judged(
             None => None,
         },
     };
-    let accepted = mode == GateMode::Full
-        || judgement
-            .as_ref()
-            .is_some_and(|judged| judged.verdict == "allow");
+    let accepted = needs.is_empty()
+        && (mode == GateMode::Full
+            || judgement
+                .as_ref()
+                .is_some_and(|judged| judged.verdict == "allow"));
+    let mut reasons = classed.reasons.clone();
+    let laid: Vec<String> = needs
+        .iter()
+        .filter(|need| !missing.contains(need))
+        .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
+        .collect();
+    if !laid.is_empty() {
+        reasons.push(format!(
+            "it writes into this machine's project secrets of the vault that {sender} shared: {}",
+            crate::travelled::listed(&laid)
+        ));
+    }
+    if !missing.is_empty() {
+        let lacking: Vec<String> = missing
+            .iter()
+            .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
+            .collect();
+        reasons.push(format!(
+            "its setup copies what this machine lacks, which {sender} shares through the vault: {}",
+            crate::travelled::listed(&lacking)
+        ));
+    }
     let state = if accepted { "accepted" } else { "held" };
     // The project is recognised again first, two launches of a new one at once making it once;
     // it is made only once the launch is recorded. The words kept are said of it as it is now.
     let (found, _making) = crate::travelled::again(daemon, found, &asked, here).await?;
     let says = said(&found);
-    let (name, made) = match &found {
-        crate::travelled::Found::Here(project) => (project.name.clone(), false),
-        crate::travelled::Found::Made { name, .. } => (name.clone(), true),
+    let (name, made, folder) = match &found {
+        crate::travelled::Found::Here(project) => (project.name.clone(), false, None),
+        crate::travelled::Found::Made { name, folder } => (name.clone(), true, Some(folder)),
     };
     let record = Launch {
         way: "in".into(),
@@ -636,11 +753,14 @@ async fn judged(
             "from": sender,
             "mode": mode.as_str(),
             "says": says,
-            "reasons": classed.reasons,
+            "reasons": reasons,
             "base": classed.base,
             "classed": classed.text,
             "judgement": judgement,
             "made": made,
+            "folder": folder,
+            "needs": needs,
+            "missing": missing,
         }),
         at: now_ms(),
     };
@@ -967,8 +1087,17 @@ async fn with_agent(
             serde_json::from_value(launch.asked["says"].clone()).unwrap_or_default();
         let judgement: Option<Judgement> =
             serde_json::from_value(launch.asked["judgement"].clone()).unwrap_or_default();
-        let shown = json!({"kind": asked.kind, "machine": launch.asked["from"],
+        let mut shown = json!({"kind": asked.kind, "machine": launch.asked["from"],
             "title": asked.title, "brief": asked.brief});
+        // What the user is asked to share from the caller's machine, by the entries' names:
+        // what a device shares before it allows the launch.
+        if launch.asked["missing"]
+            .as_array()
+            .is_some_and(|missing| !missing.is_empty())
+        {
+            shown["needs"] =
+                json!({"from": launch.asked["from"], "files": launch.asked["missing"]});
+        }
         let request = Request {
             number: 0,
             agent: agent.id.clone(),
@@ -1007,6 +1136,7 @@ async fn with_agent(
         launch.request = Some(request.number);
         placed["request"] = request.number.into();
     } else {
+        // Never one that lays a file: that one is held for the user.
         launch.state = "started".into();
     }
     // The workspace is recorded as it is in this very write: one removed since `placed` read it
@@ -1024,6 +1154,17 @@ async fn with_agent(
         go_on(daemon, &launch, &agent.id);
     }
     placed["session"] = agent.id.clone().into();
+    // Which project it runs in, whether it was made for it, and whose settings it keeps: what
+    // the caller's row and answer say of it.
+    placed["project"] = launch.project.clone().into();
+    placed["made"] = (launch.asked["made"] == true).into();
+    if asked.settings.is_some() && !crate::travelled::takes(&project, &launch.machine) {
+        placed["kept"] = match project.from_machine {
+            None => "user",
+            Some(_) => "machine",
+        }
+        .into();
+    }
     Ok(placed)
 }
 
@@ -1085,24 +1226,57 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     if !settled {
         return;
     }
+    // The files it needs are made from the vault first, which is read off this thread.
+    let needs = needs_of(&launch);
+    if allowed && !needs.is_empty() {
+        let (daemon, request) = (daemon.clone(), request.clone());
+        tokio::spawn(async move {
+            let from = launch.asked["from"].as_str().unwrap_or_default().to_owned();
+            let laid = crate::travelled::lay(&daemon, &launch.project, &needs, &from).await;
+            finish(&daemon, launch, &request, agent, laid.map_err(Some));
+        });
+        return;
+    }
+    let answer = match allowed {
+        true => Ok(()),
+        false => Err(None),
+    };
+    finish(daemon, launch, request, agent, answer);
+}
+
+/// The files the setup of `launch` copies that its project here lacked when it was judged.
+fn needs_of(launch: &Launch) -> Vec<crate::travelled::Need> {
+    serde_json::from_value(launch.asked["needs"].clone()).unwrap_or_default()
+}
+
+/// The end of the user's answer to the held `launch`, its agent `agent`: `Ok` when it is allowed
+/// and what it needed is made, `Err` with why when that failed, or `Err(None)` when the user
+/// refused it.
+fn finish(
+    daemon: &Arc<Daemon>,
+    mut launch: Launch,
+    request: &Request,
+    agent: String,
+    answer: Result<(), Option<String>>,
+) {
     // Then its project's settings, which its setup follows, laid only on the project the user
     // allowed them for: a launch whose settings cannot be used here, or whose project changed
     // since, is refused, saying why.
-    let mut allowed = allowed;
-    if allowed
-        && let Err(why) = crate::travelled::take_settings(
+    let answer = answer.and_then(|()| {
+        crate::travelled::take_settings(
             daemon,
             &launch.project,
             &launch.asked["asked"],
             &launch.machine,
             launch.asked["classed"].as_str(),
         )
-    {
+        .map_err(Some)
+    });
+    if let Err(Some(why)) = &answer {
         eprintln!(
             "flottille daemon: launch {} is refused: {why}",
             launch.launch
         );
-        allowed = false;
         launch.state = "refused".into();
         if let Err(error) = daemon.write(|store| {
             store
@@ -1115,9 +1289,9 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
             );
         }
     }
-    let outcome = match allowed {
-        true => "done",
-        false => "refused",
+    let outcome = match answer {
+        Ok(()) => "done",
+        Err(_) => "refused",
     };
     if let Err(error) = daemon.write(|store| Ok(((), store.settle_unsent(request, outcome)?))) {
         eprintln!(
@@ -1125,8 +1299,25 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
             request.number
         );
     }
-    if !allowed {
-        crate::tree::stop_tree(daemon, &agent, "the user refused its launch");
+    if let Err(why) = answer {
+        let missing: Vec<crate::travelled::Need> =
+            serde_json::from_value(launch.asked["missing"].clone()).unwrap_or_default();
+        let reason = match (&why, missing.is_empty()) {
+            (Some(why), _) => format!("its launch is refused: {why}"),
+            (None, true) => "the user refused its launch".to_owned(),
+            (None, false) => {
+                let paths: Vec<String> = missing.iter().map(|need| need.path.clone()).collect();
+                format!(
+                    "the user refused its launch, which needed {} here",
+                    crate::travelled::listed(&paths)
+                )
+            }
+        };
+        // What it lacked is said to the agent that launched it, which would wait for nothing.
+        if !missing.is_empty() {
+            refused_for_missing(daemon, &launch, &missing, why.as_deref());
+        }
+        crate::tree::stop_tree(daemon, &agent, &reason);
         // Its setup never runs: the workspace made of its code goes once its agent ended, and
         // the project made for it then.
         if let Some(workspace) = launch.workspace_id {
@@ -1135,7 +1326,54 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
         crate::travelled::unmake(daemon, &launch);
         return;
     }
+    // Its workspace was made while it was held, before these settings were laid: its setup is
+    // the project's as it is now.
+    if let Some(id) = launch.workspace_id
+        && let Err(why) = crate::workspaces::resnapshot(daemon, id)
+    {
+        eprintln!(
+            "flottille daemon: launch {}: its setup is not taken again: {why}",
+            launch.launch
+        );
+    }
     go_on(daemon, &launch, &agent);
+}
+
+/// Tells the agent of the other machine that asked `launch` that it is refused for lacking
+/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
+fn refused_for_missing(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    missing: &[crate::travelled::Need],
+    why: Option<&str>,
+) {
+    let here = crate::link::remote_of(daemon)
+        .ok()
+        .and_then(|remote| remote.listed().ok().map(|(_, name)| name))
+        .unwrap_or_else(|| "the other machine".to_owned());
+    let lacking: Vec<String> = missing
+        .iter()
+        .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
+        .collect();
+    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
+    let what = match why {
+        None => "the user refused it",
+        Some(_) => "it was allowed before what it needs there was shared",
+    };
+    let body = format!(
+        "Your launch \"{title}\" on {here} is refused: {what}. Its setup copies what {here} \
+         lacks: {}, which the user shares from this machine through the vault. Nothing of it \
+         runs there; launch it again once they are shared.",
+        crate::travelled::listed(&lacking)
+    );
+    crate::across::tell_of(
+        daemon,
+        launch,
+        "child-failed",
+        &body,
+        approval::URGENT,
+        true,
+    );
 }
 
 /// The agent `agent` ended, its requests cancelled: a launch it was held for the user's answer

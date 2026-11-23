@@ -434,6 +434,7 @@ impl Shell {
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
+        let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(this.clone()));
         let modals = cx.new(|_| Modals::new());
         let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
@@ -468,6 +469,7 @@ impl Shell {
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
+                travelled.clone(),
                 vault.clone(),
                 connections.clone(),
                 machines.clone(),
@@ -1594,24 +1596,55 @@ impl Shell {
         cx.notify();
     }
 
-    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
-    /// from what the daemon last said.
+    /// A row folded or unfolded the led sessions under it: the level that holds it is drawn
+    /// again at once, from what the daemon last said, in the arrangement shown (`show`).
     pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+        let snapshot = &self.snapshot;
+        let Some(found) = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .find(|s| s.id == session)
+        else {
+            eprintln!("flottille: the fold of {session} has no session to draw it from");
             return;
         };
-        let live = self.snapshot.live_sessions_of(&project);
-        let rows: Vec<Entity<SessionRow>> = live
-            .iter()
-            .filter_map(|s| self.sessions.get(&s.id).cloned())
+        let project = found.project.clone();
+        // Grouped by machine, the level is the project's under the session's machine, and holds
+        // that machine's sessions only.
+        let machine = self.grouped.then(|| snapshot.machine_of(found).to_owned());
+        let live: Vec<&crate::model::Session> = snapshot
+            .live_sessions_of(&project)
+            .into_iter()
+            .filter(|s| {
+                machine
+                    .as_deref()
+                    .is_none_or(|m| snapshot.machine_of(s) == m)
+            })
             .collect();
-        if rows.len() != live.len() {
+        let node = match &machine {
+            Some(machine) => self
+                .machine_projects
+                .get(&(project.clone(), machine.clone())),
+            None => self.projects.get(&project),
+        };
+        let Some(node) = node.cloned() else {
+            eprintln!("flottille: the fold of {session} has no level of {project} to draw");
             return;
-        }
+        };
+        // A session with no row yet is left out, said, and the others are drawn.
+        let (live, rows): (Vec<_>, Vec<_>) = live
+            .into_iter()
+            .filter_map(|s| match self.sessions.get(&s.id) {
+                Some(row) => Some((s, row.clone())),
+                None => {
+                    eprintln!("flottille: no row for {} of {project} yet", s.id);
+                    None
+                }
+            })
+            .unzip();
         let rows = nested(&live, &rows, cx);
-        if let Some(node) = self.projects.get(&project).cloned() {
-            node.update(cx, |node, cx| node.set_rows(rows, cx));
-        }
+        node.update(cx, |node, cx| node.set_rows(rows, cx));
     }
 
     /// "Resume" in an ended session's row.
@@ -2840,6 +2873,12 @@ impl Shell {
                     });
                 }
             }
+            Outcome::TravelledFolder { written, shown } => {
+                let section = self.settings.read(cx).travelled_folder().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(shown, written, window, cx)
+                });
+            }
             Outcome::Skills { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
                     let section = page.read(cx).skills().clone();
@@ -3325,6 +3364,7 @@ impl Shell {
         self.actions.send(Command::SessionsRead);
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
+        self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
         self.actions.send(Command::SignIns);
         self.ask_appearance(None);

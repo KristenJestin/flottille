@@ -877,7 +877,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -962,7 +962,9 @@ local child's work; nothing moves your branch.*
   those are made one at a time, a link at any of them refused: nothing lands outside the project
   through a link planted after the launch was allowed. A link is refused wherever it leads,
   inside the project too (`sub is a link: nothing is made through it`): following it is what a
-  link planted since the check would use. The commits a machine lists (`Has`) are those of a
+  link planted since the check would use. A file laid from the vault is written by walking those
+  folders again, each opened from the one before without following a link, so one swapped for a
+  link after they were made is refused too. The commits a machine lists (`Has`) are those of a
   repository inside the project folder only. In a project Flottille made, a repository
   whose folder leads out of the project is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
@@ -975,10 +977,44 @@ local child's work; nothing moves your branch.*
   its file and its folder, once its workspace is gone, unless another launch of the same machine
   may still start in it. Two launches of a new project at once make it once: the second takes the
   project the first made.
-- Not yet (#1188's follow-up): the folder for projects from other machines as a setting of that
-  machine; a setup that needs ignored files or vault entries the receiving machine lacks holding
-  the first launch until the user shares them; the making shown on the launch's row; the refusals
-  in the window's words with their action.
+- **The folder for projects from other machines** is a setting of the receiving machine
+  (#1214): Settings, General, "Projects from other machines" (`travelled_folder.set`), on that
+  machine or from another's window through "Settings of"; `$XDG_DATA_HOME/flottille/projects`
+  until the user types another. It is checked as a project's folder is: absolute, reached through
+  no link, neither a project's folder nor inside one, outside Flottille's configuration and state;
+  and it is no disk's root (`/`, a mount point), not the home itself nor Flottille's data folder
+  itself, and holds none of Flottille's configuration, state or data folders.
+  Only the projects made afterwards go there; those made before stay where they are.
+- **A setup that copies files the receiving machine lacks** (#1214): the caller's machine names,
+  with the launch, the files its project's `copy` steps match in its folder, their paths only,
+  never what they hold. Each that the project there lacks is made from a vault entry,
+  `<project>-<path>` (`app-.env`), which the user shares from the caller's machine through the
+  vault's sharing, keyring to keyring: never a file between machines. The entry is bound to that
+  file (`file:<project>/<path>`), and only an entry bound to it and shared from the launch's
+  machine is ever laid: one of the machine's own, or another machine's, of the same name is not
+  (it counts as missing). **A launch that lays a file is held for the user whatever the mode**,
+  Full included, the judge not asked, and asks once, on every device, as any held launch does: its
+  words name each file and entry there already (`app lays .env from the vault entry app-.env shared
+  by pc`); one still missing starts them with `app needs .env on server: share it?`, its reasons
+  name each entry, and its card's `needs` gives them (`{"from", "files": [{"path", "entry"}]}`). On the caller's machine, `vault.from_file` makes the
+  entry from the file, read only then, masked before it is kept; `vault.share` sends it. Allowed,
+  the receiving machine makes each file from its vault entry in the project's folder, never over
+  a file, readable by the user alone, before the setup runs, whose `copy` step then copies it as
+  any; one still missing refuses the launch, naming it. Refused, the launch ends and the agent that
+  asked it is told what was missing (`child-failed`). A file is laid through no link: each folder
+  to it is made one at a time, a link refused, the file never over one.
+- **A launch refused on the caller's machine names the window's action**, never a command line
+  (#1214): `claude is not signed in on server. Sign in to Claude on server in Settings › Agents`,
+  `server is offline since 22:14: …. Settings › Machines says when server is back`, a machine that
+  is no runner (Settings › Machines says each machine's role), a runner with no slot free (it
+  takes one once one of its children there ends). The receiving machine's own refusals of these
+  kinds are said the same way.
+- **The making shows on the launch's row** (#1214): the receiving machine answers the launch with
+  the project it runs in, whether it made it, and whose settings it keeps (`remote.launches`'
+  `there`); the row of a launch whose project was made says `server · preparing ledgerly` until
+  that machine's first delivery, and the caller's answer says when the project there keeps its
+  own settings or another machine's (`It runs in the project app there, which the user registered
+  on server: it keeps its own settings, not yours`).
 - **The place**: a new workspace on that machine, on the caller's branch for each repository of the
   caller's place, with the caller's uncommitted changes laid on it as uncommitted changes. A `child`
   on another machine works in that copy of its parent's place: a child still works in its parent's
@@ -1017,6 +1053,50 @@ local child's work; nothing moves your branch.*
 - **Caps**: the child counts in its parent's project cap on the parent's machine and in the
   project's cap on the receiving machine; refused above either, never queued.
 - **The brief** is the caller's, as today: nothing of its conversation goes with it.
+
+### Sessions of another machine
+
+**A session on another machine of the user's is the same as one on this machine, for every tool
+that addresses a session** (built #1250): an agent finds it, reads it, writes to it, stops it and
+answers it with the same arguments, and gets the same answers and the same refusals; it need not
+know, nor say, on which machine a session runs. The machine is where it runs, nothing more.
+
+- **Found the same way.** A session is named by its id or its title (`tools.md`, "Sessions that
+  read each other") among the roots of this machine and the live roots each other machine last
+  listed (`sessions`, "One list of every machine"), a project of the same name being the same
+  project. A title that two sessions share, here or there, is refused with both listed; every
+  listing a tool gives holds the sessions of every machine, one of another machine said `on
+  server` after its id (`Night lead · 0123456789ab · on server · idle, active 2 min ago`). An id
+  two machines list is refused, naming both: ids are each machine's own. A child an agent of
+  another machine launched is a child there too, never listed nor called as a session.
+  A session the caller started there, named by its title, is called as by its id.
+- **Judged by the machine it runs on, by the same code.** The caller's daemon sends the call as it
+  is (`call`, signed with its machine key) and judges nothing of it. The receiving machine stands
+  the caller in by an agent of its own, `<caller>@<machine's key>` (never an id of its own, never
+  listed, shown as `agent <id> of pc`), in the caller's project by its name and in its tree's mode,
+  and plays the call through the very path of its own agents' calls: the gate, the judge, the
+  user's leave per pair, what is held for the user in every mode (the first message to a session
+  the caller did not start, ending one, a first read across projects), the tool itself. A call
+  held there is a request of that machine's user, answered at once as held; its answer comes back
+  as the `approval` delivery it would be on one machine (`deliver`, its `launch` `request-<n>`,
+  taken only by the agent that waits for that very request of that machine). Nothing gives a
+  caller of another machine more than an agent of that machine: no other tool than
+  `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
+  the tree later is not given until it is written there), no secret, no file: when its project is
+  not on that machine, its place is a folder that does not exist. Its answer is masked again of
+  the caller's machine's secrets. A machine stands in 64 callers of one other machine at most
+  (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
+  the members, with their leaves.
+- **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
+  launch's ("Starting a session on another machine"): a machine alone cannot raise it.
+- **Only two differences, said in one machine's terms.** A machine that cannot be reached: its
+  sessions stay listed with its state (`on server, offline since 22:14`), and a call is refused at
+  once saying so (`refused: server is offline since 22:14: the session "Night lead" (agent …)
+  runs there, and cannot be reached now; …`). A device that may only view: its agents' calls that
+  only read (`session_read`, `agent_status`) are served, every other is refused (`refused: pc may
+  only view: a controller or a runner may call session_send on a session of another machine`).
+- **The version.** A call of a launch is sent as before; a call of another session carries fields
+  a machine of before does not read, and is refused by it, saying so. No protocol change.
 
 ### What travels
 
@@ -1571,6 +1651,75 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **What a travelling setup needs is its copied files** (#1214): today a project's settings name no
+  vault entry (its services and setup steps hold none), so the entries a launch asks for are those
+  made from the files its `copy` steps match on the caller's machine, one entry a file, named
+  `<project>-<path>` by the caller's name of the project, every project's (a project's name may
+  differ on the other machine). A file is made from its entry only when the project there lacks it,
+  in the project's folder, mode `0600`.
+- **The ask is the held launch's request** (#1214): Allow on a device shares nothing by itself yet;
+  the user makes the entry on the caller's machine (`vault.from_file`) and shares it (Settings,
+  Vault, **Share with…**) before Allow, and an Allow while it is still missing refuses the launch,
+  saying so. The window's card doing both on Allow is a follow-up.
+- **The row says `preparing <project>` until the first delivery** (#1214): the receiving machine
+  says nothing while the setup runs, so the row cannot tell the setup's end from the first turn's;
+  its next delivery says what it does.
+- **A secret of several lines is masked line by line too** (#1214), each line and each value after
+  its first `=` or `:` (quotes and a final comma left out) and an address's password, of 6
+  characters or more, comments left: a file's entry would otherwise be masked only whole, and an
+  agent reads one line of a `.env`. A secret transformed is not recognised (`docs/vault.md`).
+- **Two files whose entry would have one name are told apart by the entry's binding** (#1214):
+  `a/b` and `a-b` both name `app-a-b`; the entry is bound to the file it was made of, so the other
+  is refused its entry, naming the first, rather than the name carrying a hash of the path (names
+  stay readable on the card). A launch that copies both lays the first and lacks the second,
+  saying so; a hash in the name is the change if that case is met.
+- **A file is laid only after the user allows it, in every mode** (#1214): even in Full and with
+  the entry shared already, a secret written into a project's folder is the user's to allow.
+- **The folder for projects from other machines is not moved** (#1214): changing it applies to the
+  projects made afterwards; those made before stay, and a launch that did not start removes its
+  project from where it was made.
+- **A call to a session of a machine that is off is refused at once** (#1250), every tool alike,
+  never kept: what the session's machine would answer (held, refused, the leave) cannot be known
+  before it is back. Messages to a session the caller started stay kept, as before.
+- **The leave given to a caller of another machine lasts until the session written to ends** or
+  the user withdraws it (#1250): its machine does not tell when the caller ends, so the end of the
+  writer does not take it, as it does on one machine.
+- **A session of another machine is in the caller's project when its project has the same name**
+  (#1250), as the sidebar groups them ("One list of every machine"); a title is matched among the
+  live sessions that machine listed, an untitled one by the first line its list gives it. The
+  name only: the identity of a project by its repositories' remotes (#1228's `projects` list) is
+  a follow-up.
+- **A led session writing to its pilot on another machine** is asked the leave as any other pair
+  (#1250): the receiving machine does not stand its caller in as started by that pilot.
+- **The user's signed switch to Full counts for a call as for a launch** (#1250): checked against
+  the machine that sends it and the tree that machine names. The receiving machine cannot tell
+  which tree the caller belongs to; a machine that holds a switch could name its tree for another
+  of its agents, for 12 hours at most, as it already could for a launch.
+- **A machine of before refuses a call of another session** with the link's own refusal of a
+  message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
+- **A held call of a caller of another machine is that machine's user's request** (#1250), as a
+  request of a child there goes to that machine's user. The stand-in's own id (`<caller>@<key>`),
+  seen on a request card, is refused as a target by an agent of that machine (#1263), as a session
+  that does not exist (`session_read`, `session_send`, `agent_stop`): it holds no conversation and
+  runs nothing, and nothing is ever started for it.
+- **A caller of another machine reaches the sessions of the machine that stands it in only**
+  (#1263): a session that resolves to a third machine (or to its own) is refused with a sentence
+  of its own, and no call goes out on its behalf.
+- **A member list that cannot be read keeps the stand-ins** (#1263): while the peers' file was never
+  read whole (a broken file at the start), no machine left the members by it: the sweep forgets
+  none of them for that, and still forgets those idle for 30 days, with their leaves and the
+  answers they await; a list read whole that has nobody in it forgets them all.
+- **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
+  under the user's runtime folder, never made, rather than refused: a read of a session of another
+  project is served as on one machine. The callers of one machine are capped at 64, forgotten after
+  30 days idle (as long as a message is kept) and when their machine leaves the members.
+- **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
+  an answer the user gave before that (within the same second) is answered "send again later"
+  (#1263) while a call of that caller to that machine is still unanswered, and kept by its
+  sender. An answer that comes when no such call is out (the call was given up, or its answer
+  was lost with the link) is refused for good, as nothing will ever await it, so that it holds
+  back nothing its sender keeps for that machine behind it. Answers never given are forgotten
+  after 30 days.
 - **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
   no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
   signed in or not. The machine has no other reliable signal of having no screen, so the icon is
@@ -2133,7 +2282,9 @@ on a real phone, by hand, and reported.
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
   `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
   not start agent …`). A call is judged on the caller's machine as one to a session it started
-  there (ending a led session as `end_led`).
+  there (ending a led session as `end_led`). A `call` whose `launch` is empty (and not an
+  `approval_answer`) is one to any other session of the receiver: served there by its own gate
+  and tools for the caller stood in for ("Sessions of another machine").
 - What goes to another machine is kept in the sender's store (`outbox`) before it is sent: in
   order, one at a time, when the link to that machine is made and whenever a message is kept
   while it is up; forgotten once the other machine answered it. `agent_status`, `session_read`
