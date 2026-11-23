@@ -2455,7 +2455,7 @@ impl Shell {
                 self.snapshot
                     .elsewhere(row)
                     .and_then(|session| session.elsewhere.as_ref())
-                    .is_none_or(|there| there.machine == machine)
+                    .is_some_and(|there| there.machine == machine)
             })
     }
 
