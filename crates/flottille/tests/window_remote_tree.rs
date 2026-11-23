@@ -20,7 +20,7 @@ use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
 use flottille_window::session_link::SessionUpdate;
-use flottille_window::shell::{Selection, bell_group_title_id};
+use flottille_window::shell::Selection;
 use flottille_window::tree::{session_id, session_machine_id, session_mark_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::tie_id;
