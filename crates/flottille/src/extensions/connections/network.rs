@@ -300,3 +300,27 @@ pub fn daemons(sockets: &Path) -> Vec<u32> {
         .filter(|pid: &u32| Path::new(&format!("/proc/{pid}")).exists())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_of_a_process_that_took_the_pid_since_is_not_found() {
+        // The record names this process, its namespaces, and a start time that is not its own:
+        // another process that took the pid, and entered the same namespaces, is not the holder.
+        let vault = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let inode = |kind: &str| {
+            std::fs::metadata(format!("/proc/self/ns/{kind}"))
+                .unwrap()
+                .ino()
+        };
+        let started = crate::agents::start_time(me).unwrap();
+        let record = |start: u64| format!("{me} {} {} {start}\n", inode("user"), inode("net"));
+        std::fs::write(vault.path().join(RECORD), record(started + 1)).unwrap();
+        assert!(found(vault.path()).is_none(), "found another process's");
+        std::fs::write(vault.path().join(RECORD), record(started)).unwrap();
+        assert!(found(vault.path()).is_some(), "not found");
+    }
+}

@@ -105,12 +105,16 @@
 //! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
 //! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
 //! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
+//! As the real one's Chrome, the browser it starts makes its profile in the temporary folder
+//! (`$TMPDIR`, else `/tmp`): `agent-browser-chrome-<socket folder's name>`, and the file
+//! `.org.chromium.Chromium.<socket folder's name>`; `close` removes them.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
 //! epoch), written once the call is answered; `received` (the tool) is written as a call arrives,
-//! before it sleeps or answers, so a test can wait for a call in progress.
+//! before it sleeps or answers, so a test can wait for a call in progress. Every line carries
+//! `netns`, the inode of the network namespace the process ran in.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -375,6 +379,11 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
         let browser = json!({"headed": loaded_config(args)["headed"],
             "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
         std::fs::write(&file, browser.to_string()).unwrap();
+        // As Chrome does, its profile in the temporary folder.
+        let [profile, chromium] = profile_files(&folder);
+        let _ = std::fs::create_dir_all(&profile);
+        let _ = std::fs::write(profile.join("Cookies"), "");
+        let _ = std::fs::write(chromium, "");
         browser
     });
     write_log(
@@ -383,19 +392,50 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
     );
 }
 
+/// The inode of this process's network namespace.
+fn network_namespace() -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self/ns/net")
+        .ok()
+        .map(|ns| ns.ino())
+}
+
+/// What Chrome leaves in the temporary folder (`$TMPDIR`, else `/tmp`) while it runs for the
+/// browser of the socket folder `folder`: agent-browser's profile folder, which holds its cookies,
+/// and Chrome's own `.org.chromium.Chromium.*` file. Named after the socket folder, so that
+/// `close` removes this browser's alone.
+fn profile_files(folder: &std::ffi::OsStr) -> [std::path::PathBuf; 2] {
+    let name = std::path::Path::new(folder)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let temporary = std::env::temp_dir();
+    [
+        temporary.join(format!("agent-browser-chrome-{name}")),
+        temporary.join(format!(".org.chromium.Chromium.{name}")),
+    ]
+}
+
 /// `agent-browser close`: the browser on `AGENT_BROWSER_SOCKET_DIR` ends.
 fn close(args: &[String], log: &Option<String>) {
     if let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") {
         let _ = std::fs::remove_file(std::path::Path::new(&folder).join("browser.json"));
+        let [profile, file] = profile_files(&folder);
+        let _ = std::fs::remove_dir_all(profile);
+        let _ = std::fs::remove_file(file);
     }
     write_log(log, json!({"event": "close", "args": args}));
     println!("✓ Browser closed");
 }
 
-fn write_log(log: &Option<String>, line: Value) {
+fn write_log(log: &Option<String>, mut line: Value) {
     let Some(path) = log else {
         return;
     };
+    // The network namespace each command ran in: the tests check that every command of
+    // agent-browser's runs in the browser's own.
+    line["netns"] = json!(network_namespace());
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
