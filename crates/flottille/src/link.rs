@@ -1108,12 +1108,19 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
             .iter()
             .map(|agent| root_of(agent)),
     );
+    // Only the projects this machine's own window shows: a session of a project whose file is
+    // gone is shown by no window here, and the machine it is listed on could not act on it.
+    let projects: HashSet<String> = crate::projects::all(daemon)
+        .into_iter()
+        .map(|project| project.name)
+        .collect();
     let mut sessions: Vec<flottille_link::LightSession> = agents
         .iter()
         // A child an agent of another machine launched here is that agent's, no session to list.
         .filter(|agent| {
             agent.parent.is_none()
                 && !agent.state.is_final()
+                && projects.contains(&agent.project)
                 && !crate::across::remote_child(daemon, agent)
         })
         .map(|agent| {
