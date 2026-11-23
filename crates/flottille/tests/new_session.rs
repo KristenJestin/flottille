@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::User;
+use common::mcp::Mcp;
 use serde_json::{Value, json};
 
 /// A project `app` over a throwaway repository with one commit.
@@ -429,4 +430,30 @@ fn the_provider_command_sets_the_mode_a_new_session_starts_in() {
     let output = user.run(&["provider", "new-session", "--mode", "yolo"]);
     assert!(!output.status.success());
     assert_eq!(default_mode(&user), "ask");
+}
+
+#[test]
+fn a_session_an_outside_agent_starts_through_the_pilot_door_is_in_auto_whatever_the_default() {
+    let user = user();
+    let pilot = Mcp::pilot(&user);
+    let mut known: Vec<String> = Vec::new();
+    for mode in ["full", "ask"] {
+        set_mode(&user, mode);
+
+        let answer = pilot.call("agent_start", json!({"project": "app", "message": "go"}));
+        assert!(!answer.error, "{}", answer.text);
+
+        // Only a session the user starts takes the default: an agent's door keeps Auto.
+        let listed = user.call("agent.list", Value::Null).unwrap()["agents"].clone();
+        let fresh: Vec<&str> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .filter(|id| !known.iter().any(|k| k == id))
+            .collect();
+        assert_eq!(fresh.len(), 1, "{listed}");
+        assert_eq!(agent(&user, fresh[0])["gate_mode"], "auto", "{mode}");
+        known.push(fresh[0].to_owned());
+    }
 }
