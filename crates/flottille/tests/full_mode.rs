@@ -395,17 +395,17 @@ fn launched(user: &User, mcp: &Mcp, args: Value) -> String {
         user.call("approval.approve", json!({"number": number}))
             .unwrap();
     }
-    let mut found = None;
+    let found = std::cell::RefCell::new(None);
     eventually(&format!("the session {title}"), || {
-        found = user.call("agent.list", json!({})).unwrap()["agents"]
+        *found.borrow_mut() = user.call("agent.list", json!({})).unwrap()["agents"]
             .as_array()
             .unwrap()
             .iter()
             .find(|a| a["title"] == title.as_str())
             .map(|a| a["id"].as_str().unwrap().to_owned());
-        found.is_some()
+        found.borrow().is_some()
     });
-    found.unwrap()
+    found.into_inner().unwrap()
 }
 
 #[test]

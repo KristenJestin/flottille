@@ -562,12 +562,12 @@ fn the_new_sessions_settings_choose_the_mode(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(selected(cx, "new-sessions-mode-full"), Some(true));
     assert_eq!(selected(cx, "new-sessions-mode-auto"), Some(false));
-    // The note is a line of text under the choice, as the page's other lines: no box around it,
-    // so it starts where the row above it starts.
+    // The note is a line of text under the choice, as the page's other lines: no padded box
+    // around it, so it is as tall as the hint's line of the same size.
     cx.update(|window, _| {
         assert_eq!(
-            window.find("new-sessions-full-note").bounds().left(),
-            window.find("new-sessions-mode-hint").bounds().left(),
+            window.find("new-sessions-full-note").bounds().size.height,
+            window.find("new-sessions-mode-hint").bounds().size.height,
         );
     });
     assert_eq!(
