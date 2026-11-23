@@ -2808,6 +2808,16 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn nothing_is_started_for_a_stand_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::tests::a_daemon(dir.path(), false);
+
+        order(&daemon, "c0@aa", Order::Ring);
+
+        assert!(!daemon.agents.tasks.lock().unwrap().contains_key("c0@aa"));
+    }
+
     #[test]
     fn a_poisoned_saying_lock_still_keeps_the_pieces_after_it_masked() {
         let env = BTreeMap::from([("API_TOKEN".into(), "s3cr3t-token-value".into())]);

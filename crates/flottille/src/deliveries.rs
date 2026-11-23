@@ -751,6 +751,26 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_stand_in_is_never_rung_nor_given_a_note_mid_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::tests::a_daemon(dir.path(), false);
+        let mut stand_in = crate::daemon::tests::an_agent("c0@aa");
+        stand_in.state = AgentState::Working;
+        let mut urgent = delivery("Allowed.");
+        urgent.agent = stand_in.id.clone();
+        daemon
+            .write(|store| {
+                store.create_agent(&stand_in, ("agent.created", json!({})))?;
+                store.deliver(&urgent).map(|_| ((), None))
+            })
+            .unwrap();
+
+        ring(&daemon, &stand_in.id);
+
+        assert!(!daemon.notes.pinned.lock().unwrap().contains_key("c0@aa"));
+    }
+
     #[test]
     fn each_image_goes_after_its_marker_and_one_without_after_the_text() {
         let mut d = delivery("this one [Image 1: a.png] fine, this one [Image 2: b.png] overflows");

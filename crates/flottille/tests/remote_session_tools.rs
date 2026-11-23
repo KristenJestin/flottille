@@ -778,7 +778,8 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
             "From the laptop.",
         )],
     );
-    assert!(answers[0].clone().unwrap()["later"].is_string());
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("waits for no answer"), "{refused}");
 
     approve(&server, number);
     prompted(&pc, "was approved by the user");
@@ -796,7 +797,8 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
     );
     assert!(answers[0].is_ok(), "{:?}", answers[0]);
     for answer in &answers[1..] {
-        assert!(answer.clone().unwrap()["later"].is_string(), "{answer:?}");
+        let refused = answer.clone().unwrap_err();
+        assert!(refused.contains("waits for no answer"), "{refused}");
     }
     a_while();
     for body in ["From the laptop.", "Replayed", "Never asked."] {
@@ -952,19 +954,62 @@ fn a_stand_in_never_relays_a_call_to_a_third_machine() {
 
 #[test]
 fn an_answer_before_its_wait_is_recorded_is_sent_again() {
-    let (_hub, pc, server, _night) = night_lead("runner");
-    let (asker, _asking) = caller(&pc, &server, "ask");
-    let key = server.stand_in();
+    let (_hub, pc, server, night) = night_lead("runner");
+    let (_asker, asking) = caller(&pc, &server, "ask");
+    // pc takes its time to record what its agent waits for, once the server answered the call.
+    let slow = pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
 
-    // The answer of a request pc's agent does not wait for yet: not never, later.
-    let answers = sent_with(
-        &key,
-        &pc,
-        vec![answer_of("approval-7", 7, &asker, "Allowed.")],
-    );
+    std::thread::scope(|scope| {
+        let call = scope.spawn(|| asking.call("session_read", json!({"session": night})));
+        eventually("the call held on the server", || {
+            !server.requests().is_empty()
+        });
+        let number = server.requests()[0]["number"].as_u64().unwrap();
+        // The user answers before pc recorded the wait: not never, later.
+        approve(&server, number);
+        eventually("the answer taken later", || {
+            pc.log().contains("waits for no answer of request")
+                && pc.log().contains("is taken later")
+        });
+        std::fs::remove_file(&slow).unwrap();
+        assert_eq!(held(&call.join().unwrap()), number);
+    });
 
-    let answer = answers[0].clone().unwrap();
-    assert!(answer["later"].is_string(), "{answer:#}");
+    prompted(&pc, "was approved by the user");
+}
+
+#[test]
+fn an_answer_nothing_awaits_holds_back_nothing_kept_behind_it() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let (_waiting, waits) = caller(&pc, &server, "ask");
+    let awaited = held(&waits.call("session_read", json!({"session": night})));
+    // Another caller gives up its call before pc records the wait: nothing will ever await
+    // that answer.
+    let (_gone, gives_up) = caller(&pc, &server, "ask");
+    std::fs::write(pc.user.path("slow-call"), "").unwrap();
+    gives_up.call_given_up("session_read", json!({"session": night}), || {
+        server.requests().len() == 2
+    });
+    let never = server
+        .requests()
+        .into_iter()
+        .map(|request| request["number"].as_u64().unwrap())
+        .find(|number| *number != awaited)
+        .unwrap();
     a_while();
-    assert_eq!(prompts_with(&pc, "Allowed."), 0);
+
+    // Kept for pc in this order: the answer nothing awaits, then the one awaited.
+    approve(&server, never);
+    approve(&server, awaited);
+
+    prompted(&pc, "was approved by the user");
+    assert_eq!(prompts_with(&pc, "was approved by the user"), 1);
+    assert!(
+        server
+            .log()
+            .contains("refused a message kept for it, which is dropped"),
+        "{}",
+        server.log()
+    );
 }

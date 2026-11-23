@@ -79,9 +79,11 @@ pub(crate) fn runner_user() -> User {
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
     let claude = user.path("home/.claude");
     let stopping = user.path("stopping");
+    let slow = user.path("slow-call");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_SLOW_CALL_FILE", slow.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
