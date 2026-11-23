@@ -590,7 +590,6 @@ fn led_fails() {
 }
 
 #[test]
-#[ignore = "#1276: session_read of a session started across answers a line and a cut, not pages"]
 fn pilot_reads_its_led_session() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
