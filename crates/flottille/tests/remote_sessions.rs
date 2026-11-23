@@ -178,7 +178,13 @@ fn another_machine_never_lists_a_session_its_own_window_hides() {
         "{own}"
     );
     // A session of a project the machine knows is still told.
-    add_app(&server.user);
+    server
+        .user
+        .call(
+            "project.add",
+            json!({"folder": server.user.path("work/app"), "name": "app"}),
+        )
+        .unwrap();
     let again = session(&server, "Back in a project with a file");
     eventually("pc lists the session of a known project", || {
         kept_ids(&pc, "server").contains(&again)
