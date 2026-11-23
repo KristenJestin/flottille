@@ -5164,19 +5164,24 @@ fn a_run_cannot_get_the_credential() {
     );
     let (_, mcp) = signed_up(&user);
     let result = user.path("probe-result.json");
-    let config = user.path("state/flottille/connections/browser/agent-browser.json");
+    // The run cannot read the configuration that names the socket (it is in the vault folder):
+    // it is told the socket's path, which anyone can guess.
+    let config = vault_folder(&user).join("agent-browser.json");
+    let socket = vault_folder(&user).join("vault.sock");
     std::fs::write(
         user.path("work/app/probe.py"),
         format!(
             "import json, os, socket, time\n\
-             started, config, result, until = {started:?}, {config:?}, {result:?}, {until:?}\n\
+             started, config, sock, result, until = {started:?}, {config:?}, {sock:?}, {result:?}, {until:?}\n\
              deadline = time.time() + 30\n\
              while not os.path.exists(started) and time.time() < deadline:\n    time.sleep(0.02)\n\
-             out = {{'started': os.path.exists(started)}}\n\
+             out = {{'started': os.path.exists(started), 'socket': sock}}\n\
              token = ''\n\
              try:\n\
-             \x20   sock = json.load(open(config))['plugins'][0]['args'][-1]\n\
-             \x20   out['socket'] = sock\n\
+             \x20   out['config'] = open(config).read()\n\
+             except Exception as error:\n\
+             \x20   out['config_error'] = str(error)\n\
+             try:\n\
              \x20   try:\n\
              \x20       token = open(os.path.join(os.path.dirname(sock), 'vault.token')).read()\n\
              \x20       out['token'] = token\n\
@@ -5194,6 +5199,7 @@ fn a_run_cannot_get_the_credential() {
              open(until, 'w').write('')\n",
             started = format!("{}.started", until.display()),
             config = config.display().to_string(),
+            sock = socket.display().to_string(),
             result = result.display().to_string(),
             until = until.display().to_string(),
         ),
@@ -5214,13 +5220,182 @@ fn a_run_cannot_get_the_credential() {
         serde_json::from_str(&std::fs::read_to_string(&result).expect("the run never ended"))
             .unwrap();
     assert_eq!(probe["started"], true, "{probe}");
-    assert!(probe["socket"].is_string(), "{probe}");
+    assert!(
+        probe.get("config").is_none(),
+        "the run read the configuration: {probe}"
+    );
     assert!(
         probe.get("token").is_none(),
         "the run read the token: {probe}"
     );
     assert!(!probe.to_string().contains(PASSWORD), "{probe}");
     assert!(!probe.to_string().contains("tester@example.com"), "{probe}");
+}
+
+/// The connection `browser`'s vault folder, where its login's token, its plugin's socket,
+/// agent-browser's configuration and its daemon's socket are: out of every run's reach.
+fn vault_folder(user: &User) -> PathBuf {
+    user.path("runtime/flottille/vault/browser")
+}
+
+/// The folders where agent-browser's configuration and its daemon's socket were or are: the
+/// connection's state folder (until #1309) and its vault folder.
+fn browser_folders(user: &User) -> Vec<PathBuf> {
+    vec![
+        user.path("state/flottille/connections/browser"),
+        vault_folder(user),
+    ]
+}
+
+/// `probe` (Python, its words `{STARTED}`, `{UNTIL}`, `{RESULT}` and `{FOLDERS}` replaced) run by
+/// the agent while a login of the entry `shop-test` holds before its plugin is asked: the
+/// login's answer and what the probe wrote.
+fn probed_login(user: &User, probe: &str) -> (Answer, Value) {
+    let until = user.path("probe-done");
+    browser(
+        user,
+        &agent_browser("0.43.0"),
+        json!({"hold": until.to_str().unwrap()}),
+    );
+    let (_, mcp) = signed_up(user);
+    let result = user.path("probe-result.json");
+    let folders: Vec<String> = browser_folders(user)
+        .iter()
+        .map(|folder| folder.display().to_string())
+        .collect();
+    let script = probe
+        .replace(
+            "{STARTED}",
+            &format!("{:?}", format!("{}.started", until.display())),
+        )
+        .replace("{UNTIL}", &format!("{:?}", until.display().to_string()))
+        .replace("{RESULT}", &format!("{:?}", result.display().to_string()))
+        .replace("{FOLDERS}", &serde_json::to_string(&folders).unwrap());
+    std::fs::write(user.path("work/app/probe.py"), script).unwrap();
+    // Left running past its call: it waits for the login.
+    mcp.call("run", json!({"line": "python3 probe.py", "timeout": 1}));
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    let probe: Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the run never ended"))
+            .unwrap();
+    (answer, probe)
+}
+
+#[test]
+fn a_run_cannot_swap_the_login_plugin() {
+    // A run of the agent's own rewrites agent-browser's configuration, wherever it may be, over
+    // and over while a login loads its page and starts: its plugin, a script that would be run by
+    // agent-browser's daemon with the vault folder in reach, is never run, and the login fills
+    // with Flottille's own plugin.
+    let user = user();
+    let marker = user.path("swapped-plugin-ran");
+    let plugin = user.path("plugin.sh");
+    std::fs::write(
+        &plugin,
+        format!("#!/bin/sh\necho ran > {}\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&plugin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let probe = r#"import json, os, time
+started, until, result, folders = {STARTED}, {UNTIL}, {RESULT}, {FOLDERS}
+swapped = json.dumps({'plugins': [{'name': 'flottille', 'command': PLUGIN, 'args': [],
+    'capabilities': ['credential.read']}]})
+out = {'written': [], 'errors': {}}
+deadline = time.time() + 30
+while not os.path.exists(started) and time.time() < deadline:
+    for folder in folders:
+        config = os.path.join(folder, 'agent-browser.json')
+        try:
+            with open(config, 'w') as f:
+                f.write(swapped)
+            if config not in out['written']:
+                out['written'].append(config)
+        except Exception as error:
+            out['errors'][config] = str(error)
+    time.sleep(0.002)
+out['started'] = os.path.exists(started)
+open(result, 'w').write(json.dumps(out))
+open(until, 'w').write('')
+"#
+    .replace("PLUGIN", &format!("{:?}", plugin.display().to_string()));
+    let (answer, probe) = probed_login(&user, &probe);
+    assert_eq!(probe["started"], true, "{probe}");
+    assert!(
+        !marker.exists(),
+        "the run's plugin was run by agent-browser: {probe}"
+    );
+    let said = done(answer);
+    assert!(said.contains("shop-test"), "{said}");
+    let filled = form(&user).expect("the login did not sign in");
+    assert_eq!(filled["password"], PASSWORD);
+    let vault_config = vault_folder(&user).join("agent-browser.json");
+    assert!(
+        !probe["written"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(vault_config.display().to_string())),
+        "{probe}"
+    );
+}
+
+#[test]
+fn a_run_cannot_drive_the_browser() {
+    // A run of the agent's own looks for agent-browser's daemon while a login runs, in the folder
+    // `AGENT_BROWSER_SOCKET_DIR` names (the fake's browser is its `browser.json` there, the real
+    // one's a socket): it finds nothing to connect to, and reads none of it.
+    let user = user();
+    let probe = r#"import json, os, socket, time
+started, until, result, folders = {STARTED}, {UNTIL}, {RESULT}, {FOLDERS}
+deadline = time.time() + 30
+while not os.path.exists(started) and time.time() < deadline:
+    time.sleep(0.02)
+out = {'started': os.path.exists(started), 'listed': {}, 'errors': {}, 'read': {},
+    'connected': []}
+for folder in folders:
+    try:
+        names = sorted(os.listdir(folder))
+        out['listed'][folder] = names
+    except Exception as error:
+        out['errors'][folder] = str(error)
+        continue
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.endswith('.sock'):
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.settimeout(2)
+                s.connect(path)
+                out['connected'].append(path)
+            except Exception as error:
+                out['errors'][path] = str(error)
+        elif name in ('browser.json', 'agent-browser.json'):
+            try:
+                out['read'][path] = open(path).read()
+            except Exception as error:
+                out['errors'][path] = str(error)
+open(result, 'w').write(json.dumps(out))
+open(until, 'w').write('')
+"#;
+    let (answer, probe) = probed_login(&user, probe);
+    assert_eq!(probe["started"], true, "{probe}");
+    done(answer);
+    // The login's browser did run, in the folder the run looked into.
+    let browsers = logged(&user, "browser", "browser");
+    assert!(!browsers.is_empty(), "no browser ran");
+    for names in probe["listed"].as_object().unwrap().values() {
+        for name in names.as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(
+                name != "browser.json" && name != "agent-browser.json" && !name.ends_with(".sock"),
+                "the run found the browser's {name}: {probe}"
+            );
+        }
+    }
+    assert_eq!(probe["read"], json!({}), "{probe}");
+    assert_eq!(probe["connected"], json!([]), "{probe}");
 }
 
 /// A login of the entry `shop-test` with the fake's `login` behaviour `login`: its answer, and
