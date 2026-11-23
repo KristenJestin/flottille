@@ -2930,6 +2930,34 @@ mod tests {
     }
 
     #[test]
+    fn a_project_made_for_a_launch_is_preparing_until_its_machine_says_something() {
+        // Its machine lists the session `running` as soon as its first turn starts, which the row
+        // cannot tell from the setup's end: it says `preparing` until the first delivery here.
+        for listed in ["running", "idle"] {
+            let mut machines = led_on_server("started", None, Some(listed));
+            machines.launches[0].making = Some("app".into());
+            let row = the_led_row(&machines);
+            assert_eq!(row.mark, Some(AgentState::Running), "listed {listed}");
+            assert_eq!(row.mark_said, "Preparing app on server", "listed {listed}");
+            assert_eq!(row.elsewhere.as_ref().unwrap().state, "preparing app");
+        }
+        // It asks the user: that says more than the setup does.
+        let mut machines = led_on_server("started", None, Some("needs you"));
+        machines.launches[0].making = Some("app".into());
+        let row = the_led_row(&machines);
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        // It said something here: its list says the rest.
+        let mut machines = led_on_server("started", Some("session-turn-ended"), Some("running"));
+        machines.launches[0].making = Some("app".into());
+        let row = the_led_row(&machines);
+        assert_eq!(row.mark_said, "Running on server");
+        // The agents of its pilot's page say the same.
+        let mut machines = led_on_server("started", None, Some("running"));
+        machines.launches[0].making = Some("app".into());
+        assert_eq!(remote_agents(&machines)[0].state, "preparing app");
+    }
+
+    #[test]
     fn a_session_its_launch_titled_keeps_that_title_rather_than_its_brief() {
         // Launched by another machine's agent: no agent of this one launched it.
         let mut launched = agent("r1", None, "idle", None);
