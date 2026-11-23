@@ -325,10 +325,43 @@ fn a_default_chosen_while_the_composer_is_open_is_shown_unless_the_session_chose
     choose_mode("full", cx);
     user.call("provider.set_new_session_mode", json!({"mode": "auto"}))
         .unwrap();
-    // Long enough for the event to come and the providers to be read again.
-    for _ in 0..40 {
-        until(&shell, cx, "the window polls", |_| true);
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // Once the window has read the new default, which the composer had to ignore.
+    until(&shell, cx, "the providers are read again", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.providers().new_session_mode.as_deref() == Some("auto")
+        })
+    });
     assert_eq!(shown(&composer, cx), (Some("full".into()), true));
+}
+
+#[gpui_kit::test]
+fn a_composer_nobody_touched_leaves_the_mode_to_the_daemon(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, composer, cx) = atlas(&user, cx);
+    // The window shows Auto: the default it last read. The daemon's has changed since, which the
+    // window has not heard of (it hears of it by polling, and nothing polls until the start).
+    on_auto_in_the_bar(&composer, cx);
+    user.call("provider.set_new_session_mode", json!({"mode": "full"}))
+        .unwrap();
+
+    type_task("Fix the login", cx);
+    cx.update(|window, cx| window.click("send", cx));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let agents = loop {
+        let agents = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+        if agents.as_array().is_some_and(|agents| agents.len() == 1) {
+            break agents;
+        }
+        assert!(Instant::now() < deadline, "the session never started");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    // The start named no mode, so that the daemon's default applied: what the user chose for this
+    // session is the only mode the composer sends.
+    let id = agents[0]["id"].as_str().unwrap();
+    assert_eq!(
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["gate_mode"],
+        "full"
+    );
 }

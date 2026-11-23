@@ -514,6 +514,16 @@ fn mode_of(user: &User) -> serde_json::Value {
     user.call("provider.list", serde_json::Value::Null).unwrap()["new_session_mode"].clone()
 }
 
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
 fn selected(cx: &mut VisualTestContext, id: &str) -> Option<bool> {
     cx.update(|window, _| {
         window
@@ -552,12 +562,30 @@ fn the_new_sessions_settings_choose_the_mode(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(selected(cx, "new-sessions-mode-full"), Some(true));
     assert_eq!(selected(cx, "new-sessions-mode-auto"), Some(false));
+    // The note is a line of text under the choice, as the page's other lines: no box around it,
+    // so it starts where the row above it starts.
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("new-sessions-full-note").bounds().left(),
+            window.find("new-sessions-mode-hint").bounds().left(),
+        );
+    });
     assert_eq!(
         label(cx, "new-sessions-full-note").as_deref(),
         Some(
             "In Full, a session's commands run as yours, as in your terminal: nothing is \
              held back, the vault included."
         )
+    );
+
+    // The mode says it was saved in a toast of its own, not the one of the provider's choice.
+    until(&shell, cx, "the mode's toast", |cx| {
+        toasts(&shell, cx).contains(&"New session mode saved".to_owned())
+    });
+    assert!(
+        !toasts(&shell, cx).contains(&"New sessions saved".to_owned()),
+        "{:?}",
+        toasts(&shell, cx)
     );
 
     // Ask: the note leaves, and the daemon holds Ask.
