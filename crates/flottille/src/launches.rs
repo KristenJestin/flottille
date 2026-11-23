@@ -524,6 +524,13 @@ async fn judged(
             asked.caller
         ));
     }
+    // Only a root starts a session, here as on its own machine.
+    if kind != LaunchKind::Child && asked.depth > 0 {
+        return Err(format!(
+            "agent {} of {sender} is a child: only a root starts a session, led or handed",
+            asked.caller
+        ));
+    }
     if asked.title.trim().is_empty() || asked.brief.trim().is_empty() {
         return Err("a launch needs a title and a brief".to_owned());
     }
