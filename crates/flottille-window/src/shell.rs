@@ -2234,7 +2234,8 @@ impl Shell {
                     shell.say_draft(&session, cx);
                 }));
                 self.replies.insert(id.clone(), reply.clone());
-                // What its machine keeps of its draft comes back as an `Outcome::Draft`.
+                // What this machine keeps of its draft comes back as an `Outcome::Draft`, said of
+                // the machine whose actions asked (the keeper always asks this one).
                 asks.send(Command::DraftRead {
                     key: DraftKey::Session(agent.clone()),
                 });
@@ -2740,13 +2741,15 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // What the window keeps (its folds), its appearance and its build are asked of this
-        // machine's daemon whichever page asks: no word of that machine. A session's draft is
-        // kept on its own machine, and its answer is that machine's.
+        // What the window keeps (drafts, even of another machine's sessions, and folds), its
+        // appearance and its build are asked of this machine's daemon whichever page asks: no
+        // word of that machine.
         let here = matches!(
             &update,
             Update::Done(
-                Outcome::WindowKept { .. }
+                Outcome::Draft { .. }
+                    | Outcome::DraftWritten { .. }
+                    | Outcome::WindowKept { .. }
                     | Outcome::Appearance { .. }
                     | Outcome::Update { .. }
                     | Outcome::Tunnel(_)
@@ -5356,17 +5359,14 @@ impl Shell {
     pub fn answer_connection_request(
         &mut self,
         number: u64,
+        machine: Option<String>,
         server: &crate::extensions::connections::Server,
         adding: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The form of the request's machine, whichever machine is in front.
-        let machine = self
-            .connection_request
-            .read(cx)
-            .machine()
-            .map(str::to_owned);
+        // The form of the request's machine (`None`: this one), whichever machine is in front:
+        // the dialog says which, as it is being updated.
         let section = match machine == self.front {
             true => Some(self.connections(cx)),
             false => self

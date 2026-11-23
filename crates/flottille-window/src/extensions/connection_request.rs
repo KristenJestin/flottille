@@ -532,10 +532,10 @@ impl ConnectionRequest {
             return;
         };
         self.open = false;
-        let adding = proposal.action == "add";
+        let (adding, machine) = (proposal.action == "add", self.machine.clone());
         self.shell
             .update(cx, |shell, cx| {
-                shell.answer_connection_request(number, &server, adding, window, cx)
+                shell.answer_connection_request(number, machine, &server, adding, window, cx)
             })
             .ok();
         cx.notify();
