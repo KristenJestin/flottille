@@ -1935,7 +1935,7 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
 }
 
 /// What the globs match in `source`, file by file, relative to it.
-fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
     let cannot =
         |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
     let mut found = Vec::new();

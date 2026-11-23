@@ -1192,6 +1192,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        method if method.starts_with("travelled_folder.") => (
+            match crate::travelled_folder::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("workspaces_folder.") => (
             match crate::workspaces_folder::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

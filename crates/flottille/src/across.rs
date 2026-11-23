@@ -413,9 +413,35 @@ pub(crate) fn tell(
     let Some(launch) = launch_here(daemon, agent) else {
         return false;
     };
+    tell_with(daemon, &launch, kind, body, urgency, back, ended);
+    true
+}
+
+/// Tells the agent of another machine that asked `launch`, which never started here: a delivery
+/// of `kind` that ends it there, kept until that machine takes it.
+pub(crate) fn tell_of(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    kind: &str,
+    body: &str,
+    urgency: &str,
+    ended: bool,
+) {
+    tell_with(daemon, launch, kind, body, urgency, false, ended);
+}
+
+fn tell_with(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    kind: &str,
+    body: &str,
+    urgency: &str,
+    back: bool,
+    ended: bool,
+) {
     // A session handed to the user is theirs: the agent that started it is told nothing.
     if launch.kind == "handed" {
-        return true;
+        return;
     }
     let id = format!(
         "{kind}-{}",
@@ -439,17 +465,16 @@ pub(crate) fn tell(
         true => Err(format!(
             "a delivery to another machine is {LONGEST} characters at most, this one {length}"
         )),
-        false => keep(daemon, &launch, &name, id, &message, back),
+        false => keep(daemon, launch, &name, id, &message, back),
     };
     if let Err(why) = kept {
         eprintln!("flottille daemon: a {kind} for {name} is dropped: {why}");
-        let outgoing = outgoing(&launch, &name, String::new(), &message, back);
+        let outgoing = outgoing(launch, &name, String::new(), &message, back);
         let _ = daemon.emit(
             "remote.delivery_dropped",
             dropped(daemon, &outgoing, None, Some(&why)),
         );
     }
-    true
 }
 
 fn outgoing(
@@ -1232,6 +1257,9 @@ pub(crate) fn launched(daemon: &Daemon) -> Result<Value, String> {
                 "kind": launch.kind,
                 "project": launch.project,
                 "title": launch.asked["title"],
+                // The project it runs in there, as that machine answered, and whether that
+                // machine made it for this launch.
+                "there": launch.asked["there"],
                 "agent": launch.agent,
                 "state": launch.state,
                 "request": launch.request,

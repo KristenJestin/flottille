@@ -119,7 +119,203 @@ fn check(asked: &LaunchAsk) -> Result<(), String> {
         flottille_core::project::travelled_toml(settings)
             .map_err(|why| format!("the settings of {}: {why}", asked.project))?;
     }
+    if asked.copied.len() > MOST_COPIED {
+        return Err(format!(
+            "a launch names {MOST_COPIED} files its setup copies at most"
+        ));
+    }
+    if let Some(path) = asked.copied.iter().find(|path| !fit_path(path)) {
+        return Err(format!(
+            "{:?} is not a path inside the project",
+            path.chars().take(64).collect::<String>()
+        ));
+    }
     Ok(())
+}
+
+// What the setup copies.
+
+/// The most files a launch names that its setup copies.
+const MOST_COPIED: usize = 32;
+
+/// The largest file the setup copies that becomes a vault entry, in bytes.
+pub(crate) const LARGEST_COPIED: u64 = 64 * 1024;
+
+/// The files the setup of `project` copies (its `copy` steps) that its folder holds, in the
+/// repositories at `paths`, by their paths in the project: what a launch from there names, never
+/// what they hold. A link is not one: it would lead elsewhere.
+pub(crate) fn copied(project: &Project, paths: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for step in &project.setup {
+        let Some(globs) = &step.copy else {
+            continue;
+        };
+        let places: Vec<&str> = match (&step.repository, step.for_each_repository) {
+            (Some(path), _) if paths.contains(path) => vec![path.as_str()],
+            (Some(_), _) => Vec::new(),
+            (None, true) => paths.iter().map(String::as_str).collect(),
+            (None, false) => vec!["."],
+        };
+        for place in places {
+            let source = match place {
+                "." => project.folder.clone(),
+                path => project.folder.join(path),
+            };
+            for relative in crate::workspaces::copy_sources(&source, globs).unwrap_or_default() {
+                if std::fs::symlink_metadata(source.join(&relative))
+                    .is_ok_and(|metadata| !metadata.is_file())
+                {
+                    continue;
+                }
+                let path = match place {
+                    "." => relative.to_string_lossy().into_owned(),
+                    place => format!("{place}/{}", relative.to_string_lossy()),
+                };
+                if fit_path(&path) && !found.contains(&path) {
+                    found.push(path);
+                }
+            }
+        }
+    }
+    found.truncate(MOST_COPIED);
+    found
+}
+
+/// Whether `path` names a file inside a project: relative, of no `.`, `..` or `.git` part, no
+/// control character, 255 bytes at most.
+pub(crate) fn fit_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 255
+        && !path.starts_with('/')
+        && !path.contains(|c: char| c.is_control() || c == '\\')
+        && path
+            .split('/')
+            .all(|part| !matches!(part, "" | "." | ".." | ".git"))
+}
+
+/// The vault entry the file `path` of the project `project` is offered as: `<project>-<path>`,
+/// each `/` a `-` and each character an entry's name cannot hold a `_`, 64 at most.
+pub fn entry_for(project: &str, path: &str) -> String {
+    format!("{project}-{path}")
+        .chars()
+        .map(|c| match c {
+            '/' => '-',
+            c if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') => c,
+            _ => '_',
+        })
+        .take(64)
+        .collect()
+}
+
+/// A file the setup of a launch's project copies, which this machine's project lacks: made, once
+/// the launch is allowed, from the vault entry `entry`, shared from the caller's machine.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Need {
+    pub path: String,
+    pub entry: String,
+}
+
+/// What the launch `asked` needs here that the project in `folder` lacks: each file its setup
+/// copies that the folder does not hold, with the vault entry it is made from.
+pub(crate) fn needs(asked: &LaunchAsk, folder: &Path) -> Vec<Need> {
+    asked
+        .copied
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(folder.join(path)).is_err())
+        .map(|path| Need {
+            path: path.clone(),
+            entry: entry_for(&asked.project, path),
+        })
+        .collect()
+}
+
+/// Those of `needs` whose vault entry this machine lacks: what the user is asked to share.
+pub(crate) fn missing(daemon: &Daemon, needs: &[Need]) -> Vec<Need> {
+    let held = daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default();
+    needs
+        .iter()
+        .filter(|need| !held.iter().any(|entry| entry.name == need.entry))
+        .cloned()
+        .collect()
+}
+
+/// `a`, `a and b`, `a, b and c`.
+pub(crate) fn listed(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// What the user is asked, on every device, for a launch that lacks `missing` here:
+/// `app needs .env on server: share it?`.
+pub(crate) fn asked_to_share(project: &str, here: &str, missing: &[Need]) -> String {
+    let paths: Vec<String> = missing.iter().map(|need| need.path.clone()).collect();
+    let them = if missing.len() == 1 { "it" } else { "them" };
+    format!(
+        "{project} needs {} on {here}: share {them}?",
+        listed(&paths)
+    )
+}
+
+/// Makes each file of `needs` the project `project` lacks from this machine's vault entry of it,
+/// never over anything there, readable by the user alone: the setup's `copy` steps then copy it
+/// as any file of the project's. What is still missing is refused, naming it.
+pub(crate) async fn lay(daemon: &Daemon, project: &str, needs: &[Need]) -> Result<(), String> {
+    if needs.is_empty() {
+        return Ok(());
+    }
+    let project = projects::load_project(daemon, project).map_err(|failure| failure.message)?;
+    let root = std::fs::canonicalize(&project.folder)
+        .map_err(|error| format!("{}: {error}", project.folder.display()))?;
+    let mut lacking = Vec::new();
+    for need in needs {
+        let target = root.join(&need.path);
+        if !fit_path(&need.path) || std::fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        let Some(secret) = crate::vault::of_file(daemon, &need.entry).await else {
+            lacking.push(need.path.clone());
+            continue;
+        };
+        crate::vault::mask_lines(&secret);
+        let written = write_new(&root, &target, &secret);
+        if let Err(why) = written {
+            return Err(format!("{} cannot be made: {why}", need.path));
+        }
+    }
+    match lacking.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "the project {} here still lacks {}: its vault entries were not shared with it",
+            project.name,
+            listed(&lacking)
+        )),
+    }
+}
+
+/// Writes `text` as the new file `target`, inside `root` (reached through no link), readable by
+/// the user alone.
+fn write_new(root: &Path, target: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let parent = target.parent().unwrap_or(root);
+    std::fs::create_dir_all(parent).map_err(|error| error.kind().to_string())?;
+    let real = std::fs::canonicalize(parent).map_err(|error| error.kind().to_string())?;
+    if !real.starts_with(root) {
+        return Err("its folder leads out of the project".to_owned());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(real.join(target.file_name().unwrap_or_default()))
+        .map_err(|error| error.kind().to_string())?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| error.kind().to_string())
 }
 
 /// The project of this machine `asked` runs in: the one whose repositories are the launch's, by
@@ -185,7 +381,7 @@ pub(crate) async fn recognise(
 
 /// Where this machine makes the projects that come from other machines.
 pub(crate) fn folder_for_others(daemon: &Daemon) -> PathBuf {
-    daemon.paths.data.join("projects")
+    crate::travelled_folder::folder(daemon)
 }
 
 /// Whether nothing is at `folder`, or an empty folder.
@@ -298,7 +494,7 @@ pub(crate) struct Classed {
 /// Whether the settings of a launch of the machine `machine` (its key) are laid on `project`:
 /// only on one Flottille made for that very machine's launches. Its key, never its member's name,
 /// which another member may rename it from and take.
-fn takes(project: &Project, machine: &str) -> bool {
+pub(crate) fn takes(project: &Project, machine: &str) -> bool {
     project.from_machine.as_deref() == Some(machine)
 }
 
@@ -875,7 +1071,11 @@ pub(crate) fn unmake(daemon: &std::sync::Arc<Daemon>, launch: &flottille_core::s
         return;
     }
     let name = launch.project.clone();
-    let folder = folder_for_others(daemon).join(&name);
+    // Where it was made: the folder for projects from other machines may have changed since.
+    let folder = launch.asked["folder"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| folder_for_others(daemon).join(&name));
     let daemon = daemon.clone();
     let machine = launch.machine.clone();
     let this = launch.launch.clone();

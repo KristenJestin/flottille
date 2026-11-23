@@ -204,6 +204,11 @@ pub struct LaunchAsk {
     /// (`flottille_core::project::TRAVELLING`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
+    /// The files the project's setup copies that the caller's machine has, by their paths in the
+    /// project: their names only, never what they hold. The receiver asks the user for those it
+    /// lacks (`docs/remote.md`, "What travels").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied: Vec<String>,
 }
 
 /// What a repository is, whatever its folder: its root commits, and its remote's URL when it has

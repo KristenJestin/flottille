@@ -294,6 +294,16 @@ struct ShareWith {
     machine: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FromFile {
+    project: String,
+    /// The file, by its path in the project.
+    path: String,
+    /// Left out, the name a launch that needs the file asks for (`travelled::entry_for`).
+    name: Option<String>,
+}
+
 /// What a client that does not sign is answered for `vault.share`.
 pub const NOT_SIGNED: &str = "sharing a vault entry is signed by the user's device: ask it with `flottille vault share`, or from the window's Settings, Vault";
 
@@ -341,6 +351,14 @@ pub async fn call(
         "vault.share" => {
             let ShareWith { name, machine } = serde_json::from_value(params)?;
             share(&daemon, &name, &machine).await
+        }
+        "vault.from_file" => {
+            let FromFile {
+                project,
+                path,
+                name,
+            } = serde_json::from_value(params)?;
+            from_file(&daemon, &project, &path, name).await
         }
         "vault.asks" => {
             let open = daemon.read(asks)?.open;
@@ -531,6 +549,96 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     Ok(entry.to_json())
 }
 
+/// The vault entry made from the file `path` of the project `project`, which its setup copies
+/// (`docs/remote.md`, "What travels"): the user's act, from a launch on another machine that
+/// lacks the file, so that it is shared with that machine through the vault, never as a file. The
+/// daemon reads the file only now: inside the project's folder, reached through no link, a text
+/// of `LARGEST_COPIED` bytes at most; its text is masked, line by line too, before it is kept,
+/// and nothing that is said of it holds a word of it.
+async fn from_file(
+    daemon: &std::sync::Arc<Daemon>,
+    project: &str,
+    path: &str,
+    name: Option<String>,
+) -> Result<Value, Failure> {
+    let found = crate::projects::load_project(daemon, project)?;
+    if !crate::travelled::fit_path(path) {
+        return Err(Failure::refused(format!(
+            "{:?} is not a path inside the project {project}",
+            path.chars().take(64).collect::<String>()
+        )));
+    }
+    let root = std::fs::canonicalize(&found.folder)
+        .map_err(|error| Failure::refused(format!("{}: {error}", found.folder.display())))?;
+    let file = root.join(path);
+    let cannot = |why: &str| Failure::refused(format!("{path} of {project} {why}"));
+    let metadata = std::fs::symlink_metadata(&file).map_err(|_| cannot("is not there"))?;
+    if !metadata.is_file() {
+        return Err(cannot(
+            "is not a file: a link or a folder is not made an entry",
+        ));
+    }
+    if std::fs::canonicalize(&file).map_or(true, |real| !real.starts_with(&root)) {
+        return Err(cannot("leads out of the project"));
+    }
+    if metadata.len() > crate::travelled::LARGEST_COPIED {
+        return Err(cannot(&format!(
+            "is more than {} KiB: a vault entry holds less",
+            crate::travelled::LARGEST_COPIED / 1024
+        )));
+    }
+    let text = std::fs::read(&file).map_err(|_| cannot("cannot be read"))?;
+    let text = zeroize::Zeroizing::new(String::from_utf8(text).map_err(|_| cannot("is not text"))?);
+    mask_lines(&text);
+    let name = name.unwrap_or_else(|| crate::travelled::entry_for(project, path));
+    let made = set(
+        daemon,
+        json!({"name": name, "secret": *text,
+            "description": format!("The file {path} of the project {project}, which its setup copies")}),
+    )
+    .await
+    .map_err(|failure| Failure {
+        message: masked_of(&failure.message, &text),
+        ..failure
+    })?;
+    eprintln!("flottille daemon: the vault entry {name} was made from {path} of {project}");
+    Ok(made)
+}
+
+/// The secret of the entry `name`, for the file a launch's setup copies (`travelled::lay`): only
+/// an entry bound to no use, since one bound to another serves no other; none when this machine
+/// lacks it or its keyring cannot give it now.
+pub(crate) async fn of_file(daemon: &Daemon, name: &str) -> Option<zeroize::Zeroizing<String>> {
+    let entries = daemon.read(|store| store.vault_entries()).ok()?;
+    entries
+        .iter()
+        .find(|entry| entry.name == name && entry.bound.is_none())?;
+    let secret = daemon.vault.read(name).await.ok().flatten()?;
+    Some(zeroize::Zeroizing::new(secret))
+}
+
+/// Masks each line of a secret of several lines, and each line's value after its `=`, from now
+/// on: a file's (`vault.from_file`), of which an agent may come across one line alone. A comment
+/// and a part too short to be told from an ordinary word are left.
+pub(crate) fn mask_lines(secret: &str) {
+    if !secret.contains('\n') {
+        return;
+    }
+    for line in secret.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        let value = line
+            .split_once('=')
+            .map_or(line, |(_, value)| value.trim().trim_matches(['"', '\'']));
+        for part in [line, value] {
+            if part.chars().count() >= VAULT_SHORTEST {
+                secrets::add_vault_value(part);
+            }
+        }
+    }
+}
+
 /// The entry `name` sent to the user's machine `machine` (`docs/remote.md`, "Vault entries"): only
 /// as the request the user's device signed, which goes with it for that machine to check; its
 /// secret read from the keyring here and sent with its metadata, in nothing else.
@@ -697,6 +805,7 @@ pub async fn receive(
         None => None,
     };
     // Masked before it is kept anywhere, so that nothing written after can hold it.
+    mask_lines(secret);
     secrets::add_vault_login(entry.username.as_deref(), secret);
     daemon
         .vault
@@ -1173,6 +1282,7 @@ pub async fn load(daemon: &Daemon) {
                 for inner in crate::extensions::secrets_in(&secret) {
                     secrets::add_vault_value(&inner);
                 }
+                mask_lines(&secret);
                 secrets::add_vault_login(entry.username.as_deref(), &secret);
             }
             Ok(None) => {}

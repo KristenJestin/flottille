@@ -808,6 +808,7 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         repositories: vec![".".into()],
         identities: Vec::new(),
         settings: None,
+        copied: Vec::new(),
     }
 }
 
