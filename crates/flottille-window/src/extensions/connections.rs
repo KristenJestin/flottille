@@ -1252,6 +1252,13 @@ impl ConnectionsSection {
     }
 
     /// The servers as last listed; `None` until the daemon has said.
+    /// What the section says of `name`'s copy on another machine.
+    pub fn elsewhere_said(&self, name: &str) -> Option<String> {
+        self.elsewhere
+            .get(name)
+            .map(|(machine, state)| state.said(machine))
+    }
+
     pub fn servers(&self) -> Option<&[Server]> {
         self.listed.as_deref()
     }

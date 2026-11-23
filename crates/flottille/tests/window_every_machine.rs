@@ -1628,3 +1628,58 @@ fn back_to_a_machine_gone_offline_leaves_the_history_where_it_was(cx: &mut TestA
         "the history moved to a page not shown"
     );
 }
+
+#[gpui_kit::test]
+fn a_read_asked_by_the_server_s_answer_after_its_page_was_left_goes_to_the_server(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, here, _there) = two_machines();
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "old-key", "secret": "an-invented-test-value"}),
+        )
+        .unwrap();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    click(cx, "settings");
+    step(&shell, cx);
+    settings_of(&shell, cx, "server");
+    let vault = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).settings_page().cloned().unwrap();
+        page.read(cx).vault().clone()
+    });
+    until(&shell, cx, "the server's vault is listed", |cx| {
+        vault.read_with(cx, |vault, _| {
+            vault
+                .entries()
+                .is_some_and(|entries| entries.iter().any(|e| e.name == "old-key"))
+        })
+    });
+
+    // Removed on the server, whose answer comes once this machine's session is shown: the list
+    // it reads again is the server's.
+    relay.delay.store(1500, Ordering::SeqCst);
+    vault.update(cx, |vault, cx| {
+        vault.remove("old-key", cx);
+        vault.remove("old-key", cx);
+    });
+    step(&shell, cx);
+    click(cx, session_id(&here));
+    relay.delay.store(0, Ordering::SeqCst);
+    eventually("the server's entry is removed", || {
+        let listed = server.user.call("vault.list", json!({})).unwrap();
+        !listed.to_string().contains("old-key")
+    });
+    relay.take();
+    until(&shell, cx, "the server's vault is read again", |cx| {
+        let _ = cx;
+        relay
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, _)| method == "vault.list")
+    });
+}

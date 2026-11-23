@@ -617,3 +617,65 @@ fn sign_in_on_a_machine_while_another_is_shown(cx: &mut TestAppContext) {
     let _ = process.kill();
     let _ = process.wait();
 }
+
+#[gpui_kit::test]
+fn the_sign_in_toast_s_action_after_switching_goes_to_the_machine_that_shared(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    notes_on(&server);
+    let (shell, cx) = window_showing(&pc, "server", cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "the server's connection is listed", |cx| {
+        present(cx, "connection-notes")
+    });
+    let section = section(&shell, cx);
+    click("connection-more-notes", cx);
+    click("share-connection-notes", cx);
+    until(&shell, cx, "the machines are listed", |cx| {
+        section.read_with(cx, |s, _| s.share_machines().is_some())
+    });
+    settle(cx);
+    click("connection-share-entries", cx);
+    click("connection-share-to-pc", cx);
+    until(&shell, cx, "the toast offers the sign-in", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t.starts_with("Connection notes shared with pc"))
+    });
+    // pc's copy reaches nothing: its sign-in fails at once, on this machine's own loopback.
+    pc.user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+    pc.user
+        .call(
+            "connection.edit",
+            json!({"name": "notes", "url": "http://127.0.0.1:9/mcp", "secrets": null,
+                "enabled": true}),
+        )
+        .unwrap();
+
+    // This machine's Settings in front, then the server's toast's action.
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
+    until(&shell, cx, "this machine is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).is_none()
+    });
+    settle(cx);
+    let action = (1..16)
+        .map(|n| format!("toast-{n}-action"))
+        .find(|id| label(cx, id).as_deref() == Some("Sign in on pc"))
+        .expect("the toast's action");
+    click(&action, cx);
+    until(
+        &shell,
+        cx,
+        "the server's section hears how the sign-in went",
+        |cx| {
+            section.read_with(cx, |s, _| s.elsewhere_said("notes"))
+                == Some("On pc: not signed in yet".to_owned())
+        },
+    );
+}
