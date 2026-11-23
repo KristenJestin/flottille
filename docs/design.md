@@ -1111,10 +1111,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   count, made at the end of the groups and unfolded, which comes before the projects outside any
   group. Projects are dragged into it (onto its heading: first place) and out of it, and groups
   are dragged among themselves by their heading; a folded group says nothing of its rows but its
-  count. A project that is new, or newly seen on a machine, is at the end of the list, outside
+  count (the strongest mark of its rows beside it comes with #1265). A group that is made unfolds
+  and fades in, with its space; the rows that go into it from the list slide there, and when the
+  stored arrangement reaches a window after its first rows they slide into their groups rather
+  than jump. A project that is new, or newly seen on a machine, is at the end of the list, outside
   any group, and unfolds there. The order and the groups are the user's, so they are kept by the
-  daemon with the sidebar's folds (`sidebar`: `order`, `groups`, `docs/protocol.md`), the same in
-  every window of the machine, never in a project; Group by machine shows the sections instead of
+  daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
+  sidebar's folds so that one window's fold never erases another's groups, read by a window when
+  it opens, never in a project; New group… is not offered while the projects are shown by machine
+  (the entry says "Shown by machine"), and a project that a machine does not give for now keeps its
+  place and group for when it is back; Group by machine shows the sections instead of
   them (the list folds away and fades) and switched off they come back as they were. Sessions are sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
