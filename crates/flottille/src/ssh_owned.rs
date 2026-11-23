@@ -30,23 +30,30 @@ const CONFIG_MAX: u64 = 1024 * 1024;
 /// Each root-owned file the machine's configuration and the user's include, with its text now:
 /// its real path (links followed, as `ssh` opens it) and what it holds.
 pub fn copies() -> Vec<(PathBuf, Vec<u8>)> {
+    // SAFETY: getuid cannot fail.
+    if unsafe { libc::getuid() } == 0 {
+        return Vec::new();
+    }
     let system = match std::env::var_os(SYSTEM).filter(|_| cfg!(debug_assertions)) {
         Some(system) => PathBuf::from(system),
         None => PathBuf::from(SYSTEM_CONFIG),
     };
-    let account = crate::pushed::account();
+    copies_of(&system, crate::pushed::account(), 0)
+}
+
+/// The files `owner` owns that `system` and the `account`'s `~/.ssh/config` include, with their
+/// text: root's at every start, the test's own in a test.
+fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     // `ssh` reads a relative `Include` of the machine's configuration in its folder, of the
     // user's in `~/.ssh`.
     if let Some(folder) = system.parent() {
-        included(&system, folder, account, 0, &mut files);
+        included(system, folder, account, 0, &mut files);
     }
     if let Some(account) = account {
         let ssh = account.join(".ssh");
         included(&ssh.join("config"), &ssh, Some(account), 0, &mut files);
     }
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
     let mut copies: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     for file in files {
         let Ok(path) = file.canonicalize() else {
@@ -58,7 +65,7 @@ pub fn copies() -> Vec<(PathBuf, Vec<u8>)> {
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        if !meta.is_file() || meta.uid() != 0 || uid == 0 || meta.len() > CONFIG_MAX {
+        if !meta.is_file() || meta.uid() != owner || meta.len() > CONFIG_MAX {
             continue;
         }
         if let Ok(text) = std::fs::read(&path) {
