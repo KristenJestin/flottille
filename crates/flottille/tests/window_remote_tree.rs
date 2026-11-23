@@ -199,12 +199,16 @@ fn frame_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Opti
     Some(format!("tree-row-{}", row.as_u64()))
 }
 
-/// The height of `frame`, `None` once it is gone.
-fn height(cx: &mut VisualTestContext, frame: &str) -> Option<f32> {
+/// The heights of `frame`: none once it is gone, two while a row that moves between two projects
+/// of the tree (the one its pilot has and the one its machine lists) is in both, the one it
+/// leaves folding away.
+fn heights(cx: &mut VisualTestContext, frame: &str) -> Vec<f32> {
     cx.update(|window, _| {
         window
-            .try_find(frame.to_owned())
+            .find_all(frame.to_owned())
+            .iter()
             .map(|found| f32::from(found.bounds().size.height))
+            .collect()
     })
 }
 
@@ -270,6 +274,74 @@ fn a_session_on_another_machine_shows_under_its_pilot_with_the_machine(cx: &mut 
         ["running", "waiting", "reported"].contains(&state),
         "{said}"
     );
+}
+
+/// A hub, `pc` its first member with the project `app` on `feat/export`, `more` the more lines of
+/// its file, and `server` a runner paired with it that has no project: the launch makes it there.
+fn pc_and_bare_server(more: &str) -> (TestHub, Machine, Machine) {
+    let server = runner().with_judge(json!([
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    let (hub, pc, server) = pc_and_server_on(Machine::of(runner()), server);
+    let repo = pc.user.path("work/app");
+    pc.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    pc.user.git(&repo, &["add", "."]);
+    pc.user.git(&repo, &["commit", "--quiet", "-m", "first"]);
+    pc.user
+        .git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    // No branch convention of its own: one would make the launch the user's to decide there.
+    let text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\n{more}\n\
+         [[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
+        pc.user.path("work/app").display(),
+        pc.user.path("work/app-work").display()
+    );
+    pc.user.write_project_file("app", &text);
+    pc.user.call("project.list", json!({})).unwrap();
+    eventually("server offers Claude", || {
+        pc.remote()["machines"].as_array().unwrap().iter().any(|m| {
+            m["name"] == "server"
+                && m["offers"]["agents"]
+                    .as_array()
+                    .is_some_and(|agents| agents.iter().any(|a| a == "claude"))
+        })
+    });
+    (hub, pc, server)
+}
+
+#[gpui_kit::test]
+fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
+    // The project is made there, and its session says nothing back for a while.
+    let (_hub, pc, server) = pc_and_bare_server("");
+    server.user.fake_script(json!({"turns": [
+        {"when": "Finish the export", "do": [{"wait": 60000}, {"say": "done"}]}
+    ]}));
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session made on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_machine_id(&row));
+        if said.as_deref() == Some("server · preparing app") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[gpui_kit::test]
@@ -354,12 +426,12 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
     let agent = led_on_server(&mcp);
     let row = elsewhere_id("server", &agent);
     until(&shell, cx, "the row comes", |cx| {
-        frame_of(&shell, &row, cx).is_some_and(|frame| height(cx, &frame).is_some())
+        frame_of(&shell, &row, cx).is_some_and(|frame| !heights(cx, &frame).is_empty())
     });
     let frame = frame_of(&shell, &row, cx).unwrap();
-    let coming = height(cx, &frame).unwrap();
+    let coming = heights(cx, &frame).into_iter().fold(f32::MAX, f32::min);
     settle(&shell, cx);
-    let full = height(cx, &frame).unwrap();
+    let full = heights(cx, &frame).into_iter().fold(0., f32::max);
     assert!(full > 0., "{full}");
     assert!(
         coming < full,
@@ -376,11 +448,11 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
             == "ended"
     });
     until(&shell, cx, "the row starts folding away", |cx| {
-        height(cx, &frame).is_none_or(|height| height < full)
+        heights(cx, &frame).into_iter().all(|height| height < full)
     });
-    let going = height(cx, &frame);
+    let going = heights(cx, &frame);
     assert!(
-        going.is_some_and(|height| height > 0.),
+        going.iter().any(|height| *height > 0.),
         "the row folds away, it does not vanish: {going:?}"
     );
     settle(&shell, cx);

@@ -27,6 +27,7 @@ pub mod protocol;
 pub mod provider;
 pub mod question;
 pub mod registry;
+pub mod remote_key;
 pub mod routine;
 pub mod run;
 pub mod secrets;

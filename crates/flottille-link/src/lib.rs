@@ -41,7 +41,7 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
     Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
     GitOffer, GitPlace, GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message,
-    Received, RepositoryIdentity, Secret, Share, SharedEntry, Streamed, Traffic,
+    Received, RepositoryIdentity, Secret, Share, SharedEntry, Streamed, Traffic, UNKNOWN_MESSAGE,
 };
 pub use members::{
     Action, Change, ChangeHash, Colour, Icon, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member,
@@ -55,7 +55,9 @@ pub use request::{
     runs_agents,
 };
 pub use serial::hidden;
-pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
+pub use sessions::{
+    LightProject, LightSession, MOST_SESSIONS, ProjectList, STATES, SessionList, TITLE_LIMIT,
+};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
 pub use upload::{Attached, UPLOAD_CHUNK, fits, fits_with, upload_chunks, upload_name};

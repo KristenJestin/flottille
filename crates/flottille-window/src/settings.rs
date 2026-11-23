@@ -67,10 +67,11 @@ const AGENTS_BLOCKS: [&str; 6] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 6] = [
+const GENERAL_BLOCKS: [&str; 7] = [
     "about",
     "appearance",
     "workspaces",
+    "travelled",
     "developer",
     "check",
     "version",
@@ -319,6 +320,8 @@ pub struct SettingsPage {
     workspaces: Entity<WorkspacesFolder>,
     /// What rings and when, chosen on this page.
     notifications: Entity<NotificationSettings>,
+    /// Where this machine makes the projects of other machines' launches, chosen on this page.
+    travelled: Entity<crate::travelled_folder::TravelledFolder>,
     /// The vault's entries, set and removed on this page.
     vault: Entity<VaultSection>,
     connections: Entity<ConnectionsSection>,
@@ -434,6 +437,7 @@ impl SettingsPage {
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
         notifications: Entity<NotificationSettings>,
+        travelled: Entity<crate::travelled_folder::TravelledFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
         machines: Entity<crate::machines_page::MachinesSection>,
@@ -455,6 +459,7 @@ impl SettingsPage {
             compaction_pending: false,
             workspaces,
             notifications,
+            travelled,
             vault,
             connections,
             shell,
@@ -1013,6 +1018,10 @@ impl SettingsPage {
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
         &self.workspaces
+    }
+
+    pub fn travelled_folder(&self) -> &Entity<crate::travelled_folder::TravelledFolder> {
+        &self.travelled
     }
 
     pub fn sign_in(&self) -> &Entity<crate::sign_in::SignInSection> {
@@ -2666,6 +2675,7 @@ impl Render for SettingsPage {
                 ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
+                ("travelled", self.travelled.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
                 ("check", self.check.clone().into_any_element()),
                 ("version", self.version.clone().into_any_element()),
@@ -2687,6 +2697,16 @@ impl Render for SettingsPage {
             .on_choose(move |at, _, cx| {
                 this.update(cx, |this, cx| this.choose(at, cx)).ok();
             });
+        // The machine's picker sits on the title's line, at the header's right: the title is its
+        // label. The kit's header has no place right after the title; beside it, the picker
+        // stays level with the title whether or not the path line is above it.
+        let header = div()
+            .id("settings-header-line")
+            .flex()
+            .items_end()
+            .child(div().flex_1().min_w_0().child(header))
+            .children(self.machine_chooser(window, cx))
+            .test_support();
         let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
         let column = |element: AnyElement| {
             div()
@@ -2707,10 +2727,6 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .children(
-                self.machine_chooser(window, cx)
-                    .map(|chooser| column(enter(key("machine"), 1, chooser).into_any_element())),
-            )
             .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
             .child(column(self.own_line(cx).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
@@ -2733,7 +2749,7 @@ impl Render for SettingsPage {
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
         // Held after its blocks: what it adds comes after them, and a block's place stays its own.
-        let page = crate::machines::hold(page, window, cx);
+        let page = crate::machines::hold(page, window, cx).test_support();
         div()
             .size_full()
             .flex()
@@ -2745,15 +2761,11 @@ impl Render for SettingsPage {
 }
 
 impl SettingsPage {
-    /// Whose settings these are, at the top of the page: this machine, then the other machines
+    /// Whose settings these are, on the title's line: this machine, then the other machines
     /// that run agents, each with its state; choosing one shows it (`Shell::choose_machine`), as
     /// opening one of its sessions does. None while this machine is in no member list or knows no
     /// other runner.
-    fn machine_chooser(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
+    fn machine_chooser(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (choices, present) = crate::machines::kept(
             "settings-machine-kept",
             self.machines
@@ -2764,9 +2776,6 @@ impl SettingsPage {
             window,
             cx,
         );
-        if choices.is_empty() {
-            return None;
-        }
         let shown = crate::machines::shown_machine(cx);
         let chosen = choices
             .iter()
@@ -2774,39 +2783,51 @@ impl SettingsPage {
             .unwrap_or(0);
         let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
         let toggle = page.clone();
-        let picker = crate::machines::picker(
-            "settings-machine",
-            "settings-machine",
-            &choices,
-            chosen,
-            self.machine_menu,
-            move |_, cx| {
-                toggle
-                    .update(cx, |page, cx| {
-                        page.machine_menu = !page.machine_menu;
+        let picker = (!choices.is_empty()).then(|| {
+            crate::machines::picker(
+                "settings-machine",
+                "settings-machine",
+                &choices,
+                chosen,
+                self.machine_menu,
+                move |_, cx| {
+                    toggle
+                        .update(cx, |page, cx| {
+                            page.machine_menu = !page.machine_menu;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+                move |name, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.machine_menu = false;
                         cx.notify();
                     })
                     .ok();
-            },
-            move |name, _, cx| {
-                page.update(cx, |page, cx| {
-                    page.machine_menu = false;
-                    cx.notify();
-                })
-                .ok();
-                shell
-                    .update(cx, |shell, cx| shell.choose_machine(name, cx))
-                    .ok();
-            },
-        );
-        // The chooser folds away, with its words, once there is no other machine to choose.
-        Some(presence(
-            "settings-machine-presence",
+                    shell
+                        .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                        .ok();
+                },
+            )
+        });
+        // The title is its visible label; a reader hears whose settings these are. Its gap is
+        // inside it, so that it narrows away with it.
+        let picker = div()
+            .id("settings-machine-field")
+            .aria_label("Settings of")
+            .flex_none()
+            .pl(space::LG)
+            .children(picker)
+            .test_support();
+        // It narrows and fades away on the title's line once there is no other machine to choose,
+        // and widens in when one comes: built on every frame, also while there is none.
+        crate::machines::narrowing(
+            "settings-machine-fold",
             present,
-            div()
-                .pb(space::LG)
-                .child(Field::new("settings-machine-field", "Settings of", picker)),
-        ))
+            picker.into_any_element(),
+            window,
+            cx,
+        )
     }
 
     /// One line under the tabs while another machine is shown, whichever tab: the appearance and

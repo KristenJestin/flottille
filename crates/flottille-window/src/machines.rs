@@ -234,6 +234,9 @@ pub struct Launched {
     pub heard: Option<String>,
     pub heard_at: Option<u64>,
     pub at: u64,
+    /// The project its machine made for it, by that machine's name of it: `None` when it runs in
+    /// one that machine had.
+    pub making: Option<String>,
 }
 
 impl Launched {
@@ -248,6 +251,10 @@ impl Launched {
             heard: value["heard"].as_str().map(str::to_owned),
             heard_at: value["heard_at"].as_u64(),
             at: value["at"].as_u64().unwrap_or_default(),
+            making: value["there"]["project"]
+                .as_str()
+                .filter(|_| value["there"]["made"] == true)
+                .map(str::to_owned),
         }
     }
 }
@@ -297,6 +304,39 @@ pub struct Lists {
     pub this: Vec<Listed>,
     /// Each other machine's, by its name.
     pub machines: Vec<(String, Vec<Listed>)>,
+    /// The projects of this machine, by the remotes of their repositories.
+    pub this_projects: Vec<MachineProject>,
+    /// The projects of each other machine as it last listed them, kept while it is off; a machine
+    /// whose list came before projects were listed has none.
+    pub projects: Vec<(String, Vec<MachineProject>)>,
+}
+
+/// A project of a machine, as its list says it (`remote.sessions`): its name there and its
+/// repositories' remotes, normalised. Two projects of two machines are the same one when their
+/// remotes are equal; one with none (a repository that has no remote) is the same as no other.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineProject {
+    pub name: String,
+    pub remotes: Vec<String>,
+}
+
+impl MachineProject {
+    fn all(value: &Value) -> Vec<MachineProject> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|project| MachineProject {
+                name: text(&project["name"]),
+                remotes: project["remotes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(text)
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 impl Hub {
@@ -808,6 +848,13 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 .flatten()
                 .map(|list| (text(&list["name"]), Listed::all(&list["sessions"])))
                 .collect(),
+            this_projects: MachineProject::all(&lists["projects"]),
+            projects: lists["machines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|list| (text(&list["name"]), MachineProject::all(&list["projects"])))
+                .collect(),
         };
     }
     if let Ok(launched) = conn.ask_within("remote.launches", json!({}), BOUND)? {
@@ -1148,11 +1195,14 @@ pub fn narrowing(
     )
     .absolute()
     .size_full();
-    // Clipped only while it moves, so that a list the content opens is not.
+    // Clipped only while it moves, so that a list the content opens is not. A row, so that the
+    // content keeps its own width under the clip and the measure reads it whole: in a block it
+    // would shrink with the clip, and widen in again from nothing.
     let moving = t < 1.0;
     Some(
         div()
             .id(id)
+            .flex()
             .flex_none()
             .when(moving, |d| {
                 d.overflow_hidden().w(px(width.get() * t)).opacity(t)
@@ -1580,6 +1630,7 @@ mod tests {
         read.lists = Lists {
             this: Vec::new(),
             machines: vec![("server".to_owned(), vec![listing("site")])],
+            ..Lists::default()
         };
         read
     }

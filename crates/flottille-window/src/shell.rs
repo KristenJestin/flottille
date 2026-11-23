@@ -37,7 +37,7 @@ use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
-use crate::kept::{DraftKey, Folds, Written};
+use crate::kept::{DraftKey, Folds, Written, machine_key};
 use crate::link::{self, Connect, Seen, Update};
 use crate::machines::Machines;
 use crate::machines_page::{MachinesSection, RemovalDialog};
@@ -54,7 +54,7 @@ use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
-use crate::tree::{EndedNode, ProjectNode, SessionRow, Sidebar};
+use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -206,6 +206,15 @@ pub struct Shell {
     /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
     bell_shown: Motion,
     projects: HashMap<String, Entity<ProjectNode>>,
+    /// The projects' rows in a machine's section, by project then machine, while the projects are
+    /// shown by machine.
+    machine_projects: HashMap<(String, String), Entity<ProjectNode>>,
+    /// The machines' sections, by name.
+    sections: HashMap<String, Entity<MachineNode>>,
+    /// The user's choice (`window.get`): the projects are shown by machine.
+    by_machine: bool,
+    /// They are shown by machine now: the choice, and another machine to group by.
+    grouped: bool,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
     ended: Option<Entity<EndedNode>>,
     /// What the daemon keeps of what the sidebar has folded: read once at opening, which makes
@@ -431,6 +440,7 @@ impl Shell {
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let notifications = cx.new(|_| NotificationSettings::new(this.clone(), None));
+        let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(this.clone()));
         let modals = cx.new(|_| Modals::new());
         let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
@@ -466,6 +476,7 @@ impl Shell {
                 compaction_guidance.clone(),
                 workspaces.clone(),
                 notifications.clone(),
+                travelled.clone(),
                 vault.clone(),
                 connections.clone(),
                 machines.clone(),
@@ -646,6 +657,10 @@ impl Shell {
             bell_open: false,
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
+            machine_projects: HashMap::new(),
+            sections: HashMap::new(),
+            by_machine: false,
+            grouped: false,
             ended: None,
             kept: Folds::default(),
             kept_read: false,
@@ -1598,24 +1613,55 @@ impl Shell {
         cx.notify();
     }
 
-    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
-    /// from what the daemon last said.
+    /// A row folded or unfolded the led sessions under it: the level that holds it is drawn
+    /// again at once, from what the daemon last said, in the arrangement shown (`show`).
     pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+        let snapshot = &self.snapshot;
+        let Some(found) = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .find(|s| s.id == session)
+        else {
+            eprintln!("flottille: the fold of {session} has no session to draw it from");
             return;
         };
-        let live = self.snapshot.live_sessions_of(&project);
-        let rows: Vec<Entity<SessionRow>> = live
-            .iter()
-            .filter_map(|s| self.sessions.get(&s.id).cloned())
+        let project = found.project.clone();
+        // Grouped by machine, the level is the project's under the session's machine, and holds
+        // that machine's sessions only.
+        let machine = self.grouped.then(|| snapshot.machine_of(found).to_owned());
+        let live: Vec<&crate::model::Session> = snapshot
+            .live_sessions_of(&project)
+            .into_iter()
+            .filter(|s| {
+                machine
+                    .as_deref()
+                    .is_none_or(|m| snapshot.machine_of(s) == m)
+            })
             .collect();
-        if rows.len() != live.len() {
+        let node = match &machine {
+            Some(machine) => self
+                .machine_projects
+                .get(&(project.clone(), machine.clone())),
+            None => self.projects.get(&project),
+        };
+        let Some(node) = node.cloned() else {
+            eprintln!("flottille: the fold of {session} has no level of {project} to draw");
             return;
-        }
+        };
+        // A session with no row yet is left out, said, and the others are drawn.
+        let (live, rows): (Vec<_>, Vec<_>) = live
+            .into_iter()
+            .filter_map(|s| match self.sessions.get(&s.id) {
+                Some(row) => Some((s, row.clone())),
+                None => {
+                    eprintln!("flottille: no row for {} of {project} yet", s.id);
+                    None
+                }
+            })
+            .unzip();
         let rows = nested(&live, &rows, cx);
-        if let Some(node) = self.projects.get(&project).cloned() {
-            node.update(cx, |node, cx| node.set_rows(rows, cx));
-        }
+        node.update(cx, |node, cx| node.set_rows(rows, cx));
     }
 
     /// "Resume" in an ended session's row.
@@ -1686,6 +1732,38 @@ impl Shell {
         self.sessions.get(id)
     }
 
+    /// The row of the project `name` in the section of `machine`, while the projects are shown by
+    /// machine.
+    pub fn project_on(&self, name: &str, machine: &str) -> Option<&Entity<ProjectNode>> {
+        self.machine_projects
+            .get(&(name.to_owned(), machine.to_owned()))
+    }
+
+    /// The section of `machine`, while the projects are shown by machine.
+    pub fn section(&self, machine: &str) -> Option<&Entity<MachineNode>> {
+        self.sections.get(machine)
+    }
+
+    /// Whether the projects are shown by machine now: the user chose it, and there is another
+    /// machine to group by.
+    pub fn is_by_machine(&self) -> bool {
+        self.grouped
+    }
+
+    /// Group by machine, turned on or off from the Projects header's menu: the rows move to their
+    /// sections or back, and the daemon keeps the choice.
+    pub fn toggle_by_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.by_machine = !self.by_machine;
+        self.rearrange(window, cx);
+        self.sidebar_changed(cx);
+    }
+
+    /// The rows again from the snapshot held, as the projects are now to be shown.
+    fn rearrange(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot.clone();
+        self.show(snapshot, window, cx);
+    }
+
     /// The window is closing, or the program is ending: what its composers hold is written to the
     /// daemon at once, and the process waits (a moment at most) until it is.
     pub fn closing(&mut self, cx: &mut Context<Self>) {
@@ -1715,12 +1793,43 @@ impl Shell {
 
     /// What the sidebar has folded, as its nodes show it now.
     fn folds_now(&self, cx: &Context<Self>) -> Folds {
+        // What was last asked of the daemon, which the nodes that are not shown now keep.
+        let last = self.kept_asked.as_ref().unwrap_or(&self.kept);
+        let by_machine = self.is_by_machine();
+        let exists = |name: &str| self.snapshot.projects.iter().any(|p| p.name == name);
         Folds {
-            projects: self
-                .projects
-                .iter()
-                .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
-                .collect(),
+            projects: match by_machine {
+                true => last
+                    .projects
+                    .iter()
+                    .filter(|(name, _)| exists(name))
+                    .map(|(name, open)| (name.clone(), *open))
+                    .collect(),
+                false => self
+                    .projects
+                    .iter()
+                    .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
+                    .collect(),
+            },
+            by_machine: self.by_machine,
+            machines: match by_machine {
+                true => self
+                    .sections
+                    .iter()
+                    .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
+                    .collect(),
+                false => last.machines.clone(),
+            },
+            on_machines: match by_machine {
+                true => self
+                    .machine_projects
+                    .iter()
+                    .map(|((name, machine), node)| {
+                        (machine_key(machine, name), node.read(cx).is_open())
+                    })
+                    .collect(),
+                false => last.on_machines.clone(),
+            },
             leads: self
                 .sessions
                 .iter()
@@ -1856,8 +1965,13 @@ impl Shell {
                 }
             }
             Update::Kept(folds, drafts) => {
+                let by_machine = folds.by_machine;
                 self.kept = folds;
                 self.kept_read = true;
+                // What the daemon keeps of how the projects are shown comes after the first rows.
+                if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
+                    self.rearrange(window, cx);
+                }
                 self.listed_drafts = drafts;
                 self.say_drafts(cx);
             }
@@ -2817,6 +2931,12 @@ impl Shell {
                     view.update(cx, |view, cx| view.answered(shown.clone(), written, cx));
                 }
             }
+            Outcome::TravelledFolder { written, shown } => {
+                let section = self.settings.read(cx).travelled_folder().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(shown, written, window, cx)
+                });
+            }
             Outcome::Skills { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
                     let section = page.read(cx).skills().clone();
@@ -3313,6 +3433,7 @@ impl Shell {
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
         self.actions.send(Command::NotificationSettingsRead);
+        self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
         self.actions.send(Command::SignIns);
         self.ask_appearance(None);
@@ -3599,27 +3720,149 @@ impl Shell {
         // A workspace that is gone takes its pull request with it.
         self.pulls
             .retain(|(project, name), _| snapshot.workspace(project, name).is_some());
-        for project in &snapshot.projects {
-            let mut marks = Vec::new();
-            let live = snapshot.live_sessions_of(&project.name);
-            let rows = self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
-            let rows = nested(&live, &rows, cx);
-            let node = self.projects.remove(&project.name).unwrap_or_else(|| {
-                let name = project.name.clone();
-                let this = this.clone();
-                let open = self.kept.projects.get(&name).copied().unwrap_or(true);
-                cx.new(|cx| ProjectNode::new(name, this, open, cx))
-            });
-            let mark = AgentState::strongest(marks);
-            if !node.read(cx).holds(&rows, mark, cx) {
-                node.update(cx, |node, cx| node.set(rows, mark, cx));
+        let grouped = self.by_machine && snapshot.homes.len() > 1;
+        let mut section_nodes = Vec::new();
+        let mut sections = HashMap::new();
+        let mut machine_projects = HashMap::new();
+        if grouped {
+            // One section for each machine, each with the projects it has and its own sessions.
+            for home in &snapshot.homes {
+                let mut nodes = Vec::new();
+                for project in snapshot
+                    .projects
+                    .iter()
+                    .filter(|project| project.homes.iter().any(|h| h.machine == home.machine))
+                {
+                    let mut marks = Vec::new();
+                    let live: Vec<&crate::model::Session> = snapshot
+                        .live_sessions_of(&project.name)
+                        .into_iter()
+                        .filter(|session| snapshot.machine_of(session) == home.machine)
+                        .collect();
+                    let rows =
+                        self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+                    let rows = nested(&live, &rows, cx);
+                    let key = (project.name.clone(), home.machine.clone());
+                    let node = self.machine_projects.remove(&key).unwrap_or_else(|| {
+                        let this = this.clone();
+                        let kept = machine_key(&home.machine, &project.name);
+                        let open = self
+                            .kept
+                            .on_machines
+                            .get(&kept)
+                            .or_else(|| self.kept.projects.get(&project.name))
+                            .copied()
+                            .unwrap_or(true);
+                        let (name, machine) = key.clone();
+                        cx.new(|cx| ProjectNode::new(name, Some(machine), this, open, cx))
+                    });
+                    let mark = AgentState::strongest(marks);
+                    if !node.read(cx).holds(&rows, mark, cx) {
+                        node.update(cx, |node, cx| node.set(rows, mark, cx));
+                    }
+                    // Its commands run on the machine this was read from.
+                    let commands =
+                        match snapshot.this_machine.as_deref() == Some(home.machine.as_str()) {
+                            true => project.commands,
+                            false => 0,
+                        };
+                    if node.read(cx).commands() != commands {
+                        node.update(cx, |node, cx| node.set_commands(commands, cx));
+                    }
+                    let homes = std::slice::from_ref(home);
+                    if !node
+                        .read(cx)
+                        .says(project.title(), project.apart.as_deref(), homes)
+                    {
+                        node.update(cx, |node, cx| {
+                            node.set_look(
+                                project.title(),
+                                project.apart.as_deref(),
+                                homes.to_vec(),
+                                cx,
+                            )
+                        });
+                    }
+                    nodes.push(node.clone());
+                    machine_projects.insert(key, node);
+                }
+                let section = self.sections.remove(&home.machine).unwrap_or_else(|| {
+                    let this = this.clone();
+                    let open = self
+                        .kept
+                        .machines
+                        .get(&home.machine)
+                        .copied()
+                        .unwrap_or(true);
+                    let home = home.clone();
+                    cx.new(|cx| MachineNode::new(home, this, open, cx))
+                });
+                if section.read(cx).home() != home || section.read(cx).projects(cx) != nodes {
+                    section.update(cx, |section, cx| section.set(home.clone(), nodes, cx));
+                }
+                section_nodes.push(section.clone());
+                sections.insert(home.machine.clone(), section);
             }
-            if node.read(cx).commands() != project.commands {
-                node.update(cx, |node, cx| node.set_commands(project.commands, cx));
+        } else {
+            for project in &snapshot.projects {
+                let mut marks = Vec::new();
+                let live = snapshot.live_sessions_of(&project.name);
+                let rows =
+                    self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+                let rows = nested(&live, &rows, cx);
+                let node = self.projects.remove(&project.name).unwrap_or_else(|| {
+                    let name = project.name.clone();
+                    let this = this.clone();
+                    let open = self.kept.projects.get(&name).copied().unwrap_or(true);
+                    cx.new(|cx| ProjectNode::new(name, None, this, open, cx))
+                });
+                let mark = AgentState::strongest(marks);
+                if !node.read(cx).holds(&rows, mark, cx) {
+                    node.update(cx, |node, cx| node.set(rows, mark, cx));
+                }
+                if node.read(cx).commands() != project.commands {
+                    node.update(cx, |node, cx| node.set_commands(project.commands, cx));
+                }
+                if !node
+                    .read(cx)
+                    .says(project.title(), project.apart.as_deref(), &project.homes)
+                {
+                    node.update(cx, |node, cx| {
+                        node.set_look(
+                            project.title(),
+                            project.apart.as_deref(),
+                            project.homes.clone(),
+                            cx,
+                        )
+                    });
+                }
+                project_nodes.push(node.clone());
+                projects.insert(project.name.clone(), node);
             }
-            project_nodes.push(node.clone());
-            projects.insert(project.name.clone(), node);
         }
+        // The rows of the other way of showing the projects are on their way out: their
+        // sessions' rows are the new ones', which they must not show a second time.
+        for node in self
+            .projects
+            .values()
+            .chain(self.machine_projects.values())
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if !node.read(cx).sessions(cx).is_empty() {
+                node.update(cx, |node, cx| node.set_rows(Vec::new(), cx));
+            }
+        }
+        self.machine_projects = machine_projects;
+        self.grouped = grouped;
+        for section in self.sections.values().cloned().collect::<Vec<_>>() {
+            if !section.read(cx).projects(cx).is_empty() {
+                section.update(cx, |section, cx| {
+                    section.set(section.home().clone(), Vec::new(), cx)
+                });
+            }
+        }
+        self.sections = sections;
         // The ended sessions leave their places for one folded group below every project.
         let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
@@ -3642,6 +3885,17 @@ impl Shell {
         if self.sidebar.read(cx).projects() != project_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_projects(project_nodes, cx));
+        }
+        if self.sidebar.read(cx).sections() != section_nodes {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_sections(section_nodes, cx));
+        }
+        let offered = snapshot.homes.len() > 1;
+        let sidebar = self.sidebar.read(cx);
+        if sidebar.is_by_machine() != grouped || sidebar.offers_grouping() != offered {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_arrangement(grouped, offered, cx)
+            });
         }
 
         self.forms

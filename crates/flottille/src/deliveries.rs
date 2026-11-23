@@ -364,6 +364,9 @@ pub fn deliver_answer(
 /// Wakes the agent for what is queued: mid-turn, an urgent delivery is pinned as a note and a
 /// redirect cancels the turn; between turns, its task pumps them.
 pub fn ring(daemon: &Arc<Daemon>, agent: &str) {
+    if crate::across::is_stand_in(agent) {
+        return;
+    }
     let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
         return;
     };
@@ -746,6 +749,26 @@ mod tests {
             typed: None,
             commands: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_stand_in_is_never_rung_nor_given_a_note_mid_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::daemon::tests::a_daemon(dir.path(), false);
+        let mut stand_in = crate::daemon::tests::an_agent("c0@aa");
+        stand_in.state = AgentState::Working;
+        let mut urgent = delivery("Allowed.");
+        urgent.agent = stand_in.id.clone();
+        daemon
+            .write(|store| {
+                store.create_agent(&stand_in, ("agent.created", json!({})))?;
+                store.deliver(&urgent).map(|_| ((), None))
+            })
+            .unwrap();
+
+        ring(&daemon, &stand_in.id);
+
+        assert!(!daemon.notes.pinned.lock().unwrap().contains_key("c0@aa"));
     }
 
     #[test]

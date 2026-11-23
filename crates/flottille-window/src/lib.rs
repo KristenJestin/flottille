@@ -70,6 +70,7 @@ pub mod tasks;
 pub mod text_viewer;
 pub mod to_end;
 pub mod tokens;
+pub mod travelled_folder;
 pub mod tree;
 pub mod tunnels;
 pub mod vault;

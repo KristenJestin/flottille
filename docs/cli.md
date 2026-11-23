@@ -332,8 +332,9 @@ history would see. The code holds the hub's address and key: nothing else is typ
 answers with another key is refused. The command uses this user session's device key, made once
 (in the session's keyring, or `remote/device.key` when there is no Secret Service; any other
 failure of the keyring is said, and stops it), and proposes this device's card, which the options
-change: its name (the host's), its role (`runner` with an agent signed in, `controller` without),
-its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`: a laptop with a battery, a desktop with
+change: its name (the host's), its role (`runner` with an agent signed in or with no screen, a server, `controller`
+otherwise), said on the standard error before the hub is asked (with `--role`, the way to choose
+another, when it was not given), its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`: a laptop with a battery, a desktop with
 a screen, a server without either) and its colour (`grey`, `red`, `orange`, `yellow`, `green`,
 `teal`, `blue`, `purple`: one of its key's). The daemon proves the code without sending it; once
 the hub paired the device, the command signs the declaration of this machine, which the daemon
@@ -344,6 +345,7 @@ keeps its entry and its card. A machine paired already is refused unless `--repl
 ```
 $ flottille remote pair --role runner
 The pair code: 0ZJ7X3K2M9QH4V…
+pairing as a runner
 server is paired with the hub at https://hub.example.net as a runner
 ```
 

@@ -79,9 +79,11 @@ pub(crate) fn runner_user() -> User {
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
     let claude = user.path("home/.claude");
     let stopping = user.path("stopping");
+    let slow = user.path("slow-call");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_SLOW_CALL_FILE", slow.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
@@ -240,11 +242,6 @@ pub(crate) fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// `pc` paired as the hub's first device, a runner.
-fn set_up(hub: &TestHub, pc: &Machine) {
-    pair(hub, pc, "pc", "runner");
-}
-
 /// `machine` paired with `hub` as the user pairs it, as `name` with `role`.
 pub(crate) fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) {
     let output = machine.user.run_with_input(
@@ -272,11 +269,20 @@ pub(crate) fn pc_and_server(
     server_user: User,
     server_project: Option<&str>,
 ) -> (TestHub, Machine, Machine) {
+    pc_and_server_as("runner", server_user, server_project)
+}
+
+/// [`pc_and_server`], `pc` paired as the hub's first device with `pc_role`.
+pub(crate) fn pc_and_server_as(
+    pc_role: &str,
+    server_user: User,
+    server_project: Option<&str>,
+) -> (TestHub, Machine, Machine) {
     let hub = TestHub::new();
     let pc_user = runner_user();
     sign_in(&pc_user);
     let pc = Machine::of(pc_user);
-    set_up(&hub, &pc);
+    pair(&hub, &pc, "pc", pc_role);
     let server = Machine::of(server_user);
     pair(&hub, &server, "server", "runner");
     pc.wait_for("server");
@@ -808,6 +814,7 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         repositories: vec![".".into()],
         identities: Vec::new(),
         settings: None,
+        copied: Vec::new(),
     }
 }
 

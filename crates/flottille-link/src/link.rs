@@ -76,6 +76,10 @@ pub enum Message {
     Client(Value),
 }
 
+/// What a machine answers a message of a kind it does not know: a sender tells a machine of before
+/// by it (`docs/remote.md`, "The version").
+pub const UNKNOWN_MESSAGE: &str = "not a message a machine may send";
+
 /// What a machine may send another (`docs/remote.md`, "What a machine may send"): nothing else is
 /// taken.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,14 +111,22 @@ pub enum MachineMessage {
     /// and once (its `id` is idempotent). Answered `{}`, `{"later": why}` when the receiver
     /// cannot take it now (the sender keeps it), or refused.
     Deliver(Box<Deliver>),
-    /// One of the tree's tools aimed by an agent of the sender at a session it started on the
-    /// receiver (`docs/remote.md`, "What a machine may send"). Answered `{"text"}`,
-    /// `{"later": why}` when the receiver cannot take it now, or refused.
+    /// One of the tree's tools aimed by an agent of the sender at a session of the receiver: one
+    /// it started, or any other, judged there as a call of one of its own agents
+    /// (`docs/remote.md`, "What a machine may send"). Answered `{"text"}` (with `outcome` and the
+    /// `request` that holds it, for a session it did not start), `{"later": why}` when the
+    /// receiver cannot take it now, or refused.
     Call(Box<Call>),
     /// The sender's live root sessions, light (`docs/remote.md`, "One list of every machine"):
     /// sent by a runner when a link is made and again when the list changes, kept by the
     /// receiver for its clients. Answered `{}`, or refused.
     Sessions(crate::SessionList),
+    /// The sender's projects, each by the remotes of its repositories (`docs/remote.md`, "One
+    /// list of every machine"): sent by a runner after its sessions and again when they change,
+    /// kept by the receiver beside them. A message of its own so that a machine of before, which
+    /// does not know it, refuses it alone and goes on taking the sessions. Answered `{}`, or
+    /// refused.
+    Projects(crate::ProjectList),
     /// The user's close of a session of the receiver, signed by their device (`agent.stop`) and
     /// kept by the sender while the receiver was off: sent once it links again, kept until it is
     /// answered, and idempotent (a session ended already is answered as closed). Answered `{}`,
@@ -145,7 +157,7 @@ pub struct Deliver {
 
 /// A tool of the tree an agent of the sender called on a session it started on the receiver:
 /// taken only from that agent, for that session.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Call {
     /// Its id on the sender: a message is delivered once, however often it comes.
@@ -158,10 +170,26 @@ pub struct Call {
     /// The receiver's agent it is aimed at: the one the launch started; empty for an
     /// `approval_answer`.
     pub agent: String,
-    /// `agent_send`, `agent_status`, `agent_stop`, `session_send` or `session_read`.
+    /// `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read` or any tool of
+    /// the tree that addresses a session.
     pub tool: String,
     /// The tool's arguments, as JSON.
     pub arguments: String,
+    /// For a session the caller did not start (`launch` empty, `agent` the session): the
+    /// caller's project, by its name, and its title, as its machine has them. Left out of a call
+    /// of a launch, so that such a call reads as before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// The agent of the caller's tree a switch to Full names (its root otherwise), and that
+    /// tree's mode, `ask`, `auto` or `full`: Full taken only with `switch`, as a launch's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tree: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch: Option<String>,
 }
 
 /// A launch another machine asks for one of its agents.
@@ -204,6 +232,11 @@ pub struct LaunchAsk {
     /// (`flottille_core::project::TRAVELLING`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
+    /// The files the project's setup copies that the caller's machine has, by their paths in the
+    /// project: their names only, never what they hold. The receiver asks the user for those it
+    /// lacks (`docs/remote.md`, "What travels").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied: Vec<String>,
 }
 
 /// What a repository is, whatever its folder: its root commits, and its remote's URL when it has
@@ -963,7 +996,7 @@ impl Link {
             _ => {}
         }
         serde_json::from_value::<Message>(Value::Object(frame))
-            .map_err(|_| "not a message a machine may send".to_owned())
+            .map_err(|_| UNKNOWN_MESSAGE.to_owned())
     }
 
     pub(crate) fn lost(&self, failure: Failure) -> LinkError {

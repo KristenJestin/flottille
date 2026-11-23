@@ -77,8 +77,11 @@ pub fn session_of(daemon: &Daemon, id: &str) -> Result<Agent, Outcome> {
     let session = daemon
         .read(|store| store.agent(id))
         .map_err(failed)?
+        // A caller of another machine stood in for here runs nothing: it is no session.
+        .filter(|agent| !crate::across::is_stand_in(&agent.id))
         .ok_or_else(|| refused(format!("refused: there is no session {id}")))?;
-    if session.parent.is_some() {
+    // A child an agent of another machine launched here has no parent here, and is one.
+    if session.parent.is_some() || crate::across::remote_child(daemon, &session) {
         return Err(refused(format!(
             "refused: {} is a child agent, not a session: its parent reads its conversation \
              (agent_status, action conversation)",

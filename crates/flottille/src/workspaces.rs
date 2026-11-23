@@ -1436,6 +1436,31 @@ async fn local_base(
     )))
 }
 
+/// The setup of the workspace `id`, made of another machine's code while its launch was held,
+/// taken again from its project as the launch laid it, once allowed, before any of it ran.
+pub(crate) fn resnapshot(daemon: &Daemon, id: i64) -> Result<(), String> {
+    let workspace = daemon
+        .read(|store| store.workspace_by_id(id))
+        .map_err(|error| error.to_string())?;
+    let project =
+        crate::projects::load_project(daemon, &workspace.project).map_err(|f| f.message)?;
+    let taken: Vec<String> = workspace
+        .repositories
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    let mut steps = snapshot(&project, &taken);
+    steps.retain(|step| !matches!(step.action, Action::Worktree));
+    daemon
+        .write(|store| {
+            store
+                .replace_pending_steps(id, &steps)
+                .map(|replaced| (replaced, None))
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// The steps of a new workspace: a worktree per repository, then the setup as it is now, a step
 /// for each repository expanded into one per repository.
 fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
@@ -1935,7 +1960,7 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
 }
 
 /// What the globs match in `source`, file by file, relative to it.
-fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
     let cannot =
         |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
     let mut found = Vec::new();

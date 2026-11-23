@@ -2006,7 +2006,7 @@ struct Plan {
 
 /// A folder typed as `~` or `~/…` is the home of the user the daemon runs for. `~other` is not
 /// expanded: it stays relative and is refused like any relative path.
-fn home_expanded(typed: &str) -> Option<PathBuf> {
+pub(crate) fn home_expanded(typed: &str) -> Option<PathBuf> {
     let rest = typed.strip_prefix('~')?;
     if !(rest.is_empty() || rest.starts_with('/')) {
         return None;
