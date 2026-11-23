@@ -180,7 +180,8 @@ start another agent (no `Task`, no `claude --bg`, no background shell) except th
 `agent_launch`, and it cannot do anything the gate did not see (in Full, what a command it runs
 does is the user's own, §7.1). Nor can it drive the daemon from
 a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
-"Transport"). The agent's own permission
+"Transport"), but in Full, where nothing confines a command, one it runs can start a process
+that does not descend from it (`systemd-run --user`), which the daemon then accepts. The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
 ### 4.3 The tools an agent gets (first milestones)
@@ -751,22 +752,25 @@ with says so. Reading another session says the mode of that session's tree too.
   the first message of a session to another it did not start, whose leave only the user gives
   (§7.2), a tracker change that would send the worklog's token to another site or name
   another entry for it (`docs/tickets.md`, "Logging time"), and a worklog deleted
-  (`docs/tickets.md`, "Correcting a worklog"). **A command it runs is the user's own**: no
-  namespace and the daemon's environment, as a command the user typed (their keys, SSH agent,
-  display and sign-ins), so that the real `git`, `gh`, `bkt`, `acli` and `ssh` work as in their
-  terminal; Landlock alone still keeps Flottille's own folders out of its reach (its runtime
-  folder, where the vault's sockets and the tokens are, its state, the agents' own folders), and
-  leaving Full confines the next command again (`docs/tools.md`, "In Full, a run is the user's
-  own"). It is given its project's map at its start and again at the switch: its repositories with
-  their forge, remote, base branch and command line, its tracker and its place. Bare mode
-  stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
-  keep the user's logins and Flottille itself included. Each call it let through is recorded as
+  (`docs/tickets.md`, "Correcting a worklog"). **A command it runs is the user's own, as in
+  their terminal**: no namespace, no Landlock and the daemon's environment, as a command the user
+  typed, so that the real `git`, `gh`, `bkt`, `acli` and `ssh` work there. **Nothing is held
+  back from it**: their keys, SSH agent, display, sign-ins and keyring, and Flottille's own
+  folders, its vault and the key that signs as this device (`docs/vault.md`, `docs/remote.md`).
+  Flottille says so: in the mode's line, to the agent at the switch, and in the project's map.
+  Leaving Full confines the next command again, and the agent is told; a command started in Full
+  keeps what it started with (`docs/tools.md`, "In Full, a run is the user's own"). It is given
+  its project's map at its start and again at the switch: its repositories with their folder,
+  forge, remote, base branch and command line, its tracker and its place. Bare mode stays, the
+  sandbox does not: the agent has only Flottille's tools, `run` stays its only way, and every
+  refusal below stays a refusal of the gate, those that keep the user's logins and Flottille
+  itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
   and its step in the session says "allowed by Full mode". The control draws Full in the alarm
   colour, so that it is never on by mistake. A request made before the switch stays the user's to
   answer. **Its limit:** code the agent runs (an interpreter's inline code, a script it wrote) acts
-  with the user's rights, and the gate does not see what that code touches; only a sandbox would
-  close that. The refusals below protect the user from an agent's direct or accidental use of
+  with the user's rights, and the gate does not see what that code touches: in Full, no sandbox
+  closes that. A hardened Full (a filtered bus, the vault encrypted at rest) is not built. The refusals below protect the user from an agent's direct or accidental use of
   what must never be touched; they are **not a sandbox**: a program the agent runs may still do
   any of it on its own. The same holds for a connection's server (`extensions.md`,
   "Connections"): the gate sees the action called and its arguments, never what the server then

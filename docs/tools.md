@@ -554,24 +554,32 @@ pending requests.
     rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
-- **In Full, a run is the user's own.** A command an agent runs while its
-  session is in Full (the mode read at the run's start: a switch reaches the next run, never one
-  that goes on) gets none of the above: the daemon's environment as it is, then the place's
-  variables, as a command the user typed (the SSH agent, the session bus and so the keyring, the
-  display, `XDG_RUNTIME_DIR`, the forge and tracker command lines' sign-ins, the user's git
-  settings and hooks), and no user nor mount namespace, so that `git`, `gh`, `bkt`, `acli` and
-  the `ssh` git runs work as in the user's terminal. Landlock alone (no namespace needed) still
-  denies it Flottille's own folders: its runtime folder (`$XDG_RUNTIME_DIR/flottille`: the
-  daemon's socket, the bridges' tokens, the pushes' folders, the displays), its state folder (the
-  store, the connections' folders and their vault sockets, its keys) and the agents' own folders
-  (`$XDG_DATA_HOME/flottille/agents`, each session's of its provider). A `git push` in Full is
-  such a run too, never the lent push below: the project's message checks and branch format
-  still read it first. `run` stays the only way to start a command, shell syntax stays refused,
-  and the gate's refusals stay (a launcher such as `ssh` named on the line, a login printed);
-  what code the agent runs does with the user's rights is the user's, as Full says
-  (`docs/design.md` §7.1). Leaving Full confines the next run again. The tools `forge` and
-  `tickets` stay for what only they do: following checks and reviews, which wakes the agent, and
-  the window's view of pull requests and tickets.
+- **In Full, a run is the user's own, as in their terminal, and nothing is held back from it.**
+  A command an agent runs while its session is in Full (the mode read at the run's start: a
+  switch reaches the next run, never one that goes on) gets none of the above: the daemon's
+  environment as it is, then the place's variables, as a command the user typed (the SSH agent,
+  the session bus and so the keyring, the display, `XDG_RUNTIME_DIR`, the forge and tracker
+  command lines' sign-ins, the user's git settings and hooks), and no namespace and no Landlock,
+  so that `git`, `gh`, `bkt`, `acli` and the `ssh` git runs work as in the user's terminal, and so
+  do the user's own folders (`git config --global`, a file made in `~`). Flottille's own folders
+  are not kept from it either: its runtime folder (the daemon's socket, the bridges' tokens, the
+  pushes' folders), its state (the store, the connections' vault sockets, its keys, the device
+  key that signs as this machine, `docs/remote.md`), the agents' own folders, and the vault's
+  items in the keyring (`docs/vault.md`). Nor is the machine: a command can start a process
+  outside Flottille (`systemd-run --user`, the compositor, X11), which the daemon's socket then
+  accepts as any of the user's. Flottille says so where Full is chosen (the mode's line), to the
+  agent at the switch, and in the project's map, which asks it to take the care the user would.
+  A `git push` in Full is such a run too, never the lent push below: the project's message checks
+  and branch format still read it first, outside any sandbox. `run` stays the only way to start
+  a command, shell syntax stays refused, and the gate's refusals stay (a launcher such as `ssh`
+  named on the line, `ssh host command` included, a login printed): bare mode holds, the sandbox
+  does not (`docs/design.md` §7.1). **Leaving Full confines the next run again**, and each live
+  agent of the tree is told so, between turns; a command started in Full and still running, a
+  service or a watcher among them, keeps what it started with until it ends. What a run in Full
+  wrote outlives it (`~/.ssh`, `~/.gitconfig`, a file of `~/.config`): a later push in Ask or
+  Auto still judges those files each time, as below and in `docs/vault.md`, "The gaps". The tools
+  `forge` and `tickets` stay for what only they do: following checks and reviews, which wakes the
+  agent, the window's view of pull requests and tickets, and every write to Jira.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
