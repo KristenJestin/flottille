@@ -237,3 +237,16 @@ impl Render for ModeSwitch {
             .test_support()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MODES;
+
+    #[test]
+    fn the_mode_picker_says_what_full_lends() {
+        let (_, said, line, _) = MODES.iter().find(|(word, ..)| *word == "full").unwrap();
+        assert_eq!(*said, "Full");
+        assert!(line.contains("commands run as yours"), "{line}");
+        assert!(line.contains("your keys and sign-ins"), "{line}");
+    }
+}
