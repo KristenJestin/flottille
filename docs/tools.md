@@ -1811,7 +1811,8 @@ Both are the same kind of session otherwise:
   real end does it: the end of a pilot's turn, a crash (its process starts again, or the pilot
   fails and may be resumed, its sessions staying led by it), a compaction and a restart of the
   daemon end nothing. The window's confirmation lists the sessions that end with it, by title and
-  project, each with the work its workspace holds that is not saved, read by `agent.ending`
+  project (and machine, for one it leads on another machine, which ends there with it), each with
+  the work its workspace holds that is not saved, read by `agent.ending`
   (`docs/protocol.md`): one confirmation for the whole end. The card of an `agent_stop` the user
   is asked about says the same, by the same read: one line for each led session that ends with
   the session named (its title, its project, and what it holds that is not saved), so that the
