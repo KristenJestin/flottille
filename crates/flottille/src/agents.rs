@@ -536,6 +536,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();
             shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
+            shown["launched_from"] = crate::launches::launched_from_shown(daemon, &agent.id);
             shown["quota"] = crate::quota::shown(daemon, &agent);
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
@@ -866,6 +867,7 @@ async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
             preparing: false,
             role,
             parent: None,
+            remote_parent_depth: None,
             title: None,
             brief: message.text.clone(),
             provider: asked.provider,
@@ -906,6 +908,9 @@ pub struct New {
     pub role: &'static Role,
     /// Its parent, with the parent's depth; `None` for a root.
     pub parent: Option<(String, u32)>,
+    /// For a child an agent of another machine launched, that agent's depth there: it has no
+    /// parent here, and is a child all the same (`docs/remote.md`, "A tree across machines").
+    pub remote_parent_depth: Option<u32>,
     pub title: Option<String>,
     pub brief: String,
     /// Its provider, model and effort as asked: each checked, and the defaults taken for those
@@ -1022,13 +1027,17 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
     )?;
     let now = now_ms();
-    let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
+    let depth = match (&new.parent, new.remote_parent_depth) {
+        (Some((_, depth)), _) | (None, Some(depth)) => depth + 1,
+        (None, None) => 0,
+    };
     let at_depth_limit = depth >= DEPTH_LIMIT;
     let tools = tools_of(
         daemon,
         provider,
         project,
-        new.parent.is_none(),
+        // Only a root is at depth 0: a child of another machine's agent has no parent here.
+        depth == 0,
         depth,
         crate::vault::listed_to(daemon, project),
         new.launched

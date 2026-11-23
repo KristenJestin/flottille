@@ -889,13 +889,14 @@ fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
     })
 }
 
-/// Whether the agent is a root, the agent the user talks to.
+/// Whether the agent is a root, the agent the user talks to. A child an agent of another machine
+/// launched has no parent here: its depth says it is a child.
 fn is_root(daemon: &Daemon, grant: &Grant) -> bool {
     daemon
         .read(|store| store.agent(&grant.agent))
         .ok()
         .flatten()
-        .is_some_and(|agent| agent.parent.is_none())
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0)
 }
 
 /// A task in words: its line, where it runs and what it is.

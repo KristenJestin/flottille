@@ -907,6 +907,17 @@ local child's work; nothing moves your branch.*
 - **Who**: as today. `led` and `handed` from a root only; `child` from any agent that launches
   children. A led session on the computer may start a child on the server; a led session on the
   server is a root there, and may start its own children there.
+- **A child there is a child** (#1274). On the machine it runs on, a `child` an agent of another
+  machine launched has no parent, and is a child all the same: a child's tools (none of the
+  project's actions, no `session_*`, no `agent_*` at the depth limit), and its parent's depth plus
+  one, so the depth limit holds across machines. The launch carries the caller's `depth`, left out
+  at 0 so that a machine of before reads it; a child asked for by an agent at the limit is refused
+  there (`agent b1 of pc is at the depth limit (1): it cannot launch children`). `agent.list`,
+  `agent.show` and the tree say whose it is, `launched_from: {machine, agent, kind}`; the window
+  draws a bar naming that agent where the composer would be (`This conversation is a child of agent
+  b1 of pc, which launched it from there: only its parent writes to it.`), the CLI says `child of
+  agent b1 of pc`, and the phone lists it among no sessions. Its questions still reach the user
+  there while its parent's machine is off ("Where a question goes when the parent is off").
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
@@ -1614,6 +1625,9 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **A launch that says no depth is a root's** (#1274): only a root launches on a machine of before
+  (its depth limit is 1), so a missing `depth` is read as 0, never refused; a child asked for by a
+  caller at the limit is refused by the machine it would run on.
 - **A call to a session of a machine that is off is refused at once** (#1250), every tool alike,
   never kept: what the session's machine would answer (held, refused, the leave) cannot be known
   before it is back. Messages to a session the caller started stay kept, as before.
