@@ -1417,21 +1417,33 @@ fn keep_call(
     )
 }
 
+/// The sessions `pilot` of this machine leads on other machines that have not ended, the oldest
+/// first, each with the name of its machine: those its end ends there (`end_led`).
+pub(crate) fn led_elsewhere_by(daemon: &Daemon, pilot: &str) -> Vec<(Launch, String)> {
+    daemon
+        .read(|store| store.launches("out", None, LaunchFilter::All))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|launch| {
+            launch.caller == pilot
+                && launch.kind == "led"
+                && launch.agent.is_some()
+                && !matches!(launch.state.as_str(), "refused" | "ended")
+        })
+        .map(|launch| {
+            let name = machine_name(daemon, &launch);
+            (launch, name)
+        })
+        .collect()
+}
+
 /// The pilot `pilot` of this machine ended for good: each session it leads on another machine
 /// ends with it there, as one it leads here does, the stop kept until that machine takes it
 /// (`docs/tools.md`, "Sessions an agent starts").
 pub(crate) fn end_led(daemon: &Arc<Daemon>, pilot: &str) {
-    let launches = daemon
-        .read(|store| store.launches("out", None, LaunchFilter::All))
-        .unwrap_or_default();
-    for launch in launches.iter().filter(|launch| {
-        launch.caller == pilot
-            && launch.kind == "led"
-            && launch.agent.is_some()
-            && !matches!(launch.state.as_str(), "refused" | "ended")
-    }) {
+    for (launch, name) in led_elsewhere_by(daemon, pilot) {
         let args = json!({"agent_id": launch.agent, "why": PILOT_ENDED});
-        match keep_call(daemon, launch, "agent_stop", &args) {
+        match keep_call(daemon, &launch, "agent_stop", &args) {
             Ok(()) => {
                 let _ = daemon.write(|store| {
                     store
@@ -1442,7 +1454,7 @@ pub(crate) fn end_led(daemon: &Arc<Daemon>, pilot: &str) {
             Err(why) => eprintln!(
                 "flottille daemon: the session {} its pilot led on {} is not ended with it: {why}",
                 launch.agent.as_deref().unwrap_or_default(),
-                machine_name(daemon, launch)
+                name
             ),
         }
     }

@@ -2364,6 +2364,25 @@ pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
             "losses": losses,
         }));
     }
+    // Those it leads on other machines end there with it: their work is read there, not here.
+    let pilots = std::iter::once(id.to_owned()).chain(
+        led_by_pilot(daemon, id)
+            .into_iter()
+            .map(|session| session.id),
+    );
+    for pilot in pilots {
+        for (launch, machine) in crate::across::led_elsewhere_by(daemon, &pilot) {
+            sessions.push(json!({
+                "id": launch.agent,
+                "title": launch.asked["title"],
+                "project": launch.asked["there"]["project"].as_str().unwrap_or(&launch.project),
+                "workspace": launch.workspace,
+                "machine": machine,
+                "state": "unknown",
+                "losses": [format!("its workspace is on {machine}: what it holds is not read from here")],
+            }));
+        }
+    }
     Ok(json!({"agent": id, "sessions": sessions}))
 }
 
