@@ -1622,8 +1622,18 @@ on a real phone, by hand, and reported.
 
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
-  with the link's own refusal rather than run as any root's. A launch of any other caller leaves
-  the field out and reaches it as before. No protocol bump for it.
+  with the link's own refusal rather than run as any root's: the agent is answered `refused by
+  server: server refused: not a message a machine may send`, and nothing starts there until that
+  machine is updated. A launch of any other caller leaves the field out and reaches it as before.
+  No protocol bump for it.
+- **The caller's word on `launched` is taken** (#1275), but for a session the receiving machine
+  itself launched on the sender: that one is a session an agent started whatever the launch says.
+  Of any other caller, the receiving machine cannot know better, and the machines are the user's
+  own.
+- **A child on another machine counts as a session an agent started** (#1275): it has no parent
+  there yet, and the launch that started it says it was launched, so its `led` and `handed`
+  launches are held for its parent, then the user, never the judge's. #1274 makes it a real
+  child, whose such launches are refused.
 - **A child on another machine is not held for the chain** (#1275): a session an agent started
   starts children here as its mode allows, and on another machine likewise; only `led` and
   `handed` launches are base.
