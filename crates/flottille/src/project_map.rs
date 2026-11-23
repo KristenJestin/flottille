@@ -101,9 +101,10 @@ pub fn of_agent(
 /// user's own from their next run, held back from nothing, and where their project's work lives.
 pub fn tell_switched_to_full(daemon: &crate::daemon::Daemon, root: &flottille_core::agent::Agent) {
     for agent in live(daemon, root) {
-        let Some(map) = of_agent(daemon, &agent) else {
-            continue;
-        };
+        // An agent whose map cannot be built is told all the same: its commands are unconfined.
+        let map = of_agent(daemon, &agent)
+            .map(|map| format!("\n\n{map}"))
+            .unwrap_or_default();
         let body = format!(
             "The user switched this session to Full mode: every call the gate would hold passes, \
              and from your next `run` on, a command you run is the user's own, as in their \
@@ -111,7 +112,7 @@ pub fn tell_switched_to_full(daemon: &crate::daemon::Daemon, root: &flottille_co
              their keyring and sign-ins, Flottille's vault and the key that signs as this device. \
              Nothing stops a mistake, so take the care the user would. Shell syntax stays \
              refused, and `run` stays your only way. A command already running is not \
-             touched.\n\n{map}"
+             touched.{map}"
         );
         queue_mode(daemon, &agent.id, &body);
     }
