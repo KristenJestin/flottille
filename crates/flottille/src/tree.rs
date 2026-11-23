@@ -73,7 +73,7 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
     let done = match tool {
         "agent_launch" => launch(daemon, &caller, args).await,
         "agent_send" => send(daemon, &caller, args),
-        "agent_status" => status(daemon, &caller, args),
+        "agent_status" => status(daemon, &caller, grant.reads.as_deref(), args),
         "agent_stop" => stop(daemon, &caller, args),
         "report" => report(daemon, grant, &caller, args).await,
         // The two names `ask` replaced stay answered for one release, routed as `ask` is.
@@ -123,6 +123,23 @@ fn child_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome>
     }
 }
 
+/// The child `agent_status` reads: one of the caller's, or the child of this machine that
+/// `reads` names when an agent of another machine launched it (a session it leads is no child).
+fn status_child(
+    daemon: &Daemon,
+    caller: &Agent,
+    reads: Option<&str>,
+    id: &str,
+) -> Result<Agent, Outcome> {
+    if reads == Some(id)
+        && let Ok(Some(child)) = daemon.read(|store| store.agent(id))
+        && crate::across::remote_child(daemon, &child)
+    {
+        return Ok(child);
+    }
+    child_of(daemon, caller, id)
+}
+
 // Launching.
 
 #[derive(Deserialize)]
@@ -167,7 +184,7 @@ pub enum LaunchKind {
 const KINDS: &str = "child: a part of your own task, in your place, that you direct and that \
     reports to you; led: an autonomous job of its own (its own workspace or main) that you pilot, \
     a real session the user sees under you and may talk to, which asks you its questions and wakes \
-    you when it asks, reports or ends; handed: a session you start for the user and let go, \
+    you at each end of its turns; handed: a session you start for the user and let go, \
     which is theirs and of which you hear nothing more unless it writes to you";
 
 /// What a launch without `kind` is told.
@@ -566,7 +583,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "Started a session led by you, {}, on {runs}, in {place}. It is a real session, not your child: \
              the user sees it under you and may talk to it, and the agent_* tools do not reach \
              it. It asks you its questions: a delivery [flottille:session-turn-ended] wakes you \
-             when it asks, reports or ends, with its last message. Answer with session_send, \
+             at each end of its turns, with its last message. Answer with session_send, \
              relay to the user with ask, or do nothing; forge unsubscribe with its session stops \
              the wakes.{leave}",
             named(&child)
@@ -1204,8 +1221,9 @@ struct Status {
     after: Option<u64>,
 }
 
-/// `agent_status`: how the children do, or the conversation of one of them.
-fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
+/// `agent_status`: how the children do, or the conversation of one of them. `reads`: the child a
+/// caller of another machine started here, which it reads as its parent (`Grant::reads`).
+fn status(daemon: &Daemon, caller: &Agent, reads: Option<&str>, args: Value) -> Done {
     let asked: Status = arguments("agent_status", args)?;
     match asked.action.as_deref().unwrap_or("status") {
         "status" => {
@@ -1227,7 +1245,7 @@ fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
                     )));
                 }
             };
-            states(daemon, caller, asked.agent_id, full)
+            states(daemon, caller, reads, asked.agent_id, full)
         }
         "conversation" => {
             if asked.detail.is_some() {
@@ -1241,7 +1259,7 @@ fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
                      to read: agent_status without it lists your children",
                 ));
             };
-            read(daemon, caller, &id, asked.after)
+            read(daemon, caller, reads, &id, asked.after)
         }
         other => Err(refused(format!(
             "refused: agent_status has no action {other:?}: its actions are status (the default) \
@@ -1251,9 +1269,15 @@ fn status(daemon: &Daemon, caller: &Agent, args: Value) -> Done {
 }
 
 /// How one child, or each of them, does: a line each, with the child's last messages when `full`.
-fn states(daemon: &Daemon, caller: &Agent, id: Option<String>, full: bool) -> Done {
+fn states(
+    daemon: &Daemon,
+    caller: &Agent,
+    reads: Option<&str>,
+    id: Option<String>,
+    full: bool,
+) -> Done {
     let children = match id {
-        Some(id) => vec![child_of(daemon, caller, &id)?],
+        Some(id) => vec![status_child(daemon, caller, reads, &id)?],
         None => daemon
             .read(|store| store.children(&caller.id))
             .map_err(failed)?
@@ -1590,8 +1614,14 @@ fn joined(
     Some((lines, last.max(crossed)))
 }
 
-fn read(daemon: &Daemon, caller: &Agent, id: &str, after: Option<u64>) -> Done {
-    let child = child_of(daemon, caller, id)?;
+fn read(
+    daemon: &Daemon,
+    caller: &Agent,
+    reads: Option<&str>,
+    id: &str,
+    after: Option<u64>,
+) -> Done {
+    let child = status_child(daemon, caller, reads, id)?;
     let Page { lines, after, more } =
         conversation(daemon, &child, after.unwrap_or(0)).map_err(failed)?;
     let mut text = format!("The conversation of {}:\n", named(&child));
@@ -2769,7 +2799,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
         return;
     }
     if agent.parent.is_none() && !crate::across::remote_child(daemon, &agent) {
-        crate::subscriptions::turn_ended(daemon, &agent);
+        crate::subscriptions::turn_ended(daemon, &agent, stop_reason);
         remind_integrated(daemon, &agent);
         return;
     }

@@ -882,7 +882,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1047,7 +1047,20 @@ local child's work; nothing moves your branch.*
   "Finish the export"`), the brief whole. The receiving machine judges because its quota, its
   machine and its secrets are used, and because a machine alone must not be able to start anything
   unjudged. The caller is answered at once with the session's id, or the request's number on that
-  machine (`request #4 on server is waiting for the user`).
+  machine. A held launch is answered as a call held here is (`Waiting for the user's approval,
+  request #4 on server. …`), then where it will run once allowed. **The user's answer comes to
+  the caller as a held call's result does** (#1273), an `approval` delivery from that machine
+  worded as the local one, the machine named after the request: allowed, `Request #4 on server
+  (agent_launch) was approved by the user, and Flottille has now done it. Its result:` and the
+  answer of a session started there, which says what follows; refused, `… was refused by the
+  user. Nothing was done.`; allowed but unable to start, `… was approved by the user, but nothing
+  was done:` and why; its session ended there while it was held, refused, saying so. The allowed
+  answer is sent before the session's setup goes on, so that a setup that fails at once is never
+  heard of first. The caller's machine marks its record of the launch `started` or `refused`
+  (`ended` when a started one is told refused); an answer that comes before the record of the
+  launch's place is never undone by it, and one sent again is taken once. A refused launch leaves
+  no row under its pilot and counts in no cap. A handed session's caller is told too: it waited
+  for that answer, and hears nothing of the session after it.
 - **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
@@ -1105,8 +1118,10 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   caller of another machine more than an agent of that machine: no other tool than
   `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
   the tree later is not given until it is written there), no secret, no file: when its project is
-  not on that machine, its place is a folder that does not exist. Its answer is masked again of
-  the caller's machine's secrets. A machine stands in 64 callers of one other machine at most
+  not on that machine, its place is a folder that does not exist. Its answer, whatever its
+  outcome (a refusal too), is masked again of the caller's machine's secrets; an answer without
+  an outcome, or a call without a project, comes from an older daemon and is refused saying that
+  daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
   the members, with their leaves.
 - **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
@@ -1860,7 +1875,7 @@ on a real phone, by hand, and reported.
   machine are refused.
 - What crosses machines (#817): a child's report, question, failure, idle and stuck notices, the
   notice that its process died and it goes on (`child-replaced`), and a led session's
-  `session-turn-ended` (when a turn reported or asked, and when it ends or fails
+  `session-turn-ended` (at each end of a turn, and when it ends or fails
   unless its pilot ended it), and since #818 a child's held request (`child-asks`) and what a led
   session asked the user while its pilot's machine was off (`session-meanwhile`). Not yet:
   `led-integrated`, whose check reads the forge and the base on the session's machine.
@@ -1877,8 +1892,12 @@ on a real phone, by hand, and reported.
   background even while that machine is on: the caller is answered at once (`Sent to agent … on
   server`), and a refusal there is not told back to it; it is dropped with an inbox entry of the
   sending machine (`dropped`), as a message kept 30 days is.
-- `session_read` of a led session on another machine answers what `agent_status` gives: the
-  session's line and its last messages, not its paged conversation.
+- `session_read` and `agent_status` of a session or child the caller started on another machine
+  answer as on one machine: the same pages, `last`, `since`, `until`, `cursor` and cuts, the same
+  refusals (`agent_status` of a led session is refused, `session_read` of a child too). That
+  machine answers them by the same tools as a read of a session the caller did not start, for the
+  caller stood in for, which reads the session it started without a leave and its child as its
+  parent; the answer is masked again on the caller's machine, which cuts it no more.
 - `agent_status` without `agent_id` lists the children of this machine only; a child on another
   machine is read by its id.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
@@ -1886,6 +1905,10 @@ on a real phone, by hand, and reported.
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
   an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
   the receiver would.
+- A led session's plain end of a turn (it neither asked nor reported) is kept once per session
+  for the machine that took none: the next replaces the one still waiting, so that the turns of a
+  session that runs while its pilot's machine is off never fill the 100 and push out a report or
+  another session's news. What asked, reported or ended is each kept.
 - A message the other machine cannot take now (`later`) is sent again 30 seconds later, or sooner
   on the next link or message kept.
 - Pair mode (#1146) lasts 5 minutes unless `--minutes` says 1 to 15, works once, and one is open
@@ -2311,7 +2334,9 @@ on a real phone, by hand, and reported.
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
   `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
   not start agent …`). A call is judged on the caller's machine as one to a session it started
-  there (ending a led session as `end_led`). A `call` whose `launch` is empty (and not an
+  there (ending a led session as `end_led`), but for the reads (`agent_status`, `session_read`):
+  those are served as a call whose `launch` is empty, and judged there, the launch only saying
+  which session or child the caller reads as its own. A `call` whose `launch` is empty (and not an
   `approval_answer`) is one to any other session of the receiver: served there by its own gate
   and tools for the caller stood in for ("Sessions of another machine").
 - What goes to another machine is kept in the sender's store (`outbox`) before it is sent: in
@@ -2341,7 +2366,8 @@ on a real phone, by hand, and reported.
   while the pilot lives. A session handed to the user is not shown under the agent that started it.
   The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
   whose caller ended: an old launch is never read again. A launch held for the user there is
-  `waiting` until something of it is heard here (its approval there sends nothing back).
+  `waiting` until the user's answer there comes back: allowed, `running` until its first delivery;
+  refused, it leaves its pilot's rows.
 - Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
   those sessions, so a project's page, search, a session's page and the inbox do not list them,
   and nothing offers to end them from here.

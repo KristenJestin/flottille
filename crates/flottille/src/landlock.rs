@@ -210,7 +210,8 @@ fn confine<'a>(
                 .map(Path::to_owned)
                 .or_else(|| std::env::current_dir().ok());
             crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())?
-                .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())
+                .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())?
+                .giving(crate::ssh_owned::copies())
         })
         .flatten();
     if let Some(mut plan) = namespace {
