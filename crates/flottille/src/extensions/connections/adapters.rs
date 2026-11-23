@@ -137,6 +137,9 @@ const PLUGIN: &str = "flottille";
 const PROTOCOL: &str = "agent-browser.plugin.v1";
 /// The launch argument that names a shown browser's window.
 const BROWSER_CLASS_ARG: &str = "--class=flottille-browser";
+/// Chrome's disk cache at 32 MiB: its profile is in the vault folder, in the runtime folder, which
+/// is in memory on most systems.
+const CACHE_ARG: &str = "--disk-cache-size=33554432";
 /// Beside the plugin's socket, the file that holds a login run's one-time token, and the one
 /// where the plugin says why it failed: agent-browser's session daemon starts the plugin, with the
 /// environment it was started with and not the login's command line's, and says of a plugin that
@@ -512,12 +515,14 @@ pub fn start_options(vault: &crate::display::Folder, headed: bool) -> Result<Vec
         "args": ["vault", "provide", socket_file(vault)],
         "capabilities": ["credential.read"],
     }]});
+    // agent-browser's launch arguments, separated by commas.
+    config["args"] = json!(CACHE_ARG);
     if headed {
         config["headed"] = json!(true);
         // Chrome's `--class` is its app id on Wayland and its WM_CLASS on X11: the user's desktop
         // can tell this browser from their own, which a rule that keeps it from taking the focus
         // needs (`docs/extensions.md`, "Show the browser"). Only a shown browser has a window.
-        config["args"] = json!(BROWSER_CLASS_ARG);
+        config["args"] = json!(format!("{BROWSER_CLASS_ARG},{CACHE_ARG}"));
     }
     let file = config_file(vault.path());
     written(&file, config.to_string().as_bytes())
@@ -585,11 +590,25 @@ pub fn display(
         "AGENT_BROWSER_SOCKET_DIR".into(),
         sockets(vault)?.into_os_string(),
     );
+    env.insert("TMPDIR".into(), temporary(vault)?.into_os_string());
     Ok(())
+}
+
+/// The temporary folder of agent-browser and its Chrome, in the vault folder: agent-browser makes
+/// Chrome's profile there (`agent-browser-chrome-…`: cookies, Local Storage, History, and the
+/// `Preferences` that name a proxy), which in the daemon's own (`/tmp`) runs would read and plant
+/// (`docs/vault.md`, "The browser's network").
+fn temporary(vault: &crate::display::Folder) -> Result<PathBuf, String> {
+    let folder = vault.path().join(TEMPORARY);
+    flottille_core::paths::ensure_private_dir(&folder)
+        .map_err(|error| format!("{}: {error}", folder.display()))?;
+    Ok(folder)
 }
 
 /// What the name of the socket folder starts with.
 const SOCKETS: &str = "browser-";
+/// The temporary folder's name.
+const TEMPORARY: &str = "tmp";
 
 /// The folder agent-browser's daemon puts its socket in: the one folder of the vault folder, of
 /// a random name made the first time and found again by listing, by this daemon and the next.
@@ -627,9 +646,16 @@ fn sockets_in(vault: &Path) -> Option<PathBuf> {
 /// configuration, the plugin's socket). Called before any connection starts: no login runs. The
 /// socket folders stay, a browser left may answer on them (`left`).
 pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
+    // Folders alone, never through a link: the state folder is within the runs' reach.
     let folders = |base: PathBuf| -> Vec<PathBuf> {
         std::fs::read_dir(base)
-            .map(|listed| listed.flatten().map(|entry| entry.path()).collect())
+            .map(|listed| {
+                listed
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect()
+            })
             .unwrap_or_default()
     };
     for vault in folders(paths.runtime.join("vault")) {
@@ -957,9 +983,8 @@ pub async fn perform(
 fn isolation_refused(why: &str) -> String {
     format!(
         "login fills a password only into a browser that runs in a network of its own, where no \
-         run reaches its DevTools, and none can be made here: {why}. The user may {}; the rest of \
-         the browser works meanwhile",
-        network::INSTALL
+         run reaches its DevTools, and none can be made here: {why}. The rest of the browser \
+         works meanwhile"
     )
 }
 

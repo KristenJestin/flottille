@@ -21,9 +21,12 @@ use std::time::Duration;
 pub const HOLD: &str = "browser-network";
 /// What the user installs where the isolation is missing.
 pub const INSTALL: &str = "install passt (pasta) to let the agent's browser sign in";
+/// Why the isolation is missing where pasta is.
+const NO_PASTA: &str = "pasta is not on the PATH";
 /// The program that gives the namespace its way out.
 const PASTA: &str = "pasta";
-/// In the vault folder: the holder's pid and its namespaces' inodes, and pasta's pid.
+/// In the vault folder: the holder's pid, its namespaces' inodes and its start time, and pasta's
+/// pid.
 const RECORD: &str = "network";
 const PASTA_PID: &str = "network.pasta";
 /// How long pasta has to set the namespace up.
@@ -92,25 +95,54 @@ fn pasta() -> Option<PathBuf> {
 /// Whether a browser can be given a network of its own here, and why not: what `flottille
 /// doctor` says.
 pub fn available() -> Result<(), String> {
-    pasta().ok_or_else(|| format!("{PASTA} is not on the PATH"))?;
+    pasta().ok_or_else(|| format!("{NO_PASTA}: {INSTALL}"))?;
     if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
         return Err("the kernel refuses user namespaces to this user".into());
     }
-    Ok(())
+    out_of_reach(crate::landlock::abi(), yama())
+}
+
+/// Yama's `ptrace_scope`, 0 without Yama.
+fn yama() -> u32 {
+    std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Whether a run is kept from attaching to the browser (`ptrace`), which reads its memory, the
+/// password filled included: by Landlock, which confines runs from its second ABI (a confined
+/// process attaches to none outside its domain), or by Yama's `ptrace_scope` from 1 (to its own
+/// descendants alone). The network keeps DevTools out of reach; this keeps the process.
+fn out_of_reach(landlock: i64, yama: u32) -> Result<(), String> {
+    if landlock >= 2 || yama >= 1 {
+        return Ok(());
+    }
+    Err(
+        "neither Landlock nor Yama keeps a run from attaching to the browser and reading its \
+         memory: a kernel with Landlock, or kernel.yama.ptrace_scope set to 1, lets the \
+         agent's browser sign in"
+            .into(),
+    )
 }
 
 /// The namespace recorded in the vault folder `vault`, while its holder runs.
 pub fn found(vault: &Path) -> Option<Network> {
     let text = std::fs::read_to_string(vault.join(RECORD)).ok()?;
     let mut words = text.split_whitespace();
-    let (pid, user, net): (u32, u64, u64) = (
+    let (pid, user, net, started): (u32, u64, u64, u64) = (
+        words.next()?.parse().ok()?,
         words.next()?.parse().ok()?,
         words.next()?.parse().ok()?,
         words.next()?.parse().ok()?,
     );
     let network = opened(pid).ok()?;
-    // The same namespaces, not those of a process that took the pid since.
-    (inode(&network.user) == Some(user) && inode(&network.net) == Some(net)).then_some(network)
+    // The same namespaces and the same process, not one that took the pid since (and may have
+    // entered them): its start time, read once the namespaces are open, is the holder's.
+    (inode(&network.user) == Some(user)
+        && inode(&network.net) == Some(net)
+        && crate::agents::start_time(pid) == Some(started))
+    .then_some(network)
 }
 
 fn opened(pid: u32) -> io::Result<Network> {
@@ -125,7 +157,7 @@ fn opened(pid: u32) -> io::Result<Network> {
 /// A new namespace for the vault folder `vault`, its holder started, pasta's way out set up and
 /// both recorded. Whatever was recorded before is ended first.
 pub async fn made(vault: &Path) -> Result<Network, String> {
-    let pasta = pasta().ok_or_else(|| format!("{PASTA} is not on the PATH"))?;
+    let pasta = pasta().ok_or_else(|| format!("{NO_PASTA}: {INSTALL}"))?;
     ended(vault);
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
@@ -163,8 +195,12 @@ pub async fn made(vault: &Path) -> Result<Network, String> {
             return Err(format!("the namespace's holder ended at once: {error}"));
         }
     };
+    let Some(started) = crate::agents::start_time(pid) else {
+        kill(pid);
+        return Err("the namespace's holder ended at once".into());
+    };
     let record = format!(
-        "{pid} {} {}\n",
+        "{pid} {} {} {started}\n",
         inode(&network.user).unwrap_or_default(),
         inode(&network.net).unwrap_or_default()
     );
@@ -281,24 +317,48 @@ pub fn hold() -> ! {
     }
 }
 
-/// The pids agent-browser's daemons in the socket folder `sockets` say they run as (`<session>.pid`),
-/// alive.
+/// The pids of the processes that answer on the sockets of agent-browser's daemons in the socket
+/// folder `sockets` (`<session>.sock`), as the kernel says (`SO_PEERCRED`), never as a file
+/// says: 0 for one whose process is gone or unknown, which no network holds. A socket nobody
+/// answers on is no browser's.
 pub fn daemons(sockets: &Path) -> Vec<u32> {
+    use std::os::unix::fs::FileTypeExt;
     let Ok(listed) = std::fs::read_dir(sockets) else {
         return Vec::new();
     };
     listed
         .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "pid"))
+        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "sock"))
+        // Never through a link: the type of the entry itself.
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_socket()))
         .filter_map(|entry| {
-            std::fs::read_to_string(entry.path())
-                .ok()?
-                .trim()
-                .parse()
-                .ok()
+            let stream = std::os::unix::net::UnixStream::connect(entry.path()).ok()?;
+            Some(
+                peer(&stream)
+                    .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
+                    .unwrap_or(0),
+            )
         })
-        .filter(|pid: &u32| Path::new(&format!("/proc/{pid}")).exists())
         .collect()
+}
+
+/// The pid of the process at the other end of `stream`, as the kernel recorded it.
+fn peer(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::zeroed();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `length` bytes into the structure it is given.
+    let got = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    // SAFETY: zeroed, and written by the getsockopt that succeeded.
+    let pid = unsafe { credentials.assume_init() }.pid;
+    (got == 0 && pid > 0).then_some(pid as u32)
 }
 
 #[cfg(test)]
@@ -322,5 +382,15 @@ mod tests {
         assert!(found(vault.path()).is_none(), "found another process's");
         std::fs::write(vault.path().join(RECORD), record(started)).unwrap();
         assert!(found(vault.path()).is_some(), "not found");
+    }
+
+    #[test]
+    fn without_landlock_nor_yama_the_browser_is_within_a_runs_reach() {
+        let refused = out_of_reach(1, 0).unwrap_err();
+        assert!(refused.contains("Landlock"), "{refused}");
+        assert!(out_of_reach(0, 0).is_err());
+        assert!(out_of_reach(2, 0).is_ok());
+        assert!(out_of_reach(0, 1).is_ok());
+        assert!(out_of_reach(1, 3).is_ok());
     }
 }

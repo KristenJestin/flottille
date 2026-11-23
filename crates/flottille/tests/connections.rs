@@ -7384,7 +7384,7 @@ fn the_shown_browser_is_launched_with_its_own_class() {
     let started = logged(&user, "browser", "start");
     assert_eq!(
         started.last().unwrap()["config"]["args"],
-        json!("--class=flottille-browser")
+        json!("--class=flottille-browser,--disk-cache-size=33554432")
     );
 }
 
@@ -7400,8 +7400,11 @@ fn a_hidden_browser_gets_none() {
     }
     let started = logged(&user, "browser", "start");
     assert_eq!(started.last().unwrap()["config"].get("headed"), None);
-    // A browser nobody sees has no window to name.
-    assert_eq!(started.last().unwrap()["config"].get("args"), None);
+    // A browser nobody sees has no window to name: its disk cache is capped alone.
+    assert_eq!(
+        started.last().unwrap()["config"]["args"],
+        json!("--disk-cache-size=33554432")
+    );
     assert_eq!(connection(&user, "browser")["headed"], Value::Null);
 }
 
