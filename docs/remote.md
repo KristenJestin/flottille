@@ -1029,7 +1029,10 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   listed (`sessions`, "One list of every machine"), a project of the same name being the same
   project. A title that two sessions share, here or there, is refused with both listed; every
   listing a tool gives holds the sessions of every machine, one of another machine said `on
-  server` after its id (`Night lead · 0123456789ab · on server · idle, active 2 min ago`).
+  server` after its id (`Night lead · 0123456789ab · on server · idle, active 2 min ago`). An id
+  two machines list is refused, naming both: ids are each machine's own. A child an agent of
+  another machine launched is a child there too, never listed nor called as a session.
+  A session the caller started there, named by its title, is called as by its id.
 - **Judged by the machine it runs on, by the same code.** The caller's daemon sends the call as it
   is (`call`, signed with its machine key) and judges nothing of it. The receiving machine stands
   the caller in by an agent of its own, `<caller>@<machine's key>` (never an id of its own, never
@@ -1040,8 +1043,13 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   held there is a request of that machine's user, answered at once as held; its answer comes back
   as the `approval` delivery it would be on one machine (`deliver`, its `launch` `request-<n>`,
   taken only by the agent that waits for that very request of that machine). Nothing gives a
-  caller of another machine more than an agent of that machine: no other tool, no secret, no
-  file.
+  caller of another machine more than an agent of that machine: no other tool than
+  `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
+  the tree later is not given until it is written there), no secret, no file: when its project is
+  not on that machine, its place is a folder that does not exist. Its answer is masked again of
+  the caller's machine's secrets. A machine stands in 64 callers of one other machine at most
+  (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
+  the members, with their leaves.
 - **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
   launch's ("Starting a session on another machine"): a machine alone cannot raise it.
 - **Only two differences, said in one machine's terms.** A machine that cannot be reached: its
@@ -1614,9 +1622,28 @@ on a real phone, by hand, and reported.
   writer does not take it, as it does on one machine.
 - **A session of another machine is in the caller's project when its project has the same name**
   (#1250), as the sidebar groups them ("One list of every machine"); a title is matched among the
-  live sessions that machine listed, an untitled one by the first line its list gives it.
+  live sessions that machine listed, an untitled one by the first line its list gives it. The
+  name only: the identity of a project by its repositories' remotes (#1228's `projects` list) is
+  a follow-up.
 - **A led session writing to its pilot on another machine** is asked the leave as any other pair
   (#1250): the receiving machine does not stand its caller in as started by that pilot.
+- **The user's signed switch to Full counts for a call as for a launch** (#1250): checked against
+  the machine that sends it and the tree that machine names. The receiving machine cannot tell
+  which tree the caller belongs to; a machine that holds a switch could name its tree for another
+  of its agents, for 12 hours at most, as it already could for a launch.
+- **A machine of before refuses a call of another session** with the link's own refusal of a
+  message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
+- **A held call of a caller of another machine is that machine's user's request** (#1250), as a
+  request of a child there goes to that machine's user. The stand-in's own id (`<caller>@<key>`),
+  seen on a request card, is not refused as a target by an agent of that machine: it holds no
+  conversation and runs nothing, so a call to it reaches no one.
+- **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
+  under the user's runtime folder, never made, rather than refused: a read of a session of another
+  project is served as on one machine. The callers of one machine are capped at 64, forgotten after
+  30 days idle (as long as a message is kept) and when their machine leaves the members.
+- **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
+  an answer the user gave before that (within the same second) is refused. Answers never given are
+  forgotten after 30 days.
 - **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
   no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
   signed in or not. The machine has no other reliable signal of having no screen, so the icon is
