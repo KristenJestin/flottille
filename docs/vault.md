@@ -699,10 +699,11 @@ The gaps, where the platform does not allow more:
   theirs;
 - **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
   can write what is the user's under the home: agent-browser itself where the user installed it
-  there (npm's global folder under the home, `~/.local`), the Chrome it downloaded under
-  `~/.agent-browser/browsers/`, and Chrome's certificate database `~/.pki/nssdb`. A run that
-  replaced that Chrome, or agent-browser, has its own program run as the browser the login fills,
-  and one that wrote `nssdb` has the browser trust its certificate authority. Flottille does not
+  there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
+  `~/.agent-browser/browsers/`. A run that replaced that Chrome, or agent-browser, has its own
+  program run as the browser the login fills. Chrome's certificate database is in the vault folder
+  (`data/pki/nssdb`, above); a Chrome that still reads the older `~/.pki/nssdb`, where one is, would
+  trust a certificate authority a run wrote there. Flottille does not
   check them: the owner is the user either way, and a hash recorded at first use could be taken
   of a program a run had already replaced, and would refuse every update the user or agent-browser
   makes (agent-browser downloads a new Chrome on its own). Installing agent-browser and its Chrome
@@ -848,8 +849,10 @@ denied to every run), so the profile and Chrome's own temporary files are there.
 
 Chrome also writes outside its profile, whatever profile it is given: its crash database
 (`Crash Reports`, whose dumps hold the page's memory, a password typed included) under its default
-configuration folder (`$XDG_CONFIG_HOME/google-chrome-for-testing`, else `~/.config/…`), and its
-caches under `$XDG_CACHE_HOME`; agent-browser and Chrome read `$XDG_DATA_HOME`. The same commands
+configuration folder (`$XDG_CONFIG_HOME/google-chrome`, or the folder of the Chrome agent-browser
+runs, else `~/.config/…`), its certificate database (`$XDG_DATA_HOME/pki/nssdb`) and
+`mimeapps.list` under `$XDG_DATA_HOME`, and fontconfig's cache under `$XDG_CACHE_HOME`: a real
+login wrote all four there before this. The same commands
 are given `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`, the folders `config`, `cache`
 and `data` of the vault folder, and never `CHROME_CONFIG_HOME` nor `BREAKPAD_DUMP_LOCATION`,
 which would move the configuration folder or the dumps elsewhere. `HOME` stays the user's:
