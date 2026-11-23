@@ -386,8 +386,9 @@ impl Launch {
 async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked = Launch::of(args)?;
     let session = asked.session();
-    // Checked again here, as the request was: only a root starts a root.
-    if session && caller.parent.is_some() {
+    // Checked again here, as the request was: only a root starts a root. A child an agent of
+    // another machine launched has no parent here, and is a child: its depth says it.
+    if session && (caller.parent.is_some() || caller.depth > 0) {
         return Err(refused(crate::actions::CHILD_ROOTS));
     }
     let led = asked.kind() == LaunchKind::Led;
@@ -502,6 +503,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             preparing,
             role,
             parent: (!session).then(|| (caller.id.clone(), caller.depth)),
+            remote_parent_depth: None,
             title: Some(asked.title.trim().to_owned()),
             brief: asked.brief.clone(),
             provider,
@@ -716,7 +718,8 @@ pub fn launch_for_extension(
 ) -> Result<Agent, Failure> {
     let launcher = crate::extensions::launched(daemon, &parent.id);
     let allowed = match launcher {
-        None => parent.parent.is_none(),
+        // A child an agent of another machine launched has no parent here, and is no session.
+        None => parent.parent.is_none() && parent.depth == 0,
         Some((owner, _)) => owner.name == extension,
     };
     if !allowed {
@@ -758,6 +761,7 @@ pub fn launch_for_extension(
             preparing: false,
             role: &roles::LAUNCHED,
             parent: Some((parent.id.clone(), parent.depth)),
+            remote_parent_depth: None,
             title: Some(title.to_owned()),
             brief: brief.to_owned(),
             provider: provider.provider,
@@ -850,8 +854,8 @@ pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
     let brief = agent.brief.clone().unwrap_or_default();
     // Detached, it is still that agent's words.
     // Started for an agent of another machine: that agent's words, never the user's.
-    if let Some((caller, machine, child)) = crate::launches::launched_from(daemon, &agent.id) {
-        if child {
+    if let Some((caller, machine, kind)) = crate::launches::launched_from(daemon, &agent.id) {
+        if kind == "child" {
             return ("brief", brief);
         }
         return (
@@ -2873,7 +2877,8 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
     let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
         return;
     };
-    if agent.parent.is_none() {
+    // A child an agent of another machine launched has no parent here, and is a child.
+    if agent.parent.is_none() && agent.depth == 0 {
         return;
     }
     if let Some(brief) = &agent.brief {
@@ -2985,6 +2990,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "led_by": agent.launched_by.as_ref().filter(|_| agent.led),
         // The agent the user detached it from, kept for the record (`docs/tools.md`, "Detach").
         "detached_from": agent.detached_from,
+        // The agent of another machine that started it here (`launches::launched_from_shown`).
+        "launched_from": crate::launches::launched_from_shown(daemon, &agent.id),
         "depth": agent.depth,
         "epoch": agent.epoch,
         "state": agent.state,
@@ -3289,8 +3296,78 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A child an agent of another machine launched here, as the store keeps it: no parent, one
+    /// below that agent's depth.
+    pub(crate) fn a_child_of_another_machine() -> Agent {
+        Agent {
+            depth: 1,
+            role: "worker".into(),
+            ..crate::daemon::tests::an_agent("c1")
+        }
+    }
+
+    /// A daemon on temporary folders and a throwaway store holding `agent`.
+    pub(crate) fn a_daemon_with(dir: &std::path::Path, agent: &Agent) -> Arc<Daemon> {
+        let paths = flottille_core::paths::Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(agent, ("agent.created", json!({})))
+            .unwrap();
+        let projects = projects::Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    #[tokio::test]
+    async fn a_child_of_another_machine_s_agent_starts_no_session_even_given_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = a_child_of_another_machine();
+        let daemon = a_daemon_with(dir.path(), &child);
+
+        for kind in ["led", "handed"] {
+            let launched = launch(
+                &daemon,
+                &child,
+                json!({"kind": kind, "title": "Another", "brief": "Do more."}),
+            )
+            .await;
+            assert!(
+                matches!(&launched, Err(Outcome::Refused(why)) if why == crate::actions::CHILD_ROOTS),
+                "{kind}"
+            );
+        }
+        // Nor does it pilot an extension's agents: it is no session.
+        let piloted = launch_for_extension(
+            &daemon,
+            "review",
+            &child,
+            "pilot",
+            "Review",
+            "Read the change.",
+            String::new(),
+            providers::Asked {
+                provider: None,
+                model: None,
+                effort: None,
+            },
+            None,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            piloted.message.contains("cannot have children"),
+            "{}",
+            piloted.message
+        );
+        assert_eq!(daemon.read(Store::agents).unwrap().len(), 1);
+    }
 
     #[test]
     fn a_duration_is_said_in_its_unit() {

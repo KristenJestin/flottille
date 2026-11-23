@@ -542,8 +542,11 @@ Attached to its key: renamed, it keeps the rest; paired again with the same key,
 - **Signed in the list**: its name, its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`), its
   colour (`grey`, `red`, `orange`, `yellow`, `green`, `teal`, `blue`, `purple`), its role, who added
   it.
-- **What it says itself**, kept by the hub: what it is (`computer`), its system (`linux`), Flottille's
-  version (from its hello, at each session).
+- **What it says itself**, kept by the hub: what it is (`computer`, or `phone` for the app), its system
+  (`linux`), Flottille's version (from its hello, at each session). It is what tells a device that
+  cannot run agents (`phone`) from one that could: Settings explains and offers the command to make a
+  controller or a viewer a runner only to the second (#1286), as a card that has said nothing yet is
+  taken for one that could.
 - **What the hub knows**: when it was paired, when it was last seen (a session that starts or
   ends).
 
@@ -591,7 +594,9 @@ join request: a device is added on the hub's host. Then the page shows the devic
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
 "⋯", Remove asking once; the row of a controller or a viewer, which runs nothing and so is not
 offered in Settings or the composer, says so and shows `flottille-hub role <name> runner`, which
-changes it on the hub's host, copyable, #1247); #1177 took this machine's addresses off the page.
+changes it on the hub's host, copyable, #1247; a phone, which never runs agents, has only its role in
+words, #1286: the window tells it by what the device said it is, `phone`, and never by its icon or its
+name); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
@@ -908,6 +913,23 @@ local child's work; nothing moves your branch.*
 - **Who**: as today. `led` and `handed` from a root only; `child` from any agent that launches
   children. A led session on the computer may start a child on the server; a led session on the
   server is a root there, and may start its own children there.
+- **A child there is a child** (#1274). On the machine it runs on, a `child` an agent of another
+  machine launched has no parent, and is a child all the same: a child's tools (none of the
+  project's actions, no `session_*`, no `agent_*` at the depth limit), and its parent's depth plus
+  one, so the depth limit holds across machines. The launch carries the caller's `depth`, left out
+  at 0 so that a machine of before reads it; a child asked for by an agent at the limit is refused
+  there (`agent b1 of pc is at the depth limit (1): it cannot launch children`). `agent.list`,
+  `agent.show` and the tree say whose it is, `launched_from: {machine, agent, kind}`; the window
+  draws a bar naming that agent where the composer would be (`This conversation is a child of agent
+  b1 of pc, which launched it from there: only its parent writes to it.`), the CLI says `child of
+  agent b1 of pc`, and the phone lists it among no sessions. `agent.send` to it is refused, as to
+  a child here (`agent a2 is a child of agent b1 of pc: only its parent writes to it`); the user
+  still answers its questions and stops it, the ways out while its parent's machine is off ("Where
+  a question goes when the parent is off"). It is subscribed to nothing automatically, and gets its
+  brief again after a compaction, as a child does. A `led` or `handed` launch asked for by a
+  caller below its root (a `depth` above 0) is refused there, as its own machine refuses it. A
+  child stored by a Flottille of before, at depth 0, is put at depth 1 when the store opens, so it
+  takes a child's tools at its next start.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
@@ -1653,6 +1675,13 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **A child of another machine's agent stored at depth 0 is put at depth 1 at every open of the
+  store** (#1274), not by a numbered migration: the change is done once and does nothing after,
+  and every check of a root then reads its depth alone. `agent.trees` still lists it among the
+  roots: the window reads there the questions it asks the user while its parent's machine is off.
+- **A launch that says no depth is a root's** (#1274): only a root launches on a machine of before
+  (its depth limit is 1), so a missing `depth` is read as 0, never refused; a child asked for by a
+  caller at the limit is refused by the machine it would run on.
 - **What a travelling setup needs is its copied files** (#1214): today a project's settings name no
   vault entry (its services and setup steps hold none), so the entries a launch asks for are those
   made from the files its `copy` steps match on the caller's machine, one entry a file, named

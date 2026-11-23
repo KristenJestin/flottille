@@ -1636,7 +1636,8 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         daemon,
         provider,
         project,
-        agent.parent.is_none(),
+        // A child an agent of another machine launched has no parent here, and is at depth 1.
+        agent.parent.is_none() && agent.depth == 0,
         agent.depth,
         crate::vault::listed_to(daemon, project),
         crate::extensions::launched(daemon, &agent.id)

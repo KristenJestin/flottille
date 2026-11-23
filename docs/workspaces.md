@@ -50,7 +50,9 @@ the same way, with `branch` (and `base`, as `--base` does): its card says the br
 the branch made. When the project has a branch format (`docs/projects.md`), a branch the workspace
 starts must match it, named or the default, or creation is refused naming the pattern; a branch
 every repository resumes is taken as it is. Creation is refused when the project has a workspace of that
-name, when the folder exists, or when the branch is checked out in a checkout of one of the
+name, when the folder exists, when the daemon cannot make the workspaces folder or write in it
+(`/srv/nowhere/app: permission denied`, checked before any fetch, nothing recorded; the session
+that asked says it), or when the branch is checked out in a checkout of one of the
 repositories, the main one or another worktree (`the branch feature/x is checked out in <folder>
 for web: …`, naming it).
 
