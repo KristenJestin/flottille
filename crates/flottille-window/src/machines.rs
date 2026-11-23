@@ -234,6 +234,9 @@ pub struct Launched {
     pub heard: Option<String>,
     pub heard_at: Option<u64>,
     pub at: u64,
+    /// The project its machine made for it, by that machine's name of it: `None` when it runs in
+    /// one that machine had.
+    pub making: Option<String>,
 }
 
 impl Launched {
@@ -248,6 +251,10 @@ impl Launched {
             heard: value["heard"].as_str().map(str::to_owned),
             heard_at: value["heard_at"].as_u64(),
             at: value["at"].as_u64().unwrap_or_default(),
+            making: value["there"]["project"]
+                .as_str()
+                .filter(|_| value["there"]["made"] == true)
+                .map(str::to_owned),
         }
     }
 }
