@@ -231,10 +231,8 @@ fn the_workspace_section_does_not_show_prepared(cx: &mut TestAppContext) {
     with_ticket_and_pull(&user);
     let cx = open_rail(&user, &lead, cx);
 
-    assert!(
-        present(cx, other_fact(cx)),
-        "the other facts are still there"
-    );
+    let other = other_fact(cx);
+    assert!(present(cx, other), "the other facts are still there");
     for id in [
         "rail-fact-Prepared",
         "rail-fact-Prepared-label",
@@ -322,7 +320,8 @@ fn the_values_of_the_ticket_and_the_pull_request_are_drawn_at_the_size_of_the_ot
     let cx = open_rail(&user, &lead, cx);
 
     // The line height follows the text size (`mono(size)` is 1.4 times it): one height, one size.
-    let others = rect(cx, &format!("{}-value", other_fact(cx))).size.height;
+    let other = format!("{}-value", other_fact(cx));
+    let others = rect(cx, &other).size.height;
     for id in ["rail-ticket", "rail-pull-api"] {
         assert_eq!(rect(cx, id).size.height, others, "{id}");
     }
