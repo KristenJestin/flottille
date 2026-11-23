@@ -4444,7 +4444,7 @@ mod tests {
     fn a_reason_is_masked_before_it_is_cut() {
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         // The token starts before the cut and ends after it: cut first, it would be half shown.
-        let line = format!("Error: {}{token}", "x".repeat(180));
+        let line = format!("Error: {} {token}", "x".repeat(180));
 
         let said = error_line(&line, "").unwrap();
 
