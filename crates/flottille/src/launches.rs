@@ -1289,6 +1289,16 @@ fn finish(
         crate::travelled::unmake(daemon, &launch);
         return;
     }
+    // Its workspace was made while it was held, before these settings were laid: its setup is
+    // the project's as it is now.
+    if let Some(id) = launch.workspace_id
+        && let Err(why) = crate::workspaces::resnapshot(daemon, id)
+    {
+        eprintln!(
+            "flottille daemon: launch {}: its setup is not taken again: {why}",
+            launch.launch
+        );
+    }
     go_on(daemon, &launch, &agent);
 }
 

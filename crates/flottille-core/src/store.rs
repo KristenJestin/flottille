@@ -1407,6 +1407,48 @@ impl Store {
             .flatten())
     }
 
+    /// Replaces the setup steps of the workspace `workspace` that have not started, its worktrees
+    /// kept, by `steps` (none of them a worktree), numbered after the steps that stay, in one
+    /// transaction: a workspace made of another machine's code takes the setup its launch laid,
+    /// once allowed. Nothing is changed when a setup step has started.
+    pub fn replace_pending_steps(&mut self, workspace: i64, steps: &[Step]) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        let started: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM workspace_steps WHERE workspace = ?1 AND state != 'pending' \
+             AND action NOT LIKE '%\"worktree\"%'",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        if started > 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "DELETE FROM workspace_steps WHERE workspace = ?1 AND action NOT LIKE \
+             '%\"worktree\"%'",
+            params![workspace],
+        )?;
+        let next: u32 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM workspace_steps WHERE workspace = ?1",
+            params![workspace],
+            |row| row.get(0),
+        )?;
+        for (at, step) in steps.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO workspace_steps (workspace, position, repository, action, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    workspace,
+                    next + at as u32,
+                    step.repository,
+                    serde_json::to_string(&step.action)?,
+                    StepState::Pending.as_str(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     /// Puts these steps back to pending, forgetting their failure, with one event, in one
     /// transaction.
     pub fn reset_steps(

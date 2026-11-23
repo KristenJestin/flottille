@@ -320,9 +320,20 @@ fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
 
     let (shell, cx, row) = the_led_row(&pc, &agent, cx);
 
-    until(&shell, cx, "the row says the project is made", |cx| {
-        label(cx, session_machine_id(&row)).as_deref() == Some("server · preparing app")
-    });
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_machine_id(&row));
+        if said.as_deref() == Some("server · preparing app") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[gpui_kit::test]

@@ -12990,7 +12990,7 @@ fn the_folder_for_projects_from_other_machines_is_chosen_in_settings_general(
         settle(cx);
     };
 
-    // A folder inside a project's is refused, under the field, and goes once the field changes.
+    // A folder inside a project's is refused, under the field.
     typed(atlas.join("others").to_str().unwrap(), cx);
     cx.update(|window, cx| window.click("travelled-folder-save", cx));
     until(&shell, cx, "the refusal", |cx| {
@@ -13003,12 +13003,13 @@ fn the_folder_for_projects_from_other_machines_is_chosen_in_settings_general(
 
     // A folder of the user's: kept in its file, and the data folder offered back.
     typed("~/from-others", cx);
-    cx.update(|window, _| assert!(window.try_find("travelled-folder-problem").is_none()));
     cx.update(|window, cx| window.click("travelled-folder-save", cx));
     until(&shell, cx, "the folder kept", |cx| {
         section.read_with(cx, |s, _| s.shown().is_some_and(|s| s.own.is_some()))
     });
     settle(cx);
+    // The refusal folded away with the save that went through.
+    cx.update(|window, _| assert!(window.try_find("travelled-folder-problem").is_none()));
     let text = std::fs::read_to_string(user.path("config/flottille/travelled.toml")).unwrap();
     assert!(text.contains("from-others"), "{text}");
     cx.update(|window, _| assert!(window.find("travelled-folder-default").visible()));
