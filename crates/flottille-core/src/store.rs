@@ -1014,6 +1014,18 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX finding_occurrences_by_finding ON finding_occurrences (finding, id);
 ",
+    "
+    -- The answers an agent of this machine waits for from another machine: a call of a session
+    -- there held for that machine's user (`docs/remote.md`, \"A tree across machines\"). Its
+    -- answer is taken from that machine only while it is waited for.
+    CREATE TABLE awaited_answers (
+        machine TEXT NOT NULL,
+        request INTEGER NOT NULL,
+        agent   TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        at      INTEGER NOT NULL,
+        PRIMARY KEY (machine, request)
+    ) STRICT;
+",
 ];
 
 /// The migrations of the version after dev's (`docs/releases.md`, "The next version"), each by
@@ -1716,10 +1728,11 @@ impl Store {
         Ok(agent)
     }
 
-    /// Every agent, the oldest first.
+    /// Every agent, the oldest first. A caller of another machine stood in for here
+    /// ([`Store::keep_stand_in`]) is none of this machine's: only its id finds it.
     pub fn agents(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
-            "SELECT {AGENT_COLUMNS} FROM agents ORDER BY created_at, id"
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE id NOT LIKE '%@%' ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -1730,7 +1743,7 @@ impl Store {
     pub fn live_agents(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state NOT IN ('ended', 'failed') \
-             ORDER BY created_at, id"
+             AND id NOT LIKE '%@%' ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -2919,6 +2932,102 @@ impl Store {
         Ok((Some(leave), Some(event)))
     }
 
+    /// Keeps the agent of another machine that calls a session of this one, stood in for by
+    /// `agent` (its id `<caller>@<machine's key>`, never one of this machine's): made the first
+    /// time, its title, project, mode and machine's name brought up to date after. No event: it
+    /// is shown nowhere but on the requests and in the leaves it makes. `None` when it is new and
+    /// `most` of that machine's are kept already.
+    pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
+        if self.agent(&agent.id)?.is_none() {
+            let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
+            let kept: i64 = self.connection.query_row(
+                "SELECT count(*) FROM agents WHERE instr(id, '@') > 0 \
+                 AND substr(id, instr(id, '@') + 1) = ?1",
+                params![machine],
+                |row| row.get(0),
+            )?;
+            if kept as usize >= most {
+                return Ok(None);
+            }
+            self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
+        } else {
+            self.connection.execute(
+                "UPDATE agents SET title = ?2, project = ?3, gate_mode = ?4, brief = ?5, \
+                 updated_at = ?6 WHERE id = ?1",
+                params![
+                    agent.id,
+                    agent.title,
+                    agent.project,
+                    agent.gate_mode.as_str(),
+                    agent.brief,
+                    now_ms()
+                ],
+            )?;
+        }
+        Ok(Some(
+            self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()),
+        ))
+    }
+
+    /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
+    /// machine whose key is none of `machines` (it left the members), or idle since before
+    /// `idle_before`, with their leaves and requests; and the answers awaited from such a
+    /// machine, or since before `idle_before` (never sent). How many callers went.
+    pub fn forget_stand_ins(&mut self, machines: &[String], idle_before: u64) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let stand_ins: Vec<(String, u64)> = {
+            let mut statement = transaction
+                .prepare("SELECT id, updated_at FROM agents WHERE instr(id, '@') > 0")?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut forgotten = 0;
+        for (id, at) in stand_ins {
+            let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+            if at < idle_before || !machines.iter().any(|kept| kept == machine) {
+                forgotten +=
+                    transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+            }
+        }
+        let awaited: Vec<(String, i64, u64)> = {
+            let mut statement =
+                transaction.prepare("SELECT machine, request, at FROM awaited_answers")?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (machine, request, at) in awaited {
+            if at < idle_before || !machines.contains(&machine) {
+                transaction.execute(
+                    "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2",
+                    params![machine, request],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(forgotten)
+    }
+
+    /// Records that `agent` of this machine waits for the answer of request `request` of the
+    /// machine of key `machine`: that answer alone is taken from it.
+    pub fn await_answer(&mut self, machine: &str, request: u64, agent: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO awaited_answers (machine, request, agent, at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![machine, request as i64, agent, now_ms() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `agent` waited for the answer of request `request` of the machine of key
+    /// `machine`, which it waits for no more.
+    pub fn take_awaited(&mut self, machine: &str, request: u64, agent: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM awaited_answers WHERE machine = ?1 AND request = ?2 AND agent = ?3",
+            params![machine, request as i64, agent],
+        )? > 0)
+    }
+
     /// Whether the user let `writer` write to `session`.
     pub fn has_leave(&self, writer: &str, session: &str) -> Result<bool> {
         Ok(self
@@ -3497,7 +3606,7 @@ impl Store {
     }
 
     /// Keeps `list`, the sessions the machine of key `machine` (named `name`) told at `at`, in
-    /// place of the one it told before.
+    /// place of the one it told before. The projects it told apart (`keep_machine_projects`) stay.
     pub fn keep_machine_sessions(
         &mut self,
         machine: &str,
@@ -3505,11 +3614,58 @@ impl Store {
         list: &Value,
         at: u64,
     ) -> Result<()> {
-        self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let mut list = list.clone();
+        let before: Option<String> = transaction
+            .query_row(
+                "SELECT list FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let projects = before
+            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
+            .and_then(|before| before.get("projects").cloned());
+        if let (Some(projects), Some(list)) = (projects, list.as_object_mut()) {
+            list.entry("projects").or_insert(projects);
+        }
+        transaction.execute(
             "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3, at = ?4",
             params![machine, name, list.to_string(), at as i64],
         )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keeps `projects`, the projects the machine of key `machine` (named `name`) told at `at`,
+    /// beside the sessions it told (none yet when this is the first it says).
+    pub fn keep_machine_projects(
+        &mut self,
+        machine: &str,
+        name: &str,
+        projects: &Value,
+        at: u64,
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let before: Option<String> = transaction
+            .query_row(
+                "SELECT list FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut list = before
+            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({"sessions": []}));
+        list["projects"] = projects.clone();
+        transaction.execute(
+            "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3",
+            params![machine, name, list.to_string(), at as i64],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -9363,6 +9519,30 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_s_projects_stay_beside_the_sessions_it_lists_again() {
+        let mut store = Store::open_in_memory().unwrap();
+        let projects = json!([{"name": "app", "remotes": ["github.com/acme/app"]}]);
+        // Its projects may come first: its list then holds no session yet.
+        store
+            .keep_machine_projects("aa", "server", &projects, 1)
+            .unwrap();
+        store
+            .keep_machine_sessions("aa", "server", &json!({"sessions": [{"id": "s1"}]}), 2)
+            .unwrap();
+        let kept = store.machine_sessions().unwrap();
+        assert_eq!(kept[0].2["projects"], projects);
+        assert_eq!(kept[0].2["sessions"], json!([{"id": "s1"}]));
+        assert_eq!(kept[0].3, 2);
+        // A machine of before says none: its list holds no projects.
+        store
+            .keep_machine_sessions("bb", "old", &json!({"sessions": []}), 3)
+            .unwrap();
+        let old = &store.machine_sessions().unwrap()[0];
+        assert_eq!(old.1, "old");
+        assert!(old.2.get("projects").is_none());
+    }
+
+    #[test]
     fn an_allowed_launch_whose_settings_cannot_be_laid_is_refused() {
         let mut store = Store::open_in_memory().unwrap();
         let launch = a_launch_in();
@@ -9382,6 +9562,81 @@ mod tests {
             .unwrap();
         let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
         assert_eq!(read.state, "refused");
+    }
+
+    /// A caller of the machine of key `machine` stood in for here.
+    fn a_stand_in(caller: &str, machine: &str) -> Agent {
+        let mut agent = an_agent();
+        agent.id = format!("{caller}@{machine}");
+        agent
+    }
+
+    #[test]
+    fn a_stand_in_is_none_of_this_machine_s_agents() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 64).unwrap();
+
+        assert!(store.agents().unwrap().is_empty());
+        assert!(store.live_agents().unwrap().is_empty());
+        assert!(store.agent("c0@aa").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_machine_keeps_a_bounded_number_of_stand_ins_and_forgets_the_idle_and_the_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        for caller in ["c0", "c1", "c2"] {
+            assert!(
+                store
+                    .keep_stand_in(&a_stand_in(caller, "aa"), 3)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        // A fourth caller of that machine is refused; one already kept and another machine's
+        // are taken.
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c3", "aa"), 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c0", "aa"), 3)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c0", "bb"), 3)
+                .unwrap()
+                .is_some()
+        );
+        let local = an_agent();
+        store
+            .create_agent(&local, ("agent.created", json!({})))
+            .unwrap();
+        store.grant_leave("c0@aa", &local.id, 1).unwrap();
+        store.grant_leave("c0@bb", &local.id, 2).unwrap();
+        store.await_answer("aa", 5, &local.id).unwrap();
+        store.await_answer("bb", 6, &local.id).unwrap();
+
+        // `bb` left the members: its caller goes, with its leave and what is awaited of it.
+        assert_eq!(store.forget_stand_ins(&["aa".to_owned()], 0).unwrap(), 1);
+        assert!(store.agent("c0@bb").unwrap().is_none());
+        assert!(!store.has_leave("c0@bb", &local.id).unwrap());
+        assert!(store.has_leave("c0@aa", &local.id).unwrap());
+        assert!(!store.take_awaited("bb", 6, &local.id).unwrap());
+
+        // Idle for long: every caller goes, and what is awaited since as long.
+        let later = now_ms() + 1;
+        assert_eq!(
+            store.forget_stand_ins(&["aa".to_owned()], later).unwrap(),
+            3
+        );
+        assert!(store.leaves_of(&local.id).unwrap().is_empty());
+        assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
+        assert!(store.agent(&local.id).unwrap().is_some());
     }
 
     #[test]

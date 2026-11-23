@@ -2659,16 +2659,18 @@ async fn a_device_hello_changed_on_the_way_never_lowers_the_hub_s_protocol() {
         .await;
     assert_hello_not_taken(said, "the device's protocols made [1]");
 
-    // A hub of protocol 1 the device's [1, 2] made [2] on its way refuses it, its refusal signed
-    // over the [2] it received: the device, which sent [1, 2], takes it for no verdict.
+    // A hub of protocol 1 the device's [2] made [3] on its way refuses it, its refusal signed over
+    // the [3] it received: the device, which sent [2], takes it for no verdict. Were its own hello
+    // left out of what is signed, the refusal would read as the hub's word, and the device would
+    // be told to update the hub.
     let older = hub_saying(hub_signer(&place.hub_folder()), old_hello()).await;
-    let (middle, _) = relay(older, device_hello_made(serde_json::json!([2]))).await;
+    let (middle, _) = relay(older, device_hello_made(serde_json::json!([3]))).await;
     let said = pinned_to(middle, &key)
-        .connect(&machine, &both, &Tls::System)
+        .connect(&machine, &hello(), &Tls::System)
         .await;
     assert_hello_not_taken(
         said,
-        "the device's protocols made [2], the hub's refusal for it",
+        "the device's protocols made [3], the hub's refusal for it",
     );
 }
 

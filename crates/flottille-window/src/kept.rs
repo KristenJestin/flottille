@@ -239,6 +239,17 @@ pub struct Folds {
     pub leads: HashMap<String, bool>,
     /// The "Ended" group: whether it is unfolded.
     pub ended: Option<bool>,
+    /// The projects are shown by machine, one section each, instead of in one list.
+    pub by_machine: bool,
+    /// Each machine's section, by its name: whether it is unfolded.
+    pub machines: HashMap<String, bool>,
+    /// Each project of a machine's section, by [`machine_key`]: whether it is unfolded.
+    pub on_machines: HashMap<String, bool>,
+}
+
+/// What the state keeps a project of a machine's section under.
+pub fn machine_key(machine: &str, project: &str) -> String {
+    format!("{machine}\u{1f}{project}")
 }
 
 impl Folds {
@@ -258,6 +269,9 @@ impl Folds {
             projects: flags("projects"),
             leads: flags("leads"),
             ended: state["sidebar"]["ended"].as_bool(),
+            by_machine: state["sidebar"]["by_machine"].as_bool().unwrap_or(false),
+            machines: flags("machines"),
+            on_machines: flags("on_machines"),
         }
     }
 
@@ -265,6 +279,15 @@ impl Folds {
         let mut json = json!({"projects": self.projects, "leads": self.leads});
         if let Some(ended) = self.ended {
             json["ended"] = json!(ended);
+        }
+        if self.by_machine {
+            json["by_machine"] = json!(true);
+        }
+        if !self.machines.is_empty() {
+            json["machines"] = json!(self.machines);
+        }
+        if !self.on_machines.is_empty() {
+            json["on_machines"] = json!(self.on_machines);
         }
         json
     }

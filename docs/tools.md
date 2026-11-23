@@ -1684,6 +1684,13 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 They go through the gate like every call (it allows them). Their texts are masked of the
 daemon's secrets before anyone else reads them.
 
+**A session on another machine of the user's is the same as one on this machine**, for every one
+of these tools: found by its id or its title among every machine's sessions, judged by the machine
+it runs on by the same rules (the tree's mode, the judge, the leave per pair, what is held for the
+user in every mode), answered the same. Only a machine that cannot be reached (refused at once,
+saying since when) and a device that may only view (it reads, nothing more) differ
+(`docs/remote.md`, "Sessions of another machine").
+
 ### What an agent runs on
 
 An agent reads what another runs on, by name, `provider · model · effort` (`Claude · Sonnet 5.5 ·

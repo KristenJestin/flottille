@@ -620,6 +620,10 @@ fn store_answer_with(
         );
         return;
     }
+    // A caller of another machine is told on its machine, as it would be here.
+    if crate::across::answer_back(daemon, request, body) {
+        return;
+    }
     deliveries::ring(daemon, &request.agent);
 }
 
