@@ -768,10 +768,11 @@ mod tests {
             lift(Rule::ForcePush, &ask(&[&forced, "it reads .env"], &[])),
             Verdict::Ask(ask(&["it reads .env"], &[gate::PUSH]))
         );
+        // A waive stays the user's: the merge itself checks the pull request an exception is for.
         let waived = format!("{}: the user said so", gate::WAIVED);
         assert_eq!(
             lift(Rule::MergeBlocked, &ask(&[&waived], &["it merges"])),
-            Verdict::Ask(ask(&[], &["it merges"]))
+            Verdict::Ask(ask(&[&waived], &["it merges"]))
         );
         assert_eq!(
             lift(Rule::ForgeState, &ask(&[], &["it closes #3"])),
