@@ -876,7 +876,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1050,6 +1050,50 @@ local child's work; nothing moves your branch.*
 - **Caps**: the child counts in its parent's project cap on the parent's machine and in the
   project's cap on the receiving machine; refused above either, never queued.
 - **The brief** is the caller's, as today: nothing of its conversation goes with it.
+
+### Sessions of another machine
+
+**A session on another machine of the user's is the same as one on this machine, for every tool
+that addresses a session** (built #1250): an agent finds it, reads it, writes to it, stops it and
+answers it with the same arguments, and gets the same answers and the same refusals; it need not
+know, nor say, on which machine a session runs. The machine is where it runs, nothing more.
+
+- **Found the same way.** A session is named by its id or its title (`tools.md`, "Sessions that
+  read each other") among the roots of this machine and the live roots each other machine last
+  listed (`sessions`, "One list of every machine"), a project of the same name being the same
+  project. A title that two sessions share, here or there, is refused with both listed; every
+  listing a tool gives holds the sessions of every machine, one of another machine said `on
+  server` after its id (`Night lead · 0123456789ab · on server · idle, active 2 min ago`). An id
+  two machines list is refused, naming both: ids are each machine's own. A child an agent of
+  another machine launched is a child there too, never listed nor called as a session.
+  A session the caller started there, named by its title, is called as by its id.
+- **Judged by the machine it runs on, by the same code.** The caller's daemon sends the call as it
+  is (`call`, signed with its machine key) and judges nothing of it. The receiving machine stands
+  the caller in by an agent of its own, `<caller>@<machine's key>` (never an id of its own, never
+  listed, shown as `agent <id> of pc`), in the caller's project by its name and in its tree's mode,
+  and plays the call through the very path of its own agents' calls: the gate, the judge, the
+  user's leave per pair, what is held for the user in every mode (the first message to a session
+  the caller did not start, ending one, a first read across projects), the tool itself. A call
+  held there is a request of that machine's user, answered at once as held; its answer comes back
+  as the `approval` delivery it would be on one machine (`deliver`, its `launch` `request-<n>`,
+  taken only by the agent that waits for that very request of that machine). Nothing gives a
+  caller of another machine more than an agent of that machine: no other tool than
+  `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
+  the tree later is not given until it is written there), no secret, no file: when its project is
+  not on that machine, its place is a folder that does not exist. Its answer is masked again of
+  the caller's machine's secrets. A machine stands in 64 callers of one other machine at most
+  (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
+  the members, with their leaves.
+- **The mode** is the caller's tree's, Full only with the user's switch signed by a device, as a
+  launch's ("Starting a session on another machine"): a machine alone cannot raise it.
+- **Only two differences, said in one machine's terms.** A machine that cannot be reached: its
+  sessions stay listed with its state (`on server, offline since 22:14`), and a call is refused at
+  once saying so (`refused: server is offline since 22:14: the session "Night lead" (agent …)
+  runs there, and cannot be reached now; …`). A device that may only view: its agents' calls that
+  only read (`session_read`, `agent_status`) are served, every other is refused (`refused: pc may
+  only view: a controller or a runner may call session_send on a session of another machine`).
+- **The version.** A call of a launch is sent as before; a call of another session carries fields
+  a machine of before does not read, and is refused by it, saying so. No protocol change.
 
 ### What travels
 
@@ -1631,6 +1675,36 @@ on a real phone, by hand, and reported.
 - **The folder for projects from other machines is not moved** (#1214): changing it applies to the
   projects made afterwards; those made before stay, and a launch that did not start removes its
   project from where it was made.
+- **A call to a session of a machine that is off is refused at once** (#1250), every tool alike,
+  never kept: what the session's machine would answer (held, refused, the leave) cannot be known
+  before it is back. Messages to a session the caller started stay kept, as before.
+- **The leave given to a caller of another machine lasts until the session written to ends** or
+  the user withdraws it (#1250): its machine does not tell when the caller ends, so the end of the
+  writer does not take it, as it does on one machine.
+- **A session of another machine is in the caller's project when its project has the same name**
+  (#1250), as the sidebar groups them ("One list of every machine"); a title is matched among the
+  live sessions that machine listed, an untitled one by the first line its list gives it. The
+  name only: the identity of a project by its repositories' remotes (#1228's `projects` list) is
+  a follow-up.
+- **A led session writing to its pilot on another machine** is asked the leave as any other pair
+  (#1250): the receiving machine does not stand its caller in as started by that pilot.
+- **The user's signed switch to Full counts for a call as for a launch** (#1250): checked against
+  the machine that sends it and the tree that machine names. The receiving machine cannot tell
+  which tree the caller belongs to; a machine that holds a switch could name its tree for another
+  of its agents, for 12 hours at most, as it already could for a launch.
+- **A machine of before refuses a call of another session** with the link's own refusal of a
+  message it does not read (#1250), not with a sentence of its own: no protocol bump for it.
+- **A held call of a caller of another machine is that machine's user's request** (#1250), as a
+  request of a child there goes to that machine's user. The stand-in's own id (`<caller>@<key>`),
+  seen on a request card, is not refused as a target by an agent of that machine: it holds no
+  conversation and runs nothing, so a call to it reaches no one.
+- **A stand-in whose project is not on the machine is in a folder that does not exist** (#1250),
+  under the user's runtime folder, never made, rather than refused: a read of a session of another
+  project is served as on one machine. The callers of one machine are capped at 64, forgotten after
+  30 days idle (as long as a message is kept) and when their machine leaves the members.
+- **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
+  an answer the user gave before that (within the same second) is refused. Answers never given are
+  forgotten after 30 days.
 - **"No screen" is the icon the machine proposes for itself** (#1247): a server (no battery and
   no connected screen under `/sys/class/drm`) is proposed as a `runner` whether an agent CLI is
   signed in or not. The machine has no other reliable signal of having no screen, so the icon is
@@ -2193,7 +2267,9 @@ on a real phone, by hand, and reported.
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
   `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
   not start agent …`). A call is judged on the caller's machine as one to a session it started
-  there (ending a led session as `end_led`).
+  there (ending a led session as `end_led`). A `call` whose `launch` is empty (and not an
+  `approval_answer`) is one to any other session of the receiver: served there by its own gate
+  and tools for the caller stood in for ("Sessions of another machine").
 - What goes to another machine is kept in the sender's store (`outbox`) before it is sent: in
   order, one at a time, when the link to that machine is made and whenever a message is kept
   while it is up; forgotten once the other machine answered it. `agent_status`, `session_read`

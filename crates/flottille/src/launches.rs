@@ -77,6 +77,61 @@ fn agent_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The mode of `caller`'s tree as another machine is told it, with a launch or a call: the agent
+/// of the tree a switch names (its root otherwise), the mode's word, and the user's signed switch
+/// to Full, the only way another machine takes Full.
+pub(crate) fn mode_sent(daemon: &Daemon, caller: &Agent) -> (String, &'static str, Option<String>) {
+    let mut tree = crate::tree::root_of(daemon, &caller.id);
+    let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
+        GateMode::Ask => ("ask", None),
+        GateMode::Auto => ("auto", None),
+        GateMode::Full => match daemon.read(|store| store.full_switch(&tree)).ok().flatten() {
+            Some(switch) => {
+                // Kept on the root, it may name any agent of the tree: the tree is named by
+                // that agent, which the other machine checks the switch against.
+                if let Some(named) = switched(&switch) {
+                    tree = named;
+                }
+                ("full", Some(switch))
+            }
+            // Only the user's signed switch raises a launch on another machine to Full.
+            None => ("auto", None),
+        },
+    };
+    (tree, mode, switch)
+}
+
+/// The mode another machine's launch or call is taken in: the one it says, except Full, taken
+/// only with the user's switch signed by a device for `tree`, less than 12 hours old here; Auto
+/// otherwise. A machine alone cannot raise a mode.
+pub(crate) fn mode_taken(
+    mode: &str,
+    switch: Option<&str>,
+    sender: &str,
+    tree: &str,
+    members: &flottille_link::Members,
+) -> GateMode {
+    match mode {
+        "ask" => GateMode::Ask,
+        "full" => match switch {
+            Some(switch)
+                if flottille_link::full_switch(
+                    switch,
+                    sender,
+                    tree,
+                    members,
+                    crate::link::wall_now(),
+                )
+                .is_ok() =>
+            {
+                GateMode::Full
+            }
+            _ => GateMode::Auto,
+        },
+        _ => GateMode::Auto,
+    }
+}
+
 /// The agent a switch to Full the user signed names: one of the tree it switched.
 fn switched(switch: &str) -> Option<String> {
     let request: flottille_link::Request = serde_json::from_str(switch).ok()?;
@@ -178,23 +233,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
             crate::travelled::LONGEST_SETTINGS / 1024
         )));
     }
-    let mut tree = crate::tree::root_of(daemon, &caller.id);
-    let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
-        GateMode::Ask => ("ask", None),
-        GateMode::Auto => ("auto", None),
-        GateMode::Full => match daemon.read(|store| store.full_switch(&tree)).ok().flatten() {
-            Some(switch) => {
-                // Kept on the root, it may name any agent of the tree: the tree is named by
-                // that agent, which the other machine checks the switch against.
-                if let Some(named) = switched(&switch) {
-                    tree = named;
-                }
-                ("full", Some(switch))
-            }
-            // Only the user's signed switch raises a launch on another machine to Full.
-            None => ("auto", None),
-        },
-    };
+    let (tree, mode, switch) = mode_sent(daemon, caller);
     let launch = flottille_core::agent::new_id().map_err(|error| refused(error.to_string()))?;
     let repositories: Vec<String> = place.iter().map(|(path, _)| path.clone()).collect();
     let message = LaunchAsk {
@@ -601,26 +640,13 @@ async fn judged(
         ),
         _ => None,
     };
-    let mode = match asked.mode.as_str() {
-        "ask" => GateMode::Ask,
-        "full" => match &asked.switch {
-            Some(switch)
-                if flottille_link::full_switch(
-                    switch,
-                    sender,
-                    &asked.tree,
-                    members,
-                    crate::link::wall_now(),
-                )
-                .is_ok() =>
-            {
-                GateMode::Full
-            }
-            // A machine alone cannot raise a mode.
-            _ => GateMode::Auto,
-        },
-        _ => GateMode::Auto,
-    };
+    let mode = mode_taken(
+        &asked.mode,
+        asked.switch.as_deref(),
+        sender,
+        &asked.tree,
+        members,
+    );
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
     let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;

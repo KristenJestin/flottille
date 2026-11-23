@@ -8,6 +8,7 @@ use flottille_core::agent::Agent;
 use flottille_core::store::now_ms;
 use serde_json::Value;
 
+use crate::across::Away;
 use crate::daemon::Daemon;
 use crate::mcp::{Grant, Outcome};
 use crate::tree::ago;
@@ -69,21 +70,65 @@ fn named_project(
     Ok((project != caller_project).then(|| project.to_owned()))
 }
 
+/// Where the session a call names runs: here, the arguments naming it by its id, or on another
+/// machine of the user's, which the call is sent to as it is (`across::forward`).
+pub enum Resolved {
+    Here(Value),
+    Away(Value, Away),
+}
+
 /// The arguments of the call with the session it names given by its id, or the refusal when a
 /// title picks none or several. An id that names an agent is left to the tool, which refuses a
 /// session of another project or a child as it always did. With `project`, a title is matched
-/// among that project's root sessions, as it is among the caller's own.
+/// among that project's root sessions, as it is among the caller's own. The sessions other
+/// machines list are found the same way, by their id or their title: a session is the same
+/// wherever it runs (`docs/remote.md`, "A tree across machines").
 pub fn resolve(
     daemon: &Daemon,
     grant: &Grant,
     tool: &str,
     mut args: Value,
-) -> Result<Value, Outcome> {
+) -> Result<Resolved, Outcome> {
+    // Any tool of the tree that names, by its id, a session another machine runs and no agent
+    // here: its machine answers it.
+    if crate::tree::TOOLS.contains(&tool) {
+        for field in ["session", "agent_id"] {
+            let Some(id) = args[field].as_str().map(str::trim).map(str::to_owned) else {
+                continue;
+            };
+            if daemon
+                .read(|store| store.agent(&id))
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                break;
+            }
+            let mut listing: Vec<Away> = crate::across::sessions_elsewhere(daemon, None)
+                .into_iter()
+                .filter(|away| away.session.id == id)
+                .collect();
+            // Ids are each machine's own: two machines listing one is no session to pick from.
+            if listing.len() > 1 {
+                let machines: Vec<&str> = listing.iter().map(|away| away.name.as_str()).collect();
+                return Err(Outcome::Refused(format!(
+                    "refused: more than one machine lists a session {}: {}; name it by its title \
+                     instead, or ask the user which one is meant",
+                    label(&id),
+                    machines.join(", ")
+                )));
+            }
+            if let Some(away) = listing.pop() {
+                args[field] = Value::String(id);
+                return Ok(Resolved::Away(args, away));
+            }
+        }
+    }
     let Some((field, what)) = field(tool, &args) else {
-        return Ok(args);
+        return Ok(Resolved::Here(args));
     };
     let Some(given) = args[field].as_str() else {
-        return Ok(args);
+        return Ok(Resolved::Here(args));
     };
     let name = given.trim().to_owned();
     let failed = |error: String| Outcome::Failed(error);
@@ -97,7 +142,7 @@ pub fn resolve(
         .map_err(|error| failed(error.to_string()))?;
     if found.is_some() {
         args[field] = Value::String(name);
-        return Ok(args);
+        return Ok(Resolved::Here(args));
     }
     let among = elsewhere.as_deref().unwrap_or(&caller.project);
     let mut roots: Vec<Agent> = daemon
@@ -107,47 +152,75 @@ pub fn resolve(
         .filter(|agent| agent.parent.is_none() && agent.project == among)
         .collect();
     roots.sort_by_key(|agent| std::cmp::Reverse((last_sign(agent), agent.created_at)));
+    // Only a tool of the tree reaches another machine's sessions.
+    let far = match crate::tree::TOOLS.contains(&tool) {
+        true => crate::across::sessions_elsewhere(daemon, Some(among)),
+        false => Vec::new(),
+    };
     let wanted = name.to_lowercase();
+    let titled = |title: &str| !wanted.is_empty() && title.trim().to_lowercase() == wanted;
     let mut same: Vec<&Agent> = roots
         .iter()
-        .filter(|agent| {
-            !wanted.is_empty()
-                && agent
-                    .title
-                    .as_deref()
-                    .is_some_and(|title| title.trim().to_lowercase() == wanted)
-        })
+        .filter(|agent| agent.title.as_deref().is_some_and(titled))
+        .collect();
+    // Another machine lists its live sessions only.
+    let far_same: Vec<&Away> = far
+        .iter()
+        .filter(|away| titled(&away.session.title))
         .collect();
     // A session that ended cannot take a message or be stopped: the live one is meant.
-    if needs_a_live_session(tool) && same.iter().any(|agent| !agent.state.is_final()) {
+    if needs_a_live_session(tool)
+        && (!far_same.is_empty() || same.iter().any(|agent| !agent.state.is_final()))
+    {
         same.retain(|agent| !agent.state.is_final());
     }
     let whose = match &elsewhere {
         Some(project) => format!("project {}", label(project)),
         None => "your project".to_owned(),
     };
-    let (header, listed) = match same.as_slice() {
-        [one] => {
+    let now = now_ms();
+    // Every session listed, here and elsewhere, the most recently active first.
+    let lines = |here: &[&Agent], away: &[&Away]| -> Vec<String> {
+        let mut lines: Vec<(u64, String)> = here
+            .iter()
+            .map(|agent| (last_sign(agent), line(agent, now)))
+            .chain(
+                away.iter()
+                    .map(|away| (away.session.exchanged_at, away_line(daemon, away, now))),
+            )
+            .collect();
+        lines.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        lines.into_iter().map(|(_, line)| line).collect()
+    };
+    let (header, listed) = match (same.as_slice(), far_same.as_slice()) {
+        ([one], []) => {
             args[field] = Value::String(one.id.clone());
-            return Ok(args);
+            return Ok(Resolved::Here(args));
         }
-        [] => (
+        ([], [one]) => {
+            args[field] = Value::String(one.session.id.clone());
+            return Ok(Resolved::Away(args, (*one).clone()));
+        }
+        ([], []) => (
             format!(
                 "refused: no session of {whose} has the id or the title \"{}\": {what} \
                  names a session by its agent id or by its title. The sessions of this project, \
                  the most recently active first:",
                 label(&name)
             ),
-            roots.iter().collect::<Vec<_>>(),
+            lines(
+                &roots.iter().collect::<Vec<_>>(),
+                &far.iter().collect::<Vec<_>>(),
+            ),
         ),
-        several => (
+        (here, away) => (
             format!(
                 "refused: {} sessions of {whose} are titled \"{}\": name the one you mean \
                  by its agent id:",
-                several.len(),
+                here.len() + away.len(),
                 label(&name)
             ),
-            several.to_vec(),
+            lines(here, away),
         ),
     };
     Err(Outcome::Refused(listing(grant, &header, &listed)))
@@ -155,13 +228,8 @@ pub fn resolve(
 
 /// The refusal: `header`, then as many of the sessions' lines, whole, as fit under the limit of
 /// a refusal once masked and escaped (`LISTED` at most), then how many are left out.
-fn listing(grant: &Grant, header: &str, sessions: &[&Agent]) -> String {
-    let now = now_ms();
-    let lines: Vec<String> = sessions
-        .iter()
-        .take(LISTED)
-        .map(|agent| line(agent, now))
-        .collect();
+fn listing(grant: &Grant, header: &str, sessions: &[String]) -> String {
+    let lines: Vec<String> = sessions.iter().take(LISTED).cloned().collect();
     let text = |kept: usize| {
         let mut text = vec![header.to_owned()];
         text.extend(lines[..kept].iter().cloned());
@@ -178,6 +246,24 @@ fn listing(grant: &Grant, header: &str, sessions: &[&Agent]) -> String {
         .find(|kept| fits(*kept))
         .unwrap_or(0);
     text(kept)
+}
+
+/// `<title> · <id> · on <machine> · <state>, active <when> ago`, the machine's own state after
+/// its name while it is off (`on server, offline since 22:14`).
+fn away_line(daemon: &Daemon, away: &Away, now: u64) -> String {
+    let title = Some(label(&away.session.title))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "(untitled)".to_owned());
+    let machine = match crate::across::unreachable(daemon, away) {
+        Some(state) => format!("on {}, {state}", away.name),
+        None => format!("on {}", away.name),
+    };
+    format!(
+        "{title} · {} · {machine} · {}, active {} ago",
+        away.session.id,
+        away.session.state,
+        ago(now.saturating_sub(away.session.exchanged_at))
+    )
 }
 
 /// When the session last showed a sign of life.

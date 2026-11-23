@@ -1,0 +1,846 @@
+//! A session on another machine of the user's is the same as one on this machine, for every
+//! tool that addresses a session (`docs/remote.md`, "A tree across machines"; `docs/tools.md`,
+//! "Sessions that read each other"): found by its id or its title, read, written to, stopped, with
+//! the same rules, judged by the machine it runs on. The only differences are a machine that is
+//! off and a device that may only view. A hub served in the test on 127.0.0.1 and two daemons,
+//! each with its own temporary HOME and XDG folders and fake agents.
+
+use crate::common;
+use crate::remote_deliveries::{child_on_server, off, prompts_with};
+use crate::remote_launch::{
+    Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
+    pc_and_server_as, prompted, refused, sent_with, server_user, titled,
+};
+
+use common::User;
+use common::mcp::{Answer, Mcp};
+use flottille_link::{Call, Deliver, LightSession, MachineMessage, SessionList};
+use serde_json::{Value, json};
+
+/// The title the user gave the session they started on the server.
+const NIGHT: &str = "Night lead of the export";
+/// The title of a session the user started on pc, the one-machine counterpart.
+const DAY: &str = "Day lead of the export";
+
+/// A session the user starts on `machine` in `app`, idle after its first turn, titled `title`:
+/// its id.
+fn user_session(machine: &Machine, title: &str) -> String {
+    let started = machine
+        .user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the session's first turn", || {
+        machine.agent(&id)["state"] == "idle"
+    });
+    machine
+        .user
+        .call("agent.rename", json!({"agent": id, "title": title}))
+        .unwrap();
+    id
+}
+
+/// `pc` (paired as `pc_role`) and `server` linked, both with the project `app`; on the server a
+/// session the user started, titled [`NIGHT`], which pc's daemon lists: its id.
+fn night_lead(pc_role: &str) -> (crate::remote_launch::TestHub, Machine, Machine, String) {
+    night_lead_of(pc_role, server_user(allowing()))
+}
+
+/// [`night_lead`], the server being `server`'s machine.
+fn night_lead_of(
+    pc_role: &str,
+    server: User,
+) -> (crate::remote_launch::TestHub, Machine, Machine, String) {
+    let (hub, pc, server) = match pc_role {
+        "runner" => pc_and_server(server, Some("")),
+        role => pc_and_server_as(role, server, Some("")),
+    };
+    let folder = server.folder();
+    server.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    server.git(&folder, &["add", "."]);
+    server.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let night = user_session(&server, NIGHT);
+    listed_on(&pc, &night);
+    (hub, pc, server, night)
+}
+
+/// Waits until `machine`'s daemon lists the session `id` of another machine.
+fn listed_on(machine: &Machine, id: &str) {
+    listed_as(machine, id, NIGHT);
+}
+
+/// Waits until `machine`'s daemon lists the session `id` of another machine, titled `title`.
+fn listed_as(machine: &Machine, id: &str, title: &str) {
+    eventually("the other machine's session listed", || {
+        let lists = machine.user.call("remote.sessions", json!({})).unwrap();
+        lists["machines"].as_array().unwrap().iter().any(|listed| {
+            listed["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|session| session["id"] == id && session["title"] == title)
+        })
+    });
+}
+
+/// The root of pc's, in `mode`, switched by the user from a device when it is Full (a machine
+/// alone never raises another machine's calls to Full).
+fn caller(pc: &Machine, server: &Machine, mode: &str) -> (String, Mcp) {
+    let (root, mcp) = pc.root(if mode == "full" { "auto" } else { mode });
+    if mode == "full" {
+        let switched = server
+            .user
+            .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
+        assert!(
+            switched.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&switched.stderr),
+            pc.log()
+        );
+    }
+    (root, mcp)
+}
+
+/// The number of the request a held answer names.
+fn held(answer: &Answer) -> u64 {
+    let text = done(answer);
+    let at = text
+        .find("request #")
+        .unwrap_or_else(|| panic!("not held: {text}"))
+        + "request #".len();
+    text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap()
+}
+
+/// The pending request of `machine`'s user numbered `number`.
+fn request(machine: &Machine, number: u64) -> Value {
+    machine
+        .requests()
+        .into_iter()
+        .find(|request| request["number"] == number)
+        .unwrap_or_else(|| panic!("no request #{number}: {:#?}", machine.requests()))
+}
+
+fn approve(machine: &Machine, number: u64) {
+    machine
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+}
+
+#[test]
+fn an_agent_lists_the_sessions_of_its_project_on_every_machine() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let day = user_session(&pc, DAY);
+    let (_root, mcp) = caller(&pc, &server, "auto");
+
+    let answer = mcp.call("session_read", json!({"session": "No such session"}));
+
+    let text = refused(&answer);
+    assert!(text.contains("The sessions of this project"), "{text}");
+    assert!(text.contains(&format!("{DAY} · {day}")), "{text}");
+    assert!(
+        text.contains(&format!("{NIGHT} · {night} · on server")),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_agent_reads_a_session_the_user_started_on_another_machine_as_on_this_one() {
+    let (_hub, pc, server, night) = night_lead("runner");
+
+    // In Full, the read passes without anyone asked, as on one machine.
+    let (_root, mcp) = caller(&pc, &server, "full");
+    let judged = server.user.judge_received().len();
+    let answer = mcp.call("session_read", json!({"session": NIGHT}));
+    let text = done(&answer);
+    assert!(
+        text.contains(&format!(
+            "The conversation of the session \"{NIGHT}\" (agent {night})"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("hello"), "{text}");
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert_eq!(server.user.judge_received().len(), judged);
+
+    // In Ask, the same ask as on one machine: held for the user of the machine it runs on,
+    // answered at once, and the page comes later as a delivery.
+    let (_asker, asking) = caller(&pc, &server, "ask");
+    let answer = asking.call("session_read", json!({"session": night}));
+    let number = held(&answer);
+    assert!(
+        done(&answer).starts_with("Waiting for the user's approval"),
+        "{}",
+        answer.text
+    );
+    let asked = request(&server, number);
+    assert_eq!(asked["tool"], "session_read", "{asked:#}");
+    approve(&server, number);
+    prompted(&pc, "was approved by the user");
+    prompted(
+        &pc,
+        &format!("The conversation of the session \\\"{NIGHT}\\\""),
+    );
+}
+
+#[test]
+fn an_agent_writes_to_it_with_the_same_leave_as_on_one_machine() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    // Full: the leave is asked all the same, as on one machine.
+    let (root, mcp) = caller(&pc, &server, "full");
+
+    let answer = mcp.call(
+        "session_send",
+        json!({"session": NIGHT, "text": "The CSV export is merged."}),
+    );
+
+    let number = held(&answer);
+    let asked = request(&server, number);
+    let reasons = asked["reasons"].to_string();
+    assert!(
+        reasons.contains("has not written to that one before"),
+        "{asked:#}"
+    );
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("The CSV export is merged.")),
+        "sent before the user allowed it"
+    );
+    approve(&server, number);
+    prompted(&server, "The CSV export is merged.");
+    let written = server
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("The CSV export is merged."))
+        .unwrap();
+    assert!(
+        written.contains(&format!("agent {root} of pc")),
+        "{written}"
+    );
+    assert!(written.contains("wrote to this session"), "{written}");
+    prompted(&pc, "was approved by the user");
+
+    // Allowed once for the pair: the next one passes without asking.
+    let answer = mcp.call(
+        "session_send",
+        json!({"session": night, "text": "The JSON one too."}),
+    );
+    assert!(done(&answer).starts_with("Sent to"), "{}", answer.text);
+    prompted(&server, "The JSON one too.");
+}
+
+#[test]
+fn stopping_a_session_it_did_not_start_is_held_for_the_user_as_on_one_machine() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    // Full: ending another session is the user's all the same, as on one machine.
+    let (_root, mcp) = caller(&pc, &server, "full");
+
+    let answer = mcp.call("agent_stop", json!({"agent_id": NIGHT}));
+
+    let number = held(&answer);
+    let asked = request(&server, number);
+    assert!(
+        asked["reasons"]
+            .to_string()
+            .contains("the user decides, every time"),
+        "{asked:#}"
+    );
+    assert_eq!(server.agent(&night)["state"], "idle");
+    approve(&server, number);
+    eventually("the session ended", || {
+        server.agent(&night)["state"] == "ended"
+    });
+    prompted(&pc, "was approved by the user");
+}
+
+#[test]
+fn a_session_of_an_offline_machine_is_listed_with_its_state_and_a_call_says_why() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let (_root, mcp) = caller(&pc, &server, "auto");
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+
+    let answer = mcp.call("session_read", json!({"session": NIGHT}));
+
+    let text = refused(&answer);
+    assert!(text.contains("server is offline since"), "{text}");
+    assert!(text.contains(&night), "{text}");
+
+    let listing = mcp.call("session_send", json!({"session": "Nothing", "text": "Hi."}));
+    let text = refused(&listing);
+    assert!(
+        text.contains(&format!("{NIGHT} · {night} · on server, offline since")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_viewer_device_reads_and_cannot_write() {
+    let (_hub, pc, server, night) = night_lead("viewer");
+    // In Auto, the server's judge allows the read.
+    let (_root, mcp) = caller(&pc, &server, "auto");
+
+    let answer = mcp.call("session_read", json!({"session": NIGHT}));
+    assert!(
+        done(&answer).contains(&format!("(agent {night})")),
+        "{}",
+        answer.text
+    );
+
+    let answer = mcp.call(
+        "session_send",
+        json!({"session": NIGHT, "text": "The CSV export is merged."}),
+    );
+    let text = refused(&answer);
+    assert!(text.contains("pc may only view"), "{text}");
+    let answer = mcp.call("agent_stop", json!({"agent_id": night}));
+    assert!(
+        refused(&answer).contains("pc may only view"),
+        "{}",
+        answer.text
+    );
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+/// What an answer says once the ids, the titles, the numbers, the times and the cursor in it are the same
+/// for every session: what is left is what the tool says.
+fn shape(text: &str, id: &str, title: &str) -> String {
+    // A cursor names an event of its machine's store, whose numbers are that machine's own.
+    let text = match text.find("\"cursor\": \"") {
+        Some(at) => {
+            let start = at + "\"cursor\": \"".len();
+            let end = start + text[start..].find('"').unwrap_or(0);
+            format!("{}<cursor>{}", &text[..start], &text[end..])
+        }
+        None => text.to_owned(),
+    };
+    text.replace(id, "<id>")
+        .replace(title, "<title>")
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '0' } else { c })
+        .collect()
+}
+
+#[test]
+fn the_session_tools_answer_a_session_on_another_machine_as_one_on_this_machine() {
+    same_answers("full");
+}
+
+#[test]
+fn the_session_tools_answer_a_session_on_another_machine_as_one_on_this_machine_in_ask() {
+    same_answers("ask");
+}
+
+/// The table of the session tools' calls, by id and by title, against a session on this machine
+/// and one on the other, from a caller in `mode`: the same answers.
+fn same_answers(mode: &str) {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let day = user_session(&pc, DAY);
+    let (_root, mcp) = caller(&pc, &server, mode);
+    // Each call of a scenario of one machine, with `{s}` the session it addresses.
+    let calls: Vec<(&str, Value)> = vec![
+        ("session_read", json!({"session": "{s}", "last": 1})),
+        ("session_read", json!({"session": "{s}", "last": 99})),
+        (
+            "session_read",
+            json!({"session": "{s}", "since": "not a date"}),
+        ),
+        ("session_send", json!({"session": "{s}", "text": "  "})),
+        (
+            "session_send",
+            json!({"session": "{s}", "text": "First words."}),
+        ),
+        (
+            "session_send",
+            json!({"session": "{s}", "text": "Second words."}),
+        ),
+        ("agent_status", json!({"agent_id": "{s}"})),
+        ("agent_send", json!({"agent_id": "{s}", "message": "Hi."})),
+        ("agent_stop", json!({"agent_id": "{s}"})),
+    ];
+    let aimed = |args: &Value, session: &str| -> Value {
+        serde_json::from_str(&args.to_string().replace("{s}", session)).unwrap()
+    };
+    for (tool, args) in &calls {
+        let names: [fn(&str, &str) -> String; 2] =
+            [|id, _| id.to_owned(), |_, title| title.to_owned()];
+        for named in names {
+            let here = mcp.call(tool, aimed(args, &named(&day, DAY)));
+            let there = mcp.call(tool, aimed(args, &named(&night, NIGHT)));
+            assert_eq!(
+                (here.error, shape(&here.text, &day, DAY)),
+                (there.error, shape(&there.text, &night, NIGHT)),
+                "{tool} {args}: on this machine\n{}\non the other\n{}",
+                here.text,
+                there.text
+            );
+        }
+    }
+}
+
+/// The key of `machine`, as hex: the machine part of the id its callers are stood in for by.
+fn hex_of(machine: &Machine) -> String {
+    machine
+        .key()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// How many callers of other machines `machine` stands in for, as its store holds them.
+fn stand_ins(machine: &Machine) -> i64 {
+    let store =
+        rusqlite::Connection::open(machine.user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .query_row(
+            "SELECT count(*) FROM agents WHERE id LIKE '%@%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// A child pc's root launched on the server, with `brief`: the hub, the two machines, the
+/// child's id there, the MCP session of another root of pc's and of a session the server's user
+/// started, both in Full. The child is a session of neither.
+fn child_and_others(
+    brief: &str,
+) -> (
+    crate::remote_launch::TestHub,
+    Machine,
+    Machine,
+    String,
+    Mcp,
+    Mcp,
+) {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let folder = server.folder();
+    server.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    server.git(&folder, &["add", "."]);
+    server.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let (child, _launch, _parent) = child_on_server(&pc, &server, brief);
+    let (_other, other) = pc.root("full");
+    let (_local, local) = server.root("full");
+    (hub, pc, server, child, other, local)
+}
+
+/// Whether a request of `machine`'s user holds a call of `tool` (the child's launch may wait
+/// for the user there too).
+fn asked_for(machine: &Machine, tool: &str) -> bool {
+    machine
+        .requests()
+        .iter()
+        .any(|request| request["tool"] == tool)
+}
+
+#[test]
+fn a_child_launched_from_another_machine_is_not_read_as_a_session() {
+    let (_hub, _pc, _server, child, other, local) = child_and_others("Write the tests.");
+
+    for mcp in [&local, &other] {
+        let answer = mcp.call("session_read", json!({"session": child}));
+        let text = refused(&answer);
+        assert!(!text.contains("Write the tests."), "{text}");
+    }
+    let answer = local.call("session_read", json!({"session": child}));
+    assert!(
+        refused(&answer).contains("is a child agent"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_child_launched_from_another_machine_is_not_written_to_as_a_session() {
+    let (_hub, _pc, server, child, other, local) = child_and_others("Write the tests.");
+
+    let answer = local.call(
+        "session_send",
+        json!({"session": child, "text": "Stop the tests."}),
+    );
+    assert!(
+        refused(&answer).contains("is a child of another session"),
+        "{}",
+        answer.text
+    );
+    let answer = other.call(
+        "session_send",
+        json!({"session": child, "text": "Stop the tests."}),
+    );
+    refused(&answer);
+    a_while();
+    assert_eq!(prompts_with(&server, "Stop the tests."), 0);
+    assert!(
+        !asked_for(&server, "session_send"),
+        "{:#?}",
+        server.requests()
+    );
+}
+
+#[test]
+fn a_child_launched_from_another_machine_is_not_stopped_as_a_session() {
+    let (_hub, _pc, server, child, other, local) = child_and_others("Write the tests.");
+
+    let answer = local.call("agent_stop", json!({"agent_id": child}));
+    assert!(
+        refused(&answer).contains("is a child of another session"),
+        "{}",
+        answer.text
+    );
+    refused(&other.call("agent_stop", json!({"agent_id": child})));
+    assert!(
+        !asked_for(&server, "agent_stop"),
+        "{:#?}",
+        server.requests()
+    );
+    assert_ne!(server.agent(&child)["state"], "ended");
+}
+
+#[test]
+fn a_secret_of_the_calling_machine_in_the_other_machine_s_answer_comes_back_masked() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    // A secret only pc knows, in a secret file of the caller's place.
+    std::fs::write(pc.folder().join(".env"), "API_TOKEN=pc-only-token-7f3a9c\n").unwrap();
+    server
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": night, "message": "The token is pc-only-token-7f3a9c."}),
+        )
+        .unwrap();
+    eventually("the session's second turn", || {
+        prompts_with(&server, "pc-only-token-7f3a9c") > 0 && server.agent(&night)["state"] == "idle"
+    });
+    let (_root, mcp) = caller(&pc, &server, "full");
+
+    let answer = mcp.call("session_read", json!({"session": NIGHT}));
+
+    let text = done(&answer);
+    assert!(text.contains("The token is"), "{text}");
+    assert!(!text.contains("pc-only-token-7f3a9c"), "{text}");
+}
+
+#[test]
+fn a_caller_whose_project_is_not_on_the_other_machine_reaches_no_folder_there() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    // pc's project `web`, which the server has not.
+    let web = pc.user.path("work/web");
+    pc.user.git_init(&web);
+    std::fs::write(web.join("README.md"), "web\n").unwrap();
+    pc.git(&web, &["add", "."]);
+    pc.git(&web, &["commit", "--quiet", "-m", "start"]);
+    pc.user.write_project_file(
+        "web",
+        &format!(
+            "folder = \"{}\"\n[[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
+            web.display()
+        ),
+    );
+    pc.user.call("project.list", json!({})).unwrap();
+    let opened = pc.user.received_requests("session/new").len();
+    let started = pc
+        .user
+        .call("agent.run", json!({"project": "web", "message": "hello"}))
+        .unwrap();
+    let root = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&pc.user, opened);
+    eventually("the root's first turn", || {
+        pc.agent(&root)["state"] == "idle"
+    });
+    pc.user
+        .call("agent.mode", json!({"agent": root, "mode": "ask"}))
+        .unwrap();
+    let mcp = Mcp::initialize(&url, &authorization);
+
+    let answer = mcp.call("session_read", json!({"session": night}));
+
+    let number = held(&answer);
+    let asked = request(&server, number);
+    let stand_in = server.agent(asked["agent"].as_str().unwrap());
+    let folder = std::path::PathBuf::from(stand_in["folder"].as_str().unwrap());
+    assert!(!folder.exists(), "{}", folder.display());
+    assert!(
+        !folder.starts_with(server.user.path("data")),
+        "{}",
+        folder.display()
+    );
+    // The read of a session of another project is served all the same, once allowed.
+    approve(&server, number);
+    prompted(
+        &pc,
+        &format!("The conversation of the session \\\"{NIGHT}\\\""),
+    );
+}
+
+#[test]
+fn a_machine_forgets_the_callers_of_a_machine_removed_from_the_members() {
+    let (_hub, pc, server, _night) = night_lead("runner");
+    let day = user_session(&pc, DAY);
+    listed_as(&server, &day, DAY);
+    let (_local, mcp) = server.root("full");
+    // Held or served there, the caller is stood in for on pc.
+    mcp.call("session_read", json!({"session": day}));
+    assert_eq!(stand_ins(&pc), 1);
+
+    let removed = pc.user.run(&["remote", "remove", "server"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+
+    eventually("the server's caller forgotten", || stand_ins(&pc) == 0);
+}
+
+#[test]
+fn a_session_it_started_on_another_machine_named_by_its_title_is_called_as_by_its_id() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = caller(&pc, &server, "full");
+    let started = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export of the report."}),
+    );
+    let led = id_in(done(&started));
+    titled(&server, "Finish the export");
+    listed_as(&pc, &led, "Finish the export");
+    let idle = || {
+        eventually("the led session idle", || {
+            server.agent(&led)["state"] == "idle"
+        })
+    };
+    idle();
+
+    let by_id = mcp.call(
+        "session_send",
+        json!({"session": led, "text": "The CSV first."}),
+    );
+    prompted(&server, "The CSV first.");
+    idle();
+    let by_title = mcp.call(
+        "session_send",
+        json!({"session": "Finish the export", "text": "The CSV first."}),
+    );
+
+    assert_eq!(
+        (
+            by_title.error,
+            by_title.text.replace("Finish the export", &led)
+        ),
+        (by_id.error, by_id.text.replace("Finish the export", &led)),
+        "by id\n{}\nby title\n{}",
+        by_id.text,
+        by_title.text
+    );
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert_eq!(stand_ins(&server), 0);
+}
+
+/// A call of `caller` of pc to the session `night`, as pc's daemon would send it, in `mode`
+/// with `switch` for `tree`.
+fn forged_call(
+    caller: &str,
+    night: &str,
+    tree: &str,
+    mode: &str,
+    switch: Option<&str>,
+) -> MachineMessage {
+    MachineMessage::Call(Box::new(Call {
+        id: format!("call-{}", caller.replace('@', "-")),
+        launch: String::new(),
+        caller: caller.into(),
+        agent: night.into(),
+        tool: "session_read".into(),
+        arguments: json!({"session": night}).to_string(),
+        project: "app".into(),
+        title: String::new(),
+        tree: tree.into(),
+        mode: mode.into(),
+        switch: switch.map(str::to_owned),
+    }))
+}
+
+#[test]
+fn a_call_claiming_full_without_the_user_s_switch_for_its_tree_is_judged_in_auto() {
+    let ahead = tempfile::NamedTempFile::new().unwrap();
+    let user = server_user(allowing()).with_env(
+        "FLOTTILLE_TEST_WALL_AHEAD_FILE",
+        ahead.path().to_str().unwrap(),
+    );
+    let (_hub, pc, server, night) = night_lead_of("runner", user);
+    let (root, _mcp) = caller(&pc, &server, "full");
+    let switch: String = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .query_row(
+            "SELECT full_switch FROM agents WHERE id = ?1",
+            [&root],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let pc_hex = hex_of(&pc);
+    let key = pc.stand_in();
+    let judged = server.user.judge_received().len();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![
+            forged_call("noswitch", &night, "", "full", None),
+            forged_call("othertree", &night, "othertree", "full", Some(&switch)),
+            forged_call("intree", &night, &root, "full", Some(&switch)),
+            forged_call("evil@thing", &night, "", "auto", None),
+        ],
+    );
+
+    for answer in &answers[..3] {
+        assert!(answer.is_ok(), "{answer:?}");
+    }
+    let refused = answers[3].clone().unwrap_err();
+    assert!(refused.contains("short words"), "{refused}");
+    let mode = |caller: &str| server.agent(&format!("{caller}@{pc_hex}"))["gate_mode"].clone();
+    assert_eq!(mode("noswitch"), "auto");
+    assert_eq!(mode("othertree"), "auto");
+    // The switch for its tree, fresh: Full, as a launch with it is.
+    assert_eq!(mode("intree"), "full");
+    // The judge is asked of the two in Auto (a judgement may take more than one exchange).
+    let judged_then = server.user.judge_received().len();
+    assert!(judged_then > judged, "the judge was not asked");
+
+    // Thirteen hours later on the server's clock, the same switch counts no more.
+    std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![forged_call("late", &night, &root, "full", Some(&switch))],
+    );
+    assert!(answers[0].is_ok(), "{:?}", answers[0]);
+    assert_eq!(mode("late"), "auto");
+    assert!(server.user.judge_received().len() > judged_then);
+
+    // None of them is an agent of the server's, nor a session it lists.
+    assert!(
+        server
+            .agents()
+            .iter()
+            .all(|agent| !agent["id"].as_str().unwrap().contains('@')),
+        "{:#?}",
+        server.agents()
+    );
+    let lists = server.user.call("remote.sessions", json!({})).unwrap();
+    assert!(
+        !lists.to_string().contains(&format!("@{pc_hex}")),
+        "{lists:#}"
+    );
+}
+
+/// The answer of request `number` of another machine, for pc's agent `agent`.
+fn answer_of(id: &str, number: u64, agent: &str, body: &str) -> MachineMessage {
+    MachineMessage::Deliver(Box::new(Deliver {
+        id: id.into(),
+        launch: format!("request-{number}"),
+        agent: agent.into(),
+        kind: "approval".into(),
+        body: body.into(),
+        urgency: "urgent".into(),
+        ended: false,
+    }))
+}
+
+#[test]
+fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_and_once() {
+    let (hub, pc, server, night) = night_lead("runner");
+    let laptop = Machine::of(server_user(None));
+    pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop");
+    let (asker, asking) = caller(&pc, &server, "ask");
+    let number = held(&asking.call("session_read", json!({"session": night})));
+
+    // From another machine than the one that holds it.
+    let laptop_key = laptop.stand_in();
+    let answers = sent_with(
+        &laptop_key,
+        &pc,
+        vec![answer_of(
+            &format!("approval-{number}"),
+            number,
+            &asker,
+            "From the laptop.",
+        )],
+    );
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("waits for no answer"), "{refused}");
+
+    approve(&server, number);
+    prompted(&pc, "was approved by the user");
+
+    // Sent again, or another answer of it, or one of a request never awaited.
+    let server_key = server.stand_in();
+    let answers = sent_with(
+        &server_key,
+        &pc,
+        vec![
+            answer_of(&format!("approval-{number}"), number, &asker, "Replayed."),
+            answer_of("approval-again", number, &asker, "Replayed again."),
+            answer_of("approval-never", number + 50, &asker, "Never asked."),
+        ],
+    );
+    assert!(answers[0].is_ok(), "{:?}", answers[0]);
+    for answer in &answers[1..] {
+        let refused = answer.clone().unwrap_err();
+        assert!(refused.contains("waits for no answer"), "{refused}");
+    }
+    a_while();
+    for body in ["From the laptop.", "Replayed", "Never asked."] {
+        assert_eq!(prompts_with(&pc, body), 0, "{body}");
+    }
+}
+
+#[test]
+fn a_session_id_two_machines_list_is_refused_naming_both() {
+    let (hub, pc, server, night) = night_lead("runner");
+    let laptop = Machine::of(server_user(None));
+    pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop");
+    let key = laptop.stand_in();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![MachineMessage::Sessions(SessionList {
+            sessions: vec![LightSession {
+                id: night.clone(),
+                title: "Impostor".into(),
+                project: "app".into(),
+                state: "idle".into(),
+                exchanged_at: now,
+                created_at: now,
+                pilot: None,
+            }],
+        })],
+    );
+    assert!(answers[0].is_ok(), "{:?}", answers[0]);
+    listed_as(&pc, &night, "Impostor");
+    let (_root, mcp) = caller(&pc, &server, "auto");
+    let judged = server.user.judge_received().len();
+
+    let answer = mcp.call("session_read", json!({"session": night}));
+
+    let text = refused(&answer);
+    assert!(text.contains("server") && text.contains("laptop"), "{text}");
+    assert_eq!(server.user.judge_received().len(), judged);
+    assert_eq!(stand_ins(&server), 0);
+}
