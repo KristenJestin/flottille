@@ -118,6 +118,8 @@ pub fn group_count_id(group: &str) -> ElementId {
 
 /// Why New group… cannot be picked while the projects are shown by machine.
 const SHOWN_BY_MACHINE: &str = "Shown by machine";
+/// Why Group by machine cannot be switched on: there is nothing to group by.
+const ONE_MACHINE: &str = "One machine";
 
 /// The element id of New group… in the Projects header's menu.
 pub fn new_group_id() -> ElementId {
@@ -465,7 +467,7 @@ impl Sidebar {
     /// another machine): the Projects header's "⋯" menu always offers New group…, and Group by
     /// machine, a switch that slides, once there is a machine to group by.
     pub fn set_arrangement(&mut self, by_machine: bool, offered: bool, cx: &mut Context<Self>) {
-        if self.arrange.is_none() || self.offered != offered {
+        if self.arrange.is_none() {
             let shell = self.shell.clone();
             let toggles = self.shell.clone();
             self.arrange = Some(cx.new(|cx| {
@@ -486,23 +488,26 @@ impl Sidebar {
                     true => menu.disabled(SHOWN_BY_MACHINE),
                     false => menu,
                 };
-                match offered {
-                    true => menu.switch(
-                        by_machine_id(),
-                        "Group by machine",
-                        Some(glyphs::device("desktop")),
-                        by_machine,
-                        move |window, cx| {
-                            toggles
-                                .update(cx, |shell, cx| shell.toggle_by_machine(window, cx))
-                                .ok();
-                        },
-                    ),
-                    false => menu,
+                // Always there: a machine that comes or goes enables or disables it in place, so
+                // that a menu that is open stays open.
+                let menu = menu.switch(
+                    by_machine_id(),
+                    "Group by machine",
+                    Some(glyphs::device("desktop")),
+                    by_machine,
+                    move |window, cx| {
+                        toggles
+                            .update(cx, |shell, cx| shell.toggle_by_machine(window, cx))
+                            .ok();
+                    },
+                );
+                // Switched on, it stays one to switch off.
+                match offered || by_machine {
+                    true => menu,
+                    false => menu.disabled(ONE_MACHINE),
                 }
             }));
-        }
-        if self.by_machine != by_machine
+        } else if (self.by_machine != by_machine || self.offered != offered)
             && let Some(menu) = &self.arrange
         {
             menu.update(cx, |menu, cx| {
@@ -511,9 +516,12 @@ impl Sidebar {
                     by_machine.then(|| SHOWN_BY_MACHINE.into()),
                     cx,
                 );
-                if offered {
-                    menu.set_switch(&by_machine_id(), by_machine, cx);
-                }
+                menu.set_disabled(
+                    &by_machine_id(),
+                    (!offered && !by_machine).then(|| ONE_MACHINE.into()),
+                    cx,
+                );
+                menu.set_switch(&by_machine_id(), by_machine, cx);
             });
         }
         if self.by_machine != by_machine || self.offered != offered {
