@@ -5,14 +5,15 @@
 //! A hub served in the test on 127.0.0.1 and two daemons, each with its own temporary HOME and
 //! XDG folders and fake agents.
 
-use crate::remote_deliveries::{answered, release, script};
+use crate::remote_deliveries::{answered, launch_in, release, script};
 use crate::remote_launch::{
-    Machine, a_while, allowing, done, eventually, id_in, launched, pc_and_server, prompted,
-    server_user,
+    Machine, TestHub, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
+    prompted, sent_with, server_user,
 };
 
 use crate::common::mcp::Mcp;
-use flottille_core::store::Store;
+use flottille_core::store::{LaunchFilter, Store};
+use flottille_link::{Call, MachineMessage};
 use serde_json::{Value, json};
 
 const QUESTION: &str = "Which format first, CSV or JSON?";
@@ -430,4 +431,168 @@ fn the_pilot_unsubscribes_from_its_led_session_on_another_machine() {
         "{:#?}",
         pc.prompts()
     );
+}
+
+/// A call of `tool` with `args` as pc's daemon sends it for `caller`'s launch `launch` of `agent`.
+fn call_of(
+    id: &str,
+    launch: &str,
+    caller: &str,
+    agent: &str,
+    tool: &str,
+    args: Value,
+) -> MachineMessage {
+    MachineMessage::Call(Box::new(Call {
+        id: id.into(),
+        launch: launch.into(),
+        caller: caller.into(),
+        agent: agent.into(),
+        tool: tool.into(),
+        arguments: args.to_string(),
+        ..Call::default()
+    }))
+}
+
+/// What server stored of the following of the launch of `session`.
+fn following_there(server: &Machine, session: &str) -> Value {
+    Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .launches("in", None, LaunchFilter::Agent(session))
+        .unwrap()
+        .pop()
+        .unwrap()
+        .asked["following"]
+        .clone()
+}
+
+/// `laptop`, a third machine of the user's, linked to `server`: the key it links with.
+fn laptop_of(hub: &TestHub, server: &Machine) -> std::path::PathBuf {
+    let laptop = Machine::of(server_user(None));
+    pair(hub, &laptop, "laptop", "runner");
+    server.wait_for("laptop");
+    laptop.stand_in()
+}
+
+#[test]
+fn a_following_from_a_third_machine_is_refused() {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let key = laptop_of(&hub, &server);
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-f1",
+            &launch_in(&text),
+            &root,
+            &session,
+            "following",
+            json!({"state": "ended"}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("did not start"), "{refused}");
+    assert!(following_there(&server, &session).is_null());
+}
+
+#[test]
+fn a_following_of_a_handed_session_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "handed", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    ))
+    .to_owned();
+    let session = id_in(&text);
+    prompted(&server, "Finish the export.");
+    let key = pc.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-f2",
+            &launch_in(&text),
+            &root,
+            &session,
+            "following",
+            json!({"state": "ended"}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("handed to the user"), "{refused}");
+    assert!(following_there(&server, &session).is_null());
+}
+
+#[test]
+fn a_following_of_a_state_that_is_none_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let key = pc.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-f3",
+            &launch_in(&text),
+            &root,
+            &session,
+            "following",
+            json!({"state": "forgotten"}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("on, paused or ended"), "{refused}");
+    assert!(following_there(&server, &session).is_null());
+}
+
+#[test]
+fn a_pilot_ended_stop_from_a_machine_that_did_not_start_the_session_is_refused() {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let key = laptop_of(&hub, &server);
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-s1",
+            &launch_in(&text),
+            &root,
+            &session,
+            "agent_stop",
+            json!({"agent_id": session, "why": "pilot-ended"}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("did not start"), "{refused}");
+    a_while();
+    assert_ne!(server.agent(&session)["state"], "ended");
+}
+
+#[test]
+fn ending_a_pilot_lists_its_led_sessions_on_other_machines() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    let ending = pc
+        .user
+        .call("agent.ending", json!({"agent": root}))
+        .unwrap();
+
+    let sessions = ending["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{ending:#}");
+    assert_eq!(sessions[0]["id"], session.as_str(), "{ending:#}");
+    assert_eq!(sessions[0]["title"], "Finish the export", "{ending:#}");
+    assert_eq!(sessions[0]["machine"], "server", "{ending:#}");
+    assert_eq!(sessions[0]["project"], "app", "{ending:#}");
 }
