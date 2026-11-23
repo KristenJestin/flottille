@@ -261,6 +261,7 @@ fn a_call_from_an_agent_that_did_not_start_the_session_is_refused() {
             agent: child.clone(),
             tool: tool.into(),
             arguments: json!({"agent_id": child, "message": "Stop everything."}).to_string(),
+            ..Call::default()
         }))
     };
 
@@ -543,6 +544,7 @@ fn a_call_from_a_third_machine_for_a_launch_it_did_not_make_is_refused() {
             agent: child.clone(),
             tool: tool.into(),
             arguments: json!({"agent_id": child, "message": "Stop everything."}).to_string(),
+            ..Call::default()
         }))
     };
 

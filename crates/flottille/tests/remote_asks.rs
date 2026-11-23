@@ -377,6 +377,7 @@ fn no_agent_allows_a_request_across_machines() {
             tool: "approval_answer".into(),
             arguments: json!({"request_id": second, "decision": decision, "why": "fine"})
                 .to_string(),
+            ..Call::default()
         }))
     };
     let answers = sent_with(
