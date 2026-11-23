@@ -575,7 +575,9 @@ fn the_new_sessions_settings_choose_the_mode(cx: &mut TestAppContext) {
     until(&shell, cx, "the daemon holds Auto", |_| {
         mode_of(&user) == "auto"
     });
-    assert_eq!(selected(cx, "new-sessions-mode-auto"), Some(true));
+    until(&shell, cx, "Auto is chosen", |cx| {
+        selected(cx, "new-sessions-mode-auto") == Some(true)
+    });
 }
 
 #[gpui_kit::test]

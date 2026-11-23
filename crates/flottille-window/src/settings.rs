@@ -1261,7 +1261,11 @@ impl SettingsPage {
     /// The daemon's answer to what new sessions start on: a toast says it.
     pub fn new_session_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.new_session_pending = false;
-        self.new_session_mode_pending = None;
+        // Taken, the mode stays on the choice while the providers are read again: it never slides
+        // back to the old one and forward once more.
+        if let (None, Some(mode)) = (&refused, self.new_session_mode_pending.take()) {
+            self.providers.new_session_mode = Some(mode);
+        }
         match refused {
             Some(why) => toast(
                 Toast::failure("New sessions were not changed").detail(why),
