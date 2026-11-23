@@ -571,7 +571,9 @@ fn last_known(
     // Idle there before it said anything here, in a project made for it: that machine prepares
     // the project, which its list does not say.
     let preparing = launched.heard.is_none() && launched.making.is_some();
-    if let Some(listed) = listed.filter(|listed| !(preparing && listed.state == "idle")) {
+    // Held, it waits for the user there: a machine of before lists it idle, which says less.
+    let held = launched.state == "held";
+    if let Some(listed) = listed.filter(|listed| !((preparing || held) && listed.state == "idle")) {
         return (listed.state.clone(), listed_mark(&listed.state));
     }
     // A held launch is `held` until the user's answer there comes back: allowed, it is `started`.
@@ -842,10 +844,11 @@ pub fn title_of(brief: &str) -> String {
 /// launch of another machine that started it, else the first line of its first message; the
 /// neutral `agent <id>` while none says what the work is.
 fn session_title(root: &Value, id: &str, brief: Option<&String>) -> String {
-    // A root none named that has a title and no agent of this machine that launched it was
-    // launched with that title by another machine's agent, or by an extension: its brief is
-    // written for the agent, not the user.
-    if (!root["titled_by"].is_null() || root["launched_by"].is_null())
+    // A root none named that has a title and no agent of this machine that launched it, nor was
+    // detached from one (which forgets who launched it), was launched with that title by another
+    // machine's agent, or by an extension: its brief is written for the agent, not the user.
+    if (!root["titled_by"].is_null()
+        || (root["launched_by"].is_null() && root["detached_from"].is_null()))
         && let Some(title) = root["title"].as_str().filter(|title| !title.is_empty())
     {
         return title.to_owned();
