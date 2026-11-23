@@ -640,7 +640,7 @@ pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
 /// run to close anything.
 pub fn left(daemon: &Daemon, declaration: &Declaration) -> Option<Browser> {
     let vault = daemon.paths.runtime.join("vault").join(&declaration.name);
-    std::fs::read_dir(sockets_in(&vault)?).ok()?.next()?;
+    std::fs::read_dir(sockets_in(&vault)?).ok()?.next()?.ok()?;
     browser(daemon, declaration, None)
 }
 
