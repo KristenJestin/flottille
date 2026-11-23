@@ -1525,14 +1525,18 @@ pub(crate) fn stand_in_name(agent: &Agent) -> Option<String> {
     )
 }
 
+/// The project of a caller whose own this machine has not, named as the caller names it, in the
+/// place that does not exist (`nowhere`).
+fn project_nowhere(nowhere: &std::path::Path, name: &str) -> flottille_core::project::Project {
+    flottille_core::project::Project::new(name, nowhere.to_path_buf(), Vec::new(), nowhere)
+}
+
 /// The grant of a caller of another machine stood in for here: the tools of the tree that
 /// address a session, in its project here when this machine has one of that name, in a place
 /// that does not exist otherwise (it reaches no file).
 pub(crate) fn stand_in_grant(daemon: &Daemon, agent: &Agent) -> crate::mcp::Grant {
-    let project = crate::projects::load_project(daemon, &agent.project).unwrap_or_else(|_| {
-        let nowhere = no_place(daemon);
-        flottille_core::project::Project::new(&agent.project, nowhere.clone(), Vec::new(), &nowhere)
-    });
+    let project = crate::projects::load_project(daemon, &agent.project)
+        .unwrap_or_else(|_| project_nowhere(&no_place(daemon), &agent.project));
     crate::mcp::Grant {
         agent: agent.id.clone(),
         epoch: agent.epoch,
