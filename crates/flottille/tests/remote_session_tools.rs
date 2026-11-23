@@ -434,6 +434,15 @@ fn child_and_others(
     (hub, pc, server, child, other, local)
 }
 
+/// Whether a request of `machine`'s user holds a call of `tool` (the child's launch may wait
+/// for the user there too).
+fn asked_for(machine: &Machine, tool: &str) -> bool {
+    machine
+        .requests()
+        .iter()
+        .any(|request| request["tool"] == tool)
+}
+
 #[test]
 fn a_child_launched_from_another_machine_is_not_read_as_a_session() {
     let (_hub, _pc, _server, child, other, local) = child_and_others("Write the tests.");
@@ -471,7 +480,11 @@ fn a_child_launched_from_another_machine_is_not_written_to_as_a_session() {
     refused(&answer);
     a_while();
     assert_eq!(prompts_with(&server, "Stop the tests."), 0);
-    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert!(
+        !asked_for(&server, "session_send"),
+        "{:#?}",
+        server.requests()
+    );
 }
 
 #[test]
@@ -485,7 +498,11 @@ fn a_child_launched_from_another_machine_is_not_stopped_as_a_session() {
         answer.text
     );
     refused(&other.call("agent_stop", json!({"agent_id": child})));
-    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert!(
+        !asked_for(&server, "agent_stop"),
+        "{:#?}",
+        server.requests()
+    );
     assert_ne!(server.agent(&child)["state"], "ended");
 }
 
