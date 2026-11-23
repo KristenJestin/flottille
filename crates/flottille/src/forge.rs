@@ -716,20 +716,176 @@ pub(crate) fn bitbucket_lists_host(listed: &Value, host: &str) -> bool {
     bitbucket::lists_host(listed, host)
 }
 
-/// Whether `gh` is there and signed in: its exit code, nothing it prints.
+/// What a command line's own status check says (#1315): signed in, not signed in (it says so
+/// itself), or could not be checked (any other failure: the network, a service that is down, a
+/// timeout, a locked keyring), which says nothing of who is signed in and is never answered with a
+/// sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Auth {
+    SignedIn,
+    NotSignedIn,
+    /// Why it could not be checked: the command line's first error line, masked, or `no answer in
+    /// N s`.
+    Unchecked(String),
+}
+
+/// The words with which `gh`, `glab` and `acli` say they hold no login (`gh auth status`: `You
+/// are not logged into any GitHub hosts`; a token the service refuses: `The token in … is
+/// invalid`, a 401). Anything else a failed status says is not a clear "not signed in": when
+/// unsure, it is "could not check".
+fn says_not_signed_in(said: &str) -> bool {
+    let said = said.to_ascii_lowercase();
+    [
+        "not logged in",
+        "not signed in",
+        "not authenticated",
+        "unauthenticated",
+        "no token found",
+        "unauthorized",
+        "bad credentials",
+    ]
+    .iter()
+    .any(|phrase| said.contains(phrase))
+        || (said.contains("token") && said.contains("is invalid"))
+}
+
+/// The line that says why a command line failed: the first that starts with a failure mark or
+/// says `error`, else the first that is not empty (`gh auth status` starts with the host's name).
+/// glab's own (`x gitlab.com: API call failed: …`) is said without its mark and its host. The
+/// account's login is never shown, a secret is masked, and only then is the line cut.
+pub(crate) fn error_line(stderr: &str, stdout: &str) -> Option<String> {
+    let said: Vec<&str> = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let marked = |line: &str| {
+        line.starts_with("X ")
+            || line.starts_with("x ")
+            || line.starts_with("✗")
+            || line.to_ascii_lowercase().contains("error")
+    };
+    let line = said.iter().find(|line| marked(line)).or(said.first())?;
+    let line = match line.strip_prefix("x ") {
+        // The host is said before what it answered: what it answered is the reason.
+        Some(rest) => match rest.split_once(": ") {
+            Some((host, answered)) if !host.contains(' ') => answered,
+            _ => rest,
+        },
+        None => line,
+    };
+    Some(cut(&masked(&without_login(line))))
+}
+
+/// A line cut to what a row can show.
+fn cut(line: &str) -> String {
+    line.chars().take(200).collect()
+}
+
+/// `line` with the login that follows `account` said by its first letter (`X Timeout trying to log
+/// in to github.com account octocat (keyring)`).
+fn without_login(line: &str) -> String {
+    let Some(at) = line.find(" account ") else {
+        return line.to_owned();
+    };
+    let (before, rest) = line.split_at(at + " account ".len());
+    let (login, after) = rest.split_once(' ').unwrap_or((rest, ""));
+    let shown = crate::sign_in::account_masked(login).unwrap_or_default();
+    format!("{before}{shown} {after}").trim_end().to_owned()
+}
+
+/// The cause `gh auth status` prints on its `- Error:` line. For every failure of its API call but
+/// a timeout (DNS, refused, a 5xx, a rate limit) gh prints the shape of a bad token (`X Failed to
+/// log in…`, `- The token in keyring is invalid.`), with the real cause on that line.
+fn gh_cause(said: &str) -> Option<&str> {
+    said.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("- Error:"))
+        .map(str::trim)
+        .filter(|cause| !cause.is_empty())
+}
+
+/// Whether the cause of a failed API call is the service refusing the login: a 401, bad
+/// credentials or an expired token.
+fn refuses_the_login(cause: &str) -> bool {
+    let cause = cause.to_ascii_lowercase();
+    ["http 401", "bad credentials", "expired", "unauthorized"]
+        .iter()
+        .any(|phrase| cause.contains(phrase))
+}
+
+/// How a time is said: whole seconds, at least one.
+pub(crate) fn no_answer(time: Duration) -> String {
+    format!(
+        "no answer in {} s",
+        time.as_secs_f64().ceil().max(1.) as u64
+    )
+}
+
+/// What a command line's status check says (`program`'s `auth status`, as run). A command line
+/// that is not there is the caller's to say.
+pub(crate) fn auth_of(program: &str, ran: Result<(bool, String, String), Gh>) -> Auth {
+    match ran {
+        Ok((true, _, _)) => Auth::SignedIn,
+        Ok((false, stdout, stderr)) => {
+            let said = format!("{stderr}\n{stdout}");
+            // gh says every failure as a bad token: its own cause is what says which it is.
+            if program == "gh"
+                && let Some(cause) = gh_cause(&said)
+            {
+                return match refuses_the_login(cause) {
+                    true => Auth::NotSignedIn,
+                    false => Auth::Unchecked(cut(&masked(cause))),
+                };
+            }
+            match says_not_signed_in(&said) {
+                true => Auth::NotSignedIn,
+                false => Auth::Unchecked(
+                    error_line(&stderr, &stdout)
+                        .unwrap_or_else(|| format!("{program} failed without saying why")),
+                ),
+            }
+        }
+        Err(Gh::Missing) => Auth::Unchecked(format!("{program} went missing")),
+        Err(Gh::Failed(why)) => Auth::Unchecked(masked(&why)),
+    }
+}
+
+/// The sentence of a check that could not be made: for a read, what is shown could not be
+/// refreshed; for a write, nothing was written.
+pub(crate) fn unchecked(program: &str, why: &str, write: bool) -> String {
+    let after = match write {
+        true => "nothing was written",
+        false => "what is shown could not be refreshed",
+    };
+    format!("{program} could not be checked: {why}; {after}")
+}
+
+/// Whether `gh` is there and signed in: its exit code, and its first error line when it fails
+/// without saying it holds no login.
 pub(crate) async fn signed_in() -> Result<(), String> {
+    signed_in_for(false).await
+}
+
+/// `signed_in`, for a write: a check that could not be made says nothing was written.
+pub(crate) async fn signed_in_to_write() -> Result<(), String> {
+    signed_in_for(true).await
+}
+
+pub(crate) async fn signed_in_for(write: bool) -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {
         Err(Gh::Missing) => Err("Flottille cannot find gh, GitHub's command line: install \
              it (https://cli.github.com) and sign in with `gh auth login` to see the pull \
              requests; the rest of Flottille works without it"
             .into()),
-        Err(Gh::Failed(why)) => Err(format!("gh cannot run: {why}")),
-        Ok((false, _, _)) => Err(
-            "gh is not signed in to github.com: run `gh auth login` to see \
-             the pull requests; the rest of Flottille works without it"
-                .into(),
-        ),
-        Ok((true, _, _)) => Ok(()),
+        ran => match auth_of("gh", ran) {
+            Auth::SignedIn => Ok(()),
+            Auth::NotSignedIn => Err("gh is not signed in to github.com: run `gh auth login` \
+                 to see the pull requests; the rest of Flottille works without it"
+                .into()),
+            Auth::Unchecked(why) => Err(unchecked("gh", &why, write)),
+        },
     }
 }
 
@@ -785,7 +941,7 @@ async fn run(
 }
 
 /// How long a call of `gh` or `bkt` may take before it is cut.
-fn gh_time() -> Duration {
+pub(crate) fn gh_time() -> Duration {
     // Tests shorten it, so that a call that hangs is seen cut without waiting half a minute.
     std::env::var("FLOTTILLE_FORGE_TIMEOUT_MS")
         .ok()
@@ -803,11 +959,7 @@ async fn run_for(
 ) -> Result<(bool, String, String), Gh> {
     match run_within(program, time, set, remove, args).await? {
         Some(output) => Ok(output),
-        None => Err(Gh::Failed(format!(
-            "{program} {} took more than {} s",
-            args[..2].join(" "),
-            time.as_secs()
-        ))),
+        None => Err(Gh::Failed(no_answer(time))),
     }
 }
 
@@ -2603,7 +2755,7 @@ async fn forge_note(
     };
     let slug = forge.slug();
     if matches!(forge, Forge::GitHub { .. })
-        && let Err(problem) = signed_in().await
+        && let Err(problem) = signed_in_to_write().await
     {
         return Outcome::Failed(problem);
     }
@@ -2915,7 +3067,7 @@ async fn forge_close(
     let comment = asked.comment.as_deref().filter(|c| !c.trim().is_empty());
     let numbered = number.to_string();
     let repo = forge.gh_repository();
-    if !bitbucket && let Err(problem) = signed_in().await {
+    if !bitbucket && let Err(problem) = signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let seen = match seen_of(&forge, number).await {
@@ -3327,7 +3479,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             other => other,
         };
     }
-    if let Err(problem) = signed_in().await {
+    if let Err(problem) = signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let slug = forge.slug();
@@ -4219,6 +4371,86 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `gh auth status` prints when its API call fails with `cause` (cli/cli,
+    /// `auth/status/status.go`): the shape of a bad token, whatever the cause.
+    fn gh_failing(cause: &str) -> Result<(bool, String, String), Gh> {
+        Ok((
+            false,
+            String::new(),
+            format!(
+                "github.com\n  X Failed to log in to github.com account octocat (keyring)\n  - \
+                 Active account: true\n  - The token in keyring is invalid.\n  - Error: {cause}\n"
+            ),
+        ))
+    }
+
+    #[test]
+    fn gh_failing_on_its_api_is_judged_by_its_error_line_not_by_its_bad_token_shape() {
+        for cause in [
+            "Get \"https://api.github.com/user\": dial tcp: lookup api.github.com: no such host",
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+            "HTTP 403: API rate limit exceeded (https://api.github.com/graphql)",
+        ] {
+            assert_eq!(
+                auth_of("gh", gh_failing(cause)),
+                Auth::Unchecked(cause.to_owned()),
+                "{cause}"
+            );
+        }
+        for cause in [
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            "HTTP 401: The token has expired",
+        ] {
+            assert_eq!(
+                auth_of("gh", gh_failing(cause)),
+                Auth::NotSignedIn,
+                "{cause}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reason_never_shows_the_login_of_an_account() {
+        // gh's timeout has no `- Error:` line: its first line names the account.
+        let ran = Ok((
+            false,
+            String::new(),
+            "github.com\n  X Timeout trying to log in to github.com account octocat (keyring)\n"
+                .to_owned(),
+        ));
+        let Auth::Unchecked(why) = auth_of("gh", ran) else {
+            panic!("a timeout says nothing of the login");
+        };
+        assert!(!why.contains("octocat"), "{why}");
+        assert!(why.contains("Timeout"), "{why}");
+    }
+
+    #[test]
+    fn glab_s_reason_is_its_failed_call_not_its_host() {
+        let ran = Ok((
+            false,
+            String::new(),
+            "gitlab.com\n  x gitlab.com: API call failed: 502 Bad Gateway\n".to_owned(),
+        ));
+
+        assert_eq!(
+            auth_of("glab", ran),
+            Auth::Unchecked("API call failed: 502 Bad Gateway".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_reason_is_masked_before_it_is_cut() {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        // The token starts before the cut and ends after it: cut first, it would be half shown.
+        let line = format!("Error: {} {token}", "x".repeat(180));
+
+        let said = error_line(&line, "").unwrap();
+
+        assert!(!said.contains("ghp_"), "{said}");
+        assert!(!said.contains("abcdefghij"), "{said}");
+    }
 
     #[test]
     fn a_recorded_url_keeps_no_credentials() {

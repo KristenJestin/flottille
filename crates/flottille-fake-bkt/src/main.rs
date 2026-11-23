@@ -45,7 +45,9 @@
 //! API says `ref_name`; seen with v0.37.0), `steps` the `steps` of `bkt pipeline view <build>
 //! --json` and `logs` what `bkt pipeline logs <build> [--step <uuid>]` prints (the last step's by
 //! default), and `fail` makes every call on that repository end with 1, saying its text.
-//! `read_delay_ms` makes every call but `context list` wait that long first, as a slow network
+//! `status_fail` (`"Error: 503 Service Unavailable (api.bitbucket.org)"`) makes `context list`, the
+//! sign-in check, end with 1 saying that text, as a check that could not reach the service does
+//! (#1315). `read_delay_ms` makes every call but `context list` wait that long first, as a slow network
 //! does; each record in `received.jsonl` then also holds `at`, the milliseconds since the epoch
 //! the call started at, so that a test sees which calls ran together.
 //! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
@@ -228,6 +230,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     };
     if positional[..positional.len().min(2)] == ["context", "list"] {
         wait(script);
+        if let Some(why) = script["status_fail"].as_str() {
+            eprintln!("{why}");
+            return 1;
+        }
         println!("{}", json!({"contexts": contexts(script)}));
         return 0;
     }

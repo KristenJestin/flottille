@@ -524,7 +524,7 @@ async fn github_link(
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let slug = forge.slug();
@@ -741,7 +741,7 @@ pub(super) async fn comment(
                 Ok(forge) => forge,
                 Err(refusal) => return refusal,
             };
-            if let Err(problem) = forge::signed_in().await {
+            if let Err(problem) = forge::signed_in_to_write().await {
                 return Outcome::Failed(problem);
             }
             let number = id.trim_start_matches("issuecomment-");
