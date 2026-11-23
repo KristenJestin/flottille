@@ -53,6 +53,8 @@ struct Relay {
     asked: Arc<Mutex<Vec<(String, Value)>>>,
     delay: Arc<AtomicU64>,
     silent: Arc<AtomicBool>,
+    /// The methods whose request ends its connection there: the window hears it refused.
+    cut: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl Relay {
@@ -97,7 +99,11 @@ impl Relay {
                     .as_str()
                     .and_then(|params| serde_json::from_str(params).ok())
                     .unwrap_or_default();
+                let cut = self.cut.lock().unwrap().contains(&method.as_str());
                 self.asked.lock().unwrap().push((method, params));
+                if cut {
+                    return;
+                }
                 if self.silent.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -162,7 +168,10 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 /// A hub, `pc` and `server`, each with the project `app` and a session there that answered;
 /// `server` has `harbor` too. The ids of pc's session and the server's.
 fn two_machines() -> (TestHub, Machine, Machine, String, String) {
-    let script = json!({"turns": [{"when": "", "do": [{"say": REPLY}]}]});
+    let script = json!({"turns": [
+        {"when": "HANG", "do": [{"hang": true}]},
+        {"when": "", "do": [{"say": REPLY}]}
+    ]});
     let pc_user = fake_user();
     pc_user.fake_script(script.clone());
     let server_user = fake_user();
@@ -1390,5 +1399,148 @@ fn a_read_of_the_server_that_comes_after_its_page_was_left_is_not_shown(cx: &mut
                 .is_some_and(|page| page.read(cx).name() == "app"),
             "the late read moved this machine's page"
         );
+    });
+}
+
+/// Types `text` in the open page's composer and sends it.
+fn send(cx: &mut VisualTestContext, text: &str) {
+    click(cx, "reply-field");
+    cx.simulate_input(text);
+    cx.simulate_keystrokes("enter");
+}
+
+/// The composer of the server's session `there`.
+fn reply_there(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    there: &str,
+) -> Entity<flottille_window::session::Reply> {
+    let row = elsewhere_id("server", there);
+    shell.read_with(cx, |s, _| s.reply_of(&row).cloned().expect("its composer"))
+}
+
+#[gpui_kit::test]
+fn a_second_message_to_the_server_s_session_is_sent_too(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+
+    send(cx, "First note");
+    eventually("the server's session got the first message", || {
+        conversation_holds(&server.user, &there, "First note")
+    });
+    settle(&shell, cx);
+    send(cx, "Second note");
+    eventually("the server's session got the second message", || {
+        conversation_holds(&server.user, &there, "Second note")
+    });
+    let reply = reply_there(&shell, cx, &there);
+    until(&shell, cx, "the composer is free again", |cx| {
+        !reply.read_with(cx, |reply, _| reply.is_sending())
+    });
+}
+
+#[gpui_kit::test]
+fn a_mode_change_on_the_server_s_session_gets_its_answer(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    // The server never takes it: what the window hears is its refusal.
+    relay.cut.lock().unwrap().push("agent.mode");
+
+    let mode = reply_there(&shell, cx, &there).read_with(cx, |reply, _| reply.mode.clone());
+    mode.update(cx, |mode, cx| mode.choose("full", cx));
+    until(&shell, cx, "the switch says the change was refused", |cx| {
+        mode.read_with(cx, |mode, _| mode.said().is_some())
+    });
+}
+
+#[gpui_kit::test]
+fn a_model_change_on_the_server_s_session_gets_its_answer(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    relay.cut.lock().unwrap().push("agent.options");
+
+    let options = reply_there(&shell, cx, &there).read_with(cx, |reply, _| reply.options().clone());
+    options.update(cx, |options, cx| {
+        let chosen = gpui_design_system::Chosen::Model("fake".into(), Some("fake-large".into()));
+        options.choose(chosen, None, cx);
+    });
+    until(&shell, cx, "a toast says the change was refused", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|title| title == "The model or effort was not changed")
+    });
+}
+
+#[gpui_kit::test]
+fn interrupting_the_server_s_session_gets_its_answer(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    send(cx, "HANG on a long task");
+    let reply = reply_there(&shell, cx, &there);
+    until(&shell, cx, "the server's turn runs", |cx| {
+        reply.read_with(cx, |reply, _| reply.is_running())
+    });
+
+    reply.update(cx, |reply, cx| reply.interrupt(cx));
+    until(&shell, cx, "the interruption is answered", |cx| {
+        !reply.read_with(cx, |reply, _| reply.is_interrupting())
+    });
+}
+
+#[gpui_kit::test]
+fn a_draft_of_the_server_s_session_is_read_back(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, there) = two_machines();
+    server
+        .user
+        .call(
+            "draft.set",
+            json!({"kind": "session", "target": there, "text": "Half a thought"}),
+        )
+        .unwrap();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+
+    let reply = reply_there(&shell, cx, &there);
+    until(&shell, cx, "the server's draft is in its composer", |cx| {
+        reply.read_with(cx, |reply, cx| {
+            reply.draft_was_read() && reply.field().read(cx).value() == "Half a thought"
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn renaming_the_server_s_session_from_its_header_renames_it_there(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+
+    click(cx, "session-rename");
+    settle(&shell, cx);
+    shell.update_in(cx, |s, window, cx| {
+        let field = s.rename_form().read(cx).field().clone();
+        field.update(cx, |field, cx| field.set_value("Renamed there", window, cx));
+    });
+    settle(&shell, cx);
+    click(cx, "rename-save");
+    eventually("the server's session is renamed", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": there, "after": 0}))
+            .is_ok_and(|shown| shown["agent"]["title"] == "Renamed there")
     });
 }

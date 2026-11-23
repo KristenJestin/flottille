@@ -9686,6 +9686,11 @@ impl Reply {
         self.sending
     }
 
+    /// An interruption was asked and not answered yet.
+    pub fn is_interrupting(&self) -> bool {
+        self.interrupting
+    }
+
     /// The messages sent and not recorded yet, the oldest first.
     pub fn pending(&self) -> &[Pending] {
         &self.pending
