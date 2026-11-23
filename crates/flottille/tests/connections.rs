@@ -6348,6 +6348,11 @@ fn switching_to_headed_restarts_the_browser_and_keeps_its_profile() {
     assert_eq!(shown["args"], first["args"]);
     assert_eq!(shown["cwd"], first["cwd"]);
     assert_eq!(std::fs::read_to_string(&profile).unwrap(), "signed in");
+    // The profile is a folder of the connection's own, which Flottille names itself: a browser
+    // started afresh in the other mode finds the sign-ins of the last one.
+    let kept = user.path("state/flottille/connections/browser/profile");
+    assert_eq!(first["config"]["profile"], json!(kept.to_str().unwrap()));
+    assert_eq!(shown["config"]["profile"], first["config"]["profile"]);
 
     // Shown again: nothing restarts.
     let starts = logged(&user, "browser", "start").len();
@@ -6365,6 +6370,7 @@ fn switching_to_headed_restarts_the_browser_and_keeps_its_profile() {
     let hidden = logged(&user, "browser", "start").last().unwrap().clone();
     assert_eq!(hidden["display"]["WAYLAND_DISPLAY"], Value::Null);
     assert_eq!(hidden["config"].get("headed"), None);
+    assert_eq!(hidden["config"]["profile"], first["config"]["profile"]);
     assert_eq!(
         browser_running(&user),
         Some(json!({"headed": null, "XDG_RUNTIME_DIR": null}))
@@ -6373,6 +6379,29 @@ fn switching_to_headed_restarts_the_browser_and_keeps_its_profile() {
     eventually("its display folder is removed", || {
         !user.path("runtime/flottille/display/browser").exists()
     });
+}
+
+#[test]
+fn a_browser_kept_to_its_domains_is_given_no_profile() {
+    // agent-browser refuses `--allowed-domains` with a profile (Chrome may restore pages before
+    // the containment is in place): the user's own limit wins, the browser keeps no profile.
+    let user = user_with_display();
+    browser_run_with(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &["--allowed-domains", "shop.example.com"],
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_open": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    open_page(&mcp, None);
+    let started = logged(&user, "browser", "start");
+    assert_eq!(started.last().unwrap()["config"].get("profile"), None);
 }
 
 #[test]
@@ -6419,6 +6448,10 @@ fn a_shown_browser_runs_headless_when_the_socket_cannot_be_shared() {
     assert_eq!(seen["WAYLAND_DISPLAY"], Value::Null, "{seen}");
     assert_eq!(started.last().unwrap()["config"].get("headed"), None);
     assert!(!user.path("runtime/flottille/display/browser").exists());
+    // The server is told the mode it runs in: agent-browser asked to show a browser with no
+    // display fails the call instead of opening the page headless.
+    let called = logged(&user, "browser", "call");
+    assert_eq!(called.last().unwrap()["arguments"]["headed"], json!(false));
     // The agent is told, and the user's connection says why; asking again starts nothing.
     assert!(answer.contains("not shown"), "{answer}");
     let said = connection(&user, "browser")["headless"].clone();
@@ -6757,4 +6790,207 @@ fn connection_edit_has_no_headed_flag() {
         "{said}"
     );
     assert_eq!(connection(&user, "browser")["headed"], Value::Null);
+}
+
+/// The real agent-browser for [`a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless`]:
+/// `FLOTTILLE_TEST_AGENT_BROWSER` when set, else `agent-browser` on the `PATH`, kept only when it
+/// answers its version with the test's own `HOME` (a shim that needs the user's home does not).
+fn real_agent_browser(user: &User) -> Result<PathBuf, String> {
+    let program = match std::env::var_os("FLOTTILLE_TEST_AGENT_BROWSER") {
+        Some(program) => PathBuf::from(program),
+        None => std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|folder| folder.join("agent-browser"))
+            .find(|program| program.is_file())
+            .ok_or("no agent-browser on the PATH")?,
+    };
+    let output = std::process::Command::new(&program)
+        .arg("--version")
+        .env_clear()
+        .env("HOME", user.path("home"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .map_err(|error| format!("{}: {error}", program.display()))?;
+    let said = String::from_utf8_lossy(&output.stdout);
+    if !said.starts_with("agent-browser 0.43.") {
+        return Err(format!(
+            "{} does not answer agent-browser 0.43 with the test's home: {said:?} {:?}",
+            program.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(program)
+}
+
+/// A Weston of the test's own, headless, its Wayland socket `name` in the user's runtime folder:
+/// a display that is never the user's screen. Killed when dropped.
+struct Weston(std::process::Child);
+
+impl Drop for Weston {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn weston(user: &User, name: &str) -> Result<Weston, String> {
+    let child = std::process::Command::new("weston")
+        .args([
+            "--backend=headless",
+            "--fake-seat",
+            &format!("--socket={name}"),
+        ])
+        .env_clear()
+        .env("HOME", user.path("home"))
+        .env("XDG_RUNTIME_DIR", user.path("runtime"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("weston: {error}"))?;
+    let weston = Weston(child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !user.path("runtime").join(name).exists() {
+        if Instant::now() > deadline {
+            return Err("weston made no socket".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(weston)
+}
+
+/// A page of the test's own on this machine: `/login` signs in (a cookie that lasts), `/` says
+/// whether the browser is; each request is kept with its path, user agent and cookie.
+fn signing_in_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(&stream);
+            let mut first = String::new();
+            if reader.read_line(&mut first).is_err() {
+                continue;
+            }
+            let mut headers = serde_json::Map::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    headers.insert(name.trim().to_lowercase(), json!(value.trim()));
+                }
+            }
+            let path = first.split_whitespace().nth(1).unwrap_or("/").to_owned();
+            let cookie = headers.get("cookie").cloned().unwrap_or(Value::Null);
+            kept.lock().unwrap().push(json!({"path": path,
+                "agent": headers.get("user-agent").cloned().unwrap_or(Value::Null),
+                "cookie": cookie}));
+            let (extra, body) = match path.as_str() {
+                "/login" => (
+                    "Set-Cookie: signed=in; Max-Age=86400; Path=/\r\n",
+                    "welcome",
+                ),
+                _ if cookie.as_str().is_some_and(|c| c.contains("signed=in")) => ("", "signed in"),
+                _ => ("", "signed out"),
+            };
+            let page = format!("<html><body>{body}</body></html>");
+            let _ = write!(
+                &stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{extra}Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{page}",
+                page.len()
+            );
+        }
+    });
+    (address, seen)
+}
+
+#[test]
+fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
+    // The real agent-browser (0.43) through the daemon, its sandbox included: headless, then
+    // shown on a Weston of the test's own (never the user's screen), then headless again, the
+    // sign-in made shown kept. Fakes do not see what the sandbox does to a real browser.
+    let user = User::with_fake_agent().with_env("WAYLAND_DISPLAY", "wayland-flottille-test");
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let program = match real_agent_browser(&user) {
+        Ok(program) => program,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let _weston = match weston(&user, "wayland-flottille-test") {
+        Ok(weston) => weston,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let (site, seen) = signing_in_site();
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "browser", "about": "A real browser for the tests.",
+            "command": [program, "mcp"]}),
+    )
+    .unwrap();
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_open": "passes",
+            "agent_browser_close": "passes"}}),
+    )
+    .unwrap();
+    let open = |url: String, headed: Option<bool>| {
+        let mut arguments = json!({"url": url});
+        if let Some(headed) = headed {
+            arguments["headed"] = json!(headed);
+        }
+        let answer = mcp.call(
+            "conn_browser",
+            json!({"action": "agent_browser_open", "arguments": arguments}),
+        );
+        let text = done(answer);
+        assert!(!text.contains("not shown"), "{text}");
+        let last = seen.lock().unwrap().last().cloned().unwrap();
+        last
+    };
+    let headless = |request: &Value| {
+        request["agent"]
+            .as_str()
+            .unwrap()
+            .contains("HeadlessChrome")
+    };
+
+    let first = open(format!("{site}/"), None);
+    assert!(headless(&first), "{first}");
+    assert_eq!(first["cookie"], Value::Null);
+
+    // The user signs in on the shown browser: Chrome on the test's own Wayland display.
+    let shown = open(format!("{site}/login"), Some(true));
+    assert!(!headless(&shown), "{shown}");
+    assert!(
+        user.path("runtime/flottille/display/browser").exists(),
+        "the display folder is lent"
+    );
+
+    // The agent goes on headless, signed in.
+    let after = open(format!("{site}/"), None);
+    assert!(headless(&after), "{after}");
+    assert_eq!(after["cookie"], json!("signed=in"), "{after}");
+    eventually("the display folder is removed", || {
+        !user.path("runtime/flottille/display/browser").exists()
+    });
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_close", "arguments": {}}),
+    ));
 }
