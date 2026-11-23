@@ -323,12 +323,11 @@ fn a_program_without_a_flow_says_the_line_to_type(cx: &mut TestAppContext) {
         !visible(cx, "sign-in-opencode"),
         "no Sign in without a flow"
     );
+    // A program that is not installed says so, once its check ended, and offers nothing.
+    until(&shell, cx, "acli's row says it is not installed", |cx| {
+        label(cx, "sign-in-state-acli").as_deref() == Some("Not installed")
+    });
     settle(cx);
-    // A program that is not installed says so, and offers nothing.
-    assert_eq!(
-        label(cx, "sign-in-state-acli").as_deref(),
-        Some("Not installed")
-    );
     assert!(!visible(cx, "sign-in-acli"));
 }
 
@@ -394,6 +393,9 @@ fn a_row_being_checked_offers_nothing_and_its_check_again_waits(cx: &mut TestApp
 
     assert!(!visible(cx, "sign-in-gh"), "no Sign in while it checks");
     assert!(!visible(cx, "sign-out-gh"), "no Sign out while it checks");
+    until(&shell, cx, "the daemon runs gh's check", |_| {
+        statuses(&user, "gh") == 1
+    });
     let asked = statuses(&user, "gh");
     cx.update(|window, cx| window.click("sign-in-check-gh".to_owned(), cx));
     settle(cx);

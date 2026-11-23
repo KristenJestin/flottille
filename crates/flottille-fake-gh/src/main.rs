@@ -280,6 +280,10 @@ fn glab(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["auth", "status", ..] => {
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!("{why}");
+                return 1;
+            }
             if sign_in::signed_in(dir, script) {
                 eprintln!("gitlab.com\n  ✓ Logged in to gitlab.com as someone");
                 0
