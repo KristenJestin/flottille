@@ -195,6 +195,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let mut asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "writes to it")?;
+            refuse_remote_child(daemon, &agent)?;
             refuse_final(&agent)?;
             let upload = asked.upload.take();
             take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
@@ -569,6 +570,19 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
          stops its root, agent {root}",
         agent.id
     )))
+}
+
+/// A child an agent of another machine launched here belongs to that agent: only it writes to
+/// it. The user still answers its questions and stops it, the ways out while that machine is off
+/// (`docs/remote.md`, "Where a question goes when the parent is off").
+fn refuse_remote_child(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+    match crate::launches::launched_from(daemon, &agent.id) {
+        Some((caller, machine, kind)) if kind == "child" => Err(Failure::refused(format!(
+            "agent {} is a child of agent {caller} of {machine}: only its parent writes to it",
+            agent.id
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn refuse_final(agent: &Agent) -> Result<(), Failure> {
