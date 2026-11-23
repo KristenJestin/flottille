@@ -51,9 +51,9 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     (
         "ask: session_send",
         "Sent to ",
-        "a led session across has no pilot there to answer with session_send, which #1272 gives \
-         it: until then its answer comes as the wake of its turn, not as a [flottille:session] \
-         message, and the answer says so; a refusal still fails the row",
+        "a message to a session on another machine is kept until that machine takes it, and its \
+         answer names that machine (docs/remote.md, \"A tree across machines\"); a refusal still \
+         fails the row",
     ),
     (
         "held: answer",
@@ -64,8 +64,27 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     (
         "held: root's deliveries",
         "Started a session ",
-        "the answer of a session started on another machine is led_started_answer's row, which \
-         #1272 turns on; this row compares how the user's answer reaches the caller",
+        "the answer of a session started on another machine is led_started_answer's row; this \
+         row compares how the user's answer reaches the caller",
+    ),
+    (
+        "led: answer",
+        "",
+        "a session started on another machine works on a copy of its caller's place, its \
+         commits come back on refs/flottille/machines/<machine>/<launch>/<branch>, and its wakes \
+         are kept while the caller's machine is off (docs/tools.md, agent_launch)",
+    ),
+    (
+        "handed: answer",
+        "",
+        "a session handed over on another machine works on a copy of its caller's place, and its \
+         commits come back on a ref of their own (docs/tools.md, agent_launch)",
+    ),
+    (
+        "led: first message",
+        "While ",
+        "the pilot of a session on another machine may be off: its questions then go to the \
+         user's inbox there (docs/remote.md, \"Where a question goes when the parent is off\")",
     ),
 ];
 
@@ -422,9 +441,11 @@ fn parity(scenario: impl Fn(Topology) -> Seen) {
     );
 }
 
-/// `text` blanked, less the lines [`ALLOWED`] leaves out of what `key` compares.
+/// `text` blanked, less the lines [`ALLOWED`] leaves out of what `key` compares. A line break
+/// inside a JSON string (a prompt as the fake agent got it) is a line too.
 fn allowed(key: &str, text: &str) -> String {
     blank(text)
+        .replace("\\n", "\n")
         .lines()
         .filter(|line| {
             !ALLOWED.iter().any(|(what, start, _)| {
@@ -468,7 +489,6 @@ fn first_turn(steps: Value) -> Value {
 // The led sessions.
 
 #[test]
-#[ignore = "#1272: a led session started across has no pilot there and its answer differs"]
 fn led_started_answer() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -563,7 +583,6 @@ fn led_reports() {
 }
 
 #[test]
-#[ignore = "#1272: the wake of its end, across, lacks the provider line and the data warning"]
 fn led_ends() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -583,7 +602,6 @@ fn led_ends() {
 }
 
 #[test]
-#[ignore = "#1272: the wake of its end, across, lacks the provider line and the data warning"]
 fn led_fails() {
     parity(|topology| {
         let play = Play::new(
@@ -639,7 +657,6 @@ fn pilot_reads_its_led_session() {
 }
 
 #[test]
-#[ignore = "#1272: the wake of its end, across, lacks the provider line and the data warning"]
 fn pilot_stops_its_led_session() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -682,7 +699,6 @@ fn pilot_ends_and_its_led_sessions_end() {
 }
 
 #[test]
-#[ignore = "#1272: the first message of a led session started across says nothing of its pilot"]
 fn led_first_message_says_where_questions_go() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -712,7 +728,6 @@ fn led_launches_a_session() {
 }
 
 #[test]
-#[ignore = "#1272: a led session started across has no pilot there to detach it from"]
 fn detach_a_led_session() {
     parity(|topology| {
         let play = Play::new(topology, "auto", json!([]));
@@ -737,7 +752,6 @@ fn detach_a_led_session() {
 }
 
 #[test]
-#[ignore = "#1272: the following of a led session across is no subscription of its pilot: unsubscribe is refused"]
 fn unsubscribe_from_a_led_session() {
     parity(|topology| {
         let play = Play::with(topology, "auto", json!([]), true);
@@ -843,7 +857,6 @@ fn parent_stops_and_its_child_stops() {
 }
 
 #[test]
-#[ignore = "#1272: a handed session across has no launched_by, and its answer lacks what follows"]
 fn handed_tells_nothing() {
     parity(|topology| {
         let play = Play::new(
