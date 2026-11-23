@@ -1724,3 +1724,51 @@ fn the_link_of_a_copy_ends_once_its_page_is_left(cx: &mut TestAppContext) {
         relay.watching.load(Ordering::SeqCst) == 0
     });
 }
+
+#[gpui_kit::test]
+fn add_project_on_this_pc_is_not_held_by_the_server_behind_gone_offline(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, there) = two_machines();
+    let folder = pc.user.path("work/notes");
+    pc.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "notes\n").unwrap();
+    pc.user.git(&folder, &["add", "README.md"]);
+    pc.user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the server's page is held", |cx| {
+        cx.update(|_, cx| flottille_window::machines::held(cx).is_some())
+    });
+
+    // Added on this PC, while the server's page stays behind.
+    shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
+    settle(&shell, cx);
+    if present(cx, "add-project-machine-here") {
+        click(cx, "add-project-machine-here");
+        settle(&shell, cx);
+        click(cx, "add-project-step-next");
+        settle(&shell, cx);
+    }
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    assert_eq!(
+        form.read_with(cx, |f, _| f.machine().map(str::to_owned)),
+        None
+    );
+    cx.simulate_input(folder.to_str().unwrap());
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(&shell, cx);
+    click(cx, "add-project-next");
+    eventually("the project is this PC's", || {
+        pc.user
+            .call("project.list", json!({}))
+            .unwrap()
+            .to_string()
+            .contains("\"notes\"")
+    });
+}
