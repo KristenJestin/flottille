@@ -1798,7 +1798,9 @@ pub(super) async fn write(
                 ));
             };
             let number = pull.id.to_string();
-            if asked.waive.is_none() {
+            // Bitbucket has no bypass of its own: an exception lifts Flottille's refusal, and
+            // the forge's merge checks still answer.
+            if asked.waive.is_none() && !asked.bypass {
                 let checks = match checks_of(forge, context, &number).await {
                     Ok(checks) => checks,
                     Err(why) => return Outcome::Failed(why),

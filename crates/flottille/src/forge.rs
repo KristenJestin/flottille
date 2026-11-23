@@ -1115,6 +1115,10 @@ pub(crate) struct ForgeCall {
     /// merge: why the user lets a pull request whose checks or review block it be merged; the
     /// gate held the call for them.
     waive: Option<String>,
+    /// merge: the session holds the exception that lifts what blocks it (`exceptions.rs`): it is
+    /// merged past its checks, the branch protection bypassed. Never an argument of the agent's.
+    #[serde(skip)]
+    bypass: bool,
     /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
     method: Option<String>,
     /// merge by squash: the squashed commit's message, its subject on the first line; the gate
@@ -1441,6 +1445,8 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             }
         }
         ("merge" | "checks", _) => {
+            let mut asked = asked;
+            asked.bypass = asked.action == "merge" && crate::exceptions::bypasses(daemon, agent);
             let written = forge_write(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
@@ -3394,7 +3400,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 ));
             };
             let number = number.to_string();
-            if asked.waive.is_none() {
+            if asked.waive.is_none() && !asked.bypass {
                 let viewed =
                     match gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS]).await {
                         Ok(viewed) => viewed,
@@ -3427,6 +3433,10 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             // checkout, which a workspace may be using.
             if matches!(kept, Branch::Delete) {
                 args.push("--delete-branch");
+            }
+            // What the user could do by hand on the forge, they let this session do.
+            if asked.bypass {
+                args.push("--admin");
             }
             let message = asked.message.as_deref().map(squash_message);
             if let Some((subject, body)) = &message {

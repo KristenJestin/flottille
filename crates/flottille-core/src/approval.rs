@@ -199,6 +199,28 @@ impl Leave {
     }
 }
 
+/// An exception the user accepted for a session (`docs/design.md` §7.3): one rule of the gate
+/// that no longer stops that session, until it ends or the user withdraws it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Exception {
+    /// The session that asked: an agent's id. Its sub-agents and other sessions still ask.
+    pub agent: String,
+    /// The rule it lifts, by its name (`force-push`, `merge-blocked`, `forge-state`).
+    pub rule: String,
+    /// The agent's reason, masked, as the user read it.
+    pub why: String,
+    /// The request the user allowed it in.
+    pub request: u64,
+    pub granted_at: u64,
+}
+
+impl Exception {
+    pub fn to_json(&self) -> Value {
+        json!({"agent": self.agent, "rule": self.rule, "why": self.why,
+            "request": self.request, "granted_at": self.granted_at})
+    }
+}
+
 /// A message Flottille hands to an agent, stored before it is sent (`docs/design.md` §5.2,
 /// `docs/agents.md`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

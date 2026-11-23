@@ -17,6 +17,7 @@ pub mod conventions;
 pub mod conversation;
 pub mod device;
 pub mod end_led;
+pub mod exceptions;
 pub mod extensions;
 pub mod findings;
 pub mod glyphs;

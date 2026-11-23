@@ -13,18 +13,32 @@ pub const LEAVE_SAYS: &str = "Flottille always asks you this, in every mode: all
                               this session write to that one until either ends or you withdraw \
                               it.";
 
+/// Why an exception asked for always comes back, said on its card instead of `BASE_SAYS`: what
+/// it asks lasts the session, in every mode.
+pub const EXCEPTION_SAYS: &str = "Flottille always asks you this, in every mode: allowing it \
+                                  lifts this rule for this session until it ends or you withdraw \
+                                  it. Other sessions and its sub-agents still ask.";
+
 /// How a card names the root agent of the page it is on, which has no name of its own there.
 pub const THE_CONVERSATION: &str = "the conversation";
 
 /// What the daemon's reason for the first message to another session says (`LEAVE` of the gate).
 const LEAVE_REASON: &str = "has not written to that one before";
 
+/// What the daemon's reason for an exception asked for says (`ASKS` of its exceptions), as a
+/// sentence or not.
+const EXCEPTION_REASON: &str = "t asks an exception for the rest of this session";
+
 /// What a base request says of why it always asks: `LEAVE_SAYS` when its reasons (`why`) name the
-/// first message of a session to another, else `BASE_SAYS`.
+/// first message of a session to another, `EXCEPTION_SAYS` when they ask an exception, else
+/// `BASE_SAYS`.
 pub fn always_says(why: &str) -> &'static str {
-    match why.contains(LEAVE_REASON) {
-        true => LEAVE_SAYS,
-        false => BASE_SAYS,
+    if why.contains(EXCEPTION_REASON) {
+        EXCEPTION_SAYS
+    } else if why.contains(LEAVE_REASON) {
+        LEAVE_SAYS
+    } else {
+        BASE_SAYS
     }
 }
 

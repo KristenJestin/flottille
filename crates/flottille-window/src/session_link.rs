@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::{VaultAsk, one_line};
+use crate::exceptions::ExceptionRow;
 use crate::leaves::LeaveRow;
 use crate::link::{Conn, Connect, Update, quiet_wait};
 use crate::model::OpenQuestion;
@@ -474,6 +475,9 @@ pub enum SessionUpdate {
     /// The leaves that let the root write to another session, or another to write to it
     /// (`leave.list`).
     Leaves(Vec<LeaveRow>),
+    /// The exceptions the root holds: rules of the gate the user lifted for it
+    /// (`exception.list`).
+    Exceptions(Vec<ExceptionRow>),
     /// The root's session refused a model or an effort the user changed to, with why.
     OptionsRefused(String),
 }
@@ -653,6 +657,7 @@ struct Stale {
     commands: bool,
     subscriptions: bool,
     leaves: bool,
+    exceptions: bool,
     /// When the first of them was marked.
     since: Option<Instant>,
 }
@@ -735,6 +740,7 @@ impl Link {
         // reads of seconds.
         self.read_subscriptions(&mut conn)?;
         self.read_leaves(&mut conn)?;
+        self.read_exceptions(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
         self.read_place(&mut conn, &mut resume.known)?;
         let mut next_commands = Instant::now() + COMMANDS_EVERY;
@@ -767,6 +773,9 @@ impl Link {
                 }
                 if stale.leaves {
                     self.read_leaves(&mut conn)?;
+                }
+                if stale.exceptions {
+                    self.read_exceptions(&mut conn)?;
                 }
                 let due = running && Instant::now() >= next_commands;
                 if stale.commands || due {
@@ -807,6 +816,13 @@ impl Link {
                 || matches!(name, "agent.ended" | "agent.failed")
             {
                 stale.leaves = true;
+                stale.since.get_or_insert_with(Instant::now);
+            }
+            // An exception is the root's own, and goes with its end.
+            if (name.starts_with("exception.") && data["agent"] == root)
+                || (matches!(name, "agent.ended" | "agent.failed") && agent == root)
+            {
+                stale.exceptions = true;
                 stale.since.get_or_insert_with(Instant::now);
             }
             // A following that pauses or resumes is the follower's subscription.
@@ -965,6 +981,19 @@ impl Link {
             .map(LeaveRow::of)
             .collect();
         self.send(SessionUpdate::Leaves(rows));
+        Ok(())
+    }
+
+    /// The exceptions the session's root holds, sent.
+    fn read_exceptions(&self, conn: &mut Conn) -> Result<(), String> {
+        let answer = conn.request("exception.list", json!({"session": self.root}))?;
+        let rows = answer["exceptions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(ExceptionRow::of)
+            .collect();
+        self.send(SessionUpdate::Exceptions(rows));
         Ok(())
     }
 

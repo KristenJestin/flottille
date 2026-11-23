@@ -1143,6 +1143,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        method if method.starts_with("exception.") => (
+            match crate::exceptions::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("leave.") => (
             match crate::leaves::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

@@ -11,7 +11,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
-use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
+use crate::approval::{
+    Decision, Delivery, Exception, Forward, Judgement, Kind, Leave, Request, RequestState,
+};
 use crate::finding::{self, Finding};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::notification::{self, New as NewNotification, Notification};
@@ -1023,6 +1025,18 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (machine, request)
     ) STRICT;
 ",
+    "
+    -- The exceptions the user accepted for a session (`docs/design.md` §7.3): a rule of the gate
+    -- that no longer stops it. They go with the end of the session.
+    CREATE TABLE session_exceptions (
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        rule       TEXT NOT NULL,
+        why        TEXT NOT NULL,
+        request    INTEGER NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (agent, rule)
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -1690,6 +1704,10 @@ impl Store {
         if change.state.is_some_and(AgentState::is_final) {
             transaction.execute(
                 "DELETE FROM session_leaves WHERE writer = ?1 OR session = ?1",
+                params![id],
+            )?;
+            transaction.execute(
+                "DELETE FROM session_exceptions WHERE agent = ?1",
                 params![id],
             )?;
             transaction.execute("DELETE FROM quota_waits WHERE agent = ?1", params![id])?;
@@ -2940,6 +2958,112 @@ impl Store {
             )
             .optional()?
             .is_some())
+    }
+
+    /// The user lifts `rule` for the session `agent`, with the request it was asked in, and its
+    /// `exception.granted` event; `None` when it holds it already or has ended.
+    pub fn grant_exception(
+        &mut self,
+        agent: &str,
+        rule: &str,
+        why: &str,
+        request: u64,
+    ) -> Result<(Option<Exception>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let exception = Exception {
+            agent: agent.to_owned(),
+            rule: rule.to_owned(),
+            why: why.to_owned(),
+            request,
+            granted_at: now_ms(),
+        };
+        // Checked in the same write as `change_agent`'s DELETE, so a session ended between the
+        // approval and here never keeps an exception a resume would find.
+        let added = transaction.execute(
+            "INSERT OR IGNORE INTO session_exceptions (agent, rule, why, request, granted_at) \
+             SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM agents \
+             WHERE id = ?1 AND state NOT IN ('ended', 'failed'))",
+            params![agent, rule, why, request, exception.granted_at],
+        )?;
+        if added == 0 {
+            return Ok((None, None));
+        }
+        let event = append_agent_event(
+            &transaction,
+            agent,
+            "exception.granted",
+            exception.to_json(),
+        )?;
+        transaction.commit()?;
+        Ok((Some(exception), Some(event)))
+    }
+
+    /// Whether the session `agent` holds an exception of `rule`.
+    pub fn has_exception(&self, agent: &str, rule: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM session_exceptions WHERE agent = ?1 AND rule = ?2",
+                params![agent, rule],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The exceptions the session `agent` holds, oldest first.
+    pub fn exceptions_of(&self, agent: &str) -> Result<Vec<Exception>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT rule, why, request, granted_at FROM session_exceptions \
+             WHERE agent = ?1 ORDER BY granted_at, rowid",
+        )?;
+        let rows = statement.query_map(params![agent], |row| {
+            Ok(Exception {
+                agent: agent.to_owned(),
+                rule: row.get(0)?,
+                why: row.get(1)?,
+                request: row.get(2)?,
+                granted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The user takes the exception back, with its `exception.withdrawn` event; `None` when there
+    /// was none.
+    pub fn withdraw_exception(
+        &mut self,
+        agent: &str,
+        rule: &str,
+    ) -> Result<(Option<Exception>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let exception = transaction
+            .query_row(
+                "DELETE FROM session_exceptions WHERE agent = ?1 AND rule = ?2 \
+                 RETURNING why, request, granted_at",
+                params![agent, rule],
+                |row| {
+                    Ok(Exception {
+                        agent: agent.to_owned(),
+                        rule: rule.to_owned(),
+                        why: row.get(0)?,
+                        request: row.get(1)?,
+                        granted_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(exception) = exception else {
+            return Ok((None, None));
+        };
+        let event = append_agent_event(
+            &transaction,
+            agent,
+            "exception.withdrawn",
+            exception.to_json(),
+        )?;
+        transaction.commit()?;
+        Ok((Some(exception), Some(event)))
     }
 
     /// The leaves that name `agent`, as the writer or as the session written to, oldest first.
@@ -6487,6 +6611,61 @@ mod tests {
         let (leave, event) = store.grant_leave(&writer.id, &session.id, 8).unwrap();
         assert_eq!(leave.map(|l| l.request), Some(8));
         assert_eq!(event.unwrap().name, "leave.granted");
+    }
+
+    #[test]
+    fn an_exception_lasts_while_its_session_does_and_is_its_own() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        let mut other = an_agent();
+        other.id = "other0000000".into();
+        for agent in [&agent, &other] {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+
+        let (granted, event) = store
+            .grant_exception(&agent.id, "force-push", "a check refuses it", 4)
+            .unwrap();
+        assert_eq!(granted.map(|e| e.request), Some(4));
+        assert_eq!(event.unwrap().name, "exception.granted");
+        assert!(store.has_exception(&agent.id, "force-push").unwrap());
+        assert!(!store.has_exception(&other.id, "force-push").unwrap());
+        assert!(!store.has_exception(&agent.id, "merge-blocked").unwrap());
+        // Given twice, it is the first.
+        let again = store
+            .grant_exception(&agent.id, "force-push", "again", 5)
+            .unwrap();
+        assert_eq!(again, (None, None));
+        let listed = store.exceptions_of(&agent.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].why, "a check refuses it");
+
+        let (withdrawn, event) = store.withdraw_exception(&agent.id, "force-push").unwrap();
+        assert_eq!(withdrawn.map(|e| e.rule).as_deref(), Some("force-push"));
+        assert_eq!(event.unwrap().name, "exception.withdrawn");
+        assert_eq!(
+            store.withdraw_exception(&agent.id, "force-push").unwrap(),
+            (None, None)
+        );
+
+        // The end of the session takes it, even to be resumed; an ended one gets none.
+        store
+            .grant_exception(&agent.id, "force-push", "a check refuses it", 6)
+            .unwrap();
+        let ended = AgentChange {
+            state: Some(AgentState::Ended),
+            ..AgentChange::default()
+        };
+        store.change_agent(&agent.id, ended, None).unwrap();
+        assert!(!store.has_exception(&agent.id, "force-push").unwrap());
+        assert_eq!(
+            store
+                .grant_exception(&agent.id, "force-push", "x", 7)
+                .unwrap(),
+            (None, None)
+        );
     }
 
     #[test]

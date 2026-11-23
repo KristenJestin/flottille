@@ -964,7 +964,8 @@ waiting…"). A tool call never waits for a human or an agent. Who holds the req
 who asked:
 
 - **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
-  the event stream. The user allows it once or denies it: there is no lasting grant, but one.
+  the event stream. The user allows it once or denies it: there is no lasting grant, but two,
+  the leave below and an exception (§7.3).
   **The leave of a pair of sessions**: the first `session_send` of a session to another it did
   not start (nor was started by) is held for the user in every mode, Full included, and never
   reaches the judge; allowing it delivers the message and lets that session write to the other
@@ -996,6 +997,49 @@ hooks (`reference/hemera.md` §3), and with every push walled but the run that i
 
 **Commands** are named instructions of the project (`commands.md`), sent to a session as `/name`:
 a command grants nothing, each call the session makes goes through its mode like any other.
+
+### 7.3 Exceptions
+
+A rule can be right in general and wrong in one case: a check that refuses an old commit of a
+branch, which the squashed commit does not hold, keeps a pull request from being merged, and the
+base branch's protection keeps it from being merged past it. The agent stays blocked by default;
+when it is, it may ask the user for an **exception**: it makes the very call the rule holds again
+with `exception`, its reason, saying exactly what the rule refuses and why it is wrong here.
+
+- The ask is a request of the user's in every mode, Full included, never the judge's, answered at
+  once as any held call ("request #n is waiting"): no tool call waits for a human. Its card says
+  the call whole (the line, the pull request), the rule it lifts, what that lets the session do
+  (the protection bypassed, for a merge), the agent's reason, and what else the gate says of the
+  call. A child's ask goes to its parent first, as its other requests do.
+- Allowed, the call is done and the rule no longer stops **that session** until it ends (even to
+  be resumed) or the user withdraws it, in the window (the session's rail, Exceptions) or with
+  `flottille exception withdraw`. Other sessions and the session's own sub-agents still ask for
+  themselves. Denied or left unanswered, nothing changes. The exception and the answer stay in the
+  session's history (`exception.granted`, `exception.withdrawn`).
+- An exception lifts only its rule's reasons: what else the gate says of a call stays, and the
+  session's mode decides it as before.
+
+What can be asked for are the refusals that protect the project's own process, where the user
+could do the same by hand on the forge:
+
+- `force-push`: a forced push of the agent's own branch (`git push --force origin <its branch>`,
+  `--force-with-lease`, a `+` refspec), base and held by the project's never list; then judged as
+  any push is. Only a plain line of `git push`, its forcing options, a named remote and one
+  refspec whose destination is the workspace's branch, never `main`, `master`, `dev`, `develop`,
+  `trunk`, `stable/*`, `next/*` or `release/*`, never a deletion;
+- `merge-blocked`: a merge of the workspace's pull request whose required checks fail or whose
+  branch protection blocks it (`forge merge`, the exception its waive): merged past Flottille's
+  refusal, with GitHub's protection bypassed (`gh pr merge --admin`, the rights of the user's own
+  `gh`); Bitbucket has no bypass, and its merge checks still answer;
+- `forge-state`: closing, reopening or relabelling an issue or a pull request (`forge` and
+  `tickets` `close`, `reopen`, `edit` of labels alone), then harmless.
+
+What can never be asked for is refused with no ask, `exception` or not: a shell, or a command with
+shell syntax; the value of a secret or of a credential, from the vault or from a file; anything
+that leaves bare mode (a built-in tool of the agent, its own sub-agents, an MCP server other than
+Flottille's); writing outside the workspace; rewriting the published history of a protected
+branch; changing the gate's own settings or the agent's own permissions. So is an exception asked
+for a call the gate lets through as it is.
 
 ## 8. Instructions
 

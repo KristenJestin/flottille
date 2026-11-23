@@ -61,6 +61,7 @@ use crate::conversation::{
     TIME_LOGGING_KIND, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::end_led::{self, LedEnd};
+use crate::exceptions::ExceptionList;
 use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -701,6 +702,11 @@ impl SessionPage {
         self.rail.read(cx).leaves.clone()
     }
 
+    /// The rail's Exceptions section.
+    pub fn exceptions(&self, cx: &gpui_kit::App) -> Entity<ExceptionList> {
+        self.rail.read(cx).exceptions.clone()
+    }
+
     /// The rail's "Waiting for you" section.
     pub(crate) fn shell(&self) -> WeakEntity<Shell> {
         self.shell.clone()
@@ -1148,6 +1154,30 @@ impl SessionPage {
         );
     }
 
+    /// The user withdraws an exception of the root: the daemon takes it back, and the list
+    /// follows its event.
+    pub fn withdraw_exception(&mut self, agent: &str, rule: &str, cx: &mut Context<Self>) {
+        self.perform(
+            Command::WithdrawException {
+                session: self.opened.id.clone(),
+                agent: agent.to_owned(),
+                rule: rule.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to the withdrawal of an exception: why, in a toast, when it
+    /// refused.
+    pub fn exception_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        if let Some(why) = refused {
+            toast(
+                Toast::failure("The exception was not withdrawn").detail(why),
+                cx,
+            );
+        }
+    }
+
     /// What the daemon answered to a withdrawal: why, in a toast, when it refused.
     pub fn leave_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         if let Some(why) = refused {
@@ -1472,6 +1502,10 @@ impl SessionPage {
             }
             SessionUpdate::Leaves(rows) => {
                 let list = self.leaves(cx);
+                list.update(cx, |list, cx| list.set(rows, cx));
+            }
+            SessionUpdate::Exceptions(rows) => {
+                let list = self.exceptions(cx);
                 list.update(cx, |list, cx| list.set(rows, cx));
             }
             SessionUpdate::CommandOutput(output) => {
@@ -6904,7 +6938,7 @@ impl SessionPage {
     }
 }
 
-pub use flottille_protocol::words::{BASE_SAYS, LEAVE_SAYS};
+pub use flottille_protocol::words::{BASE_SAYS, EXCEPTION_SAYS, LEAVE_SAYS};
 
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
@@ -7364,6 +7398,8 @@ pub struct SessionRail {
     subscriptions: Entity<SubscriptionList>,
     /// The leaves that let the session write to another, or another to write to it.
     leaves: Entity<LeaveList>,
+    /// The rules of the gate the user lifted for the session.
+    exceptions: Entity<ExceptionList>,
     /// The requests that wait for the user, pinned at the rail's bottom.
     waiting: Entity<Waiting>,
     /// The scroll of the sections above what waits.
@@ -7413,12 +7449,14 @@ impl SessionRail {
         let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let leaves = cx.new(|_| LeaveList::new(page.clone(), root.clone()));
+        let exceptions = cx.new(|_| ExceptionList::new(page.clone(), root.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
             page,
             commands,
             subscriptions,
             leaves,
+            exceptions,
             waiting,
             scroll: ScrollHandle::new(),
             agents: Vec::new(),
@@ -9085,6 +9123,7 @@ impl Render for SessionRail {
                     .child(workspace)
                     .child(self.subscriptions.clone())
                     .child(self.leaves.clone())
+                    .child(self.exceptions.clone())
                     .child(self.commands.clone()),
             )
             .child(

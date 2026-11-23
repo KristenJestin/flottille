@@ -443,6 +443,9 @@ async fn performed(
     if !grant.tools.contains(&tool) {
         return not_executed(format!("the agent has no tool {tool}."));
     }
+    // An exception the user accepted is the session's from now on, whatever becomes of the call:
+    // its check below finds the call without the rule it lifts.
+    crate::exceptions::grant(daemon, &request.agent, &request.reasons, number);
     // The situation may have changed since the request was made.
     let (verdict, first) = mcp::judged_off(daemon, &grant, tool, &request.arguments).await;
     // A connection's write compares once more, where it writes, what it does with what the user

@@ -366,6 +366,7 @@ pub fn verdict(
     let held = |why: &str| {
         gate::Verdict::Ask(gate::Ask {
             reasons: vec![why.to_owned()],
+            base: 0,
             class: gate::Class::Judge,
             kind: Kind::Call,
         })
