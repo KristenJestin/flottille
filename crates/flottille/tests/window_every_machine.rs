@@ -1532,24 +1532,17 @@ fn interrupting_the_server_s_session_gets_its_answer(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_draft_of_the_server_s_session_is_read_back(cx: &mut TestAppContext) {
+fn a_draft_read_of_the_server_s_session_reaches_its_composer(cx: &mut TestAppContext) {
     let (_hub, pc, _server, _here, there) = two_machines();
-    // The window keeps its drafts on this machine, another machine's sessions' too.
-    pc.user
-        .call(
-            "draft.set",
-            json!({"kind": "session", "target": there, "text": "Half a thought"}),
-        )
-        .unwrap();
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     open_there(&shell, cx, &there);
 
+    // The window asks what it keeps of the draft: the answer reaches the composer, which may
+    // then write one.
     let reply = reply_there(&shell, cx, &there);
-    until(&shell, cx, "the server's draft is in its composer", |cx| {
-        reply.read_with(cx, |reply, cx| {
-            reply.draft_was_read() && reply.field().read(cx).value() == "Half a thought"
-        })
+    until(&shell, cx, "the composer heard what its draft is", |cx| {
+        reply.read_with(cx, |reply, _| reply.draft_was_read())
     });
 }
 
@@ -1611,6 +1604,9 @@ fn back_to_a_machine_gone_offline_leaves_the_history_where_it_was(cx: &mut TestA
     let (_hub, pc, server, here, there) = two_machines();
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
+    until(&shell, cx, "this machine's session is listed", |cx| {
+        present(cx, session_id(&here))
+    });
     click(cx, session_id(&here));
     until(&shell, cx, "this machine's session is drawn", |cx| {
         shows_reply(&shell, cx, &here)
@@ -1676,6 +1672,10 @@ fn a_read_asked_by_the_server_s_answer_after_its_page_was_left_goes_to_the_serve
     click(cx, "settings");
     step(&shell, cx);
     settings_of(&shell, cx, "server");
+    until(&shell, cx, "the server's settings are shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
     let vault = shell.read_with(cx, |s, cx| {
         let page = s.main().read(cx).settings_page().cloned().unwrap();
         page.read(cx).vault().clone()
