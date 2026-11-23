@@ -1910,7 +1910,7 @@ on a real phone, by hand, and reported.
   machine are refused.
 - What crosses machines (#817): a child's report, question, failure, idle and stuck notices, the
   notice that its process died and it goes on (`child-replaced`), and a led session's
-  `session-turn-ended` (when a turn reported or asked, and when it ends or fails
+  `session-turn-ended` (at each end of a turn, and when it ends or fails
   unless its pilot ended it), and since #818 a child's held request (`child-asks`) and what a led
   session asked the user while its pilot's machine was off (`session-meanwhile`). Not yet:
   `led-integrated`, whose check reads the forge and the base on the session's machine.
@@ -1940,6 +1940,10 @@ on a real phone, by hand, and reported.
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
   an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
   the receiver would.
+- A led session's plain end of a turn (it neither asked nor reported) is kept once per session
+  for the machine that took none: the next replaces the one still waiting, so that the turns of a
+  session that runs while its pilot's machine is off never fill the 100 and push out a report or
+  another session's news. What asked, reported or ended is each kept.
 - A message the other machine cannot take now (`later`) is sent again 30 seconds later, or sooner
   on the next link or message kept.
 - Pair mode (#1146) lasts 5 minutes unless `--minutes` says 1 to 15, works once, and one is open

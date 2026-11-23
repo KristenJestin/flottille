@@ -1678,7 +1678,7 @@ fn a_held_launch_allowed_there_tells_its_caller() {
     );
     assert!(told.contains("Started a session led by you"), "{told}");
     assert!(
-        told.contains("[flottille:session-turn-ended] wakes you when it asks, reports or ends"),
+        told.contains("[flottille:session-turn-ended] wakes you at each end of its turns"),
         "{told}"
     );
     assert!(told.contains("session_send"), "{told}");
@@ -1783,7 +1783,7 @@ fn a_led_session_started_on_another_machine_says_what_follows() {
 
     assert!(text.contains("Started a session led by you"), "{text}");
     assert!(text.contains("[flottille:session-turn-ended]"), "{text}");
-    assert!(text.contains("when it asks, reports or ends"), "{text}");
+    assert!(text.contains("at each end of its turns"), "{text}");
     assert!(text.contains("session_send"), "{text}");
 }
 

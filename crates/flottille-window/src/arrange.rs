@@ -449,4 +449,44 @@ mod tests {
         arrangement.apply(&change);
         assert_eq!(arrangement.groups.len(), 1);
     }
+
+    #[test]
+    fn every_arrangement_change_applied_twice_is_held_once() {
+        let present = keys(&["a", "b", "c"]);
+        let mut start = Arrangement::default();
+        let work = add(&mut start, "Work");
+        let play = add(&mut start, "Play");
+        start.move_project(&present, "a", Some(&work), 0);
+        let changes = [
+            Change::add_group("Home"),
+            Change::RemoveGroup(work.clone()),
+            Change::MoveProject {
+                present: present.clone(),
+                key: "b".into(),
+                group: Some(play.clone()),
+                index: 0,
+            },
+            Change::MoveProject {
+                present: present.clone(),
+                key: "c".into(),
+                group: None,
+                index: 0,
+            },
+            Change::MoveGroup {
+                id: play.clone(),
+                index: 0,
+            },
+            Change::OpenGroup {
+                id: work.clone(),
+                open: false,
+            },
+        ];
+        for change in changes {
+            let mut once = start.clone();
+            once.apply(&change);
+            let mut twice = once.clone();
+            twice.apply(&change);
+            assert_eq!(twice, once, "{change:?} applied twice");
+        }
+    }
 }
