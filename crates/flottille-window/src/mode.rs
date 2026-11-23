@@ -41,7 +41,7 @@ const MODES: [(&str, &str, &str, Tone); 3] = [
     (
         "full",
         "Full",
-        "Nothing is held back: commands run as yours, with your keys, sign-ins and keyring, the vault included. They can also act as this machine: reach the daemon, switch other sessions or machines.",
+        "Nothing is held back: commands run as yours, with your keys, sign-ins and keyring, the vault included. They can also act as this machine: control Flottille, switch other sessions or machines.",
         Tone::Fail,
     ),
 ];
