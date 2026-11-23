@@ -3707,14 +3707,14 @@ impl Shell {
             }
             // Only the answer to the latest request counts: an older one would take the window
             // back to a choice the user has since changed.
-            // Every machine's Settings ask through one count: a read of one that another
-            // overtook still lets that one's Settings know what the window keeps, or its choice
-            // would stay held (#1271).
+            // Every machine's Settings ask through one count: a read of another machine's that
+            // this one's overtook still lets its Settings know what the window keeps, or their
+            // choice would stay held (#1271). This machine's own wait for its latest answer.
             Outcome::Appearance {
                 seq,
                 written: false,
                 shown: Ok(appearance),
-            } if seq != self.appearance_asked => {
+            } if seq != self.appearance_asked && self.answering.is_some() => {
                 if !self.settings.read(cx).appearance_known() {
                     self.settings.update(cx, |page, cx| {
                         page.appearance_answered(Ok(appearance), false, cx)
