@@ -5753,13 +5753,16 @@ fn devtools_probed(user: &User, mcp: &Mcp, agent: &str, mode: &str) -> Value {
              \x20       try:\n\
              \x20           s = socket.create_connection((host, port), timeout=1)\n\
              \x20           s.settimeout(2)\n\
-             \x20           s.sendall(b'GET /json/version HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n')\n\
+             \x20           s.sendall(b'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n')\n\
              \x20           data = b''\n\
-             \x20           while len(data) < 65536:\n\
-             \x20               chunk = s.recv(4096)\n\
-             \x20               if not chunk:\n\
-             \x20                   break\n\
-             \x20               data += chunk\n\
+             \x20           try:\n\
+             \x20               while len(data) < 65536:\n\
+             \x20                   chunk = s.recv(4096)\n\
+             \x20                   if not chunk:\n\
+             \x20                       break\n\
+             \x20                   data += chunk\n\
+             \x20           except Exception:\n\
+             \x20               pass\n\
              \x20           s.close()\n\
              \x20           if b'webSocketDebuggerUrl' in data:\n\
              \x20               out['devtools'].append(data.decode('utf-8', 'replace')[-400:])\n\
