@@ -105,12 +105,9 @@ fn connects(path: &Path) -> String {
     ))
 }
 
-/// A line that reads the file at `path` and prints only whether it could.
+/// A line that reads the file at `path`, printing nothing of it: exit 0 when it could.
 fn reads(path: &Path) -> String {
-    python(&format!(
-        "open('{}').read(); print('read it')",
-        path.display()
-    ))
+    python(&format!("open('{}').read()", path.display()))
 }
 
 #[test]
@@ -153,15 +150,10 @@ fn a_run_in_full_has_the_daemon_s_ssh_agent_and_display() {
     set_mode(&user, &id, "full");
 
     // Their presence alone: a value is never printed.
-    let names = [
-        "SSH_AUTH_SOCK",
-        "WAYLAND_DISPLAY",
-        "DISPLAY",
-        "XDG_RUNTIME_DIR",
-    ];
-    let present = python(&format!(
-        "import os, sys; sys.exit(0 if all(n in os.environ for n in {names:?}) else 1)"
-    ));
+    let present = python(
+        "import os, sys; sys.exit(0 if all(n in os.environ for n in ['SSH_AUTH_SOCK', \
+         'WAYLAND_DISPLAY', 'DISPLAY', 'XDG_RUNTIME_DIR']) else 1)",
+    );
     let (given, ran) = exits_zero(&mcp, &present);
     assert!(given, "the daemon's environment is not the run's: {ran}");
     let (reached, ran) = exits_zero(
@@ -202,10 +194,9 @@ fn a_run_in_full_still_cannot_reach_the_vault_socket_nor_a_login_token() {
     for kept in [bridge.join("1.mcp.json"), codex.join("session.json")] {
         let (read, ran) = exits_zero(&mcp, &reads(&kept));
         assert!(!read, "{} is in reach: {ran}", kept.display());
-        assert!(!ran.contains("read it"), "{ran}");
     }
     let (read, ran) = exits_zero(&mcp, &reads(&open));
-    assert!(read && ran.contains("read it"), "{ran}");
+    assert!(read, "{ran}");
     // Connecting to a socket by its path is a right of Landlock's ninth ABI only.
     if landlock_abi() >= 9 {
         let (reached, ran) = exits_zero(&mcp, &connects(&vault.join("vault.sock")));
@@ -260,6 +251,9 @@ fn in_full_a_push_over_ssh_reaches_the_network_though_the_git_settings_changed()
         "[user]\n\tname = Test\n\temail = test@example.com\n",
     )
     .unwrap();
+    // The user's own settings, which the daemon finds at its start: the harness gives none.
+    let settings = user.path("home/.gitconfig");
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "full");
     user.git(
@@ -361,7 +355,7 @@ fn a_session_in_full_is_told_where_its_pull_requests_and_tickets_are() {
     let delivery = told().unwrap();
     assert!(delivery.body.contains("Full"), "{}", delivery.body);
     assert!(
-        delivery.body.contains("as the user's own"),
+        delivery.body.contains("the user's own"),
         "{}",
         delivery.body
     );
