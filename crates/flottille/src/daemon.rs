@@ -1479,7 +1479,7 @@ pub(crate) mod tests {
     }
 
     /// A daemon on a throwaway store with the agent `a`, and its bus when `bus` says so.
-    fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
+    pub(crate) fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
         let paths = Paths {
             runtime: dir.join("runtime"),
             state: dir.join("state"),
