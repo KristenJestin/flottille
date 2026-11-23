@@ -2635,6 +2635,36 @@ mod tests {
     }
 
     #[test]
+    fn a_session_held_on_another_machine_then_allowed_is_said_once_it_started() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "machine": "server", "title": "Docs", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Not started yet: request #4 on server is waiting for the user, who allows or refuses it there."}),
+        ));
+        c.apply(&event(
+            3,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 on server (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Docs\" (agent 0123456789ab), on server, in workspace w there."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "\"Docs\"".into()
+            })
+        );
+        assert!(c.held_sessions.is_empty(), "{:?}", c.held_sessions);
+    }
+
+    #[test]
     fn a_child_reads_its_brief_from_its_parent() {
         let mut c = Conversation::new("web-form".into(), Some("lead".into()));
         c.apply(&event(
