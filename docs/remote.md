@@ -1024,7 +1024,16 @@ local child's work; nothing moves your branch.*
   "Finish the export"`), the brief whole. The receiving machine judges because its quota, its
   machine and its secrets are used, and because a machine alone must not be able to start anything
   unjudged. The caller is answered at once with the session's id, or the request's number on that
-  machine (`request #4 on server is waiting for the user`).
+  machine (`request #4 on server is waiting for the user`). The held answer says what follows once
+  the user allows it there (a led session's questions, reports and end wake its pilot, and
+  `session_send` reaches it; a child's report, questions and failure come as a local child's), and
+  that the caller is told of the user's answer. **That answer comes to the caller as a held call's
+  result does** (#1273), an `approval` delivery from that machine: allowed, the session runs now,
+  and what follows is said again; refused (by the user, by its session ended there while it was
+  held, or allowed but unable to start, saying why), nothing of it runs there. The caller's
+  machine marks its record of the launch `started` or `refused`: a refused launch leaves no row
+  under its pilot and counts in no cap. A handed session's caller is told too: it waited for that
+  answer, and hears nothing of the session after it.
 - **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
@@ -2299,7 +2308,8 @@ on a real phone, by hand, and reported.
   while the pilot lives. A session handed to the user is not shown under the agent that started it.
   The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
   whose caller ended: an old launch is never read again. A launch held for the user there is
-  `waiting` until something of it is heard here (its approval there sends nothing back).
+  `waiting` until the user's answer there comes back: allowed, `running` until its first delivery;
+  refused, it leaves its pilot's rows.
 - Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
   those sessions, so a project's page, search, a session's page and the inbox do not list them,
   and nothing offers to end them from here.
