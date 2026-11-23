@@ -219,6 +219,37 @@ fn a_led_session_from_another_machine_is_told_where_its_questions_go() {
 }
 
 #[test]
+fn the_window_shows_a_session_led_from_another_machine_without_the_agent_only_paragraphs() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (_session, _root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let first = prompt_with(&server, "Finish the export.");
+
+    // What the daemon really sent, folded as the window folds it: a session led here shows its
+    // brief alone, and so does this one.
+    let mut conversation =
+        flottille_window::conversation::Conversation::new("session".into(), None);
+    conversation.apply(&flottille_protocol::Event {
+        seq: 1,
+        at: 1,
+        name: "agent.prompted".into(),
+        data: json!({ "text": first }),
+    });
+    let shown = conversation
+        .blocks()
+        .iter()
+        .find_map(|block| match block {
+            flottille_window::conversation::Block::Message { from, text, .. }
+                if from.starts_with("started by") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no started-by message in {:?}", conversation.blocks()));
+    assert_eq!(shown.trim(), "Finish the export.", "{shown}");
+}
+
+#[test]
 fn the_answer_of_a_led_launch_on_another_machine_says_it_wakes_its_pilot() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
 
