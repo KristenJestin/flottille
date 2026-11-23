@@ -1684,9 +1684,10 @@ impl Remote {
         kept.into_iter()
             .filter(|(machine, _, _, _)| peers.iter().any(|peer| hex_of(&peer.key) == *machine))
             .flat_map(|(machine, name, list, _)| {
-                let list: flottille_link::SessionList =
-                    serde_json::from_value(list).unwrap_or_default();
-                list.sessions
+                // The list kept may hold more than its sessions (its machine's projects).
+                let sessions: Vec<flottille_link::LightSession> =
+                    serde_json::from_value(list["sessions"].clone()).unwrap_or_default();
+                sessions
                     .into_iter()
                     .filter(|session| !closing.contains(&(machine.clone(), session.id.clone())))
                     .map(|session| (machine.clone(), name.clone(), session))
