@@ -16,7 +16,7 @@ use flottille_window::settings::SettingsPage;
 use flottille_window::shell::Selection;
 use gpui_design_system::motion::PANEL;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 fn click(id: &str, cx: &mut VisualTestContext) {
@@ -31,6 +31,8 @@ fn settings_of(user: &User) -> Value {
 
 /// Settings on its Notifications tab, once the page knows what rings.
 fn open_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
+    // The tab is long: tall enough that every control is on screen, as a click needs.
+    cx.simulate_resize(size(px(1440.), px(2800.)));
     cx.update(|window, cx| window.click("settings", cx));
     until(shell, cx, "the settings page is shown", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
@@ -55,6 +57,7 @@ fn open_project_tab(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
 ) -> Entity<ProjectSettingsPage> {
+    cx.simulate_resize(size(px(1440.), px(2800.)));
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::ProjectSettings("app".into()), window, cx)
     });
@@ -291,7 +294,7 @@ fn a_project_has_its_own_level_for_each_kind_and_follows_the_default_until_it_se
         );
     }
     // It follows the defaults, and says what they are.
-    let follows = label("notify-project-report-default", cx).unwrap_or_default();
+    let follows = label("notify-project-report", cx).unwrap_or_default();
     assert!(follows.starts_with("As Settings"), "{follows}");
 
     click("notify-project-report", cx);
@@ -332,7 +335,7 @@ fn the_bell_turns_do_not_disturb_on_for_an_hour_and_off(cx: &mut TestAppContext)
         Some("Do not disturb")
     );
     // It says how long before it is on, and not once it is.
-    assert!(has("bell-dnd-how-field", cx));
+    assert!(has("bell-dnd-how-field-label", cx));
     click("bell-dnd-how", cx);
     click("bell-dnd-how-one-hour", cx);
 
@@ -356,7 +359,10 @@ fn the_bell_turns_do_not_disturb_on_for_an_hour_and_off(cx: &mut TestAppContext)
         })
     });
     settle(cx);
-    assert!(!has("bell-dnd-how-field", cx), "on: the length folded away");
+    assert!(
+        !has("bell-dnd-how-field-label", cx),
+        "on: the length folded away"
+    );
     let line = label("bell-dnd-line", cx).unwrap_or_default();
     assert!(line.starts_with("Until "), "{line}");
 
@@ -365,5 +371,8 @@ fn the_bell_turns_do_not_disturb_on_for_an_hour_and_off(cx: &mut TestAppContext)
         settings_of(&user)["do_not_disturb"]["on"] == false
     });
     settle(cx);
-    assert!(has("bell-dnd-how-field", cx), "off: the length is offered");
+    assert!(
+        has("bell-dnd-how-field-label", cx),
+        "off: the length is offered"
+    );
 }
