@@ -25,6 +25,8 @@ mod forge_review;
 mod forge_threads;
 #[path = "../forges.rs"]
 mod forges;
+#[path = "../gate_exception.rs"]
+mod gate_exception;
 #[path = "../message_checks.rs"]
 mod message_checks;
 #[path = "../pr_edit.rs"]
