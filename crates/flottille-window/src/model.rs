@@ -2935,7 +2935,21 @@ mod tests {
         assert_eq!(snapshot.sessions[0].title, "Rework the login");
         // Launched by an agent of this machine, it keeps its brief's first line until named.
         launched["launched_by"] = json!("r0");
+        let snapshot = build(json!({"agents": [launched.clone()]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Fix the login");
+        // Detached from that agent, which clears who launched it, it still keeps its brief's.
+        launched["launched_by"] = Value::Null;
+        launched["detached_from"] = json!("r0");
         let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
         assert_eq!(snapshot.sessions[0].title, "Fix the login");
+    }
+
+    #[test]
+    fn a_held_launch_an_older_machine_lists_idle_still_needs_you() {
+        // A machine before the list said `needs you` for a held launch lists it idle.
+        let row = the_led_row(&led_on_server("held", None, Some("idle")));
+        assert_eq!(row.mark, Some(AgentState::NeedsYou));
+        assert_eq!(row.mark_said, "Needs you on server");
+        assert_eq!(row.elsewhere.as_ref().unwrap().state, "needs you");
     }
 }

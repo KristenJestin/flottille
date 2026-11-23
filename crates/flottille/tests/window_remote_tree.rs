@@ -1116,33 +1116,81 @@ fn a_running_root_of_another_machine_with_a_question_shows_needs_you(cx: &mut Te
     });
     assert_eq!(mark, Some(flottille_window::state::AgentState::NeedsYou));
 
-    // Opened, its machine comes in front: its row there still needs you while its turn runs.
-    cx.update(|window, cx| window.click(session_id(&row), cx));
-    until(&shell, cx, "the root's row with server in front", |cx| {
-        present(cx, session_id(&id))
-    });
-    let deadline = Instant::now() + WAIT;
-    loop {
-        step(&shell, Duration::from_millis(16), cx);
-        let said = label(cx, session_mark_id(&id));
-        if said
-            .as_deref()
-            .is_some_and(|said| said.starts_with("Needs you"))
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "with server in front the row says {said:?}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
     let agent = server
         .user
         .call("agent.show", json!({"agent": id}))
         .unwrap()["agent"]
         .clone();
     assert_eq!(agent["state"], "working", "its turn still runs");
+}
+
+#[gpui_kit::test]
+fn a_led_session_of_another_machine_that_asks_the_user_needs_you_under_its_pilot(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server();
+    // It asks once its pilot's machine is off: the question goes to the user there.
+    server.user.fake_script(json!({"turns": [
+        {"when": "Finish the export of the report.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "ask", "arguments": {"question": "CSV or JSON first?"}}}
+        ]}
+    ]}));
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "working")
+    });
+    let stopped = pc.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", pc.log());
+    eventually("server sees pc offline", || {
+        server.remote()["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "pc" && m["state"] != "online")
+    });
+    std::fs::write(server.user.path("fake/release"), "").unwrap();
+    eventually("the session waits on the user of server", || {
+        server
+            .user
+            .call("agent.tree", json!({"agent": agent}))
+            .unwrap()["agents"][0]["waiting_on"]
+            == "user"
+    });
+    // pc back, its link to server up again.
+    pc.user.status();
+    eventually("pc sees server online", || {
+        pc.remote()["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "server" && m["state"] == "online")
+    });
+
+    // Under its pilot, its row says what server says of it: it needs the user there.
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, Duration::from_millis(16), cx);
+        let said = label(cx, session_mark_id(&row));
+        if said.as_deref() == Some("Needs you on server") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the row says {said:?}, server lists it {:?}",
+            listed_state(&server, &agent)
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        label(cx, session_machine_id(&row)).as_deref(),
+        Some("server · needs you")
+    );
 }
 
 #[gpui_kit::test]
