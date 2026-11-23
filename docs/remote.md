@@ -989,6 +989,12 @@ local child's work; nothing moves your branch.*
   machine and its secrets are used, and because a machine alone must not be able to start anything
   unjudged. The caller is answered at once with the session's id, or the request's number on that
   machine (`request #4 on server is waiting for the user`).
+- **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
+  a `led` or `handed` launch whose caller is itself a session another agent started (here, or on
+  a third machine) says so (`launched`), and the receiving machine's gate takes it as base: held
+  for its user in every mode but Full, never the judge's (`this agent is a session another agent
+  started for the user, …`). A `led` or `handed` session a machine started for an agent of
+  another is, to its own gate, a session an agent started: a session it starts comes to the user.
 - **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
@@ -1613,6 +1619,16 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
+  field it does not know, and a launch is read with no unknown field, so the launch is refused
+  with the link's own refusal rather than run as any root's. A launch of any other caller leaves
+  the field out and reaches it as before. No protocol bump for it.
+- **A child on another machine is not held for the chain** (#1275): a session an agent started
+  starts children here as its mode allows, and on another machine likewise; only `led` and
+  `handed` launches are base.
+- **A session started here for another machine's agent cannot be detached yet** (#1275): it has no
+  `launched_by` here (#1272 records its pilot), so its launches stay the user's until then.
 
 - **A call to a session of a machine that is off is refused at once** (#1250), every tool alike,
   never kept: what the session's machine would answer (held, refused, the leave) cannot be known

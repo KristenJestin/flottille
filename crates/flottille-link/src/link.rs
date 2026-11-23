@@ -232,6 +232,11 @@ pub struct LaunchAsk {
     /// (`flottille_core::project::TRAVELLING`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
+    /// The caller is itself a session another agent started (`docs/tools.md`, "No chain without
+    /// the user"): a session it starts comes to the user there too. Left out when false, so that
+    /// a launch of any other caller reads as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub launched: bool,
 }
 
 /// What a repository is, whatever its folder: its root commits, and its remote's URL when it has

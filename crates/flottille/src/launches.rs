@@ -249,6 +249,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         repositories: place.iter().map(|(path, _)| path.clone()).collect(),
         identities,
         settings: Some(settings),
+        launched: launched(daemon, caller),
     };
     let judged = link
         .send(&Message::Machine(MachineMessage::Launch(Box::new(
@@ -594,7 +595,15 @@ async fn judged(
     );
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
-    let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    let mut classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    // No chain without the user, across machines as here: a session another agent started
+    // starts a session only as base (`gate::LAUNCHED_LAUNCH`); its children are its tree's.
+    if asked.launched && kind != LaunchKind::Child {
+        classed.base = true;
+        classed
+            .reasons
+            .push(crate::gate::LAUNCHED_LAUNCH.to_owned());
+    }
     let name_of = |key: &str| {
         members
             .members()
@@ -1202,6 +1211,12 @@ pub(crate) fn launched_from(daemon: &Daemon, agent: &str) -> Option<(String, Str
         .unwrap_or("another machine")
         .to_owned();
     Some((launch.caller, from, launch.kind == "child"))
+}
+
+/// Whether `agent` is a session another agent started: here (`launched_by`), or on another
+/// machine. Its own launches come to the user (`gate::LAUNCHED_LAUNCH`).
+pub(crate) fn launched(daemon: &Daemon, agent: &Agent) -> bool {
+    agent.launched_by.is_some() || launched_from(daemon, &agent.id).is_some()
 }
 
 /// Whether `agent` was started here for another machine's agent, and allowed: its first message
