@@ -1097,7 +1097,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   name but other repositories stay two rows, the second saying its machine in small at the end
   of its row. A project that only machines that are off have is greyed and says `offline since
   14:02` under its row, its ink fading as the machine goes and comes back. The Projects header's
-  "⋯" (offered once there is another machine) holds **Group by machine**, a switch: the list
+  "⋯" holds **Group by machine**, a switch (off, with "One machine" as its reason, until there is
+  another machine; the menu is built once, so a machine that comes or goes never closes it): the list
   becomes one foldable section per machine (its icon, its name and its state, `this machine` for
   this one), each with the projects that machine has and its own sessions only, a project several
   machines have under each of them; switched off, the one list comes back, and the rows move
@@ -1118,7 +1119,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   any group, and unfolds there. The order and the groups are the user's, so they are kept by the
   daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
   sidebar's folds so that one window's fold never erases another's groups, read by a window when
-  it opens, never in a project; New group… is not offered while the projects are shown by machine
+  it opens and again at each change it makes (applied to what the daemon holds, so that a window
+  that was open before another made a group does not erase it), never in a project; a project is
+  dragged from its own row, never from the sessions and buttons it holds; New group… is not offered while the projects are shown by machine
   (the entry says "Shown by machine"), and a project that a machine does not give for now keeps its
   place and group for when it is back; Group by machine shows the sections instead of
   them (the list folds away and fades) and switched off they come back as they were. Sessions are sorted by
