@@ -2835,13 +2835,21 @@ reaches them. A method that names no program Flottille signs in is `not-found`.
 
 #### `signin.list`
 
-`{}`. Every program, the agents first in the providers' order, then the forges and trackers, those
-the registered projects use first: `{"programs": [{"program", "title", "kind", "host", "found",
-"path", "version", "signed_in", "account", "can_sign_in", "line", "sign_out_line", "running"}]}`.
+`{"checked"?, "program"?}`. Every program, the agents first in the providers' order, then the
+forges and trackers (`gh`, `acli`, `bkt`, `glab`), always in that order, whatever the registered
+projects use: `{"programs": [{"program", "title", "kind", "host", "found", "path", "version",
+"signed_in", "account", "problem", "checking", "can_sign_in", "line", "sign_out_line",
+"running"}]}`. With `"checked": false` no check runs: each row says what is known without one
+(`found`, `host`, `can_sign_in`, `running`) and `"checking": true`, and the caller asks each
+check alone with `"program"`, which answers that one row, checked (`checking` false). The window
+does so, so that a row says it is being checked until its own result arrives, and no row waits for
+another. `problem` is why a forge's or a tracker's check could not be made: the command line's first
+error line, masked, or `no answer in N s` (`signed_in` is `null` then, and a sign-in is never
+offered: `docs/forges.md`, "The programs it needs"), else `null`.
 `kind` is `agent` or `forge`; `host` the one a forge program is checked for (the first a project
 names, else `github.com`, `gitlab.com` or `bitbucket.org`; the Jira site for `acli`, `null` when no
 project names one), `null` for an agent. `signed_in` is what the program's own status says
-(`null` when it is not installed or could not say), `account` the account's name it says (`gh`'s
+(`null` when it is not installed or could not say, `problem` saying why for the forges), `account` the account's name it says (`gh`'s
 login, Claude's email), masked to its first letter and its domain's (`o***`, `s***@e***`), else
 `null`. `can_sign_in` is `true` when Flottille can run its
 sign-in here; `line` is the line to type in a terminal on that machine when it cannot

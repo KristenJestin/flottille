@@ -23,7 +23,8 @@ would send a read or a write to another host than the one the declaration was ch
 
 - **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
   `--show-token`, never reads `gh`'s configuration folder. Of `gh auth status --hostname
-  github.com` it reads the exit code alone: 0 is signed in.
+  github.com` it reads the exit code, and, when that is not 0, whether the command line says it
+  holds no login (below): nothing else it prints is kept.
 - **What `gh` and `bkt` print is masked** before it is shown or stored (titles, comments, errors),
   as every output is (`flottille_core::secrets`).
 - **Agents never get that environment.** An agent's process and its command runs have the forge
@@ -52,6 +53,19 @@ with the system's default handler.
 | `bkt`, Bitbucket Cloud | <https://github.com/avivsinai/bitbucket-cli> | `brew install bitbucket-cli` (macOS and Linux with Homebrew) | `bkt auth login https://bitbucket.org --kind cloud --web`, then `bkt context create bitbucket-org-<workspace> --host api.bitbucket.org --workspace <workspace>` |
 | `bkt`, Data Center | the same | the same | `bkt auth login https://<host> --web-token`, then `bkt context create <host>-<project> --host <host> --project <PROJECT>` |
 | `acli` | <https://developer.atlassian.com/cloud/acli/guides/install-acli/> | none | `acli jira auth login`; signed in to another site: `acli jira auth switch --site <site>` |
+
+**A check says one of three things** (#1315), for `gh`, `glab`, `acli` and `bkt` alike: **signed in**
+(exit 0, or for `bkt` a context for the host), **not signed in** (the command line says it holds no
+login: `gh auth status` says `You are not logged into any GitHub hosts` or that its token is
+invalid, `acli` and `glab` that they are not logged in or not authenticated, a `bkt` listing with no
+context for the host), and **could not check** (any other failure: the network, a service that is
+down, a keyring that is locked, a command that gives no answer in 30 s). When unsure, a failure that
+is not a clear "not logged in" is "could not check": it says nothing of who is signed in, and is
+never answered with a sign-in. It carries the command line's first error line, masked, or `no answer
+in N s`; the daemon's log says the same line (`gh could not be checked: <line>; what is shown could
+not be refreshed`). What the projects show of a forge or a tracker (pull requests, tickets) keeps its
+last known state when a check could not be made, and says it could not be refreshed, rather than
+"not signed in".
 
 The `bkt` commands are the ones its README gives (Cloud by the browser, Data Center by a personal
 access token), with the workspace or the project of the repository that declares the forge, and the
