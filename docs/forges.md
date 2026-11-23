@@ -148,7 +148,14 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
   and the checks as one mark: `failing` when one fails, else `pending` when one runs, else
   `passing` (skipped ones count as passing in the mark, but a merge needs one that passed: a pull
   request whose checks were all skipped is refused like one with none); none when there are no
-  checks;
+  checks. **Each check counts once, its latest run**: GitHub lists every run of a check on the
+  head (a run again, a workflow run superseded or cancelled and started again, the same name
+  twice), and the one that started last (`startedAt`, else `createdAt`; one with no start is the
+  oldest, and of two that started together the one listed last) is the check, whatever the
+  others said. A check is `pending` only when that run is queued or runs, and a cancelled run
+  that is the latest still fails. `forge` `show`, `forge` `merge` and the items read the checks
+  through that one rule; `forge` `checks` runs again the latest run of each workflow of the
+  head (`gh run list … --json …,createdAt`) when it failed, and refuses when none did;
 - its comments (their number; `forge` `show` gives their text, and the reviews');
 - with `detail: full`, its **review threads** ("Review threads" below), counted otherwise where
   they were read;
@@ -380,7 +387,8 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   `ref_name`), its `selector.type` and `selector.pattern`, and, for a pull request's, its
   `destination`: one branch can be the source of two pull requests, and a passing build for one
   does not hide a failed build for the other. A status no pipeline of the list explains (another
-  CI's, an older build) is kept. When the pipelines cannot be read, the statuses are shown as `bkt`
+  CI's, an older build) is kept, and of several such statuses of one name (another CI's runs of
+  one check), the latest made (`created_on`, Data Center `dateAdded`) counts alone, as on GitHub. When the pipelines cannot be read, the statuses are shown as `bkt`
   gives them. **Known limits**: only the newest 50 pipelines are read (no second page), so a status
   of an older build is kept as it is; and a "re-run failed steps" in Bitbucket's page keeps the
   build number, so the statuses of the build are all that are read. Both fail safe.
