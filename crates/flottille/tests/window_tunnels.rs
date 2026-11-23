@@ -282,7 +282,7 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     })
 }
 
-/// The window shows the server, and its project `app`'s page.
+/// The server is read online: its pages can be opened.
 fn on_the_server(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the server is read", |cx| {
         shell.read_with(cx, |s, cx| {
@@ -294,20 +294,21 @@ fn on_the_server(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
         })
     });
     settle(shell, cx);
-    shell.update_in(cx, |shell, window, cx| {
-        shell.choose_machine(Some("server".to_owned()), window, cx)
-    });
-    until(shell, cx, "the server's project is in the tree", |cx| {
-        shell.read_with(cx, |s, _| {
-            s.machine_shown().as_deref() == Some("server")
-                && s.snapshot().projects.iter().any(|p| p.name == "app")
-        })
-    });
 }
 
+/// The server's page of `app`: its pages are the server's, nothing else switching (#1271).
 fn project_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     shell.update_in(cx, |s, window, cx| {
-        s.open(Selection::Project("app".into()), window, cx)
+        s.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(shell, cx, "the server's page of app is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main()
+                    .read(cx)
+                    .project_page()
+                    .is_some_and(|page| page.read(cx).name() == "app")
+        })
     });
 }
 
@@ -340,11 +341,13 @@ fn session_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Ses
 }
 
 fn open_session(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) {
-    until(shell, cx, "the server's session is in the tree", |cx| {
-        cx.update(|window, _| window.try_find(session_id(agent)).is_some())
+    // The server's session is its row of the one list.
+    let row = session_id(&flottille_window::model::elsewhere_id("server", agent));
+    until(shell, cx, "the server's session is in the list", |cx| {
+        cx.update(|window, _| window.try_find(row.clone()).is_some())
     });
     settle(shell, cx);
-    cx.update(|window, cx| window.click(session_id(agent), cx));
+    cx.update(|window, cx| window.click(row, cx));
     until(shell, cx, "the session's page shows", |cx| {
         session_page(shell, cx).read_with(cx, |page, cx| {
             page.id() == agent && !page.conversation().read(cx).rows().is_empty()

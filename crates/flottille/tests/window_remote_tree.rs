@@ -20,7 +20,7 @@ use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
 use flottille_window::session_link::SessionUpdate;
-use flottille_window::shell::{Selection, bell_group_title_id};
+use flottille_window::shell::Selection;
 use flottille_window::tree::{session_id, session_machine_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::tie_id;
@@ -345,7 +345,7 @@ fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
+fn opening_it_shows_that_machine_s_page_of_it(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     let (_pilot, mcp) = root(&pc, "auto");
     let agent = led_on_server(&mcp);
@@ -359,29 +359,23 @@ fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
 
     cx.update(|window, cx| window.click(session_id(&row), cx));
 
-    until(
-        &shell,
-        cx,
-        "the window shows server on that session",
-        |cx| {
-            shell.read_with(cx, |s, cx| {
-                s.machine_shown().as_deref() == Some("server")
-                    && s.main()
-                        .read(cx)
-                        .session_page()
-                        .is_some_and(|page| page.read(cx).id() == agent)
-            })
-        },
-    );
-    // The page arrived by the switch: its header and its composer enter, one after the other.
+    until(&shell, cx, "the page of that session, server's", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main()
+                    .read(cx)
+                    .session_page()
+                    .is_some_and(|page| page.read(cx).id() == agent)
+        })
+    });
+    // The page arrives: its header and its composer enter, one after the other.
     for section in ["0", "2"] {
         let id = gpui_kit::ElementId::Name(format!("session-section-{agent}-{section}").into());
         assert!(present(cx, id), "section {section} enters");
     }
-    // Its own row now: the session as server lists it.
-    until(&shell, cx, "its row on server", |cx| {
-        present(cx, session_id(&agent))
-    });
+    // Its row stays under its pilot: the list is this machine's, nothing switched (#1271).
+    settle(&shell, cx);
+    assert!(present(cx, session_id(&row)), "its row left the list");
     assert!(server.log().contains("asked by pc"), "{}", server.log());
 }
 
@@ -622,7 +616,7 @@ fn the_project_page_neither_lists_nor_ends_a_session_of_another_machine(cx: &mut
 }
 
 #[gpui_kit::test]
-fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) {
+fn the_question_cards_of_another_machine_name_it(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     server.user.fake_script(json!({"turns": [
         {"when": "ask me", "do": [
@@ -663,26 +657,9 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
     let (shell, cx) = window(&pc, cx);
     settle(&shell, cx);
 
-    shell.update_in(cx, |s, window, cx| {
-        s.choose_machine(Some("server".to_owned()), window, cx)
-    });
-    until(&shell, cx, "server's question in the inbox", |cx| {
-        shell.read_with(cx, |s, _| {
-            s.machine_shown().as_deref() == Some("server")
-                && s.snapshot().bell.iter().any(|item| {
-                    item.session.as_deref() == Some(id.as_str()) && item.kind == "question"
-                })
-        })
-    });
-    cx.update(|window, cx| window.click("bell", cx));
-    settle(&shell, cx);
-    // The panel groups a session's rows under its title, which says the machine.
-    let said = label(cx, bell_group_title_id(&id)).unwrap_or_default();
-    assert!(said.ends_with(" · on server"), "{said:?}");
-    cx.update(|window, cx| window.click("bell", cx));
-    settle(&shell, cx);
-
-    let page = open_page(&shell, &id, cx);
+    // Its page is the server's, from its row of the one list; the bell stays this machine's.
+    let row = flottille_window::model::elsewhere_id("server", &id);
+    let page = open_page(&shell, &row, cx);
     until(&shell, cx, "the question's card", |cx| {
         page.read_with(cx, |p, cx| p.ask_dock().read(cx).shown().is_some())
     });

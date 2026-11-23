@@ -841,7 +841,9 @@ fn every_request_of_a_page_goes_to_its_machine_signed(cx: &mut TestAppContext) {
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::ProjectSettings("app".into()), window, cx)
     });
-    settle(&shell, cx);
+    until(&shell, cx, "the server's settings of app are asked", |_| {
+        server.log().contains("project.settings asked by pc")
+    });
     shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
     until(&shell, cx, "the server's folders are asked", |_| {
         server.log().contains("project.folders asked by pc")
@@ -880,6 +882,19 @@ fn open_project(shell: &Entity<Shell>, name: &str, cx: &mut VisualTestContext) {
         })
     });
     settle(shell, cx);
+}
+
+/// The server's page of `app` is drawn: what it shows was read of the server.
+fn server_page_of_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    until(shell, cx, "the server's page of app", |cx| {
+        shown(shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, cx| {
+                s.main()
+                    .read(cx)
+                    .project_page()
+                    .is_some_and(|page| page.read(cx).name() == "app")
+            })
+    });
 }
 
 fn shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
@@ -982,9 +997,7 @@ fn a_chosen_machine_that_goes_off_says_to_pick_another_or_wait(cx: &mut TestAppC
     });
     click(&shell, "machine-picker", cx);
     click(&shell, "machine-choice-server", cx);
-    until(&shell, cx, "the server is shown", |cx| {
-        shown(&shell, cx).as_deref() == Some("server")
-    });
+    server_page_of_app(&shell, cx);
     settle(&shell, cx);
     assert!(!present(cx, "composer-machine-off"), "online: no notice");
 
@@ -1061,9 +1074,7 @@ fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppCo
     });
     click(&shell, "machine-picker", cx);
     click(&shell, "machine-choice-server", cx);
-    until(&shell, cx, "the server is shown", |cx| {
-        shown(&shell, cx).as_deref() == Some("server")
-    });
+    server_page_of_app(&shell, cx);
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     pc.wait_for("server", "offline");
     until(&shell, cx, "the notice under the composer", |cx| {

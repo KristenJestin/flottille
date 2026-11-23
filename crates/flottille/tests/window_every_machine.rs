@@ -34,13 +34,13 @@ const WAIT: Duration = Duration::from_secs(60);
 /// What the server's agent answers.
 const REPLY: &str = "The notes are ready.";
 
-/// What the window asks to read the whole of a machine: none of it is a session's page.
-const WHOLE_MACHINE: [&str; 7] = [
+/// What the window asks to read the whole of a machine, the shell's first read: none of it is a
+/// session's page. (Its page reads the requests of its tree, `approval.list` with that tree, and
+/// `vault.asks`, which has no filter and which it keeps to its session's.)
+const WHOLE_MACHINE: [&str; 5] = [
     "project.list",
     "workspace.list",
     "agent.list",
-    "approval.list",
-    "vault.asks",
     "notifications.list",
     "agent.trees",
 ];
@@ -322,10 +322,19 @@ fn opening_a_session_of_another_machine_reads_only_that_session(cx: &mut TestApp
         whole.is_empty(),
         "the server was read whole for one session: {whole:?} in {asked:?}"
     );
-    // Every agent it names is the session's own.
+    // Every agent or tree it names is the session's own, and the requests are its tree's.
     for (method, params) in &asked {
-        if let Some(agent) = params["agent"].as_str() {
-            assert_eq!(agent, there, "{method} reads another session");
+        for key in ["agent", "tree"] {
+            if let Some(agent) = params[key].as_str() {
+                assert_eq!(agent, there, "{method} reads another session");
+            }
+        }
+        if method == "approval.list" {
+            assert_eq!(
+                params["tree"],
+                there.as_str(),
+                "the requests of the whole server"
+            );
         }
     }
 }
@@ -550,7 +559,10 @@ fn a_machine_that_does_not_answer_is_said_on_its_page_only(cx: &mut TestAppConte
     until(&shell, cx, "this machine's session is drawn", |cx| {
         shows_reply(&shell, cx, &here)
     });
-    assert!(!present(cx, "machine-not-answering"));
+    // The line folds away with the page it was said on.
+    until(&shell, cx, "the line folds away", |cx| {
+        !present(cx, "machine-not-answering")
+    });
 }
 
 #[gpui_kit::test]

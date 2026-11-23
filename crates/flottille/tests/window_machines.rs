@@ -387,7 +387,9 @@ fn opening_a_session_of_another_machine_shows_it_signed_and_the_list_stays(
         Some("server".to_owned())
     );
     // Served for pc's device, signed.
-    assert!(server.log().contains("asked by pc"), "{}", server.log());
+    until(&shell, cx, "the server serves pc's device", |_| {
+        server.log().contains("asked by pc")
+    });
     // Its row stays where it was: the list is this machine's.
     assert!(present(cx, &format!("session-{row}")));
 }

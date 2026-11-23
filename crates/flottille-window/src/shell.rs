@@ -332,6 +332,9 @@ pub struct Shell {
     /// Settings and its providers are now ([`Pages`]). Nothing switches with it: every machine's
     /// connections stay open, and the list is this machine's (#1271).
     front: Option<String>,
+    /// How this window signs what only the user's device may ask, when it was given its own: every
+    /// machine's actions sign with it.
+    sign: Option<crate::link::Sign>,
     /// The device key, read once for the window: it signs every request to another machine.
     key: Option<Arc<flottille_link::DeviceKey>>,
     /// What the pages of each machine not in front hold, kept as it was: brought back at once.
@@ -864,6 +867,7 @@ impl Shell {
             local,
             sender,
             front: None,
+            sign: None,
             key: None,
             sides: HashMap::new(),
             copies: HashMap::new(),
@@ -1080,8 +1084,11 @@ impl Shell {
                 .and_then(|session| session.elsewhere.as_ref())
                 .filter(|there| !there.here)
                 .map(|there| there.machine.clone()),
+            // The list has a group for a project another machine only has: this machine's own
+            // read says whether it is this one's.
             Selection::Project(project) => {
-                match self.snapshot.projects.iter().any(|p| &p.name == project) {
+                let here = self.read.as_ref().unwrap_or(&self.snapshot);
+                match here.projects.iter().any(|p| &p.name == project) {
                     true => None,
                     false => self.machine_of_project(project, cx),
                 }
@@ -1195,7 +1202,10 @@ impl Shell {
                 aim.set(Some((name.to_owned(), key)));
                 let updates = updates.of(name);
                 let connect = aim.connect(self.local.clone());
-                let actions = Actions::spawn_aimed(aim, self.local.clone(), updates.clone());
+                let mut actions = Actions::spawn_aimed(aim, self.local.clone(), updates.clone());
+                if let Some(sign) = self.sign.clone() {
+                    actions.sign_with(sign);
+                }
                 let follow = Follow {
                     connect,
                     updates,
@@ -1209,7 +1219,11 @@ impl Shell {
                     updates: updates.clone(),
                     opener: self.follow.opener.clone(),
                 };
-                (Actions::spawn(self.local.clone(), updates), follow)
+                let mut actions = Actions::spawn(self.local.clone(), updates);
+                if let Some(sign) = self.sign.clone() {
+                    actions.sign_with(sign);
+                }
+                (actions, follow)
             }
         };
         let (settings, rules) = settings_of(&this, &self.shared, cx);
@@ -1793,12 +1807,19 @@ impl Shell {
     /// How this window signs what only the user's device may ask, rather than with the process's
     /// signer (`link::sign_with`): a window of its own device, as a test's two machines have.
     pub fn sign_with(&mut self, sign: crate::link::Sign) {
-        self.actions.sign_with(sign);
+        self.actions.sign_with(sign.clone());
+        for pages in self.sides.values_mut() {
+            pages.actions.sign_with(sign.clone());
+        }
+        self.sign = Some(sign);
     }
 
     /// What opens a folder in the user's editor, for the session pages opened from now on.
     pub fn set_opener(&mut self, opener: Opener) {
-        self.follow.opener = opener;
+        self.follow.opener = opener.clone();
+        for pages in self.sides.values_mut() {
+            pages.follow.opener = opener.clone();
+        }
     }
 
     /// Opens a file of this machine with the system's default handler: a copy of another
@@ -2110,6 +2131,10 @@ impl Shell {
     pub fn ask_appearance(&mut self, choice: Option<gpui_design_system::Appearance>) {
         self.appearance_asked += 1;
         let seq = self.appearance_asked;
+        eprintln!(
+            "TRACE ask_appearance {choice:?} seq={seq} front={:?}",
+            self.front
+        );
         self.actions.send(match choice {
             Some(appearance) => Command::AppearanceSet { appearance, seq },
             None => Command::AppearanceRead { seq },
@@ -2487,7 +2512,20 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.front.as_deref() == Some(machine.as_str()) {
+        // What the window keeps (drafts, folds), its appearance and its build are asked of this
+        // machine's daemon whichever page asks: no word of that machine.
+        let here = matches!(
+            &update,
+            Update::Done(
+                Outcome::Draft { .. }
+                    | Outcome::DraftWritten { .. }
+                    | Outcome::WindowKept { .. }
+                    | Outcome::Appearance { .. }
+                    | Outcome::Update { .. }
+                    | Outcome::Tunnel(_)
+            )
+        );
+        if !here && self.front.as_deref() == Some(machine.as_str()) {
             self.heard(cx);
         }
         match update {
@@ -3359,8 +3397,18 @@ impl Shell {
             }
             // Only the answer to the latest request counts: an older one would take the window
             // back to a choice the user has since changed.
-            Outcome::Appearance { seq, .. } if seq != self.appearance_asked => {}
+            Outcome::Appearance { seq, .. } if seq != self.appearance_asked => {
+                eprintln!(
+                    "TRACE appearance dropped seq={seq} asked={}",
+                    self.appearance_asked
+                );
+            }
             Outcome::Appearance { written, shown, .. } => {
+                eprintln!(
+                    "TRACE appearance answered written={written} ok={} aside={}",
+                    shown.is_ok(),
+                    self.aside
+                );
                 match &shown {
                     Ok(appearance) => {
                         gpui_design_system::appearance::appear(appearance.clone(), cx);
