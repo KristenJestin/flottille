@@ -128,6 +128,13 @@ fn a_request_in_another_tree_does_not_list_as_needs_you() {
 #[test]
 fn an_ask_for_a_vault_entry_lists_as_needs_you() {
     let (_hub, pc, _server) = pc_and_server(server_user(allowing()), Some(""));
+    // An entry `app` sees, for its agents to have the vault's tool (the test's in-memory keyring).
+    pc.user
+        .call(
+            "vault.set",
+            json!({"name": "deploy-key", "secret": "d3ploy-s3cret-key", "project": "app"}),
+        )
+        .unwrap();
     let (root, mcp) = pc.root("auto");
     assert_eq!(listed(&pc, &root).as_deref(), Some("idle"));
 
