@@ -294,6 +294,18 @@ row's **Share with…** (a dialog that lists the runners online), or `flottille 
   error; the logs say what was shared, with which machine, and by whom, never the value. The hub
   never sees it.
 
+## Made from a file a setup copies
+
+A launch on another machine whose project's setup copies a file that machine lacks (an ignored
+`.env`) asks the user to share it (`docs/remote.md`, "Which project"): the file becomes a vault
+entry first, on the machine that has it, with `vault.from_file {project, path, name?}`. The daemon
+reads the file only then, inside the project's folder, reached through no link, a text of 64 KiB at
+most; its text is the entry's secret, masked whole and line by line (each line and each value after
+its `=`, of 6 characters or more) before it is kept, and nothing that is said of it, an answer, an
+error, a log or an event, holds a word of it. The entry is named `<project>-<path>` (`app-.env`),
+every project's, described as the file of that project its setup copies; it is then shared as any
+other, and the other machine makes the file from it once the launch is allowed.
+
 ## The runtime folder
 
 The keyring answers on the session bus, whose socket is in the user's runtime folder

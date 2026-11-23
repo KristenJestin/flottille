@@ -941,10 +941,39 @@ local child's work; nothing moves your branch.*
   its file and its folder, once its workspace is gone, unless another launch of the same machine
   may still start in it. Two launches of a new project at once make it once: the second takes the
   project the first made.
-- Not yet (#1188's follow-up): the folder for projects from other machines as a setting of that
-  machine; a setup that needs ignored files or vault entries the receiving machine lacks holding
-  the first launch until the user shares them; the making shown on the launch's row; the refusals
-  in the window's words with their action.
+- **The folder for projects from other machines** is a setting of the receiving machine
+  (#1214): Settings, General, "Projects from other machines" (`travelled_folder.set`), on that
+  machine or from another's window through "Settings of"; `$XDG_DATA_HOME/flottille/projects`
+  until the user types another. It is checked as a project's folder is: absolute, reached through
+  no link, neither a project's folder nor inside one, outside Flottille's configuration and state.
+  Only the projects made afterwards go there; those made before stay where they are.
+- **A setup that copies files the receiving machine lacks** (#1214): the caller's machine names,
+  with the launch, the files its project's `copy` steps match in its folder, their paths only,
+  never what they hold. Each that the project there lacks is made from a vault entry,
+  `<project>-<path>` (`app-.env`), which the user shares from the caller's machine through the
+  vault's sharing, keyring to keyring: never a file between machines. A launch that lacks one
+  whose entry is not there is held for the user whatever the mode, the judge not asked, and asks
+  once, on every device, as any held launch does: its request's words start with `app needs .env
+  on server: share it?`, its reasons name each entry, and its card's `needs` gives them
+  (`{"from", "files": [{"path", "entry"}]}`). On the caller's machine, `vault.from_file` makes the
+  entry from the file, read only then, masked before it is kept; `vault.share` sends it. Allowed,
+  the receiving machine makes each file from its vault entry in the project's folder, never over
+  a file, readable by the user alone, before the setup runs, whose `copy` step then copies it as
+  any; one still missing refuses the launch, naming it. Refused, the launch ends and the agent that
+  asked it is told what was missing (`child-failed`). A launch whose entries are there already
+  makes the files and starts as it would.
+- **A launch refused on the caller's machine names the window's action**, never a command line
+  (#1214): `claude is not signed in on server. Sign in to Claude on server in Settings › Agents`,
+  `server is offline since 22:14: …. Settings › Machines says when server is back`, a machine that
+  is no runner (Settings › Machines says each machine's role), a runner with no slot free (it
+  takes one once one of its children there ends). The receiving machine's own refusals of these
+  kinds are said the same way.
+- **The making shows on the launch's row** (#1214): the receiving machine answers the launch with
+  the project it runs in, whether it made it, and whose settings it keeps (`remote.launches`'
+  `there`); the row of a launch whose project was made says `server · preparing ledgerly` until
+  that machine's first delivery, and the caller's answer says when the project there keeps its
+  own settings or another machine's (`It runs in the project app there, which the user registered
+  on server: it keeps its own settings, not yours`).
 - **The place**: a new workspace on that machine, on the caller's branch for each repository of the
   caller's place, with the caller's uncommitted changes laid on it as uncommitted changes. A `child`
   on another machine works in that copy of its parent's place: a child still works in its parent's
@@ -1536,6 +1565,26 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **What a travelling setup needs is its copied files** (#1214): today a project's settings name no
+  vault entry (its services and setup steps hold none), so the entries a launch asks for are those
+  made from the files its `copy` steps match on the caller's machine, one entry a file, named
+  `<project>-<path>` by the caller's name of the project, every project's (a project's name may
+  differ on the other machine). A file is made from its entry only when the project there lacks it,
+  in the project's folder, mode `0600`.
+- **The ask is the held launch's request** (#1214): Allow on a device shares nothing by itself yet;
+  the user makes the entry on the caller's machine (`vault.from_file`) and shares it (Settings,
+  Vault, **Share with…**) before Allow, and an Allow while it is still missing refuses the launch,
+  saying so. The window's card doing both on Allow is a follow-up.
+- **The row says `preparing <project>` until the first delivery** (#1214): the receiving machine
+  says nothing while the setup runs, so the row cannot tell the setup's end from the first turn's;
+  its next delivery says what it does.
+- **A secret of several lines is masked line by line too** (#1214), each line and each value after
+  its `=` of 6 characters or more, comments left: a file's entry would otherwise be masked only
+  whole, and an agent reads one line of a `.env`.
+- **The folder for projects from other machines is not moved** (#1214): changing it applies to the
+  projects made afterwards; those made before stay, and a launch that did not start removes its
+  project from where it was made.
 
 - **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
   project's choosers switch the whole window, as opening a session there does, rather than a page

@@ -208,6 +208,8 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `tool_results.set` | drive |
 | `sessions.show` | read |
 | `sessions.set` | drive |
+| `travelled_folder.show` | read |
+| `travelled_folder.set` | drive |
 | `workspaces_folder.show` | read |
 | `workspaces_folder.set` | drive |
 | `draft.get` | local |
@@ -220,6 +222,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.set` | drive |
 | `vault.remove` | drive |
 | `vault.share` | drive |
+| `vault.from_file` | drive |
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
 | `remote.machines` | read |
@@ -1275,6 +1278,24 @@ Only the workspaces made afterwards follow a change; none is moved. `workspaces_
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
 reaches them: no tool of an agent does.
 
+### The folder for projects from other machines
+
+`travelled_folder.show` and `travelled_folder.set` read and keep where this machine makes the
+projects that come with another machine's launches (`docs/remote.md`, "Which project"):
+`$XDG_DATA_HOME/flottille/projects` unless the user chose a folder, kept in `travelled.toml` of
+Flottille's configuration folder (`folder = "<path>"`). Settings, General has them, on this machine
+or another's through "Settings of".
+
+- `travelled_folder.show {}` answers `{"folder", "own", "default", "error"}`: the folder the next
+  project is made in, the user's as written (`null` while the default is followed), the default,
+  and why the file cannot be followed (the default is then), else `null`.
+- `travelled_folder.set {folder}` keeps the folder (`~` is the home), or goes back to the default
+  when it is `null` or empty, and answers as `show`. `refused` for a folder that is not absolute,
+  holds `..`, leads elsewhere through a link, is a file, is in Flottille's configuration or state,
+  or is a project's folder or inside one, naming that project. Nothing is written then.
+
+Only the projects made afterwards go to a new folder; none is moved.
+
 ### The draft and window methods
 
 What the user leaves in the window and has not finished, kept by the daemon so that it survives
@@ -1426,13 +1447,22 @@ was removed on 2026-11-21).
   the hub knows of the device (`docs/remote.md`, "A device's card"): `kind` and `system` as it said
   them, `version` its Flottille's, `paired_at` and `last_seen` in seconds since the Unix epoch, each
   `null` until told. `refused` when this machine is paired with no hub.
+- `vault.from_file {project, path, name?}` makes the vault entry of the file `path` of the
+  project `project`, which its setup copies, so that it is shared with another machine that lacks
+  it (`docs/remote.md`, "What travels"): the file is read only then, inside the project's folder,
+  reached through no link, a text of 64 KiB at most; it is masked, line by line too, before it is
+  kept, as `vault.set` keeps a secret, under `name` or, left out, the name a launch that needs it
+  asks for (`<project>-<path>`, each `/` a `-`). Answers as `vault.set`; `refused` for a path out of
+  the project, a link, a folder, a file too large or not text, never with a word of what it holds.
 - `remote.launches` answers the sessions and children this machine's agents started on other
   machines (`docs/remote.md`, "A tree across machines"), as the window's tree shows them under
   their pilot: those that started a session there, not refused, not handed to the user, and not
   ended unless their last delivery was a report and the agent that started it has not ended (an
   old launch is never listed). `{"launches":
-  [{"machine", "launch", "caller", "kind", "project", "title", "agent", "state", "request", "heard",
-  "heard_at", "at"}]}`, `machine` its name, `caller` the agent of this machine that started it,
+  [{"machine", "launch", "caller", "kind", "project", "title", "there", "agent", "state", "request",
+  "heard", "heard_at", "at"}]}`, `machine` its name, `there` `{"project", "made", "kept"}` as that
+  machine answered the launch (the project it runs in there, whether it made it for it, and
+  `user` or `machine` when that project keeps its own settings or another machine's), or `null`, `caller` the agent of this machine that started it,
   `kind` `child`, `led` or `handed`, `agent` its id there, `state` `held` (waiting for the user
   there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
