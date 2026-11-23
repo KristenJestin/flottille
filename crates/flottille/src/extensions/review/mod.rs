@@ -2149,11 +2149,14 @@ fn tell_lead(daemon: &Arc<Daemon>, review: &Review, said: impl FnOnce(&str) -> S
     let body = said(&crate::tree::named(&session));
     // A lead of another machine is told there: its stand-in here is never woken.
     if crate::across::is_stand_in(lead) {
+        // Its findings were delivered to the session: a body too long for the link is cut, and
+        // says where the pilot reads them.
+        let here = crate::across::own_name(daemon).unwrap_or_else(|| "its machine".to_owned());
         crate::across::tell(
             daemon,
             &session.id,
             EXTENSION.name,
-            &body,
+            &crate::across::fitted(&body, &session.id, &here),
             flottille_core::approval::BETWEEN_TURNS,
             false,
             false,

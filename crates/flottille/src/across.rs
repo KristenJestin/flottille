@@ -260,7 +260,7 @@ pub(crate) fn caller_of(daemon: &Daemon, agent: &Agent, kind: &str) -> Option<St
 }
 
 /// This machine's name among the user's, as the member list says it.
-fn own_name(daemon: &Daemon) -> Option<String> {
+pub(crate) fn own_name(daemon: &Daemon) -> Option<String> {
     let remote = crate::link::remote_of(daemon).ok()?;
     remote.listed().ok().map(|(_, name)| name)
 }
@@ -480,8 +480,18 @@ pub(crate) fn relinked(daemon: &Arc<Daemon>, machine: &str) {
 /// `body` as it goes to another machine, which takes `LONGEST` characters at most: cut, and told
 /// where the whole is read, the session `session` on this machine, named `here`.
 pub(crate) fn fitted(body: &str, session: &str, here: &str) -> String {
-    let _ = (session, here);
-    body.to_owned()
+    let length = body.chars().count();
+    if length <= LONGEST {
+        return body.to_owned();
+    }
+    let read = format!("session_read {{\"session\": \"{session}\"}} on {here} reads the rest]");
+    // The note says how much was cut, up to six digits: room is kept for it.
+    let kept = LONGEST - read.chars().count() - "\n\n[cut: 000000 more characters; ".len();
+    format!(
+        "{}\n\n[cut: {} more characters; {read}",
+        body.chars().take(kept).collect::<String>(),
+        length - kept
+    )
 }
 
 /// Tells the agent of another machine that started `agent` here: a delivery of `kind`, kept until
