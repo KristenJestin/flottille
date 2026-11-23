@@ -2199,4 +2199,68 @@ mod tests {
         assert!(refused.message.contains("secret"), "{}", refused.message);
         assert!(listed(&daemon).await.is_empty(), "nothing was kept");
     }
+
+    #[test]
+    fn a_file_s_lines_are_masked_whatever_their_format() {
+        mask_lines(
+            "token: plainyamlvalue\n  \"json_key\": \"plainjsonvalue\",\n\
+             url = https://alice:plainurlpassword@example.test/x\n\
+             DATABASE_URL=postgres://bob:plainpgpassword@db.example.test/ledger\n",
+        );
+        let env = std::collections::BTreeMap::new();
+        for value in [
+            "plainyamlvalue",
+            "plainjsonvalue",
+            "plainurlpassword",
+            "plainpgpassword",
+        ] {
+            let said = secrets::mask(&format!("it is {value} now"), &env);
+            assert_eq!(said, "it is [masked] now", "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_is_laid_only_from_its_own_entry_shared_by_the_launch_s_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        // The machine's own entry, of no use: never a file, whatever its name.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "github-token", "secret": "own-t0ken-Zr81"}),
+        )
+        .await);
+        // The file's entry, shared from another machine than the launch's.
+        receive(
+            &daemon,
+            &json!({"name": "app-.env", "for": "file:app/.env"}),
+            SHARED,
+            "laptop",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            of_file(&daemon, "github-token", "file:github/token", "pc")
+                .await
+                .is_none()
+        );
+        assert!(
+            of_file(&daemon, "app-.env", "file:app/.env", "pc")
+                .await
+                .is_none()
+        );
+        assert!(
+            of_file(&daemon, "app-.env", "file:app/other", "laptop")
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            of_file(&daemon, "app-.env", "file:app/.env", "laptop")
+                .await
+                .as_deref()
+                .map(String::as_str),
+            Some(SHARED)
+        );
+    }
 }

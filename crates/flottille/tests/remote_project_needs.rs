@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::common;
+
 use crate::remote_launch::{
     Machine, allowing, done, eventually, folder_of, launched, pc_and_server, prompted, refused,
     runner_user, server_user, titled,
@@ -355,4 +357,315 @@ fn the_caller_is_told_when_a_hand_registered_project_keeps_its_own_settings() {
             .get("rules")
             .is_none_or(|r| r != "Theirs.")
     );
+}
+
+/// A `.env` of two lines: an agent may read one alone.
+const TWO_LINES: &str = "DATABASE_URL=postgres://robin:s3cret-pass@db.example.test/ledger\n\
+                         API_TOKEN=t0ken-Value-77\n";
+
+/// A root of `pc` whose mode the user switched to Full from a device, signed: its MCP session.
+fn full_root(pc: &Machine, server: &Machine) -> common::mcp::Mcp {
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    let switched = server
+        .user
+        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
+    assert!(switched.status.success(), "{}", pc.log());
+    mcp
+}
+
+/// `pc`'s `.env` made the vault entry `app-.env` and shared with the server.
+fn shared_env(pc: &Machine, server: &Machine) {
+    pc.user
+        .call("vault.from_file", json!({"project": "app", "path": ".env"}))
+        .unwrap();
+    let shared = pc.user.run(&[
+        "vault",
+        "share",
+        "app-.env",
+        "--machine",
+        "server",
+        "--json",
+    ]);
+    assert!(
+        shared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shared.stderr)
+    );
+    eventually("the entry on server", || {
+        server.user.call("vault.list", json!({})).unwrap()["entries"]
+            .to_string()
+            .contains("app-.env")
+    });
+}
+
+fn approve(server: &Machine, request: &Value) {
+    server
+        .user
+        .call(
+            "approval.approve",
+            json!({"number": request["number"].as_u64().unwrap()}),
+        )
+        .unwrap();
+}
+
+#[test]
+fn full_holds_a_launch_whose_setup_lays_a_file_and_names_its_entry() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.register("[[setup]]\ncopy = [\".env\"]\n");
+    std::fs::write(pc.folder().join(".env"), TWO_LINES).unwrap();
+    // The agent there reads the file whole, then its second line alone.
+    let second = TWO_LINES.find("API_TOKEN").unwrap();
+    server.user.fake_script(json!({"turns": [
+        {"when": "Ledger, whole.", "do": [
+            {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}},
+            {"mcp": {"tool": "fs_read", "arguments": {"path": ".env",
+                "range": {"offset": second}, "again": true}}}
+        ]}
+    ]}));
+    signed_in_there(&pc);
+    shared_env(&pc, &server);
+    let mcp = full_root(&pc, &server);
+
+    let answer = done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Ledger",
+            "brief": "Ledger, whole."}),
+    ))
+    .to_owned();
+
+    // Full: the launch would start at once, but a file is laid from the vault, which the user
+    // allows, the entry named.
+    assert!(answer.contains("waiting for the user"), "{answer}");
+    let request = the_request(&server);
+    let card = request.to_string();
+    assert!(
+        card.contains("app lays .env from the vault entry app-.env shared by pc"),
+        "{card}"
+    );
+    let session = titled(&server, "Ledger");
+    let made = std::path::PathBuf::from(project(&server, "app")["folder"].as_str().unwrap());
+    assert!(!made.join(".env").exists());
+
+    approve(&server, &request);
+
+    eventually("the .env copied into the workspace", || {
+        std::fs::read_to_string(folder_of(&session).join(".env")).is_ok_and(|t| t == TWO_LINES)
+    });
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = std::fs::metadata(made.join(".env"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    // What the agent read is masked, the whole file and its line alone.
+    let id = session["id"].as_str().unwrap().to_owned();
+    eventually("both reads answered", || {
+        server
+            .user
+            .call("agent.read", json!({"agent": id, "after": 0}))
+            .unwrap()
+            .to_string()
+            .matches("[masked]")
+            .count()
+            >= 2
+    });
+    let page = server
+        .user
+        .call("agent.read", json!({"agent": id, "after": 0}))
+        .unwrap()
+        .to_string();
+    for secret in ["s3cret-pass", "t0ken-Value-77"] {
+        assert!(!page.contains(secret), "{page}");
+    }
+}
+
+#[test]
+fn in_full_an_entry_of_the_server_s_own_named_as_the_file_is_never_laid() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    needing_env(&pc);
+    signed_in_there(&pc);
+    // The server's own entry, unrelated, which a launch's names happen to (or are made to) name.
+    let own = "own-t0ken-Zr81";
+    server
+        .user
+        .call("vault.set", json!({"name": "app-.env", "secret": own}))
+        .unwrap();
+    let mcp = full_root(&pc, &server);
+
+    let answer = done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Ledger",
+            "brief": "Ledger, whole."}),
+    ))
+    .to_owned();
+
+    assert!(answer.contains("waiting for the user"), "{answer}");
+    let request = the_request(&server);
+    let card = request.to_string();
+    assert!(
+        card.contains("app needs .env on server: share it?"),
+        "{card}"
+    );
+    let session = titled(&server, "Ledger");
+    let made = std::path::PathBuf::from(project(&server, "app")["folder"].as_str().unwrap());
+
+    approve(&server, &request);
+
+    eventually("the session ended", || {
+        server.agent(session["id"].as_str().unwrap())["state"] == "ended"
+    });
+    assert!(
+        !made.join(".env").exists(),
+        "the server's own entry was laid"
+    );
+    assert!(!folder_of(&session).join(".env").exists());
+    assert!(!server.log().contains(own));
+}
+
+#[test]
+fn a_launch_naming_an_entry_of_the_server_s_own_is_held_whatever_the_judge_says() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    signed_in_there(&pc);
+    // The server's project github, and its own entry github-token, of no file.
+    let folder = server.user.path("work/github");
+    register_other(&server, "github", &folder);
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "github-token", "secret": "ghp-0wn-t0ken-Qz7"}),
+        )
+        .unwrap();
+    let key = pc.stand_in();
+    let mut asked = crate::remote_launch::launch_ask("l-github", "root1");
+    asked.mode = "auto".into();
+    asked.project = "github".into();
+    asked.copied = vec!["token".into()];
+
+    let answer = crate::remote_launch::sent_with(
+        &key,
+        &server,
+        vec![flottille_link::MachineMessage::Launch(Box::new(asked))],
+    )
+    .remove(0)
+    .unwrap();
+
+    // The judge would allow it: what it lays from the vault is the user's to decide.
+    assert_eq!(answer["state"], "held", "{answer:#}");
+    assert!(!folder.join("token").exists());
+}
+
+#[test]
+fn copied_paths_that_are_not_inside_or_too_many_are_refused_on_arrival() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    signed_in_there(&pc);
+    let key = pc.stand_in();
+    let with = |launch: &str, copied: Vec<String>| {
+        let mut asked = crate::remote_launch::launch_ask(launch, "root1");
+        asked.mode = "auto".into();
+        asked.copied = copied;
+        flottille_link::MachineMessage::Launch(Box::new(asked))
+    };
+    let many: Vec<String> = (0..33).map(|n| format!("f{n}")).collect();
+
+    let answers = crate::remote_launch::sent_with(
+        &key,
+        &server,
+        vec![
+            with("l-up", vec!["../outside".into()]),
+            with("l-root", vec!["/etc/passwd".into()]),
+            with("l-git", vec![".git/config".into()]),
+            with("l-many", many),
+        ],
+    );
+
+    for answer in &answers {
+        let refused = answer.as_ref().unwrap_err();
+        assert!(
+            refused.contains("not a path inside the project") || refused.contains("32 files"),
+            "{refused}"
+        );
+    }
+    assert!(server.agents().is_empty());
+}
+
+#[test]
+fn a_file_made_an_entry_is_refused_through_a_link_and_never_replaces_one_silently() {
+    let pc = Machine::of(runner_user());
+    pc.register("");
+    let folder = pc.folder();
+    std::fs::create_dir_all(&folder).unwrap();
+    let outside = pc.user.path("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("key"), "0utside-s3cret\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("key"), folder.join("linked")).unwrap();
+    std::os::unix::fs::symlink(&outside, folder.join("conf")).unwrap();
+    let from_file = |path: &str, more: Value| {
+        let mut params = json!({"project": "app", "path": path});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(more.as_object().cloned().unwrap_or_default());
+        pc.user.call("vault.from_file", params)
+    };
+
+    // A link, and a file reached through a linked folder.
+    for path in ["linked", "conf/key"] {
+        let (code, refused) = from_file(path, json!({})).unwrap_err();
+        assert_eq!(code, "refused", "{refused}");
+        assert!(!refused.contains("0utside-s3cret"), "{refused}");
+    }
+
+    // An entry of that name already: refused unless the call says it replaces it.
+    std::fs::create_dir_all(folder.join("a")).unwrap();
+    std::fs::write(folder.join("a/b"), "FIRST=f1rst-value\n").unwrap();
+    std::fs::write(folder.join("a-b"), "SECOND=s3cond-value\n").unwrap();
+    assert_eq!(from_file("a/b", json!({})).unwrap()["name"], "app-a-b");
+    let (code, again) = from_file("a/b", json!({})).unwrap_err();
+    assert_eq!(code, "refused", "{again}");
+    assert!(again.contains("app-a-b"), "{again}");
+    assert_eq!(
+        from_file("a/b", json!({"replace": true})).unwrap()["name"],
+        "app-a-b"
+    );
+    // Another file whose entry would have the same name: refused, even replacing.
+    for more in [json!({}), json!({"replace": true})] {
+        let (code, ambiguous) = from_file("a-b", more).unwrap_err();
+        assert_eq!(code, "refused", "{ambiguous}");
+        assert!(ambiguous.contains("a/b"), "{ambiguous}");
+    }
+    let listed = pc.user.call("vault.list", json!({})).unwrap();
+    assert_eq!(listed["entries"][0]["for"], "file:app/a/b", "{listed:#}");
+}
+
+#[test]
+fn the_folder_for_projects_from_other_machines_is_never_a_root_the_home_or_flottille_s() {
+    let user = common::User::new();
+    let home = user.path("home");
+    std::fs::create_dir_all(&home).unwrap();
+    for folder in [
+        "/".to_owned(),
+        "~".to_owned(),
+        home.to_str().unwrap().to_owned(),
+        user.path("data/flottille").to_str().unwrap().to_owned(),
+        // It holds the configuration, the state and the data folders.
+        user.path("")
+            .to_str()
+            .unwrap()
+            .trim_end_matches('/')
+            .to_owned(),
+        user.path("data").to_str().unwrap().to_owned(),
+    ] {
+        let (code, refused) = user
+            .call("travelled_folder.set", json!({"folder": folder}))
+            .unwrap_err();
+        assert_eq!(code, "refused", "{folder}: {refused}");
+    }
+    // A folder of its own in the home is fine.
+    user.call(
+        "travelled_folder.set",
+        json!({"folder": home.join("from-others")}),
+    )
+    .unwrap();
 }

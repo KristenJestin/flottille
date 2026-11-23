@@ -1139,4 +1139,33 @@ mod tests {
         }
         assert_ne!(same_place("git@github.com:acme/other.git"), place);
     }
+
+    #[test]
+    fn a_file_is_laid_through_no_link_never_over_one_and_for_the_user_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("conf")).unwrap();
+        std::os::unix::fs::symlink(outside.join("planted"), root.join("planted")).unwrap();
+        std::fs::write(root.join(".env"), "mine").unwrap();
+
+        // Through a linked folder: refused before any folder is made outside.
+        assert!(write_new(&root, "conf/a/b/x", "theirs").is_err());
+        assert!(!outside.join("a").exists());
+        // A link where the file goes, and a file there already: neither is written through.
+        assert!(write_new(&root, "planted", "theirs").is_err());
+        assert!(!outside.join("planted").exists());
+        assert!(write_new(&root, ".env", "theirs").is_err());
+        assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), "mine");
+
+        write_new(&root, "deep/er/.env", "theirs").unwrap();
+        let laid = root.join("deep/er/.env");
+        assert_eq!(std::fs::read_to_string(&laid).unwrap(), "theirs");
+        let mode = std::fs::metadata(&laid).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
 }

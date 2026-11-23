@@ -5907,6 +5907,65 @@ mod tests {
     }
 
     #[test]
+    fn a_step_naming_worktree_in_its_text_is_replaced_once_not_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let step = |position, action| Step {
+            position,
+            repository: None,
+            action,
+            state: StepState::Pending,
+            failure: None,
+            started_at: None,
+            ended_at: None,
+            duration_ms: None,
+        };
+        let mut workspace = a_workspace();
+        // Steps whose JSON holds "worktree" without being one.
+        workspace.steps.push(step(
+            2,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        ));
+        workspace.steps.push(step(
+            3,
+            Action::Run {
+                line: "git worktree prune".into(),
+                task: Some("worktree".into()),
+                time_limit: 60,
+            },
+        ));
+        let (id, _) = store
+            .create_workspace(&workspace, ("workspace.created", json!({})))
+            .unwrap();
+        let laid = [step(
+            0,
+            Action::Copy {
+                globs: vec!["worktree".into()],
+            },
+        )];
+
+        assert!(store.replace_pending_steps(id, &laid).unwrap());
+
+        let actions: Vec<Action> = store
+            .workspace_by_id(id)
+            .unwrap()
+            .steps
+            .into_iter()
+            .map(|step| step.action)
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                Action::Worktree,
+                Action::Copy {
+                    globs: vec!["worktree".into()]
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn a_workspace_keeps_when_its_preparation_ended() {
         let mut store = Store::open_in_memory().unwrap();
         let (id, _) = store
