@@ -881,6 +881,8 @@ fn relay_ends() -> (RelayPort, Carried) {
 
 /// What the hub pushes to a device, as the session hands it over.
 #[derive(Clone, Debug)]
+// A notice now and then, handed over at once: its key's size costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum Pushed {
     List(MemberList),
     Presence(Vec<PresenceOf>),
