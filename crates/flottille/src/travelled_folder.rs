@@ -165,7 +165,7 @@ fn checked(daemon: &Daemon, typed: &str) -> Result<PathBuf, Failure> {
             folder.display()
         )));
     }
-    if projects::home_expanded("~").is_some_and(|home| folder == home) {
+    if is_the_home(projects::home_expanded("~"), &folder) {
         return Err(refused(format!(
             "{} is the home itself: give a folder in it",
             folder.display()
@@ -196,4 +196,29 @@ fn checked(daemon: &Daemon, typed: &str) -> Result<PathBuf, Failure> {
         }
     }
     Ok(folder)
+}
+
+/// Whether `folder` (a path with no link in it) is the user's home: both sides canonical, so a home
+/// that is itself a link to its folder is recognised.
+fn is_the_home(home: Option<PathBuf>, folder: &Path) -> bool {
+    home.is_some_and(|home| std::fs::canonicalize(&home).unwrap_or(home) == folder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_home_that_is_a_link_is_the_home_by_its_folder_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = real.parent().unwrap().join("home");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(is_the_home(Some(link.clone()), &real));
+        assert!(is_the_home(Some(real.clone()), &real));
+        assert!(!is_the_home(Some(link), &real.join("sub")));
+        assert!(!is_the_home(None, &real));
+    }
 }
