@@ -1658,7 +1658,7 @@ One monorepo. The crates and folders this milestone adds:
 | `crates/flottille-hub` | The hub's binary (control plane only), its `Dockerfile` and a compose example. |
 | `crates/flottille-mobile` | The mobile core, a UniFFI library. |
 | `apps/android/` | The Android app (Gradle). |
-| `site/` | The showcase site, coming. |
+| `site/` | The showcase site, coming, and what is published on the repository's GitHub Pages: Flottille's OAuth client metadata document (`site/oauth/client.json`, `reference/mcp-authorization.md`, §2). |
 
 **CI by paths**: the Rust suite does not run for a change of `apps/android/` or `site/` alone, nor the
 Android build for a change the core crates do not see; one job that always runs reports the result,

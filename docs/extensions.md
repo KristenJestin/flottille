@@ -1368,8 +1368,9 @@ is followed and what is left out): `flottille connection login <name>`, or the c
 **Sign in** in the window (#672), which opens the sign-in address only when it is `https://`,
 or `http://` on this machine, and says why in a toast otherwise. The daemon reads the server's challenge, its protected resource
 metadata (RFC 9728) and its authorization server's metadata (RFC 8414, OpenID Connect discovery);
-it uses the `client_id` the user declared, or registers itself (RFC 7591) when the authorization
-server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
+it uses the `client_id` the user declared, else Flottille's own client metadata document (an
+`https://` address that serves as its client id, when the authorization server takes them: nothing
+is registered), else registers itself (RFC 7591) when the authorization server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
 (RFC 8707) to a one-shot loopback redirect on `127.0.0.1` and a port the system picks, which waits
 five minutes; a redirect with another `state` is refused and its code never exchanged. The
 browser is opened by the client the user asked from, with the system's default handler.

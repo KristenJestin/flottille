@@ -75,15 +75,27 @@ the issuer that gave them and are never used with another.
 
 - A **client id the user declares** in the connection (`client_id`) is used first: the user
   registered Flottille with that server themselves.
-- **No Client ID Metadata Document.** It needs a document at a public `https://` URL that the
-  authorization server fetches: Flottille runs on the user's machine and hosts nothing. It is the
-  reason the user may declare a client id.
+- Then **Flottille's Client ID Metadata Document**, when the authorization server's metadata says
+  `client_id_metadata_document_supported: true`: the client id is the document's address,
+  `https://kristenjestin.github.io/flottille/oauth/client.json` (one constant of the code), and
+  nothing is registered, no call is made to a registration endpoint even when there is one, and
+  there is no secret. The document is `site/oauth/client.json` of this repository, published on its
+  GitHub Pages by the `pages` workflow (only `site/`, on a push to `dev` that changes it, and by
+  hand); it is one **fixed** document for every Flottille: Flottille runs on the user's machine and
+  hosts nothing itself. Its `redirect_uris` is the loopback redirect without a port
+  (`http://127.0.0.1/callback`), the port varying as RFC 8252, section 7.3, allows for a loopback
+  redirect; a test checks that the document agrees with the client (same `client_id`, a redirect
+  that covers the one the client sends). The address **is** the client id: a domain of Flottille's
+  own replacing it later makes every authorization server see a new client, which signs in again.
+  The document holds nothing private, and tokens never go to it.
 - Otherwise **Dynamic Client Registration** when the metadata has a `registration_endpoint`:
   `client_name` "Flottille", the loopback `redirect_uris`, `grant_types` `authorization_code` and
   `refresh_token`, `response_types` `code`, `token_endpoint_auth_method` `none`,
   `application_type` `native`. A secret it gives back is kept with the tokens and sent to the
   token endpoint (`client_secret_post`).
-- Neither: the sign-in is refused, saying that the server needs a client id to be declared.
+- None of them: the sign-in is refused, saying that the server needs a client id to be declared
+  (the server has turned registration off and knows no metadata document: the user registered
+  Flottille there by hand).
 - A registration is made at each sign-in, and kept with the tokens it is for, with their issuer.
 
 ## 3. The sign-in
@@ -158,7 +170,6 @@ client may not assume it gets one. An invalid or expired token is answered `401`
 
 ## What is left out
 
-- **Client ID Metadata Documents** (above: Flottille hosts nothing).
 - **Step-up authorization** (a `403 insufficient_scope` at run time): the call fails with the
   server's words; signing in again asks for the scopes the server challenges with then.
 - **More than one authorization server**: the first listed is used.
