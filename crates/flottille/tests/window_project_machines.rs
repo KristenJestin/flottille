@@ -365,7 +365,7 @@ fn group_by_machine_shows_a_section_per_machine_and_back(cx: &mut TestAppContext
         homes(&shell, "app", cx) == ["pc", "server"] && present(cx, session_id(&row))
     });
     // Offered once there is another machine; off until the user turns it on.
-    assert!(present(cx, projects_menu_id()));
+    assert!(shell.read_with(cx, |s, cx| s.offers_grouping(cx)));
     assert!(!shell.read_with(cx, |s, _| s.is_by_machine()));
 
     switch_grouping(&shell, cx);
@@ -417,7 +417,7 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
 
     let (shell, cx) = with_row(&pc, "app", cx);
     until(&shell, cx, "the choice is offered", |cx| {
-        present(cx, projects_menu_id())
+        shell.read_with(cx, |s, cx| s.offers_grouping(cx))
     });
     switch_grouping(&shell, cx);
     assert!(shell.read_with(cx, |s, _| s.is_by_machine()));

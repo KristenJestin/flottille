@@ -55,6 +55,7 @@ use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
+use crate::tree::{Arranged, ArrangedGroup};
 use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
@@ -1226,11 +1227,116 @@ impl Shell {
         )
     }
 
-    /// A group made, from the dialog.
-    pub fn add_group(&mut self, _name: &str, _cx: &mut Context<Self>) {}
+    /// Whether the Projects header's menu offers Group by machine now (there is another machine).
+    pub fn offers_grouping(&self, cx: &App) -> bool {
+        self.sidebar.read(cx).offers_grouping()
+    }
 
-    /// A group removed: its projects go back to the list.
-    pub fn remove_group(&mut self, _id: &str, _window: &mut Window, _cx: &mut Context<Self>) {}
+    /// "New group…" in the Projects header's menu: the dialog.
+    pub fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_form.update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The names of the projects the window holds, in the order the daemon lists them.
+    fn project_names(&self) -> Vec<String> {
+        self.snapshot
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect()
+    }
+
+    /// A group made, from the dialog: at the end of the groups, unfolded.
+    pub fn add_group(&mut self, name: &str, cx: &mut Context<Self>) {
+        let present = self.project_names();
+        self.arrangement.add_group(&present, name);
+        self.arranged(cx);
+    }
+
+    /// A group removed: its projects go back to the list, at the end, none removed.
+    pub fn remove_group(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        let present = self.project_names();
+        self.arrangement.remove_group(&present, id);
+        self.arranged(cx);
+    }
+
+    /// A project row dragged to `index` among the rows of `group` (`None`: outside any group).
+    pub fn project_moved(
+        &mut self,
+        project: &str,
+        group: Option<&str>,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let present = self.project_names();
+        self.arrangement
+            .move_project(&present, project, group, index);
+        self.arranged(cx);
+    }
+
+    /// A group's heading dragged to `index` among the groups.
+    pub fn group_moved(
+        &mut self,
+        group: &str,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let present = self.project_names();
+        self.arrangement.move_group(&present, group, index);
+        self.arranged(cx);
+    }
+
+    /// A group's heading clicked: its rows fold away or unfold.
+    pub fn group_opened(
+        &mut self,
+        group: &str,
+        open: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.arrangement.open_group(group, open);
+        self.arranged(cx);
+    }
+
+    /// The rows of the projects as the user arranged them, from the nodes the tree holds.
+    fn arranged_rows(
+        &self,
+        present: &[String],
+        nodes: &HashMap<String, Entity<ProjectNode>>,
+    ) -> Arranged {
+        let layout = self.arrangement.listed(present);
+        let rows = |keys: &[String]| -> Vec<Entity<ProjectNode>> {
+            keys.iter()
+                .filter_map(|key| nodes.get(key).cloned())
+                .collect()
+        };
+        Arranged {
+            groups: layout
+                .groups
+                .iter()
+                .map(|group| ArrangedGroup {
+                    id: group.id.clone(),
+                    name: group.name.clone(),
+                    open: group.open,
+                    rows: rows(&group.projects),
+                })
+                .collect(),
+            loose: rows(&layout.loose),
+        }
+    }
+
+    /// The arrangement changed: the list draws it, and the daemon keeps it.
+    fn arranged(&mut self, cx: &mut Context<Self>) {
+        let present = self.project_names();
+        let arranged = self.arranged_rows(&present, &self.projects);
+        if self.sidebar.read(cx).arranged() != &arranged {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
+        }
+        self.sidebar_changed(cx);
+    }
 
     /// The quick switcher.
     pub fn switcher(&self) -> &Entity<Switcher> {
@@ -1802,6 +1908,7 @@ impl Shell {
                     .collect(),
             },
             by_machine: self.by_machine,
+            arrangement: self.arrangement.clone(),
             machines: match by_machine {
                 true => self
                     .sections
@@ -1956,11 +2063,16 @@ impl Shell {
             }
             Update::Kept(folds, drafts) => {
                 let by_machine = folds.by_machine;
+                let arrangement = folds.arrangement.clone();
                 self.kept = folds;
                 self.kept_read = true;
                 // What the daemon keeps of how the projects are shown comes after the first rows.
+                let moved =
+                    std::mem::replace(&mut self.arrangement, arrangement) != self.arrangement;
                 if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
                     self.rearrange(window, cx);
+                } else if moved {
+                    self.arranged(cx);
                 }
                 self.listed_drafts = drafts;
                 self.say_drafts(cx);
@@ -3797,23 +3909,42 @@ impl Shell {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
-        self.projects = projects;
+        match grouped {
+            true => {
+                // The user's list folds away as it was, and its rows come back when it does: the
+                // nodes stay, the projects that are gone from them.
+                self.projects
+                    .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
+            }
+            false => self.projects = projects,
+        }
         self.sessions = sessions;
+        let offered = snapshot.homes.len() > 1;
+        let sidebar = self.sidebar.read(cx);
+        // First, so that the rows below are taken (or kept, while shown by machine).
+        if sidebar.is_by_machine() != grouped
+            || sidebar.offers_grouping() != offered
+            || !sidebar.has_menu()
+        {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_arrangement(grouped, offered, cx)
+            });
+        }
+        let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
+        let arranged = self.arranged_rows(&names, &self.projects);
         self.sidebar_changed(cx);
-        if self.sidebar.read(cx).projects() != project_nodes {
+        // GPUI Fast takes any update for a change: touch the list only when it did.
+        if !grouped && self.sidebar.read(cx).projects() != project_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_projects(project_nodes, cx));
+        }
+        if !grouped && self.sidebar.read(cx).arranged() != &arranged {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
         }
         if self.sidebar.read(cx).sections() != section_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_sections(section_nodes, cx));
-        }
-        let offered = snapshot.homes.len() > 1;
-        let sidebar = self.sidebar.read(cx);
-        if sidebar.is_by_machine() != grouped || sidebar.offers_grouping() != offered {
-            self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_arrangement(grouped, offered, cx)
-            });
         }
 
         self.forms

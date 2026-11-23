@@ -5,15 +5,15 @@
 
 use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
-    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, changed, changing, fade,
-    hoverable, meta, palette, presence, presence_of, section_label, space, tipped, tree_children,
-    tree_tie,
+    Button, Fold, Icon, Item, Listing, Menu, Modal, ReorderGroup, Reorderable, Tie, TreeRow,
+    changed, changing, fade, hoverable, meta, palette, presence, presence_of, section_label, space,
+    tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -340,8 +340,15 @@ impl Mark {
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
-    /// The rows as drawn: a project that went folds away before it is gone.
+    /// The rows as drawn: a project that went folds away before it is gone. Fed in the order the
+    /// daemon lists them, never the user's: a row the user moved is the reorderable list's to
+    /// slide.
     list: Listing<Entity<ProjectNode>>,
+    /// The projects as the user arranged them: the groups, then the rows outside any group.
+    arranged: Arranged,
+    /// The places of the rows as last drawn (a project's name and its group), so that a row that
+    /// is going stays where it was while it folds away.
+    drawn: Vec<(String, Option<String>)>,
     /// The machines' sections, which replace the projects' list while they are shown by machine.
     sections: Vec<Entity<MachineNode>>,
     section_list: Listing<Entity<MachineNode>>,
@@ -378,6 +385,8 @@ impl Sidebar {
             shell,
             projects: Vec::new(),
             list: Listing::default(),
+            arranged: Arranged::default(),
+            drawn: Vec::new(),
             sections: Vec::new(),
             section_list: Listing::default(),
             by_machine: false,
@@ -395,12 +404,26 @@ impl Sidebar {
         }
     }
 
+    /// The projects' rows as the user arranged them.
+    pub fn arranged(&self) -> &Arranged {
+        &self.arranged
+    }
+
     pub fn projects(&self) -> &[Entity<ProjectNode>] {
         &self.projects
     }
 
+    /// The projects as the user arranged them: while the projects are shown by machine, the list
+    /// keeps what it was, folding away as a whole.
+    pub fn set_arranged(&mut self, arranged: Arranged, cx: &mut Context<Self>) {
+        if !self.by_machine && self.arranged != arranged {
+            self.arranged = arranged;
+            cx.notify();
+        }
+    }
+
     pub fn set_projects(&mut self, projects: Vec<Entity<ProjectNode>>, cx: &mut Context<Self>) {
-        if self.projects != projects {
+        if !self.by_machine && self.projects != projects {
             self.projects = projects;
             cx.notify();
         }
@@ -422,34 +445,55 @@ impl Sidebar {
         self.by_machine
     }
 
+    /// Whether the Projects header's menu is made.
+    pub fn has_menu(&self) -> bool {
+        self.arrange.is_some()
+    }
+
     /// Whether the header offers Group by machine now.
     pub fn offers_grouping(&self) -> bool {
         self.offered
     }
 
-    /// How the projects are shown, and whether the user may choose (there is another machine):
-    /// the "⋯" menu fades in with the choice, its switch slides with it.
+    /// How the projects are shown, and whether the user may group them by machine (there is
+    /// another machine): the Projects header's "⋯" menu always offers New group…, and Group by
+    /// machine, a switch that slides, once there is a machine to group by.
     pub fn set_arrangement(&mut self, by_machine: bool, offered: bool, cx: &mut Context<Self>) {
-        if offered && self.arrange.is_none() {
+        if self.arrange.is_none() || self.offered != offered {
             let shell = self.shell.clone();
+            let toggles = self.shell.clone();
             self.arrange = Some(cx.new(|cx| {
-                Menu::new(projects_menu_id(), "Arrange projects", cx)
+                let menu = Menu::new(projects_menu_id(), "Arrange projects", cx)
                     .width(px(210.))
-                    .switch(
+                    .entry(
+                        new_group_id(),
+                        crate::group_name::NEW_GROUP_LABEL,
+                        Some(Icon::Plus),
+                        move |window, cx| {
+                            shell
+                                .update(cx, |shell, cx| shell.new_group(window, cx))
+                                .ok();
+                        },
+                    );
+                match offered {
+                    true => menu.switch(
                         by_machine_id(),
                         "Group by machine",
                         Some(glyphs::device("desktop")),
                         by_machine,
                         move |window, cx| {
-                            shell
+                            toggles
                                 .update(cx, |shell, cx| shell.toggle_by_machine(window, cx))
                                 .ok();
                         },
-                    )
+                    ),
+                    false => menu,
+                }
             }));
         }
         if self.by_machine != by_machine
             && let Some(menu) = &self.arrange
+            && offered
         {
             menu.update(cx, |menu, cx| {
                 menu.set_switch(&by_machine_id(), by_machine, cx)
@@ -607,16 +651,136 @@ impl Sidebar {
     }
 }
 
+/// A group of the user's as the list draws it: its projects' rows, in order.
+#[derive(Clone, PartialEq)]
+pub struct ArrangedGroup {
+    pub id: String,
+    pub name: String,
+    pub open: bool,
+    pub rows: Vec<Entity<ProjectNode>>,
+}
+
+/// The projects' rows as the user arranged them: the groups, then the rows outside any group.
+#[derive(Clone, Default, PartialEq)]
+pub struct Arranged {
+    pub groups: Vec<ArrangedGroup>,
+    pub loose: Vec<Entity<ProjectNode>>,
+}
+
+impl Sidebar {
+    /// The user's list: the groups and the rows outside any, dragged to their place. The rows
+    /// are the listing's items (one that comes unfolds, one that goes folds away), the list as a
+    /// whole folds away while the projects are shown by machine.
+    fn project_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.list.sync(
+            self.projects
+                .iter()
+                .map(|row| (row.entity_id().as_u64().to_string(), row.clone())),
+            now,
+            reduce,
+        );
+        // Each row by its project's name, which the list keys it by; two rows of one name (one
+        // going, one coming) are told apart by the node. A new row unfolds from nothing, at the
+        // end of the list.
+        let mut items: HashMap<String, gpui_kit::AnyElement> = HashMap::new();
+        let mut canonical: Vec<String> = Vec::new();
+        for row in self.list.rows() {
+            let mut key = row.value.read(cx).name().to_owned();
+            if items.contains_key(&key) {
+                key = format!("{key}~{}", row.key);
+            }
+            let item = Item::new(
+                ElementId::Name(format!("tree-project-{}", row.key).into()),
+                row.placement,
+                row.value.clone(),
+            );
+            canonical.push(key.clone());
+            items.insert(key, item.into_any_element());
+        }
+        let name = |node: &Entity<ProjectNode>| node.read(cx).name().to_owned();
+        let mut order: Vec<(String, Option<String>)> = Vec::new();
+        for group in &self.arranged.groups {
+            for node in &group.rows {
+                order.push((name(node), Some(group.id.clone())));
+            }
+        }
+        for node in &self.arranged.loose {
+            order.push((name(node), None));
+        }
+        // A row that is going stays where it was while it folds away.
+        let last = std::mem::take(&mut self.drawn);
+        for (at, (key, place)) in last.iter().enumerate() {
+            if order.iter().any(|(held, _)| held == key) || !items.contains_key(key) {
+                continue;
+            }
+            let after = last[..at]
+                .iter()
+                .rev()
+                .find_map(|(before, _)| order.iter().position(|(held, _)| held == before));
+            let place = place
+                .clone()
+                .filter(|id| self.arranged.groups.iter().any(|group| &group.id == id));
+            order.insert(after.map_or(0, |at| at + 1), (key.clone(), place));
+        }
+        // What the arrangement does not name is at the end.
+        for key in canonical {
+            if !order.iter().any(|(held, _)| *held == key) {
+                order.push((key, None));
+            }
+        }
+        self.drawn = order.clone();
+
+        let mut list = Reorderable::new(projects_list_id());
+        for group in &self.arranged.groups {
+            let mut held = ReorderGroup::new(group.id.clone(), group.name.clone()).open(group.open);
+            for (key, place) in &order {
+                if place.as_deref() == Some(group.id.as_str())
+                    && let Some(item) = items.remove(key)
+                {
+                    held = held.row(key.clone(), item);
+                }
+            }
+            list = list.group(held);
+        }
+        for (key, place) in &order {
+            if place.is_none()
+                && let Some(item) = items.remove(key)
+            {
+                list = list.row(key.clone(), item);
+            }
+        }
+        let (moved, groups, toggled) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
+        let list = list
+            .on_move_row(move |row, window, cx| {
+                let (name, group, index) = (row.row.to_string(), row.group.clone(), row.index);
+                moved
+                    .update(cx, |shell, cx| {
+                        shell.project_moved(&name, group.as_deref(), index, window, cx)
+                    })
+                    .ok();
+            })
+            .on_move_group(move |id, index, window, cx| {
+                groups
+                    .update(cx, |shell, cx| shell.group_moved(id, index, window, cx))
+                    .ok();
+            })
+            .on_toggle(move |id, open, window, cx| {
+                toggled
+                    .update(cx, |shell, cx| shell.group_opened(id, open, window, cx))
+                    .ok();
+            });
+        presence("sidebar-projects-list", !self.by_machine, list)
+    }
+}
+
 impl Render for Sidebar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        // Shown by machine, the projects' rows fold away and the machines' sections come in, and
+        // Shown by machine, the projects' list folds away and the machines' sections come in, and
         // back.
-        let listed: &[Entity<ProjectNode>] = match self.by_machine {
-            true => &[],
-            false => &self.projects,
-        };
-        let projects = framed(&mut self.list, listed, "tree-project", |_, _| false, cx);
+        let projects = self.project_list(cx);
         let sectioned: &[Entity<MachineNode>] = match self.by_machine {
             true => &self.sections,
             false => &[],
@@ -628,11 +792,7 @@ impl Render for Sidebar {
             |_, _| false,
             cx,
         );
-        let offered = fade("projects-menu-fade", self.offered, ENTER, window, cx);
-        let arrange = self
-            .arrange
-            .clone()
-            .filter(|_| self.offered || offered > 0.0);
+        let arrange = self.arrange.clone();
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         let version = self.shell.clone();
@@ -722,9 +882,7 @@ impl Render for Sidebar {
                                     .flex()
                                     .items_center()
                                     .gap(space::XS)
-                                    .when_some(arrange, |d, menu| {
-                                        d.child(div().opacity(offered).child(menu))
-                                    })
+                                    .when_some(arrange, |d, menu| d.child(menu))
                                     .child(
                                         Button::icon("add-project", Icon::Plus, "Add a project")
                                             .on_click(move |_, window, cx| {
@@ -741,7 +899,7 @@ impl Render for Sidebar {
                         self.loading,
                         crate::loading::sidebar(),
                     ))
-                    .children(projects)
+                    .child(projects)
                     .children(sections),
             )
             .children(ended)
@@ -892,6 +1050,11 @@ impl ProjectNode {
             fold,
             shell,
         }
+    }
+
+    /// The project's name.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// What its ids are made from: its name, and its machine in a machine's section.

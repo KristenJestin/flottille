@@ -405,19 +405,19 @@ fn a_new_project_goes_at_the_end_and_unfolds(cx: &mut TestAppContext) {
 
     project(&user, "delta");
     // From the moment its row is there: it is not full height yet, and grows to it.
-    let mut first = None;
+    let first = std::cell::Cell::new(None);
     until(&shell, cx, "the new row", |cx| {
         if present(cx, project_slot_id("delta")) {
-            first = Some(bounds(cx, project_slot_id("delta")).size.height);
+            first.set(Some(bounds(cx, project_slot_id("delta")).size.height));
             true
         } else {
             false
         }
     });
     assert!(
-        first.unwrap() < full,
+        first.get().unwrap() < full,
         "the new row unfolds ({:?} of {:?})",
-        first,
+        first.get(),
         full
     );
     settle(&shell, cx);

@@ -1307,7 +1307,12 @@ pictures decoded and written off the runtime's threads.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded).
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). It also
+  holds the user's arrangement of the projects (#1229): `order`, the names of the projects outside
+  any group in the order the user put them, and `groups`, `[{"id", "name", "open", "projects":
+  [<name>]}]` in order, each with the projects it holds. A project neither names is at the end of
+  the list, outside any group; a name that is no project is ignored. The window writes the whole
+  of it at each change, and every window of the machine reads it.
 - `window.set {key, value}` keeps one key (`null` forgets it) and answers `{}`.
 
 The pictures of a draft are files of the daemon's state folder (`drafts/`, mode 0700, one folder by

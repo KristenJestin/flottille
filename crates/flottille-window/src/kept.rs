@@ -10,6 +10,7 @@ use gpui_kit::{Context, Task, WeakEntity};
 use serde_json::{Value, json};
 
 use crate::actions::{Command, Picture};
+use crate::arrange::Arrangement;
 
 /// How long after the last change a draft is written.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -245,6 +246,8 @@ pub struct Folds {
     pub machines: HashMap<String, bool>,
     /// Each project of a machine's section, by [`machine_key`]: whether it is unfolded.
     pub on_machines: HashMap<String, bool>,
+    /// The user's order of the projects and their groups.
+    pub arrangement: Arrangement,
 }
 
 /// What the state keeps a project of a machine's section under.
@@ -272,6 +275,7 @@ impl Folds {
             by_machine: state["sidebar"]["by_machine"].as_bool().unwrap_or(false),
             machines: flags("machines"),
             on_machines: flags("on_machines"),
+            arrangement: Arrangement::of(&state["sidebar"]),
         }
     }
 
@@ -289,6 +293,7 @@ impl Folds {
         if !self.on_machines.is_empty() {
             json["on_machines"] = json!(self.on_machines);
         }
+        self.arrangement.put(&mut json);
         json
     }
 }
