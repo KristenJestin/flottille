@@ -989,14 +989,32 @@ async fn statuses_of(forge: &Forge, context: &str, id: &str) -> Result<Vec<Value
             ));
         }
     };
-    if statuses
+    let statuses = if statuses
         .iter()
         .any(|s| build_of(forge, s["url"].as_str()).is_some())
         && let Some(pipelines) = recent_pipelines(forge, context).await
     {
-        return Ok(counted(forge, statuses, &pipelines));
-    }
-    Ok(statuses)
+        counted(forge, statuses, &pipelines)
+    } else {
+        statuses
+    };
+    Ok(latest(forge, statuses))
+}
+
+/// Each check of the head once, its latest status (`super::latest`, by when it was made): another
+/// CI that posts a status per run of the same check. A pipeline's step is a check of that build
+/// alone: `counted` already keeps the latest build of each pipeline, and two pipelines that both
+/// count (a branch's and a pull request's, two destinations) are two checks.
+fn latest(forge: &Forge, statuses: Vec<Value>) -> Vec<Value> {
+    let check = |status: &Value| {
+        let build = build_of(forge, status["url"].as_str());
+        format!("{}\0{build:?}", check_of(status).0)
+    };
+    let made = |status: &Value| match &status["created_on"] {
+        Value::String(at) => crate::session_read::form(at),
+        _ => status["dateAdded"].as_u64(),
+    };
+    super::latest(statuses, check, made)
 }
 
 /// The newest 50 pipelines of a Cloud repository, as the API gives them; none on Data Center and
