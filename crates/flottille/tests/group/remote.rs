@@ -59,6 +59,8 @@ mod remote_uploads;
 mod ssh_agent;
 #[path = "../ssh_files.rs"]
 mod ssh_files;
+#[path = "../tree_parity.rs"]
+mod tree_parity;
 #[path = "../vault.rs"]
 mod vault;
 #[path = "../vault_ask.rs"]
