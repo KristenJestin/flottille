@@ -300,6 +300,28 @@ fn the_pilot_reaches_its_led_session_on_another_machine_without_a_leave() {
 }
 
 #[test]
+fn the_pilot_writes_to_its_led_session_on_another_machine_in_auto() {
+    // pc's judge too allows: in Auto the message is judged, then checked again.
+    let (_hub, pc, server) = crate::remote_launch::pc_and_server_with(
+        "runner",
+        server_user(allowing()),
+        server_user(allowing()),
+        Some(""),
+    );
+    let (session, _root, _, mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    let sent = mcp.call(
+        "session_send",
+        json!({"session": session, "text": "CSV first, JSON next."}),
+    );
+
+    assert!(!sent.error, "{}", sent.text);
+    prompted(&server, "CSV first, JSON next.");
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert!(pc.requests().is_empty(), "{:#?}", pc.requests());
+}
+
+#[test]
 fn a_led_session_on_another_machine_ends_with_its_pilot() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
