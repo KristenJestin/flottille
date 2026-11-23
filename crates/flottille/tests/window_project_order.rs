@@ -7,6 +7,7 @@
 
 use crate::common;
 
+use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -896,45 +897,75 @@ fn the_window_draws_no_frame_at_rest_with_groups_and_a_finished_drag(cx: &mut Te
     );
 }
 
-/// The connections the window's keeper opens, so that a test can cut them and keep it from
-/// reaching the daemon for a while: what it asks then is answered "retry".
+/// The connections the window's keeper opens, through a relay a test can hold: while it holds,
+/// what the keeper asks does not reach the daemon and no answer comes back; then it drops the
+/// connections, so that what was asked is answered "retry" and the next ask opens another one.
 #[derive(Clone, Default)]
-struct Cuttable {
-    streams: Arc<Mutex<Vec<UnixStream>>>,
-    down: Arc<AtomicBool>,
+struct Relay {
+    held: Arc<AtomicBool>,
+    open: Arc<Mutex<Vec<(UnixStream, UnixStream)>>>,
 }
 
-impl Cuttable {
+impl Relay {
     fn connector(&self, user: &User) -> Connect {
-        let open = user.connector();
-        let (streams, down) = (self.streams.clone(), self.down.clone());
+        let daemon = user.connector();
+        let relay = self.clone();
         Arc::new(move || {
-            let keeper = std::thread::current().name() == Some("flottille-keeper");
-            if keeper && down.load(Ordering::SeqCst) {
-                return Err(std::io::Error::other("the connection is lost"));
+            let toward = daemon()?;
+            if std::thread::current().name() != Some("flottille-keeper") {
+                return Ok(toward);
             }
-            let stream = open()?;
-            if keeper {
-                streams.lock().unwrap().push(stream.try_clone()?);
-            }
-            Ok(stream)
+            let (keeper, outside) = UnixStream::pair()?;
+            relay
+                .open
+                .lock()
+                .unwrap()
+                .push((toward.try_clone()?, outside.try_clone()?));
+            // The asks, once the relay lets them go.
+            let (mut from, mut to, held) = (
+                outside.try_clone()?,
+                toward.try_clone()?,
+                relay.held.clone(),
+            );
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                while let Ok(read) = from.read(&mut buffer) {
+                    while read > 0 && held.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if read == 0 || to.write_all(&buffer[..read]).is_err() {
+                        break;
+                    }
+                }
+                let _ = to.shutdown(Shutdown::Both);
+            });
+            // The answers.
+            let (mut from, mut to) = (toward, outside);
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 8192];
+                while let Ok(read) = from.read(&mut buffer) {
+                    if read == 0 || to.write_all(&buffer[..read]).is_err() {
+                        break;
+                    }
+                }
+                let _ = to.shutdown(Shutdown::Both);
+            });
+            Ok(keeper)
         })
     }
 
-    /// The keeper loses its connection and cannot make another until `restore`. Says how many
-    /// connections it held.
-    fn lose(&self) -> usize {
-        self.down.store(true, Ordering::SeqCst);
-        let mut streams = self.streams.lock().unwrap();
-        let cut = streams.len();
-        for stream in streams.drain(..) {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
-        cut
+    /// From now on what the keeper asks stays in the relay.
+    fn hold(&self) {
+        self.held.store(true, Ordering::SeqCst);
     }
 
-    fn restore(&self) {
-        self.down.store(false, Ordering::SeqCst);
+    /// The connections are lost: what was held never reaches the daemon.
+    fn drop_connections(&self) {
+        for (toward, outside) in self.open.lock().unwrap().drain(..) {
+            let _ = toward.shutdown(Shutdown::Both);
+            let _ = outside.shutdown(Shutdown::Both);
+        }
+        self.held.store(false, Ordering::SeqCst);
     }
 }
 
@@ -943,26 +974,24 @@ fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut Test
     let user = user();
     project(&user, "alpha");
     project(&user, "bravo");
-    let wire = Cuttable::default();
-    let (shell, cx) = window_through(&user, wire.connector(&user), cx);
+    let relay = Relay::default();
+    let (shell, cx) = window_through(&user, relay.connector(&user), cx);
     until(&shell, cx, "the rows", |cx| {
         present(cx, project_id("bravo"))
     });
     settle(&shell, cx);
 
-    // The user makes the group "Work" while the connection to the daemon is lost: that request
-    // is answered "retry" and asked again later.
-    assert!(wire.lose() > 0, "the keeper held a connection to cut");
+    // The user makes the group "Work" while the connection is stuck, and drags alpha into it
+    // before the first request is answered: the connection drops then, so that it is asked again
+    // later, and what comes after it must not pass it.
+    relay.hold();
     new_group("Work", &shell, cx);
-    // They drag alpha into it and the connection is back as they let go: the move is asked while
-    // the group's creation is still to be asked again.
     let id = group_id(&shell, "Work", cx);
-    let (_, end) = lift(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
-    wire.restore();
-    release(end, &shell, cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["alpha"]));
+    relay.drop_connections();
 
-    // A second by step, so that the wait before the asking again, which grows, is over.
+    // A second by step, so that the wait before the asking again is over.
     let deadline = Instant::now() + Duration::from_secs(60);
     while strings(&kept(&user)["groups"][0]["projects"]) != ["alpha"] {
         assert!(
