@@ -555,8 +555,8 @@ fn the_new_sessions_settings_choose_the_mode(cx: &mut TestAppContext) {
     assert_eq!(
         label(cx, "new-sessions-full-note").as_deref(),
         Some(
-            "In Full, a session's commands run as yours, with your keys and sign-ins. \
-             The vault stays out of reach."
+            "In Full, a session's commands run as yours, as in your terminal: nothing is \
+             held back, the vault included."
         )
     );
 
