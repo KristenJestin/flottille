@@ -444,17 +444,24 @@ fn parity(scenario: impl Fn(Topology) -> Seen) {
 /// `text` blanked, less the lines [`ALLOWED`] leaves out of what `key` compares. A line break
 /// inside a JSON string (a prompt as the fake agent got it) is a line too.
 fn allowed(key: &str, text: &str) -> String {
-    blank(text)
-        .replace("\\n", "\n")
-        .lines()
-        .filter(|line| {
-            !ALLOWED.iter().any(|(what, start, _)| {
-                (*what == "*" || *what == key) && line.trim_start().starts_with(start)
-            })
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut kept: Vec<String> = Vec::new();
+    for line in blank(text).replace("\\n", "\n").lines() {
+        let left_out = ALLOWED.iter().any(|(what, start, _)| {
+            (*what == "*" || *what == key) && line.trim_start().starts_with(start)
+        });
+        if !left_out {
+            kept.push(line.to_owned());
+        // The last line of a prompt closes its JSON: that stays, on the line before, when the
+        // line is left out.
+        } else if let (Some(at), Some(last)) = (line.find(JSON_END), kept.last_mut()) {
+            last.push_str(&line[at..]);
+        }
+    }
+    kept.join("\n")
 }
+
+/// What closes a prompt the fake agent kept, a JSON list of one text block.
+const JSON_END: &str = "\",\"type\":\"text\"}]";
 
 /// What a tool answered, said with whether it was an error.
 fn said(answer: &Answer) -> String {

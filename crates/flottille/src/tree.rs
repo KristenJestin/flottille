@@ -858,15 +858,16 @@ pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
         if kind == "child" {
             return ("brief", brief);
         }
-        // Led from there, it is told where its questions go as a session led here is.
+        // Led from there, it is told where its questions go as a session led here is; the off case
+        // stays inside that paragraph, which the window cuts whole.
         let guide = match agent.led {
             true => format!(
-                "\n\nWhile {machine} is not linked to this machine, ask reaches the user's \
-                 inbox instead of the agent named below.\n{WHERE_QUESTIONS_GO} this session is \
-                 led by agent {caller} of {machine}: what you need answered goes through ask, \
-                 which reaches it, and its answer comes as [flottille:session]; the user may also \
-                 write to you directly. A question left in a report or in your last message is a \
-                 follow-up, not a wait: nobody is told to answer it."
+                "\n\n{WHERE_QUESTIONS_GO} this session is led by agent {caller} of {machine}: \
+                 what you need answered goes through ask, which reaches it, and its answer comes \
+                 as [flottille:session]; the user may also write to you directly. A question \
+                 left in a report or in your last message is a follow-up, not a wait: nobody is \
+                 told to answer it.\nWhile {machine} is not linked to this machine, ask reaches the \
+                 user's inbox instead."
             ),
             false => String::new(),
         };
