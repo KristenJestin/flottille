@@ -961,7 +961,9 @@ local child's work; nothing moves your branch.*
   those are made one at a time, a link at any of them refused: nothing lands outside the project
   through a link planted after the launch was allowed. A link is refused wherever it leads,
   inside the project too (`sub is a link: nothing is made through it`): following it is what a
-  link planted since the check would use. The commits a machine lists (`Has`) are those of a
+  link planted since the check would use. A file laid from the vault is written by walking those
+  folders again, each opened from the one before without following a link, so one swapped for a
+  link after they were made is refused too. The commits a machine lists (`Has`) are those of a
   repository inside the project folder only. In a project Flottille made, a repository
   whose folder leads out of the project is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the

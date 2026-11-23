@@ -299,10 +299,12 @@ row's **Share with…** (a dialog that lists the runners online), or `flottille 
 A launch on another machine whose project's setup copies a file that machine lacks (an ignored
 `.env`) asks the user to share it (`docs/remote.md`, "Which project"): the file becomes a vault
 entry first, on the machine that has it, with `vault.from_file {project, path, name?, replace?}`.
-The daemon reads the file only then, inside the project's folder, reached through no link, a text
+The daemon reads the file only then, inside the project's folder, opened once and never through a
+link (what is checked is the file that is read), a text
 of 64 KiB at most; its text is the entry's secret, masked whole and line by line before it is
 kept, and nothing that is said of it, an answer, an error, a log or an event, holds a word of it.
-Each line is masked, and each line's value: what follows its first `=` or `:` (`KEY=v`, `key: v`,
+Each line is masked, a file of one line without a final newline too (any secret bound to a
+`file:` is, set by hand or received as well), and each line's value: what follows its first `=` or `:` (`KEY=v`, `key: v`,
 `"key": "v",`), its quotes and final comma left out, and the password of an address's
 `user:password@`, each of 6 characters or more, comments left. **A secret transformed is not
 recognised**: a value an agent decodes, splits, re-encodes (other than the address, HTML and JSON
@@ -313,7 +315,9 @@ project its setup copies, and **bound to that file** (`"for": "file:<project>/<p
 serves no tool and no other use; it is then shared as any other, its binding kept. The other
 machine makes the file from an entry only when it is bound to that very file and was shared from
 the launch's machine: an entry of its own, or another machine's, whatever its name, is never
-written into a file. A name already taken is refused: by another entry (`a/b` and `a-b` both name
+written into a file. **A machine renamed leaves the copies it shared under its old name matching
+nothing**: a launch from the new name finds no entry shared from it, so the file is asked for again
+(fail closed); share the entry again from the renamed machine. A name already taken is refused: by another entry (`a/b` and `a-b` both name
 `app-a-b`: the second file is refused, naming the first), and by the same file's entry unless the
 call says `replace: true`.
 
