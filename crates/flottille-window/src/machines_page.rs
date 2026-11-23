@@ -2,7 +2,8 @@
 //! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
 //! **Connect to your hub** while this machine is in no member list, a dialog where the code
 //! `flottille-hub pair` printed is pasted and the card this machine proposes confirmed; then the
-//! devices of the list, each renamed, drawn another way or removed from its "⋯". The page says
+//! devices of the list, each renamed, drawn another way or removed from its "⋯", and when the
+//! phone is told (**Notify the phone**, `docs/remote.md`, "Notifications"). The page says
 //! the state and holds the buttons: what is typed is a dialog of the
 //! window's host. A device is added on the hub only: every new member, and every result, is a
 //! toast. What is asked goes to this machine's daemon, signed with the
@@ -58,6 +59,18 @@ const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines w
 const HUB_SENTENCE: &str = "The hub keeps the list of your devices and carries their links, \
                             encrypted end to end: it reads nothing of what they say to each \
                             other.";
+const PHONE_SENTENCE: &str = "Your phone is told of a request, a question, a report or a \
+                              failure through your hub, after 30 seconds, unless you answered or \
+                              saw it at a window meanwhile.";
+/// When the phone is told: the key `remote.configure` takes, the choice's title and its line.
+const NOTIFY: [(&str, &str, &str); 2] = [
+    (
+        "away",
+        "When I am away",
+        "Only while no window or phone of yours had an input in the last 2 minutes.",
+    ),
+    ("always", "Always", "Even while you are at a window."),
+];
 const NOT_OFFERED: &str = "It runs nothing, so Settings and the composer do not offer it. A role \
                            changes on the hub's host:";
 const FORGOTTEN: &str = "The hub no longer knows this machine";
@@ -103,6 +116,8 @@ pub struct MachinesSection {
     kept: Option<Machines>,
     /// A change of remote was asked and not answered yet.
     configuring: bool,
+    /// When the phone is told, as chosen and not answered yet: shown until the daemon says it.
+    notify_chosen: Option<String>,
     members: Listing<Member>,
     /// A device's "⋯" menu, made again when what it offers changes (the hub refuses, or a change
     /// is being made): the reason its items wait, with it.
@@ -135,6 +150,7 @@ impl MachinesSection {
             look_colour: 0,
             kept: None,
             configuring: false,
+            notify_chosen: None,
             members: Listing::default(),
             menus: HashMap::new(),
             removal: None,
@@ -319,6 +335,22 @@ impl MachinesSection {
                     Err(why) => toast(Toast::failure("Remote was not changed").detail(why), cx),
                 }
             }
+            (Asked::Notify(notify), done) => {
+                self.notify_chosen = None;
+                match done {
+                    Ok(_) => {
+                        let said = match notify.as_str() {
+                            "always" => "Your phone is told always",
+                            _ => "Your phone is told when you are away",
+                        };
+                        toast(Toast::success(said), cx);
+                    }
+                    Err(why) => toast(
+                        Toast::failure("When your phone is told was not changed").detail(why),
+                        cx,
+                    ),
+                }
+            }
             (Asked::Rename(name), Ok(_)) => {
                 self.changing = false;
                 toast(Toast::success(format!("Renamed {name}")), cx)
@@ -389,6 +421,30 @@ impl MachinesSection {
         self.modals
             .update(cx, |modals, cx| modals.open(CONNECT_MODAL, cx));
         cx.notify();
+    }
+
+    /// When the phone is told: the choice `at` of `NOTIFY`.
+    pub fn choose_notify(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some((notify, _, _)) = NOTIFY.get(at) else {
+            return;
+        };
+        if self.notify_chosen.is_some() || self.notify() == *notify {
+            return;
+        }
+        self.notify_chosen = Some((*notify).to_owned());
+        self.remote.ask(Ask::Notify {
+            notify: (*notify).to_owned(),
+        });
+        cx.notify();
+    }
+
+    /// When the phone is told, as chosen or as the daemon last said.
+    fn notify(&self) -> &str {
+        match (&self.notify_chosen, &self.read) {
+            (Some(chosen), _) => chosen,
+            (None, Some(read)) if read.notify == "always" => "always",
+            _ => "away",
+        }
     }
 
     /// Turns remote on or off.
@@ -1095,6 +1151,28 @@ impl MachinesSection {
             )
     }
 
+    /// When the phone is told of what waits for the user.
+    fn phone_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let chosen = NOTIFY
+            .iter()
+            .position(|(key, _, _)| *key == self.notify())
+            .unwrap_or(0);
+        let this = cx.entity().downgrade();
+        let choices = NOTIFY
+            .iter()
+            .fold(
+                RadioChoices::new("notify-phone", "Notify the phone"),
+                |choices, (key, title, line)| choices.choice(*key, *title, *line),
+            )
+            .chosen(chosen)
+            .on_choose(move |at, _, cx| {
+                this.update(cx, |this, cx| this.choose_notify(at, cx)).ok();
+            });
+        Section::new("phone", "Phone")
+            .sentence(PHONE_SENTENCE)
+            .child(spaced(space::LG, choices))
+    }
+
     fn removal_confirm(&self, cx: &mut Context<Self>) -> Confirm {
         let (question, sentence, action) = match &self.removal_said {
             Removal::Member(name)
@@ -1191,6 +1269,7 @@ impl MachinesSection {
             "devices",
             self.devices_section(window, cx).into_any_element(),
         ));
+        blocks.push(("phone", self.phone_section(cx).into_any_element()));
         blocks
     }
 }

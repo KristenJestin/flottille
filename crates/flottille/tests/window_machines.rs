@@ -1902,6 +1902,14 @@ fn notify_the_phone_is_chosen_in_settings_machines(cx: &mut TestAppContext) {
         pc.user.call("remote.settings", json!({})).unwrap()["notify"] == "away"
             && notify_read(&shell, cx).as_deref() == Some("away")
     });
+    // Each result is a toast.
+    settle(&shell, cx);
+    for toast in [
+        "Your phone is told always",
+        "Your phone is told when you are away",
+    ] {
+        assert!(toasts(&shell, cx).iter().any(|t| t == toast), "{toast}");
+    }
 }
 
 #[gpui_kit::test]
