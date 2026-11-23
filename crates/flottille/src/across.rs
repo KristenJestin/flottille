@@ -2053,6 +2053,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_answer_sent_again_after_a_refusal_still_finds_its_launch() {
+        let launch = Launch {
+            way: "out".into(),
+            machine: "0123456789ab".into(),
+            launch: "first".into(),
+            caller: "caller".into(),
+            kind: "led".into(),
+            project: "app".into(),
+            state: "refused".into(),
+            request: None,
+            agent: None,
+            workspace: None,
+            workspace_id: None,
+            asked: json!({}),
+            at: 1,
+        };
+        // Its first sending refused it; the machine that did not hear it was taken sends it
+        // again, which is answered as taken, never dropped.
+        assert!(delivered_to(&launch, "caller", "approval"));
+        assert!(!delivered_to(&launch, "caller", "child-report"));
+        assert!(!delivered_to(&launch, "another", "approval"));
+    }
+
+    #[test]
     fn a_caller_of_another_machine_is_given_only_the_session_tools_the_issue_names() {
         // A tool of the tree added later reaches no caller of another machine until it is
         // written here.
