@@ -76,6 +76,10 @@ pub enum Message {
     Client(Value),
 }
 
+/// What a machine answers a message of a kind it does not know: a sender tells a machine of before
+/// by it (`docs/remote.md`, "The version").
+pub const UNKNOWN_MESSAGE: &str = "not a message a machine may send";
+
 /// What a machine may send another (`docs/remote.md`, "What a machine may send"): nothing else is
 /// taken.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +119,12 @@ pub enum MachineMessage {
     /// sent by a runner when a link is made and again when the list changes, kept by the
     /// receiver for its clients. Answered `{}`, or refused.
     Sessions(crate::SessionList),
+    /// The sender's projects, each by the remotes of its repositories (`docs/remote.md`, "One
+    /// list of every machine"): sent by a runner after its sessions and again when they change,
+    /// kept by the receiver beside them. A message of its own so that a machine of before, which
+    /// does not know it, refuses it alone and goes on taking the sessions. Answered `{}`, or
+    /// refused.
+    Projects(crate::ProjectList),
     /// The user's close of a session of the receiver, signed by their device (`agent.stop`) and
     /// kept by the sender while the receiver was off: sent once it links again, kept until it is
     /// answered, and idempotent (a session ended already is answered as closed). Answered `{}`,
@@ -963,7 +973,7 @@ impl Link {
             _ => {}
         }
         serde_json::from_value::<Message>(Value::Object(frame))
-            .map_err(|_| "not a message a machine may send".to_owned())
+            .map_err(|_| UNKNOWN_MESSAGE.to_owned())
     }
 
     pub(crate) fn lost(&self, failure: Failure) -> LinkError {

@@ -1438,10 +1438,15 @@ was removed on 2026-11-21).
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
   `heard_at` when, `null` before any: what the window shows as its state as last known.
 - `remote.sessions` answers the sessions of every machine, light (`docs/remote.md`, "One list of
-  every machine"): `{"this": [session…], "machines": [{"name", "sessions": [session…], "at"}]}`,
-  `this` this machine's live root sessions, each other machine's as it last listed them over its
-  link (`at` when), kept while it is off, without those whose close waits to be sent; a machine no
-  longer among the user's is not listed. A session is `{"id", "title", "project", "state",
+  every machine"): `{"this": [session…], "projects": [project…], "machines": [{"name", "sessions":
+  [session…], "projects": [project…], "at"}]}`, `this` this machine's live root sessions,
+  each other machine's as it last listed them over its link (`at` when), kept while it is off,
+  without those whose close waits to be sent; a machine no longer among the user's is not listed.
+  A project is `{"name", "remotes": [address…]}`: the projects of the machine, each by the remotes
+  of its repositories, normalised (`github.com/acme/app`: no scheme, user nor port, no `.git`, the
+  host in lower case), sorted, each once, `[]` when one of its repositories has no remote: two
+  projects are the same one when their `remotes` are equal and not empty. A machine whose list
+  came before projects were listed says `null` for them. A session is `{"id", "title", "project", "state",
   "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
   `pilot` the session of the agent that leads it on that machine, or `null`; never its
   conversation. The event `remote.sessions {name}` says that a machine's list changed.

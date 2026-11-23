@@ -16,11 +16,19 @@ use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
 
 fn add_app(user: &User) {
+    add_app_at(user, None);
+}
+
+/// The project `app` over a throwaway repository, whose remote `origin` is `remote` when given.
+fn add_app_at(user: &User, remote: Option<&str>) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
     user.git(&folder, &["add", "README.md"]);
     user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    if let Some(remote) = remote {
+        user.git(&folder, &["remote", "add", "origin", remote]);
+    }
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
 }
@@ -385,4 +393,55 @@ fn a_second_close_of_a_session_replaces_the_one_waiting() {
         state(&server, &agent) == "ended"
     });
     assert!(dropped_words(&pc).is_empty(), "{:?}", dropped_words(&pc));
+}
+
+/// What `machine` keeps of the projects of the machine `name`, as `remote.sessions` lists them.
+fn projects_of(machine: &Machine, name: &str) -> Vec<Value> {
+    let lists = machine.user.call("remote.sessions", json!({})).unwrap();
+    lists["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|list| list["name"] == name)
+        .and_then(|list| list["projects"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_runner_lists_its_projects_by_their_remotes_and_the_copy_stays_across_a_restart() {
+    // Written as the server's user wrote them: the scheme, the user, the `.git` and the case of
+    // the host are not what tells repositories apart, and a credential never travels.
+    let (_hub, pc, server) = pc_and_server_on(
+        Machine::of(User::with_fake_agent()),
+        User::with_fake_agent(),
+    );
+    add_app(&pc.user);
+    add_app_at(
+        &server.user,
+        Some("https://user:secret@GIT.example/acme/app.git"),
+    );
+
+    eventually("pc keeps server's projects", || {
+        projects_of(&pc, "server")
+            .iter()
+            .any(|p| p["name"] == "app" && p["remotes"] == json!(["git.example/acme/app"]))
+    });
+    // No credential travels, and a project with no remote says none.
+    let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+    assert!(!lists.to_string().contains("secret"), "{lists}");
+    assert_eq!(
+        lists["projects"],
+        json!([{"name": "app", "remotes": []}]),
+        "this machine's own list, its project having no remote"
+    );
+
+    // The copy of a machine that is off keeps them, as it keeps its sessions.
+    off(&server);
+    pc.wait_for("server", "offline");
+    assert!(
+        projects_of(&pc, "server")
+            .iter()
+            .any(|p| p["remotes"] == json!(["git.example/acme/app"]))
+    );
+    on(&server);
 }

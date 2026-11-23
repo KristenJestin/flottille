@@ -3398,7 +3398,7 @@ impl Store {
     }
 
     /// Keeps `list`, the sessions the machine of key `machine` (named `name`) told at `at`, in
-    /// place of the one it told before.
+    /// place of the one it told before. The projects it told apart (`keep_machine_projects`) stay.
     pub fn keep_machine_sessions(
         &mut self,
         machine: &str,
@@ -3406,11 +3406,58 @@ impl Store {
         list: &Value,
         at: u64,
     ) -> Result<()> {
-        self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let mut list = list.clone();
+        let before: Option<String> = transaction
+            .query_row(
+                "SELECT list FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let projects = before
+            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
+            .and_then(|before| before.get("projects").cloned());
+        if let (Some(projects), Some(list)) = (projects, list.as_object_mut()) {
+            list.entry("projects").or_insert(projects);
+        }
+        transaction.execute(
             "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3, at = ?4",
             params![machine, name, list.to_string(), at as i64],
         )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keeps `projects`, the projects the machine of key `machine` (named `name`) told at `at`,
+    /// beside the sessions it told (none yet when this is the first it says).
+    pub fn keep_machine_projects(
+        &mut self,
+        machine: &str,
+        name: &str,
+        projects: &Value,
+        at: u64,
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let before: Option<String> = transaction
+            .query_row(
+                "SELECT list FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut list = before
+            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({"sessions": []}));
+        list["projects"] = projects.clone();
+        transaction.execute(
+            "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3",
+            params![machine, name, list.to_string(), at as i64],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -9113,6 +9160,30 @@ mod tests {
             (read.state.as_str(), read.workspace_id),
             ("refused", Some(id))
         );
+    }
+
+    #[test]
+    fn a_machine_s_projects_stay_beside_the_sessions_it_lists_again() {
+        let mut store = Store::open_in_memory().unwrap();
+        let projects = json!([{"name": "app", "remotes": ["github.com/acme/app"]}]);
+        // Its projects may come first: its list then holds no session yet.
+        store
+            .keep_machine_projects("aa", "server", &projects, 1)
+            .unwrap();
+        store
+            .keep_machine_sessions("aa", "server", &json!({"sessions": [{"id": "s1"}]}), 2)
+            .unwrap();
+        let kept = store.machine_sessions().unwrap();
+        assert_eq!(kept[0].2["projects"], projects);
+        assert_eq!(kept[0].2["sessions"], json!([{"id": "s1"}]));
+        assert_eq!(kept[0].3, 2);
+        // A machine of before says none: its list holds no projects.
+        store
+            .keep_machine_sessions("bb", "old", &json!({"sessions": []}), 3)
+            .unwrap();
+        let old = &store.machine_sessions().unwrap()[0];
+        assert_eq!(old.1, "old");
+        assert!(old.2.get("projects").is_none());
     }
 
     #[test]

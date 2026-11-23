@@ -695,6 +695,9 @@ cannot reach it (its words say that an older hub is updated on its host) instead
 an update; a device of before reads this hub's hello as it did, the signature beside it ignored. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 
+A new kind of message that a machine of before refuses alone, as the projects of a runner (#1181),
+leaves the number: that machine says it so in its log, and nothing else of the link is lost.
+
 Pair mode (#1146) raised it from 1 to 2: its frames and its changes (`hub`, `pair`, `role`,
 `look`) are ones a build of before cannot read, so that a device and a hub of different builds say
 to update rather than refuse each other's frames without saying why.
@@ -800,13 +803,32 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
 ### One list of every machine
 
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
-  project: a project registered on several machines under the same name is one group. Sessions
+  project: a project that several machines have is one group, whatever its name there (the next
+  bullet). Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
   chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
   in a project's composer (the machine picker); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
+- **The same project.** Two projects are the same when the remotes of their repositories are the
+  same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
+  `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
+  `.git`, the host in lower case, the case of the path kept), and a project of several
+  repositories matches when all of them match. A repository with no remote, or at a path of the
+  machine, says nothing: its project matches none. Each runner tells the machines it links to its
+  projects by those remotes in a message of its own, after its sessions (`projects`, "What a
+  machine may send"; `remote.sessions` says them), and the copy kept for a machine that is off
+  holds them too, so that its projects stay in the sidebar, greyed. A machine whose list came before projects were
+  listed says none: its sessions' project names are matched by name, as before. The message is
+  one a machine of before does not know, so that it refuses it alone (`not a message a machine may
+  send`) and goes on taking the sessions: the protocol number is not raised, two machines of
+  different builds keep their lists of sessions, and the one that sent the projects says in its
+  log, once for the link, that the other runs an older Flottille (`flottille update`) and sends
+  it no more of them; the older machine, which draws no project by machine, loses nothing. The
+  remote's address is the only thing of a repository that travels in this list: no credential (a user or a
+  password in the address is dropped), no path of the machine. The window draws one row for a
+  project the machines share, with a mark for each (`docs/design.md` §10).
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
   changes (a session that starts, ends, is written to, answers or asks). The window reads it from
@@ -855,6 +877,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `projects` | A runner's projects, each one's name and the normalised remotes of its repositories (`github.com/acme/app`), 1024 at most, 64 remotes of 256 characters at most each; sent after the sessions and again when they change, kept by the receiver beside them. A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link ("One list of every machine"). |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
 Nothing else: no user method but the kept close, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
