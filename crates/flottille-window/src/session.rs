@@ -1154,8 +1154,8 @@ impl SessionPage {
         );
     }
 
-    /// The user withdraws an exception of the root: the daemon takes it back, and the list
-    /// follows its event.
+    /// The user withdraws an exception of the session's tree: the daemon takes it back from
+    /// `agent`, and the list follows its event.
     pub fn withdraw_exception(&mut self, agent: &str, rule: &str, cx: &mut Context<Self>) {
         self.perform(
             Command::WithdrawException {

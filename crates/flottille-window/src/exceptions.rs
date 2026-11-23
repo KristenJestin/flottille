@@ -1,12 +1,13 @@
-//! The rail's Exceptions section: the rules of the gate the user lifted for the session at its
-//! agent's ask (`docs/design.md` §7.3), each with what it lets the session do, the agent's reason,
-//! since when, and a Withdraw that the daemon carries out (`exception.withdraw`). Nothing is drawn
-//! while there is none; a row unfolds when an exception is given and folds away when it ends,
-//! withdrawn or with the session.
+//! The rail's Exceptions section: the rules of the gate the user lifted for the session's tree at
+//! its agents' ask (`docs/design.md` §7.3), the root's and each sub-agent's, each with what it lets
+//! do, the agent's reason, who holds it when it is not the root, since when, and a Withdraw that
+//! the daemon carries out (`exception.withdraw`). Nothing is drawn while there is none; a row
+//! unfolds when an exception is given and folds away when it ends, withdrawn or with its session.
 
 use gpui_design_system::{
     Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, space,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
@@ -20,8 +21,10 @@ use crate::session::{SessionPage, said_at};
 /// An exception the session holds, as `exception.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExceptionRow {
-    /// The session that holds it.
+    /// The session that holds it: the root, or one of its sub-agents.
     pub session: String,
+    /// That session's title, when it has one.
+    pub title: Option<String>,
     pub rule: String,
     /// The agent's reason, as the user read it on the card.
     pub why: String,
@@ -33,6 +36,7 @@ impl ExceptionRow {
         let text = |key: &str| value[key].as_str().unwrap_or_default().to_owned();
         ExceptionRow {
             session: text("session"),
+            title: value["title"].as_str().map(str::to_owned),
             rule: text("rule"),
             why: text("why"),
             granted_at: value["granted_at"].as_u64().unwrap_or(0),
@@ -49,6 +53,19 @@ impl ExceptionRow {
         }
     }
 
+    /// Its key in the list and in the ids of its row: one rule per session.
+    pub fn key(&self) -> String {
+        format!("{}-{}", self.session, self.rule)
+    }
+
+    /// Who holds it, said for a sub-agent's: `held by worker`.
+    pub fn holder(&self) -> String {
+        match &self.title {
+            Some(title) => format!("held by {title}"),
+            None => format!("held by agent {}", self.session),
+        }
+    }
+
     /// `allowed 3 Nov, 14:05`.
     pub fn since(&self) -> String {
         format!("allowed {}", said_at(self.granted_at))
@@ -58,7 +75,7 @@ impl ExceptionRow {
 /// The rail's Exceptions section.
 pub struct ExceptionList {
     page: WeakEntity<SessionPage>,
-    /// The session's root, whose exceptions are listed.
+    /// The session's root: its tree's exceptions are listed, a sub-agent's with its holder.
     root: String,
     rows: Vec<ExceptionRow>,
     /// The rows as drawn: one that ends folds away before it is gone.
@@ -89,10 +106,10 @@ impl ExceptionList {
 
     /// One exception: what it lets, why it was asked, since when, and its Withdraw.
     fn row(&self, row: &ExceptionRow, p: Palette) -> AnyElement {
-        let key = row.rule.clone();
+        let key = row.key();
         let id = |part: &str| ElementId::Name(format!("exception-{part}-{key}").into());
         let withdraw = {
-            let (page, agent, rule) = (self.page.clone(), self.root.clone(), row.rule.clone());
+            let (page, agent, rule) = (self.page.clone(), row.session.clone(), row.rule.clone());
             Button::icon(id("withdraw"), Icon::Close, "Withdraw").on_click(move |_, _, cx| {
                 page.update(cx, |page, cx| page.withdraw_exception(&agent, &rule, cx))
                     .ok();
@@ -146,6 +163,9 @@ impl ExceptionList {
                             .test_support(),
                     )
                     .child(line("why", why, 12.))
+                    .when(row.session != self.root, |held| {
+                        held.child(line("holder", row.holder(), 11.5))
+                    })
                     .child(line("since", since, 11.5)),
             )
             .child(withdraw)
@@ -158,7 +178,7 @@ impl Render for ExceptionList {
         let entries: Vec<(String, ExceptionRow)> = self
             .rows
             .iter()
-            .map(|row| (row.rule.clone(), row.clone()))
+            .map(|row| (row.key(), row.clone()))
             .collect();
         let at = cx.background_executor().now();
         self.list.sync(entries, at, cx.reduce_motion());
@@ -231,5 +251,10 @@ mod tests {
         );
         assert_eq!(row("later-rule").said(), "later-rule");
         assert_eq!(row("force-push").why, "w");
+        assert_eq!(row("force-push").key(), "a1-force-push");
+        assert_eq!(row("force-push").holder(), "held by agent a1");
+        let titled = ExceptionRow::of(&json!({"session": "a2", "title": "worker",
+            "rule": "force-push", "why": "w", "granted_at": 0}));
+        assert_eq!(titled.holder(), "held by worker");
     }
 }

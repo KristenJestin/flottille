@@ -691,7 +691,8 @@ pub enum Command {
         writer: String,
         leave_session: String,
     },
-    /// Takes back the exception of `rule` the session's root `agent` holds.
+    /// Takes back the exception of `rule` that `agent`, the session's root or one of its
+    /// sub-agents, holds.
     WithdrawException {
         session: String,
         agent: String,

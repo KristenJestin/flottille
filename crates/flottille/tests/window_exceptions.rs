@@ -98,7 +98,7 @@ fn excepted(user: &User) -> String {
         .unwrap();
     let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     eventually("the exception", || {
-        store.has_exception(&agent, "force-push").unwrap()
+        store.exception(&agent, "force-push").unwrap().is_some()
     });
     agent
 }
@@ -190,36 +190,36 @@ fn the_exception_is_listed_on_its_session_and_can_be_withdrawn(cx: &mut TestAppC
     settle(cx);
     assert_eq!(label(cx, "rail-exceptions-title").unwrap(), "Exceptions");
     assert_eq!(
-        label(cx, "exception-said-force-push").unwrap(),
+        label(cx, &format!("exception-said-{agent}-force-push")).unwrap(),
         "Force-push its own branch"
     );
     assert_eq!(
-        label(cx, "exception-why-force-push").unwrap(),
+        label(cx, &format!("exception-why-{agent}-force-push")).unwrap(),
         "a check refuses an old commit the squash drops"
     );
     assert!(
-        label(cx, "exception-since-force-push")
+        label(cx, &format!("exception-since-{agent}-force-push"))
             .unwrap()
             .starts_with("allowed ")
     );
     assert_eq!(
-        label(cx, "exception-withdraw-force-push").unwrap(),
+        label(cx, &format!("exception-withdraw-{agent}-force-push")).unwrap(),
         "Withdraw"
     );
 
-    cx.update(|window, cx| window.click("exception-withdraw-force-push", cx));
+    cx.update(|window, cx| window.click(format!("exception-withdraw-{agent}-force-push"), cx));
     until(&shell, cx, "the exception is gone", |cx| {
         rows(&shown, cx).is_empty()
     });
     // It folds away before it is gone.
     cx.update(|window, cx| window.simulate_next_frame(cx));
     assert!(
-        present(cx, "exception-said-force-push"),
+        present(cx, &format!("exception-said-{agent}-force-push")),
         "the row left at once"
     );
     settle(cx);
 
-    assert!(!present(cx, "exception-said-force-push"));
+    assert!(!present(cx, &format!("exception-said-{agent}-force-push")));
     assert!(!present(cx, "rail-exceptions-title"));
     let listed = user
         .call("exception.list", json!({"session": agent}))
@@ -269,4 +269,79 @@ fn a_refused_withdrawal_is_said_in_a_toast(cx: &mut TestAppContext) {
             })
         })
     });
+}
+
+/// A sub-agent `mcp`'s session starts, titled `worker`: its id and MCP session.
+fn child(user: &User, mcp: &Mcp) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "worker", "brief": "Push the branch."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+    let listed = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+    let id = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["title"] == "worker")
+        .and_then(|agent| agent["id"].as_str())
+        .unwrap_or_else(|| panic!("no worker in {listed}"))
+        .to_owned();
+    (id, child)
+}
+
+#[gpui_kit::test]
+fn the_exception_of_a_sub_agent_is_listed_on_the_session_with_its_holder(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_allowing_judge();
+    app(&user);
+    let (agent, mcp) = root(&user);
+    let (worker, child_mcp) = child(&user, &mcp);
+    // The sub-agent asks; its parent forwards to the user, who allows it.
+    let held = child_mcp.call(
+        "run",
+        json!({"line": "git push --force origin app/w",
+            "exception": "a check refuses an old commit the squash drops"}),
+    );
+    let number: u64 = held
+        .text
+        .strip_prefix("Waiting for approval, request #")
+        .and_then(|rest| rest.split_once(|c: char| !c.is_ascii_digit()))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", held.text));
+    let forwarded = mcp.call(
+        "approval_answer",
+        json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
+    );
+    assert!(!forwarded.error, "{}", forwarded.text);
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
+    eventually("the exception", || {
+        store.exception(&worker, "force-push").unwrap().is_some()
+    });
+
+    let (shell, cx) = window(&user, cx);
+    let shown = open(&shell, cx, &agent);
+    until(
+        &shell,
+        cx,
+        "the rail lists the sub-agent's exception",
+        |cx| rows(&shown, cx).iter().any(|row| row.session == worker),
+    );
+    settle(cx);
+    assert_eq!(
+        label(cx, &format!("exception-holder-{worker}-force-push")).unwrap(),
+        "held by worker"
+    );
+
+    cx.update(|window, cx| window.click(format!("exception-withdraw-{worker}-force-push"), cx));
+    until(&shell, cx, "the exception is gone", |cx| {
+        rows(&shown, cx).is_empty()
+    });
+    settle(cx);
+    assert!(!present(cx, &format!("exception-said-{worker}-force-push")));
+    assert!(store.exception(&worker, "force-push").unwrap().is_none());
 }

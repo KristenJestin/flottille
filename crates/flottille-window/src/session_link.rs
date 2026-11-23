@@ -475,8 +475,8 @@ pub enum SessionUpdate {
     /// The leaves that let the root write to another session, or another to write to it
     /// (`leave.list`).
     Leaves(Vec<LeaveRow>),
-    /// The exceptions the root holds: rules of the gate the user lifted for it
-    /// (`exception.list`).
+    /// The exceptions of the root's tree: rules of the gate the user lifted for it or one of its
+    /// sub-agents (`exception.list`).
     Exceptions(Vec<ExceptionRow>),
     /// The root's session refused a model or an effort the user changed to, with why.
     OptionsRefused(String),
@@ -818,10 +818,8 @@ impl Link {
                 stale.leaves = true;
                 stale.since.get_or_insert_with(Instant::now);
             }
-            // An exception is the root's own, and goes with its end.
-            if (name.starts_with("exception.") && data["agent"] == root)
-                || (matches!(name, "agent.ended" | "agent.failed") && agent == root)
-            {
+            // The tree's exceptions are listed, and each goes with the end of its session.
+            if name.starts_with("exception.") || matches!(name, "agent.ended" | "agent.failed") {
                 stale.exceptions = true;
                 stale.since.get_or_insert_with(Instant::now);
             }
@@ -984,9 +982,12 @@ impl Link {
         Ok(())
     }
 
-    /// The exceptions the session's root holds, sent.
+    /// The exceptions of the session's tree, its root's and its sub-agents', sent.
     fn read_exceptions(&self, conn: &mut Conn) -> Result<(), String> {
-        let answer = conn.request("exception.list", json!({"session": self.root}))?;
+        let answer = conn.request(
+            "exception.list",
+            json!({"session": self.root, "tree": true}),
+        )?;
         let rows = answer["exceptions"]
             .as_array()
             .into_iter()
