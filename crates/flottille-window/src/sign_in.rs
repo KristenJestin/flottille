@@ -175,6 +175,9 @@ pub struct SignInSection {
     asked: String,
     /// The programs a request is out for: their buttons wait for the daemon.
     pending: HashSet<String>,
+    /// The programs whose check is asked and not answered: a list read again meanwhile does not
+    /// ask it twice.
+    checks: HashSet<String>,
 }
 
 impl SignInSection {
@@ -191,6 +194,7 @@ impl SignInSection {
             confirming: None,
             asked: String::new(),
             pending: HashSet::new(),
+            checks: HashSet::new(),
         }
     }
 
@@ -234,6 +238,7 @@ impl SignInSection {
         {
             row.checking = true;
         }
+        self.checks.insert(program.to_owned());
         perform_later(&self.shell, Command::SignInCheck(program.to_owned()), cx);
         cx.notify();
     }
@@ -251,7 +256,9 @@ impl SignInSection {
                     .map(SignInRow::of)
                     .collect();
                 for row in rows.iter().filter(|row| row.checking) {
-                    perform_later(&self.shell, Command::SignInCheck(row.program.clone()), cx);
+                    if self.checks.insert(row.program.clone()) {
+                        perform_later(&self.shell, Command::SignInCheck(row.program.clone()), cx);
+                    }
                 }
                 if self.listed.as_ref() != Some(&rows) {
                     self.listed = Some(rows);
@@ -270,6 +277,7 @@ impl SignInSection {
         answer: Result<Value, String>,
         cx: &mut Context<Self>,
     ) {
+        self.checks.remove(program);
         let Some(row) = self
             .listed
             .iter_mut()
