@@ -1463,12 +1463,15 @@ fn a_second_message_to_the_server_s_session_is_sent_too(cx: &mut TestAppContext)
     eventually("the server's session got the first message", || {
         conversation_holds(&server.user, &there, "First note")
     });
+    let reply = reply_there(&shell, cx, &there);
+    until(&shell, cx, "the composer is free after the first", |cx| {
+        !reply.read_with(cx, |reply, _| reply.is_sending())
+    });
     settle(&shell, cx);
     send(cx, "Second note");
     eventually("the server's session got the second message", || {
         conversation_holds(&server.user, &there, "Second note")
     });
-    let reply = reply_there(&shell, cx, &there);
     until(&shell, cx, "the composer is free again", |cx| {
         !reply.read_with(cx, |reply, _| reply.is_sending())
     });
