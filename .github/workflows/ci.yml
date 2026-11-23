@@ -542,7 +542,22 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk@4.1.2
+      # Gradle's downloads, the Robolectric jars above all: Maven Central refused them with 429,
+      # Too Many Requests, three tries in a row, six runs of dev in two days (21-23 November
+      # 2026). Kept from one run to the next, they are fetched once per version. A pull request
+      # reads them and keeps none, as with the caches above.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.sh') }}
+          restore-keys: gradle-
       - run: apps/android/ci.sh
+      - uses: actions/cache/save@v4
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: gradle-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.sh') }}
       # The APK (`docs/releases.md`, "The version"), on every pull request that touches the app and
       # every push, for every channel: the version of `tools/version.sh`. This job runs the
       # branch's own code and holds no secret: the APK it builds is unsigned, and a copy of it is

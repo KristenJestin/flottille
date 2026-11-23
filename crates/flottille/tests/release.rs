@@ -6425,6 +6425,30 @@ fn a_pull_request_writes_no_cache() {
     assert!(caches >= 6, "{caches} caches");
 }
 
+#[test]
+fn the_android_job_keeps_gradle_s_downloads_between_runs() {
+    // Maven Central answered the Robolectric jar's download with 429, Too Many Requests, three
+    // times in a row: the Android job failed dev six times in two days (21-23 November 2026).
+    // Gradle's downloads are kept from one run to the next: the jar is fetched once per version.
+    let android = ci_job("android");
+    let restore = android
+        .find("uses: actions/cache/restore@v4")
+        .expect("the downloads are restored");
+    let run = android
+        .find("apps/android/ci.sh")
+        .expect("the job runs ci.sh");
+    assert!(restore < run, "{android}");
+    let save = android
+        .find("uses: actions/cache/save@v4")
+        .expect("the downloads are kept");
+    assert!(run < save, "{android}");
+    assert_eq!(
+        android.matches("~/.gradle/caches/modules-2").count(),
+        2,
+        "the same folder restored and saved: {android}"
+    );
+}
+
 /// Every file under `dir`, folders walked.
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();

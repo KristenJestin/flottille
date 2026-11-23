@@ -243,7 +243,9 @@ The jobs of the whole suite's run:
   (`org.robolectric:android-all-instrumented`, in `apps/android/app/build.gradle.kts`), fetched
   by `:app:fetchRobolectricJars`, a step of `ci.sh` of its own (tried three times) that runs before
   any test, and every test task reads it from there with `robolectric.offline=true`: a test that
-  needs a jar it was not given fails, it never goes to the network.
+  needs a jar it was not given fails, it never goes to the network. Gradle's downloads
+  (`~/.gradle/caches/modules-2`) are kept from one run to the next: Maven Central answers a jar
+  fetched on every run with 429, Too Many Requests.
 - **`verify`**, the required check, always concludes. On a push it fails unless `check`,
   `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check`,
   `guards` and `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
