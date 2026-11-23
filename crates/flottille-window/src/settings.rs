@@ -191,8 +191,8 @@ pub const NEW_SESSION_MODE_HINT: &str =
     "Sessions agents start, and children, keep their own rules.";
 
 /// What the page says once when Full is chosen for new sessions: what Full lends.
-pub const FULL_LENDS: &str = "In Full, a session's commands run as yours, with your keys and \
-     sign-ins. The vault stays out of reach.";
+pub const FULL_LENDS: &str = "In Full, a session's commands run as yours, as in your terminal: \
+     nothing is held back, the vault included.";
 
 /// The modes of a new session, in the order of the choice: the daemon's word and the word said.
 const NEW_SESSION_MODES: [(&str, &str); 3] = [("ask", "Ask"), ("auto", "Auto"), ("full", "Full")];

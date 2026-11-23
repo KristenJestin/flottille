@@ -733,8 +733,8 @@ carries over to the next. The default is the user's alone, for the sessions the 
 session an agent starts, and a child, keep the rules below (a child follows its tree's mode, a
 session an agent starts in another project is in Auto, never above its launcher's tree's), so
 that a default of Full lends nothing to a tree that is not in Full. Choosing Full as the default
-says once, under the choice, what Full lends: a session's commands run as the user's, with their
-keys and sign-ins, and the vault stays out of reach (§7.2). A tree has one mode, its
+says once, under the choice, what Full lends: a session's commands run as the user's, as in their
+terminal: nothing is held back, the vault included (§7.2). A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
@@ -1337,7 +1337,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   ("Sessions agents start, and children, keep their own rules."), which the machine keeps
   (`provider.set_new_session_mode`) and the composer that starts a session shows before its first
   message (§7.1); while Full is chosen, a note under it says once what Full lends ("In Full, a
-  session's commands run as yours, with your keys and sign-ins. The vault stays out of reach."),
+  session's commands run as yours, as in your terminal: nothing is held back, the vault included."),
   which unfolds and fades in, and folds away with its gap. It
   enters with the page's other sections and its fold of the line fades in and out. **Rules for every project**
   ("What every agent is told, in every project. A project adds its own, or uses only its own."):
