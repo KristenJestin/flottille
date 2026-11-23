@@ -286,8 +286,9 @@ fn pc_and_bare_server(more: &str) -> (TestHub, Machine, Machine) {
     pc.user.git(&repo, &["commit", "--quiet", "-m", "first"]);
     pc.user
         .git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    // No branch convention of its own: one would make the launch the user's to decide there.
     let text = format!(
-        "folder = \"{}\"\nworkspaces_root = \"{}\"\nbranch_prefix = \"\"\n{more}\n\
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\n{more}\n\
          [[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
         pc.user.path("work/app").display(),
         pc.user.path("work/app-work").display()
