@@ -9644,6 +9644,59 @@ mod tests {
     }
 
     #[test]
+    fn the_pilot_of_an_ended_session_leaves_the_cap_of_its_machine() {
+        let mut store = Store::open_in_memory().unwrap();
+        // 65 pilots in turn, each session it led ended before the next one comes.
+        for n in 0..65 {
+            let pilot = format!("c{n}@aa");
+            assert!(
+                store
+                    .keep_stand_in(&a_stand_in(&format!("c{n}"), "aa"), 64)
+                    .unwrap()
+                    .is_some(),
+                "pilot {n} is refused"
+            );
+            let mut led = an_agent();
+            led.id = format!("led{n}");
+            led.launched_by = Some(pilot);
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+            store
+                .change_agent(
+                    &led.id,
+                    AgentChange {
+                        state: Some(AgentState::Ended),
+                        ..AgentChange::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        // A live session's pilot still counts: 64 of them fill the cap.
+        let mut store = Store::open_in_memory().unwrap();
+        for n in 0..64 {
+            store
+                .keep_stand_in(&a_stand_in(&format!("c{n}"), "aa"), 64)
+                .unwrap();
+            let mut led = an_agent();
+            led.id = format!("led{n}");
+            led.launched_by = Some(format!("c{n}@aa"));
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+        }
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c64", "aa"), 64)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_member_list_never_read_forgets_no_machine_and_still_the_idle() {
         let mut store = Store::open_in_memory().unwrap();
         store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
