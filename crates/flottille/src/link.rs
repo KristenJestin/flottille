@@ -1081,7 +1081,12 @@ pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
         .collect();
     let mut sessions: Vec<flottille_link::LightSession> = agents
         .iter()
-        .filter(|agent| agent.parent.is_none() && !agent.state.is_final())
+        // A child an agent of another machine launched here is that agent's, no session to list.
+        .filter(|agent| {
+            agent.parent.is_none()
+                && !agent.state.is_final()
+                && !crate::across::remote_child(daemon, agent)
+        })
         .map(|agent| {
             let title = agent
                 .title
