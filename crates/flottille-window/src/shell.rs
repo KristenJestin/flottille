@@ -944,7 +944,13 @@ impl Shell {
     /// Lets go of what the window holds of each machine no longer among the user's (#1271): its
     /// pages and their dialogs, its copy and its link, the kept page of its session.
     fn forget_gone_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(read) = self.machines.read(cx).machines() else {
+        // A read that failed lists no machine: none of them is gone for it.
+        let Some(read) = self
+            .machines
+            .read(cx)
+            .machines()
+            .filter(|read| read.off.is_none())
+        else {
             return;
         };
         let kept: Vec<String> = self
@@ -5364,11 +5370,11 @@ impl Shell {
         let Some(at) = self.history.find(way, exists) else {
             return;
         };
-        let visit = self.history.move_to(at);
-        // The page of the machine it was a page of.
-        let machine = visit.machine.clone();
-        self.reach_then(machine.clone(), window, cx, move |shell, window, cx| {
-            shell.bring(machine, window, cx);
+        // The page of the machine it was a page of; the history moves there once it is reached.
+        let machine = self.history.visit(at).machine.clone();
+        self.reach_then(machine, window, cx, move |shell, window, cx| {
+            let visit = shell.history.move_to(at);
+            shell.bring(visit.machine.clone(), window, cx);
             shell.show_visit(visit, window, cx);
         });
     }

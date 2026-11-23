@@ -105,6 +105,11 @@ impl History {
     }
 
     /// Stands on the place `at` (found by [`History::find`]).
+    /// The visit `at`, a place [`History::find`] gave.
+    pub fn visit(&self, at: usize) -> &Visit {
+        &self.visits[at]
+    }
+
     pub fn move_to(&mut self, at: usize) -> Visit {
         self.at = at;
         self.visits[at].clone()
