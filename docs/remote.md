@@ -916,8 +916,14 @@ local child's work; nothing moves your branch.*
   `agent.show` and the tree say whose it is, `launched_from: {machine, agent, kind}`; the window
   draws a bar naming that agent where the composer would be (`This conversation is a child of agent
   b1 of pc, which launched it from there: only its parent writes to it.`), the CLI says `child of
-  agent b1 of pc`, and the phone lists it among no sessions. Its questions still reach the user
-  there while its parent's machine is off ("Where a question goes when the parent is off").
+  agent b1 of pc`, and the phone lists it among no sessions. `agent.send` to it is refused, as to
+  a child here (`agent a2 is a child of agent b1 of pc: only its parent writes to it`); the user
+  still answers its questions and stops it, the ways out while its parent's machine is off ("Where
+  a question goes when the parent is off"). It is subscribed to nothing automatically, and gets its
+  brief again after a compaction, as a child does. A `led` or `handed` launch asked for by a
+  caller below its root (a `depth` above 0) is refused there, as its own machine refuses it. A
+  child stored by a Flottille of before, at depth 0, is put at depth 1 when the store opens, so it
+  takes a child's tools at its next start.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
@@ -1624,6 +1630,11 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **A child of another machine's agent stored at depth 0 is put at depth 1 at every open of the
+  store** (#1274), not by a numbered migration: the change is done once and does nothing after,
+  and every check of a root then reads its depth alone. `agent.trees` still lists it among the
+  roots: the window reads there the questions it asks the user while its parent's machine is off.
 
 - **A launch that says no depth is a root's** (#1274): only a root launches on a machine of before
   (its depth limit is 1), so a missing `depth` is read as 0, never refused; a child asked for by a
