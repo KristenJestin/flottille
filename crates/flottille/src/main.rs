@@ -66,6 +66,7 @@ mod posts;
 mod program;
 mod programs;
 mod project_command;
+mod project_map;
 mod projects;
 mod providers;
 mod push_folder;
