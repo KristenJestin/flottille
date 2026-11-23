@@ -1163,12 +1163,12 @@ fn repository_url(folder: &Path, remote: &str) -> Option<String> {
     if !folder.join(".git").exists() {
         return None;
     }
-    let output = crate::git::blocking(
+    let output = crate::children::spawn_std(&mut crate::git::blocking(
         crate::git::own(),
         folder,
         &["remote", "get-url", "--end-of-options", remote],
-    )
-    .output()
+    ))
+    .and_then(std::process::Child::wait_with_output)
     .ok()?;
     output
         .status
