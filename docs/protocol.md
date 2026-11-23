@@ -332,6 +332,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `provider.disable` | drive |
 | `provider.set_judge` | drive |
 | `provider.set_new_session` | drive |
+| `provider.set_new_session_mode` | drive |
 | `provider.judge_noticed` | drive |
 | `signin.list` | read |
 | `signin.start` | drive |
@@ -2756,7 +2757,9 @@ chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the pro
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
 there is none. `new_session` is what the user chose for new sessions to start on
 (`provider.set_new_session`), `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for
-the provider's to propose, or `null` when none is chosen. `not-found` when the project
+the provider's to propose, or `null` when none is chosen. `new_session_mode` is the mode a session
+the user starts is in (`provider.set_new_session_mode`): `"ask"`, `"auto"` or `"full"`, `"auto"`
+when the user chose none. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
@@ -2789,6 +2792,19 @@ removes it, keeping the rest of the file as `provider.enable` keeps it, and answ
 `provider.new_session_changed` (`docs/events.md`). `not-found` when there is no provider of that
 name; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches it: no
 tool of an agent chooses it.
+
+### `provider.set_new_session_mode`
+
+`{"mode"}`, `"ask"`, `"auto"` or `"full"`. Chooses the mode a session the user starts is in
+(`agent.start`, when it names none: the window's composer always names one, which it shows before
+the first message; `flottille agent start --mode` names its own). The daemon writes
+`new_session_mode` in `providers.toml`, or removes it for `"auto"`, which is what a file that says
+nothing means, keeping the rest of the file as `provider.enable` keeps it, and answers
+`{"new_session_mode"}`, as `provider.list` gives it. A session an agent starts, and a child, are not
+affected: they keep the rules of `docs/design.md` §7.1. When this changes the file it emits
+`provider.new_session_mode_changed` (`docs/events.md`). `invalid-params` when the word is none of
+the three; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches
+it: no tool of an agent chooses it.
 
 ### `provider.set_judge`
 

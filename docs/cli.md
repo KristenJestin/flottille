@@ -158,22 +158,29 @@ claude: enabled, its agents can run
 codex: enabled, its agents cannot run: codex is not on PATH
 opencode: disabled
 Auto judge: claude (haiku), picked by Flottille: change it in Settings, or choose no judge there.
+New session mode: Auto.
 New sessions: what the provider proposes.
 ```
 
-### `flottille provider new-session <provider> [--model <model>] [--effort <effort>]`
+### `flottille provider new-session [<provider>] [--model <model>] [--effort <effort>] [--mode ask|auto|full]`
 
 Chooses the provider, model and effort a new session starts on (`docs/agents.md`, "Providers"),
 as the window's settings page does ("New sessions"): `[new_session]` in `providers.toml`, the rest
 of the file kept as you wrote it. What is left out is the provider's to propose. `--clear` goes back
 to what the provider proposes. `provider list` says it on its last line, and `--json` gives it as
-`"new_session"`.
+`"new_session"`. `--mode` chooses the mode a session you start is in (the window's "Mode",
+`new_session_mode`, Auto until you choose; `docs/design.md` §7.1), alone or with a provider: a
+session an agent starts and a child keep their own rules, and `agent start --mode` still names a
+session's own. It is kept for this machine, and `provider list` says it, and `--json` gives it as
+`"new_session_mode"`.
 
 ```
 $ flottille provider new-session claude --model opus --effort high
 New sessions start on claude, opus, high.
 $ flottille provider new-session --clear
 New sessions start on what the provider proposes.
+$ flottille provider new-session --mode full
+New sessions start in Full.
 ```
 
 ### `flottille provider enable <name>`
