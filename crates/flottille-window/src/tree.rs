@@ -17,7 +17,7 @@ use gpui_design_system::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
@@ -1407,7 +1407,13 @@ impl Render for ProjectNode {
                     .child(row)
                     .child(offline),
             )
-            .child(self.fold.clone())
+            // A press on what the project holds (a session's row, a button) is that row's own: it
+            // never starts the drag of the whole project, which begins on the project's row.
+            .child(
+                div()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.fold.clone()),
+            )
     }
 }
 
