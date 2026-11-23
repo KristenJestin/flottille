@@ -195,7 +195,12 @@ fn a_refused_action_asked_for_and_accepted_no_longer_stops_that_session() {
         "{reasons:?}"
     );
     assert!(reasons[0].contains("force-push"), "{reasons:?}");
-    assert!(reasons[0].contains(WHY), "{reasons:?}");
+    assert!(reasons[0].contains("app/w"), "{reasons:?}");
+    assert_eq!(
+        reasons[1],
+        format!("the agent's reason: {WHY}"),
+        "{reasons:?}"
+    );
     assert!(
         reasons
             .iter()
@@ -448,9 +453,12 @@ fn a_merge_past_failing_checks_asked_for_and_accepted_bypasses_the_protection_fo
     );
     assert_eq!(exceptions(&user, &agent), ["merge-blocked"]);
 
-    // The next merge of the session is no longer stopped by its checks.
+    // The next merge of that pull request is no longer stopped by its checks.
     passed(&user, &mcp.call("forge", merge));
-    assert_eq!(merges(&user).len(), 2);
+    assert_eq!(
+        merges(&user)[1],
+        "pr merge 12 -R github.com/acme/app --squash --admin"
+    );
     assert!(requests(&user).is_empty(), "a request was made");
 }
 
@@ -656,4 +664,90 @@ fn the_reason_of_an_ask_is_one_line_of_a_bounded_length() {
         refused_with_no_ask(&user, &answer);
         assert!(answer.text.contains("exception"), "{}", answer.text);
     }
+}
+
+/// The user puts the session `agent` in `mode`.
+fn set_mode(user: &User, agent: &str, mode: &str) {
+    let output = user.run(&["agent", "mode", agent, mode]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn in_full_an_exception_ask_still_reaches_the_user() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    app(&user);
+    workspace(&user, "w");
+    let (agent, mcp) = root(&user, "w");
+    set_mode(&user, &agent, "full");
+
+    // Never the judge, never passed: the user's own request.
+    let asked = held(&ask_force_push(&mcp, "app/w"));
+    let request = requests(&user)
+        .into_iter()
+        .find(|request| request["number"] == asked)
+        .unwrap();
+    assert_eq!(request["held_by"], "user", "{request}");
+    assert!(request["judgement"].is_null(), "{request}");
+    assert!(exceptions(&user, &agent).is_empty());
+}
+
+#[test]
+fn a_forge_action_asked_for_and_accepted_no_longer_stops_that_session() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    user.gh_script(failing_pull());
+    let (agent, mcp) = root(&user, "login");
+    set_mode(&user, &agent, "ask");
+    let close = json!({"action": "close", "repository": ".", "number": 12});
+
+    // Blocked by default: closing a pull request is the user's in Ask.
+    let blocked = held(&mcp.call("forge", close.clone()));
+    answer(&user, blocked, "approval.deny");
+
+    let mut asking = close.clone();
+    asking["exception"] = json!(WHY);
+    let asked = held(&mcp.call("forge", asking));
+    assert!(
+        reasons_of(&user, asked)[0].contains("forge-state"),
+        "{:?}",
+        reasons_of(&user, asked)
+    );
+    let done = answer(&user, asked, "approval.approve");
+    assert!(done.contains("Flottille has now done it"), "{done}");
+    assert_eq!(exceptions(&user, &agent), ["forge-state"]);
+
+    // The same rule no longer stops it: relabelling passes with no request.
+    passed(
+        &user,
+        &mcp.call(
+            "forge",
+            json!({"action": "edit", "repository": ".", "number": 12, "labels_add": ["bug"]}),
+        ),
+    );
+    assert!(requests(&user).is_empty(), "a request was made");
+}
+
+#[test]
+fn one_rule_s_exception_never_lifts_another() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    user.gh_script(failing_pull());
+    let (agent, mcp) = root(&user, "login");
+    let close = json!({"action": "close", "repository": ".", "number": 12,
+        "exception": WHY});
+    let asked = held(&mcp.call("forge", close));
+    answer(&user, asked, "approval.approve");
+    assert_eq!(exceptions(&user, &agent), ["forge-state"]);
+
+    // A forced push of its own branch is held as before.
+    held(&force_push(&mcp, "app/login"));
+    // A merge past failing checks is refused as before: no check skipped, no bypass.
+    let merged = mcp.call("forge", json!({"action": "merge", "repository": "."}));
+    assert!(merged.error, "{}", merged.text);
+    assert!(merged.text.contains("its checks fail"), "{}", merged.text);
+    assert!(merges(&user).is_empty());
 }
