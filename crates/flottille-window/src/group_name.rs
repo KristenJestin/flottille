@@ -47,6 +47,11 @@ impl GroupName {
         self.open
     }
 
+    /// What the dialog says is wrong with the name, if it does.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     pub fn field(&self) -> &Entity<InputState> {
         &self.field
     }

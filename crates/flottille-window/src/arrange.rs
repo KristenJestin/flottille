@@ -319,6 +319,40 @@ mod tests {
     }
 
     #[test]
+    fn a_project_absent_while_another_is_moved_returns_to_its_place_and_group() {
+        let all = keys(&["a", "b", "c", "d"]);
+        let mut arrangement = Arrangement::default();
+        let id = arrangement.add_group(&all, "Work");
+        arrangement.move_project(&all, "b", Some(&id), 0);
+        arrangement.move_project(&all, "c", Some(&id), 1);
+        arrangement.move_project(&all, "d", None, 0);
+        let before = arrangement.listed(&all);
+        assert_eq!(before.groups[0].projects, keys(&["b", "c"]));
+        assert_eq!(before.loose, keys(&["d", "a"]));
+
+        // `b` is out of reach (a machine that is off): the user moves others meanwhile.
+        let present = keys(&["a", "c", "d"]);
+        arrangement.move_project(&present, "a", None, 0);
+        arrangement.move_group(&present, &id, 0);
+        arrangement.open_group(&id, true);
+        assert_eq!(arrangement.listed(&present).loose, keys(&["a", "d"]));
+
+        // It is back: in its group, before `c`, as it was.
+        let listed = arrangement.listed(&all);
+        assert_eq!(listed.groups[0].projects, keys(&["b", "c"]));
+        assert_eq!(listed.loose, keys(&["a", "d"]));
+    }
+
+    #[test]
+    fn a_name_is_taken_whatever_its_case_beyond_ascii() {
+        let mut arrangement = Arrangement::default();
+        arrangement.add_group(&[], "Équipe");
+        assert!(arrangement.names("équipe"));
+        assert!(arrangement.names(" ÉQUIPE "));
+        assert!(!arrangement.names("Equipe"));
+    }
+
+    #[test]
     fn it_is_what_the_daemon_keeps() {
         let present = keys(&["a", "b"]);
         let mut arrangement = Arrangement::default();

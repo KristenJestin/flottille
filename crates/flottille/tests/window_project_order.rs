@@ -17,6 +17,7 @@ use flottille_window::tree::{
     group_count_id, group_header_id, new_group_id, project_id, project_slot_id, projects_menu_id,
 };
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Bounds, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext, VisualTestContext,
@@ -57,9 +58,10 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// What the daemon keeps of the sidebar.
+/// What the daemon keeps of the user's arrangement, under its own key (the sidebar's folds are
+/// another's: a window that only folds a project never writes it).
 fn kept(user: &User) -> Value {
-    user.call("window.get", json!({})).unwrap()["state"]["sidebar"].clone()
+    user.call("window.get", json!({})).unwrap()["state"]["arrangement"].clone()
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -246,8 +248,8 @@ fn drag(
     release(end, shell, cx);
 }
 
-/// A group made from the Projects header's menu: New group…, its name, Create.
-fn new_group(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+/// The dialog of New group… asked for `name` and Create pressed, nothing settled after it.
+fn ask_new_group(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.click(projects_menu_id(), cx));
     settle(shell, cx);
     cx.update(|window, cx| window.click(new_group_id(), cx));
@@ -258,6 +260,11 @@ fn new_group(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| field.update(cx, |field, cx| field.set_value(&name, window, cx)));
     settle(shell, cx);
     cx.update(|window, cx| window.click("group-name-save", cx));
+}
+
+/// A group made from the Projects header's menu: New group…, its name, Create.
+fn new_group(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    ask_new_group(name, shell, cx);
     settle(shell, cx);
 }
 
@@ -430,9 +437,12 @@ fn a_new_project_goes_at_the_end_and_unfolds(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
+fn the_arrangement_survives_a_restart_of_the_window(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
     let user = user();
-    let (shell, cx) = with_projects(&user, &["alpha", "bravo", "charlie"], cx);
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo", "charlie"], first);
     new_group("Work", &shell, cx);
     let id = group_id(&shell, "Work", cx);
     drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
@@ -444,8 +454,9 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
         strings(&sidebar["order"]) == ["charlie", "bravo"] && sidebar["groups"][0]["open"] == false
     });
 
-    // Another window, on the same daemon, shows the same arrangement.
-    let (again, cx) = open(&user, cx);
+    // The first window is left as it is, never stepped again, and the app starts anew on the same
+    // daemon (as `window_kept_state.rs` restarts one): the arrangement is the daemon's.
+    let (again, cx) = window(&user, second);
     until(
         &again,
         cx,
@@ -463,6 +474,217 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
     assert!(
         !present(cx, project_id("alpha")),
         "the group is folded as it was left"
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_groups_heading_unfolds_and_no_row_jumps(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo"], cx);
+    let y = |cx: &mut VisualTestContext| f32::from(bounds(cx, project_slot_id("alpha")).origin.y);
+    let before = y(cx);
+
+    ask_new_group("Work", &shell, cx);
+    let mut ys = Vec::new();
+    for _ in 0..30 {
+        step(&shell, FRAME, cx);
+        ys.push(y(cx));
+    }
+    let id = group_id(&shell, "Work", cx);
+    let heading = f32::from(bounds(cx, group_header_id(&id)).size.height);
+    let end = *ys.last().unwrap();
+    assert_eq!(end - before, heading, "the rows made room for the heading");
+    assert!(
+        ys.iter().any(|y| *y > before && *y < end),
+        "the heading unfolds: {ys:?}"
+    );
+    assert!(
+        ys.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the rows only go down: {ys:?}"
+    );
+    assert!(
+        ys[0] - before < heading / 2.,
+        "nothing jumps when the group comes: {ys:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_arrangement_arriving_after_the_rows_slides_them_into_their_groups(cx: &mut TestAppContext) {
+    let user = user();
+    for name in ["alpha", "bravo", "charlie", "delta"] {
+        project(&user, name);
+    }
+    user.call(
+        "window.set",
+        json!({"key": "arrangement", "value": {
+            "order": ["alpha", "delta"],
+            "groups": [{"id": "g1", "name": "Work", "open": true,
+                "projects": ["charlie", "bravo"]}]}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+
+    // Every frame from the first row to the settled list: where each row is.
+    let rows = ["alpha", "bravo", "charlie", "delta"];
+    let mut seen: Vec<Vec<Option<f32>>> = Vec::new();
+    let began = Instant::now();
+    loop {
+        step(&shell, FRAME, cx);
+        seen.push(
+            rows.iter()
+                .map(|name| {
+                    present(cx, project_slot_id(name))
+                        .then(|| f32::from(bounds(cx, project_slot_id(name)).origin.y))
+                })
+                .collect(),
+        );
+        let drawn = seen.last().unwrap().iter().all(Option::is_some);
+        if (drawn && seen.len() > 120) || began.elapsed() > Duration::from_secs(25) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(held(&shell, "Work", cx), names(&["charlie", "bravo"]));
+    for (at, name) in rows.iter().enumerate() {
+        let path: Vec<f32> = seen.iter().filter_map(|frame| frame[at]).collect();
+        // The row came in, rising a little: where it was drawn first is where it moves from.
+        let from = path[path.len().min(3) - 1];
+        let to = *path.last().unwrap();
+        let worst = path
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0., f32::max);
+        if (to - from).abs() >= 10. {
+            assert!(
+                worst <= (to - from).abs() * 0.6,
+                "{name} jumps ({from} to {to}, {worst} in one frame): {path:?}"
+            );
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn groups_made_in_one_window_survive_a_sidebar_write_from_another(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "alpha");
+    project(&user, "bravo");
+    let (one, cx_one) = window(&user, first);
+    until(&one, cx_one, "the rows of the window", |cx| {
+        present(cx, project_id("bravo"))
+    });
+    let (two, cx_two) = window(&user, second);
+    until(&two, cx_two, "the rows of the other window", |cx| {
+        present(cx, project_id("bravo"))
+    });
+
+    new_group("Work", &one, cx_one);
+    eventually("the daemon keeps the group", || {
+        kept(&user)["groups"][0]["name"] == "Work"
+    });
+
+    // The other window, which never heard of the group, folds a project: it writes the sidebar.
+    cx_two.update(|window, cx| window.click(toggle_id(project_id("alpha")), cx));
+    settle(&two, cx_two);
+    eventually("the daemon keeps the fold", || {
+        user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["projects"]["alpha"]
+            == false
+    });
+    assert_eq!(
+        kept(&user)["groups"][0]["name"],
+        "Work",
+        "a write of the folds never erases the groups"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_absent_while_the_user_drags_returns_to_its_place_and_group(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo", "charlie"], cx);
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("bravo"), group_header_id(&id), 0., &shell, cx);
+    assert_eq!(held(&shell, "Work", cx), names(&["bravo"]));
+
+    // The project is gone for a while (as a machine's is while it is not reached).
+    user.call("project.remove", json!({"name": "bravo"}))
+        .unwrap();
+    until(&shell, cx, "the row to go", |cx| {
+        !present(cx, project_id("bravo"))
+    });
+    settle(&shell, cx);
+    drag(project_id("alpha"), project_id("charlie"), 6., &shell, cx);
+    assert_eq!(loose(&shell, cx), names(&["charlie", "alpha"]));
+
+    user.call(
+        "project.add",
+        json!({"folder": user.path("work/bravo"), "name": "bravo"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the row to come back", |cx| {
+        present(cx, project_id("bravo"))
+    });
+    settle(&shell, cx);
+    assert_eq!(held(&shell, "Work", cx), names(&["bravo"]), "its group");
+    assert_eq!(loose(&shell, cx), names(&["charlie", "alpha"]));
+}
+
+/// The dialog of New group… refused `name`, with what it says, and made no group.
+fn refused(name: &str, says: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let groups = shell.read_with(cx, |s, _| s.listing().groups.len());
+    ask_new_group(name, shell, cx);
+    settle(shell, cx);
+    assert!(
+        shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()),
+        "the dialog stays open on {name:?}"
+    );
+    assert_eq!(
+        shell
+            .read_with(cx, |s, cx| s
+                .group_form()
+                .read(cx)
+                .error()
+                .map(str::to_owned))
+            .as_deref(),
+        Some(says)
+    );
+    assert!(present(cx, "group-name-error"), "and says it");
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.listing().groups.len()),
+        groups,
+        "no group was made"
+    );
+}
+
+#[gpui_kit::test]
+fn a_group_name_that_is_empty_is_refused(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha"], cx);
+    refused("   ", "Give the group a name.", &shell, cx);
+}
+
+#[gpui_kit::test]
+fn a_group_name_already_taken_is_refused_whatever_its_case(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha"], cx);
+    new_group("Équipe", &shell, cx);
+    // Beyond ASCII too: the same word in another case is the same name.
+    refused("équipe", "A group of that name exists.", &shell, cx);
+    refused("ÉQUIPE ", "A group of that name exists.", &shell, cx);
+}
+
+#[gpui_kit::test]
+fn a_group_name_longer_than_sixty_characters_is_refused(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha"], cx);
+    let long = "é".repeat(61);
+    refused(
+        &long,
+        "A group's name is 60 characters at most.",
+        &shell,
+        cx,
     );
 }
 

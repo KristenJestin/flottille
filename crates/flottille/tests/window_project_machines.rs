@@ -436,25 +436,60 @@ fn the_arrangement_survives_a_restart_of_the_window(cx: &mut TestAppContext) {
     assert!(again.read_with(cx, |s, _| s.is_by_machine()));
 }
 
+/// The projects of the user's list as drawn, top to bottom.
+fn drawn_order(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    let mut rows: Vec<(f32, String)> = shell
+        .read_with(cx, |s, _| s.listing().keys())
+        .into_iter()
+        .map(|name| {
+            let at = cx.update(|window, _| {
+                window
+                    .find(flottille_window::tree::project_slot_id(&name))
+                    .bounds()
+                    .origin
+                    .y
+            });
+            (f32::from(at), name)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.into_iter().map(|(_, name)| name).collect()
+}
+
 #[gpui_kit::test]
 fn group_by_machine_off_brings_the_users_groups_back_as_they_were(cx: &mut TestAppContext) {
     let (_hub, pc, server) = machines();
-    add(&pc, "app", APP);
-    add(&pc, "docs", "");
+    for name in ["app", "docs", "extra", "notes", "zeta"] {
+        add(&pc, name, "");
+    }
     add(&server, "site", SITE);
     told(&pc, &["site"]);
-    let (shell, cx) = with_row(&pc, "docs", cx);
+    let (shell, cx) = with_row(&pc, "zeta", cx);
     until(&shell, cx, "the choice is offered", |cx| {
         shell.read_with(cx, |s, cx| s.offers_grouping(cx))
     });
-    // The user's own arrangement: a group holding docs, app outside it.
+    // The user's own arrangement, unlike the daemon's order: two groups, and the projects
+    // outside them in another order than the daemon lists them.
     shell.update_in(cx, |shell, window, cx| {
         shell.add_group("Work", cx);
-        let id = shell.listing().groups[0].id.clone();
-        shell.project_moved("docs", Some(&id), 0, window, cx);
+        shell.add_group("Play", cx);
+        let (work, play) = {
+            let groups = shell.listing().groups;
+            (groups[0].id.clone(), groups[1].id.clone())
+        };
+        shell.project_moved("notes", Some(&work), 0, window, cx);
+        shell.project_moved("docs", Some(&work), 1, window, cx);
+        shell.project_moved("app", Some(&play), 0, window, cx);
+        shell.project_moved("zeta", None, 0, window, cx);
     });
     settle(&shell, cx);
-    let id = shell.read_with(cx, |s, _| s.listing().groups[0].id.clone());
+    let before = shell.read_with(cx, |s, _| s.listing());
+    assert_eq!(before.groups[0].projects, ["notes", "docs"]);
+    assert_eq!(before.groups[1].projects, ["app"]);
+    assert_eq!(before.loose, ["zeta", "extra"]);
+    let drawn = drawn_order(&shell, cx);
+    assert_eq!(drawn, ["notes", "docs", "app", "zeta", "extra"]);
+    let id = before.groups[0].id.clone();
     assert!(present(cx, group_header_id(&id)));
 
     // By machine the user's groups give way to the sections, and the rows are the sections'.
@@ -464,16 +499,64 @@ fn group_by_machine_off_brings_the_users_groups_back_as_they_were(cx: &mut TestA
     });
     assert!(!present(cx, project_id("docs")), "the one list is gone");
 
-    // Switched off, the groups and the order are back as they were.
+    // Switched off, the groups and the order are back exactly as they were.
     switch_grouping(&shell, cx);
     until(&shell, cx, "the user's list", |cx| {
         !present(cx, machine_id("pc")) && present(cx, group_header_id(&id))
     });
     settle(&shell, cx);
-    let listing = shell.read_with(cx, |s, _| s.listing());
-    assert_eq!(listing.groups[0].projects, ["docs"]);
-    assert!(listing.loose.contains(&"app".to_owned()));
-    assert!(present(cx, project_id("docs")) && present(cx, project_id("app")));
+    assert_eq!(shell.read_with(cx, |s, _| s.listing()), before);
+    assert_eq!(drawn_order(&shell, cx), drawn);
+}
+
+#[gpui_kit::test]
+fn new_group_is_not_offered_while_the_projects_are_grouped_by_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&server, "site", SITE);
+    told(&pc, &["site"]);
+    let (shell, cx) = with_row(&pc, "app", cx);
+    until(&shell, cx, "the choice is offered", |cx| {
+        shell.read_with(cx, |s, cx| s.offers_grouping(cx))
+    });
+    let reason = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .try_find("projects-new-group-detail")
+                .and_then(|found| found.label().map(str::to_owned))
+        })
+    };
+
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc"))
+    });
+    cx.update(|window, cx| window.click(projects_menu_id(), cx));
+    settle(&shell, cx);
+    assert_eq!(
+        reason(cx).as_deref(),
+        Some("Shown by machine"),
+        "the entry says why"
+    );
+    cx.update(|window, cx| window.click(flottille_window::tree::new_group_id(), cx));
+    settle(&shell, cx);
+    assert!(
+        !shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()),
+        "it opens nothing"
+    );
+
+    // Back to the one list: it is offered again.
+    cx.update(|window, cx| window.click(by_machine_id(), cx));
+    until(&shell, cx, "the user's list", |cx| {
+        !present(cx, machine_id("pc"))
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(projects_menu_id(), cx));
+    settle(&shell, cx);
+    assert_eq!(reason(cx), None);
+    cx.update(|window, cx| window.click(flottille_window::tree::new_group_id(), cx));
+    settle(&shell, cx);
+    assert!(shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()));
 }
 
 /// The frames the window draws, and the animation frames it asks, over ten seconds of its clock.
