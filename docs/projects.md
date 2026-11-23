@@ -465,7 +465,7 @@ run.
   the commits checked at commit time are not the only ones: those of `git cherry-pick`,
   `git am`, `git rebase`, `git pull`, a stash, a raw commit object moved onto the branch, a
   script calling git, or whose message git changed after the checks (`--cleanup`, `--trailer`,
-  `--signoff`) are checked here. Every other push is walled: `git push` inside another line or a
+  `--signoff`) are checked here. In Ask and Auto every other push is walled: `git push` inside another line or a
   script goes nowhere, and `git send-pack`, `git http-push` and git's transport helpers, which
   would push past the wall, are refused in every mode (`docs/tools.md`).
 - **What they do not see**: a commit the agent makes and never pushes stays unchecked; a ref

@@ -85,13 +85,14 @@ pub const FORM_SENTENCE: &str = "Flottille starts it and talks to it; agents onl
 
 /// What the variables' field says: where their values come from.
 pub const VARIABLES_HINT: &str = "Each one's value is a vault entry every project sees, put \
-                                  where it goes when the server starts. Agents never see it.";
+                                  where it goes when the server starts. In Ask and Auto, agents do \
+                                  not see it; in Full, a command they run can read it.";
 
 /// What the secrets' field says: where their values come from and go.
 pub const SECRETS_HINT: &str = "Each one's value is a vault entry every project sees, put in a \
                                 header (after its prefix, such as \"Bearer \"), a query parameter, \
-                                a cookie or basic authentication of every request. Agents never \
-                                see it.";
+                                a cookie or basic authentication of every request. In Ask and \
+                                Auto, agents do not see it; in Full, a command they run can read it.";
 
 /// What the limits' field says.
 pub const LIMITS_HINT: &str = "An argument of that name may take only these values, in every \
@@ -120,7 +121,7 @@ fn slot_of(word: &str) -> usize {
 /// The four answers to it, in the order of the pill's list: the daemon's word, the word said,
 /// the sentence under it, and how the pill is drawn while it is the one chosen.
 const SETTINGS: [(&str, &str, &str, Tone); 4] = [
-    ("off", "Off", "Agents never see it.", Tone::Outline),
+    ("off", "Off", "Hidden from agents.", Tone::Outline),
     (
         "passes",
         "Allowed",
@@ -146,7 +147,7 @@ const SETTINGS: [(&str, &str, &str, Tone); 4] = [
 const GROUPS: [(&str, &str, &str); 4] = [
     ("asked", "Asked", "Always a card for you."),
     ("passes", "Allowed", "Run without asking."),
-    ("off", "Off", "Agents never see them."),
+    ("off", "Off", "Hidden from agents."),
     ("judged", "Judged", "The judge decides in Auto, you in Ask."),
 ];
 

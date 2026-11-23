@@ -890,8 +890,8 @@ Removed skill react from shop. The project's files were not touched.
 
 ## The vault
 
-The user's secrets, kept by the keyring, that agents use through Flottille's tools and never see
-(`docs/vault.md`). A secret is never printed, by these commands or any other.
+The user's secrets, kept by the keyring, that agents use through Flottille's tools without seeing
+them in Ask and Auto; in Full a command they run can read them (`docs/vault.md`). A secret is never printed, by these commands or any other.
 
 ### `flottille vault list [--project <project>]`
 
@@ -1421,8 +1421,8 @@ judge and every base call passes at once, recorded as allowed by Full mode, and 
 refuses (shell syntax, a malformed call, `flottille` run as a command, a login's place, a write
 of Flottille's own folders or of a startup file, a launcher such as `systemd-run` or `tmux`…)
 stays refused. In `full`, code the agent runs (an interpreter's inline code, a script it wrote)
-acts with your rights, and the gate does not see what it touches: only a sandbox would close
-that. A session
+runs as you, as in your terminal: confined in no way (no sandbox, your keys, sign-ins and
+keyring), and the gate does not see what it touches. A session
 never starts in `full`. A tree has one mode, its root's: naming a
 child switches its root, and every agent of the tree follows at once. A new session starts in
 `auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.

@@ -1687,6 +1687,12 @@ on a real phone, by hand, and reported.
   could read a key a client keeps in an unlocked keyring. A device key read that way can sign what
   its role allows. Roles bound what a device may do; a phone that asks for its unlock before a base
   answer comes later.
+- **A tree in Full can sign as this device.** A command an agent runs in Full is held back from
+  nothing (`docs/tools.md`, "In Full, a run is the user's own"): it reaches the keyring, and in it
+  the `Flottille: device` key that signs the user's requests to every machine, and Flottille's
+  state folder. Code it runs can sign what this device's role allows, a switch to Full among
+  them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
+  do not hold against code run in Full, which can sign a new one at any time.
 - **Configuration is not synced**: a project is registered by hand on each machine.
 - **No session moves** between machines; no conversation travels.
 - **Files other than pictures** do not travel yet; submodules and Git LFS objects are not sent by a

@@ -31,6 +31,8 @@ mod codex_bridge;
 mod expired_login;
 #[path = "../full_mode.rs"]
 mod full_mode;
+#[path = "../full_runs.rs"]
+mod full_runs;
 #[path = "../judge.rs"]
 mod judge;
 #[path = "../models_left.rs"]
