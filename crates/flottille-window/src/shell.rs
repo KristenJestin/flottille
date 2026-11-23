@@ -4,7 +4,7 @@
 
 use crate::glyphs;
 use crate::state::AgentState;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +30,7 @@ use lyon_tessellation::{LineCap, LineJoin};
 
 use crate::actions::{Actions, Command, Details, Outcome, Pick, Reading, RunFrom};
 use crate::add_project::AddProject;
-use crate::arrange::{Arrangement, Listed};
+use crate::arrange::{Arrangement, Change, Listed};
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::end_led::LedEnd;
 use crate::extensions::Registry;
@@ -70,8 +70,6 @@ pub const NARROW: f32 = 860.;
 const SIDEBAR: f32 = 280.;
 const SIDEBAR_MEDIUM: f32 = 260.;
 /// How often the times ago are looked at; a row is drawn again only when its text changes.
-/// The key of the daemon's window state that holds the user's order and groups of projects.
-const ARRANGEMENT_KEY: &str = "arrangement";
 const CLOCK: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,12 +231,17 @@ pub struct Shell {
     kept_retry: Option<Task<()>>,
     /// The user's order and groups of projects: one key of the daemon's window state, apart from
     /// the sidebar's folds, written only when the user arranges (`arranged`), so that a window
-    /// that only folds a project never writes over what another made. Read when the window opens.
+    /// that only folds a project never writes over what another made. This is what the daemon
+    /// held when it last said so (as the window opened, then with each change it kept).
     arrangement_kept: Arrangement,
-    /// What was last asked of the daemon and not answered yet, and the retries of a refusal.
-    arrangement_asked: Option<Arrangement>,
+    /// What the user did that the daemon has not kept yet, and whether it was asked: the daemon
+    /// applies each to the arrangement it holds, which another window may have changed since this
+    /// one read it. They are asked at once, in order, and answered in order.
+    arrangement_queue: VecDeque<(Change, bool)>,
+    /// How many asks in a row the daemon did not take, and the wait that ends with the next try.
     arrangement_failures: u32,
     arrangement_retry: Option<Task<()>>,
+    arrangement_waiting: bool,
     /// The sessions the daemon kept a draft of when the window opened: their rows say it before
     /// their pages are opened.
     listed_drafts: HashSet<String>,
@@ -671,9 +674,10 @@ impl Shell {
             kept_failures: 0,
             kept_retry: None,
             arrangement_kept: Arrangement::default(),
-            arrangement_asked: None,
+            arrangement_queue: VecDeque::new(),
             arrangement_failures: 0,
             arrangement_retry: None,
+            arrangement_waiting: false,
             listed_drafts: HashSet::new(),
             closed: false,
             sessions: HashMap::new(),
@@ -1262,14 +1266,12 @@ impl Shell {
 
     /// A group made, from the dialog: at the end of the groups, unfolded.
     pub fn add_group(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.arrangement.add_group(name);
-        self.arranged(cx);
+        self.arrange(Change::add_group(name), cx);
     }
 
     /// A group removed: its projects go back to the list, at the end, none removed.
     pub fn remove_group(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        self.arrangement.remove_group(id);
-        self.arranged(cx);
+        self.arrange(Change::RemoveGroup(id.to_owned()), cx);
     }
 
     /// A project row dragged to `index` among the rows of `group` (`None`: outside any group).
@@ -1281,10 +1283,13 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let present = self.project_names();
-        self.arrangement
-            .move_project(&present, project, group, index);
-        self.arranged(cx);
+        let change = Change::MoveProject {
+            present: self.project_names(),
+            key: project.to_owned(),
+            group: group.map(str::to_owned),
+            index,
+        };
+        self.arrange(change, cx);
     }
 
     /// A group's heading dragged to `index` among the groups.
@@ -1295,8 +1300,8 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.arrangement.move_group(group, index);
-        self.arranged(cx);
+        let id = group.to_owned();
+        self.arrange(Change::MoveGroup { id, index }, cx);
     }
 
     /// A group's heading clicked: its rows fold away or unfold.
@@ -1307,8 +1312,8 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.arrangement.open_group(group, open);
-        self.arranged(cx);
+        let id = group.to_owned();
+        self.arrange(Change::OpenGroup { id, open }, cx);
     }
 
     /// The rows of the projects as the user arranged them, from the nodes the tree holds.
@@ -1349,58 +1354,89 @@ impl Shell {
     }
 
     /// The user changed the arrangement: the list draws it, and the daemon keeps it, under its
-    /// own key. This is the only place it is written.
-    fn arranged(&mut self, cx: &mut Context<Self>) {
+    /// own key, by applying the change to the arrangement it holds. This is the only place it is
+    /// written.
+    fn arrange(&mut self, change: Change, cx: &mut Context<Self>) {
+        self.arrangement.apply(&change);
+        self.arrangement_queue.push_back((change, false));
         self.show_arrangement(cx);
         self.keep_arrangement();
     }
 
+    /// The changes not asked yet are asked of the daemon, unless it could not take one lately.
     fn keep_arrangement(&mut self) {
-        if !self.kept_read {
+        if !self.kept_read || self.arrangement_waiting {
             return;
         }
-        let last = self
-            .arrangement_asked
-            .as_ref()
-            .unwrap_or(&self.arrangement_kept);
-        if *last == self.arrangement {
-            return;
+        let unasked: Vec<Change> = self
+            .arrangement_queue
+            .iter_mut()
+            .filter(|(_, sent)| !*sent)
+            .map(|(change, sent)| {
+                *sent = true;
+                change.clone()
+            })
+            .collect();
+        for change in unasked {
+            self.perform(Command::ArrangementChange { change });
         }
-        self.perform(Command::WindowSet {
-            key: ARRANGEMENT_KEY.into(),
-            value: self.arrangement.to_json(),
-        });
-        self.arrangement_asked = Some(self.arrangement.clone());
     }
 
-    /// The daemon answered a write of the arrangement: asked again, later, when it could not take
-    /// it.
-    fn arrangement_written(
+    /// What the daemon holds, with what the user did since and it has not kept yet.
+    fn arrangement_now(&self) -> Arrangement {
+        let mut now = self.arrangement_kept.clone();
+        for (change, _) in &self.arrangement_queue {
+            now.apply(change);
+        }
+        now
+    }
+
+    /// The daemon answered the ask of a change: the arrangement it holds now is the base of what
+    /// the list shows, so that what another window arranged shows here too. A change it could not
+    /// take is asked again, later.
+    fn arrangement_answered(
         &mut self,
-        value: serde_json::Value,
+        change: Change,
+        held: Option<Arrangement>,
         result: Written,
         cx: &mut Context<Self>,
     ) {
-        let value = Arrangement::of(&value);
-        if self.arrangement_asked.as_ref() == Some(&value) {
-            self.arrangement_asked = None;
+        if let Some(held) = held {
+            self.arrangement_kept = held;
         }
-        match result {
-            Written::Kept => {
-                self.arrangement_failures = 0;
-                self.arrangement_kept = value;
-            }
-            Written::Retry => {
+        let at = self
+            .arrangement_queue
+            .iter()
+            .position(|(asked, sent)| *sent && *asked == change);
+        match (result, at) {
+            (Written::Retry, Some(at)) => {
+                self.arrangement_queue[at].1 = false;
                 let wait = (crate::kept::DEBOUNCE * 2u32.pow(self.arrangement_failures.min(6)))
                     .min(Duration::from_secs(30));
                 self.arrangement_failures += 1;
+                self.arrangement_waiting = true;
                 self.arrangement_retry = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(wait).await;
-                    this.update(cx, |shell, _| shell.keep_arrangement()).ok();
+                    this.update(cx, |shell, _| {
+                        shell.arrangement_waiting = false;
+                        shell.keep_arrangement()
+                    })
+                    .ok();
                 }));
             }
-            // Refused for good, or gone: asking again would be answered the same.
-            Written::Gone | Written::Refused => {}
+            // Kept, or refused for good, or gone: asking again would be answered the same.
+            (Written::Retry, None) => {}
+            (_, at) => {
+                self.arrangement_failures = 0;
+                if let Some(at) = at {
+                    self.arrangement_queue.remove(at);
+                }
+            }
+        }
+        let now = self.arrangement_now();
+        if now != self.arrangement {
+            self.arrangement = now;
+            self.show_arrangement(cx);
         }
     }
 
@@ -2133,14 +2169,15 @@ impl Shell {
                 // What the daemon keeps of how the projects are shown comes after the first rows.
                 // It is read once, as the window opens: another window's later changes are seen by
                 // the windows opened after them.
-                self.arrangement_kept = arrangement.clone();
-                let moved =
-                    std::mem::replace(&mut self.arrangement, arrangement) != self.arrangement;
+                self.arrangement_kept = arrangement;
+                let now = self.arrangement_now();
+                let moved = std::mem::replace(&mut self.arrangement, now) != self.arrangement;
                 if std::mem::replace(&mut self.by_machine, by_machine) != by_machine {
                     self.rearrange(window, cx);
                 } else if moved {
                     self.show_arrangement(cx);
                 }
+                self.keep_arrangement();
                 self.listed_drafts = drafts;
                 self.say_drafts(cx);
             }
@@ -2918,10 +2955,12 @@ impl Shell {
                     }
                 }
             },
-            Outcome::WindowKept { key, value, result } => match key.as_str() {
-                ARRANGEMENT_KEY => self.arrangement_written(value, result, cx),
-                _ => self.kept_written(value, result, cx),
-            },
+            Outcome::WindowKept { value, result, .. } => self.kept_written(value, result, cx),
+            Outcome::ArrangementKept {
+                change,
+                arrangement,
+                result,
+            } => self.arrangement_answered(change, arrangement, result, cx),
             Outcome::ToolResults { written, shown } => {
                 self.settings.update(cx, |page, cx| {
                     page.tool_results_answered(shown, written, cx)

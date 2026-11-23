@@ -9,6 +9,9 @@
 
 use serde_json::{Value, json};
 
+/// The key of the daemon's window state that holds the arrangement.
+pub const KEY: &str = "arrangement";
+
 /// A group of the user's: a name, whether it is unfolded, and the projects in it, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
@@ -28,6 +31,47 @@ pub struct Arrangement {
     pub order: Vec<String>,
     /// The groups, in order: they come first in the list.
     pub groups: Vec<Group>,
+}
+
+/// One thing the user did to the arrangement. It is kept as it was done, not as the whole it
+/// left: the daemon's arrangement is read again when it is written, and the change applied to
+/// that copy, so that what another window arranged meanwhile is not erased.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// A group made. Its id is chosen where it is made, so that the changes after it can name it.
+    AddGroup {
+        id: String,
+        name: String,
+    },
+    RemoveGroup(String),
+    MoveProject {
+        present: Vec<String>,
+        key: String,
+        group: Option<String>,
+        index: usize,
+    },
+    MoveGroup {
+        id: String,
+        index: usize,
+    },
+    OpenGroup {
+        id: String,
+        open: bool,
+    },
+}
+
+impl Change {
+    /// A new group's change, with an id no other window is likely to give: the clock, in
+    /// microseconds.
+    pub fn add_group(name: &str) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_micros());
+        Self::AddGroup {
+            id: format!("g{now:x}"),
+            name: name.trim().to_owned(),
+        }
+    }
 }
 
 /// What the list shows: the groups with the projects they hold now, then the projects outside any
@@ -190,25 +234,34 @@ impl Arrangement {
         self.groups.insert(index.min(self.groups.len()), group);
     }
 
-    /// A new, empty group at the end of the groups, unfolded: its id. An id is never given twice
-    /// while a group holds it; a group removed gives its up, which is harmless, for an id is read
-    /// where the arrangement is, and nothing outside it keeps one.
-    pub fn add_group(&mut self, name: &str) -> String {
-        let next = self
-            .groups
-            .iter()
-            .filter_map(|group| group.id.strip_prefix('g')?.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let id = format!("g{next}");
+    /// What the user did, done to this arrangement.
+    pub fn apply(&mut self, change: &Change) {
+        match change {
+            Change::AddGroup { id, name } => self.add_group(id, name),
+            Change::RemoveGroup(id) => self.remove_group(id),
+            Change::MoveProject {
+                present,
+                key,
+                group,
+                index,
+            } => self.move_project(present, key, group.as_deref(), *index),
+            Change::MoveGroup { id, index } => self.move_group(id, *index),
+            Change::OpenGroup { id, open } => self.open_group(id, *open),
+        }
+    }
+
+    /// A new, empty group at the end of the groups, unfolded. A group already held under that
+    /// id is left as it is.
+    pub fn add_group(&mut self, id: &str, name: &str) {
+        if self.groups.iter().any(|group| group.id == id) {
+            return;
+        }
         self.groups.push(Group {
-            id: id.clone(),
+            id: id.to_owned(),
             name: name.trim().to_owned(),
             open: true,
             projects: Vec::new(),
         });
-        id
     }
 
     /// A group given another name.
@@ -247,6 +300,15 @@ impl Arrangement {
 mod tests {
     use super::*;
 
+    fn add(arrangement: &mut Arrangement, name: &str) -> String {
+        let change = Change::add_group(name);
+        arrangement.apply(&change);
+        let Change::AddGroup { id, .. } = change else {
+            unreachable!()
+        };
+        id
+    }
+
     fn keys(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
@@ -281,7 +343,7 @@ mod tests {
     fn a_project_is_moved_into_a_group_and_out_of_it() {
         let present = keys(&["a", "b", "c"]);
         let mut arrangement = Arrangement::default();
-        let id = arrangement.add_group("Work");
+        let id = add(&mut arrangement, "Work");
         arrangement.move_project(&present, "b", Some(&id), 0);
         let listed = arrangement.listed(&present);
         assert_eq!(listed.groups[0].projects, keys(&["b"]));
@@ -296,7 +358,7 @@ mod tests {
     fn removing_a_group_puts_its_projects_back_at_the_end() {
         let present = keys(&["a", "b", "c"]);
         let mut arrangement = Arrangement::default();
-        let id = arrangement.add_group("Work");
+        let id = add(&mut arrangement, "Work");
         arrangement.move_project(&present, "a", Some(&id), 0);
         arrangement.remove_group(&id);
         assert!(arrangement.groups.is_empty());
@@ -306,8 +368,8 @@ mod tests {
     #[test]
     fn groups_are_moved_among_themselves() {
         let mut arrangement = Arrangement::default();
-        let first = arrangement.add_group("One");
-        let second = arrangement.add_group("Two");
+        let first = add(&mut arrangement, "One");
+        let second = add(&mut arrangement, "Two");
         assert_ne!(first, second);
         arrangement.move_group(&second, 0);
         let names: Vec<_> = arrangement.groups.iter().map(|g| g.name.as_str()).collect();
@@ -318,7 +380,7 @@ mod tests {
     fn a_project_absent_while_another_is_moved_returns_to_its_place_and_group() {
         let all = keys(&["a", "b", "c", "d"]);
         let mut arrangement = Arrangement::default();
-        let id = arrangement.add_group("Work");
+        let id = add(&mut arrangement, "Work");
         arrangement.move_project(&all, "b", Some(&id), 0);
         arrangement.move_project(&all, "c", Some(&id), 1);
         arrangement.move_project(&all, "d", None, 0);
@@ -342,7 +404,7 @@ mod tests {
     #[test]
     fn a_name_is_taken_whatever_its_case_beyond_ascii() {
         let mut arrangement = Arrangement::default();
-        arrangement.add_group("Équipe");
+        add(&mut arrangement, "Équipe");
         assert!(arrangement.names("équipe"));
         assert!(arrangement.names(" ÉQUIPE "));
         assert!(!arrangement.names("Equipe"));
@@ -352,8 +414,37 @@ mod tests {
     fn it_is_what_the_daemon_keeps() {
         let present = keys(&["a", "b"]);
         let mut arrangement = Arrangement::default();
-        let id = arrangement.add_group("Work");
+        let id = add(&mut arrangement, "Work");
         arrangement.move_project(&present, "b", Some(&id), 0);
         assert_eq!(Arrangement::of(&arrangement.to_json()), arrangement);
+    }
+
+    #[test]
+    fn a_change_is_applied_to_what_another_window_arranged_meanwhile() {
+        let present = keys(&["a", "b"]);
+        // This window never heard of the group the other one made.
+        let mut mine = Arrangement::default();
+        let drag = Change::MoveProject {
+            present: present.clone(),
+            key: "a".into(),
+            group: None,
+            index: 1,
+        };
+        mine.apply(&drag);
+        let mut theirs = Arrangement::default();
+        let id = add(&mut theirs, "Work");
+        theirs.apply(&drag);
+        assert_eq!(theirs.groups[0].id, id);
+        assert_eq!(theirs.groups.len(), 1, "the group is kept");
+        assert_eq!(theirs.listed(&present).loose, keys(&["b", "a"]));
+    }
+
+    #[test]
+    fn a_group_added_twice_under_one_id_is_held_once() {
+        let mut arrangement = Arrangement::default();
+        let change = Change::add_group("Work");
+        arrangement.apply(&change);
+        arrangement.apply(&change);
+        assert_eq!(arrangement.groups.len(), 1);
     }
 }
