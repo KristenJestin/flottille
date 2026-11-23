@@ -3097,7 +3097,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.10#bba87e0b84ffdbb881428feaf23f9f638e05e2a4"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.12#ce62e87fc1656b68a1c755908092aba3968c831f"
 dependencies = [
  "gpui-kit",
  "qrcodegen",
