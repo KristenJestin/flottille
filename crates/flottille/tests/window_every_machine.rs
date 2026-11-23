@@ -53,6 +53,8 @@ struct Relay {
     asked: Arc<Mutex<Vec<(String, Value)>>>,
     delay: Arc<AtomicU64>,
     silent: Arc<AtomicBool>,
+    /// Each connection that asks the server is cut: its link keeps breaking.
+    cut: Arc<AtomicBool>,
 }
 
 impl Relay {
@@ -98,6 +100,9 @@ impl Relay {
                     .and_then(|params| serde_json::from_str(params).ok())
                     .unwrap_or_default();
                 self.asked.lock().unwrap().push((method, params));
+                if self.cut.load(Ordering::SeqCst) {
+                    return;
+                }
                 if self.silent.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -744,4 +749,633 @@ fn the_time_from_the_click_to_the_page_drawn(cx: &mut TestAppContext) {
         settle(&shell, cx);
     }
     let _ = label;
+}
+
+// Round 2 of #1271: every page sends to its own machine, and the window's ways back keep it.
+
+/// The id of a server's session listed on the server since `before`.
+fn started_on(user: &User, before: &[String]) -> Option<String> {
+    let listed = user.call("agent.list", json!({})).unwrap();
+    listed["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent["id"].as_str())
+        .find(|id| !before.iter().any(|known| known == id))
+        .map(str::to_owned)
+}
+
+fn agents_of(user: &User) -> Vec<String> {
+    let listed = user.call("agent.list", json!({})).unwrap();
+    listed["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The conversation of `agent` on `user`'s machine holds `text`.
+fn conversation_holds(user: &User, agent: &str, text: &str) -> bool {
+    user.call("agent.show", json!({"agent": agent, "after": 0}))
+        .is_ok_and(|shown| shown.to_string().contains(text))
+}
+
+/// Whatever the server was asked since the last take names `text`.
+fn asked_of_the_server(relay: &Relay, text: &str) -> Vec<String> {
+    relay
+        .take()
+        .into_iter()
+        .filter(|(_, params)| params.to_string().contains(text))
+        .map(|(method, _)| method)
+        .collect()
+}
+
+#[gpui_kit::test]
+fn a_reply_on_a_page_of_this_pc_while_another_machine_is_in_front_goes_to_this_pc(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    until(&shell, cx, "this machine's session is listed", |cx| {
+        present(cx, session_id(&here))
+    });
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+
+    // Add project, the server chosen in it, then cancelled: the page behind stayed.
+    shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
+    settle(&shell, cx);
+    click(cx, "add-project-machine-server");
+    until(&shell, cx, "the server's folders are listed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.add_project_form()
+                .read(cx)
+                .folders_of(Some("server"))
+                .is_some()
+        })
+    });
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    form.update(cx, |form, cx| form.close(cx));
+    settle(&shell, cx);
+    assert!(shows_reply(&shell, cx, &here), "the page behind left");
+    relay.take();
+
+    click(cx, "reply-field");
+    cx.simulate_input("Note the date");
+    cx.simulate_keystrokes("enter");
+    eventually("this machine's session got the reply", || {
+        conversation_holds(&pc.user, &here, "Note the date")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        asked_of_the_server(&relay, "Note the date"),
+        Vec::<String>::new()
+    );
+}
+
+#[gpui_kit::test]
+fn a_rename_from_the_sidebar_goes_to_the_session_s_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    relay.take();
+
+    // This machine's session, renamed from its row while the server's page is shown.
+    let session = here.clone();
+    shell.update_in(cx, |s, window, cx| {
+        s.rename_of(&session, window, cx);
+        let field = s.rename_form().read(cx).field().clone();
+        field.update(cx, |field, cx| field.set_value("Renamed here", window, cx));
+    });
+    settle(&shell, cx);
+    click(cx, "rename-save");
+    eventually("this machine's session is renamed", || {
+        pc.user
+            .call("agent.show", json!({"agent": here, "after": 0}))
+            .is_ok_and(|shown| shown["agent"]["title"] == "Renamed here")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        asked_of_the_server(&relay, "Renamed here"),
+        Vec::<String>::new()
+    );
+}
+
+/// A PNG of 4 by 4, as a picture pasted in a message.
+const PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x02, 0x00, 0x00, 0x00, 0x26, 0x93, 0x09,
+    0x29, 0x00, 0x00, 0x00, 0x13, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xfc, 0xcf, 0x80, 0x0f,
+    0x30, 0x31, 0x20, 0x01, 0x46, 0x3c, 0x0a, 0x00, 0x3d, 0x4e, 0x01, 0x07, 0x2c, 0x6f, 0x7a, 0x86,
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+fn pictures_read(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) -> usize {
+    shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .session_page()
+            .filter(|page| page.read(cx).id() == id)
+            .map_or(0, |page| page.read(cx).pictures_read())
+    })
+}
+
+#[gpui_kit::test]
+fn a_kept_page_of_another_machine_gets_its_pictures(cx: &mut TestAppContext) {
+    let (_hub, pc, server, here, there) = two_machines_taking_images();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    open_there(&shell, cx, &there);
+    settle(&shell, cx);
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+
+    // While this machine's page is shown, the server's session gets a picture: its kept page
+    // follows it, and asks the server for the picture.
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(PNG);
+    server
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": there, "message": "Look at this",
+                   "images": [{"mime": "image/png", "data": data}]}),
+        )
+        .unwrap();
+    eventually("the server's session took the picture", || {
+        conversation_holds(&server.user, &there, "Look at this")
+    });
+    for _ in 0..100 {
+        step(&shell, cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    click(cx, row_there(&there));
+    until(&shell, cx, "the server's page shows its picture", |cx| {
+        pictures_read(&shell, cx, &there) >= 1
+    });
+}
+
+/// [`two_machines`], each machine's fake agent taking images.
+fn two_machines_taking_images() -> (TestHub, Machine, Machine, String, String) {
+    let script = json!({"images": true, "turns": [{"when": "", "do": [{"say": REPLY}]}]});
+    let pc_user = fake_user();
+    pc_user.fake_script(script.clone());
+    let server_user = fake_user();
+    server_user.fake_script(script);
+    let (hub, pc, server) = pc_and_server_on(Machine::of(pc_user), server_user);
+    project(&pc.user, "app");
+    project(&server.user, "app");
+    project(&server.user, "harbor");
+    let here = session(&pc.user, "app", "Tidy the readme");
+    let there = session(&server.user, "harbor", "Write the release notes");
+    (hub, pc, server, here, there)
+}
+
+fn back(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| {
+        s.go(flottille_window::history::Way::Back, window, cx)
+    });
+}
+
+#[gpui_kit::test]
+fn back_from_a_session_of_this_pc_returns_to_the_server_s_settings(cx: &mut TestAppContext) {
+    let (_hub, pc, server, here, _there) = two_machines();
+    set_settings(&pc.user, "Pc person", true);
+    set_settings(&server.user, "Server person", false);
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    click(cx, "settings");
+    step(&shell, cx);
+    click(cx, "settings-tabs-general");
+    settings_of(&shell, cx, "server");
+    until(&shell, cx, "the server's settings are shown", |cx| {
+        settings_shown(&shell, cx).0.as_deref() == Some("Server person")
+    });
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+
+    back(&shell, cx);
+    for _ in 0..40 {
+        step(&shell, cx);
+        assert_eq!(
+            shell.read_with(cx, |s, _| s.machine_shown()).as_deref(),
+            Some("server"),
+            "back went to this machine's settings"
+        );
+    }
+    until(&shell, cx, "the server's settings are shown again", |cx| {
+        settings_shown(&shell, cx).0.as_deref() == Some("Server person")
+    });
+}
+
+#[gpui_kit::test]
+fn back_from_a_session_of_this_pc_returns_to_the_server_s_settings_of_app(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's page of app is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main().read(cx).project_page().is_some()
+        })
+    });
+    settle(&shell, cx);
+    click(cx, "project-settings");
+    until(&shell, cx, "the server's settings of app", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().is_some()
+        })
+    });
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+
+    back(&shell, cx);
+    settle(&shell, cx);
+    shell.read_with(cx, |s, cx| {
+        assert_eq!(
+            s.machine_shown().as_deref(),
+            Some("server"),
+            "back went to this machine's settings of app"
+        );
+        assert!(s.main().read(cx).project_settings_page().is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_session_started_from_another_machine_s_project_page_opens_that_session(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's page of app is drawn", |cx| {
+        present(cx, "composer-field")
+            && shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    let before = agents_of(&server.user);
+    click(cx, "composer-field");
+    cx.simulate_input("Count the files");
+    click(cx, "send");
+    eventually("the session started on the server", || {
+        started_on(&server.user, &before).is_some()
+    });
+    let started = started_on(&server.user, &before).unwrap();
+    until(&shell, cx, "the started session is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main()
+                    .read(cx)
+                    .session_page()
+                    .is_some_and(|page| page.read(cx).id() == started)
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn the_does_not_answer_line_shows_on_a_project_page_of_a_silent_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update(cx, |_, _| {
+        flottille_window::link::not_answering_after_on_this_thread(Duration::from_secs(2))
+    });
+    // Nothing of the server answers: its link's own words (cut, made again) are no answer.
+    relay.cut.store(true, Ordering::SeqCst);
+
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
+    });
+    let deadline = Instant::now() + WAIT;
+    loop {
+        step(&shell, cx);
+        if label(cx, "machine-not-answering").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the project's page never said the server does not answer"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+        cx.executor().advance_clock(Duration::from_millis(200));
+    }
+    assert_eq!(
+        label(cx, "machine-not-answering").as_deref(),
+        Some("server does not answer")
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_removed_answer_from_the_server_does_not_touch_this_pc_s_list(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's page of app is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main().read(cx).project_page().is_some()
+        })
+    });
+    settle(&shell, cx);
+
+    // The server's app removed, and this machine's app shown before the answer comes.
+    relay.delay.store(1500, Ordering::SeqCst);
+    shell.update(cx, |s, _| {
+        s.perform(flottille_window::actions::Command::RemoveProject {
+            project: "app".to_owned(),
+            discard: None,
+        })
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open(
+            flottille_window::shell::Selection::Project("app".to_owned()),
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "this machine's page of app is shown", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().is_none()
+                && s.main()
+                    .read(cx)
+                    .project_page()
+                    .is_some_and(|page| page.read(cx).name() == "app")
+        })
+    });
+    eventually("the server removed its app", || {
+        let listed = server.user.call("project.list", json!({})).unwrap();
+        !listed.to_string().contains("\"app\"")
+    });
+    relay.delay.store(0, Ordering::SeqCst);
+    for _ in 0..60 {
+        step(&shell, cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    shell.read_with(cx, |s, cx| {
+        assert!(
+            s.snapshot().projects.iter().any(|p| p.name == "app"),
+            "this machine's app left its list"
+        );
+        assert_eq!(s.machine_shown(), None);
+        assert!(
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == "app"),
+            "this machine's page of app was left"
+        );
+    });
+    assert!(present(cx, project_id("app")));
+}
+
+#[gpui_kit::test]
+fn the_key_read_overtaken_does_not_jump(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    until(&shell, cx, "the server's session is listed", |cx| {
+        present(cx, row_there(&there))
+    });
+    settle(&shell, cx);
+
+    // The server's session asked, its key not read yet; this machine's asked meanwhile.
+    let (server_agent, home) = (there.clone(), here.clone());
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_elsewhere("server".to_owned(), server_agent, window, cx);
+        shell.open_here(home, window, cx);
+    });
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+    for _ in 0..40 {
+        step(&shell, cx);
+        assert_eq!(
+            shell.read_with(cx, |s, _| s.machine_shown()),
+            None,
+            "the window jumped to the server"
+        );
+        assert!(shows_reply(&shell, cx, &here), "the page jumped");
+    }
+}
+
+#[gpui_kit::test]
+fn removing_a_machine_drops_its_pages_and_copies(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    let dialogs = shell.read_with(cx, |s, cx| s.dialogs_held(cx));
+    open_there(&shell, cx, &there);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
+    });
+    until(&shell, cx, "the server's page of harbor", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(&shell, cx);
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine's session is drawn", |cx| {
+        shows_reply(&shell, cx, &here)
+    });
+    assert!(shell.read_with(cx, |s, _| s.holds_pages_of("server")));
+    assert!(shell.read_with(cx, |s, cx| s.dialogs_held(cx)) > dialogs);
+
+    let removed = pc.user.run(&["remote", "remove", "server"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    until(&shell, cx, "the server's pages are dropped", |cx| {
+        !shell.read_with(cx, |s, _| s.holds_pages_of("server"))
+    });
+    assert_eq!(shell.read_with(cx, |s, cx| s.dialogs_held(cx)), dialogs);
+}
+
+fn run_for(by: Duration, cx: &mut VisualTestContext) {
+    let frame = Duration::from_millis(16);
+    let mut gone = Duration::ZERO;
+    while gone < by {
+        cx.executor().advance_clock(frame);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        gone += frame;
+    }
+}
+
+fn y_of(cx: &mut VisualTestContext, id: &str) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| f32::from(window.find(id).bounds().origin.y))
+}
+
+#[gpui_kit::test]
+fn choosing_another_machine_in_settings_enters_its_sections_one_after_the_other(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    click(cx, "settings");
+    step(&shell, cx);
+    click(cx, "settings-tabs-general");
+    settle(&shell, cx);
+    // The server once, its key read; then this machine, then the server again.
+    settings_of(&shell, cx, "server");
+    until(&shell, cx, "the server's settings are shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    settings_of(&shell, cx, "here");
+    settle(&shell, cx);
+    run_for(Duration::from_millis(1500), cx);
+
+    click(cx, "settings-machine");
+    step(&shell, cx);
+    click(cx, "settings-machine-server");
+    let ids = ["header", "tabs", "about"].map(|part| format!("enter-settings-server-{part}"));
+    run_for(Duration::from_millis(120), cx);
+    let waiting: Vec<f32> = ids.iter().map(|id| y_of(cx, id)).collect();
+    run_for(Duration::from_millis(1500), cx);
+    let arrived: Vec<f32> = ids.iter().map(|id| y_of(cx, id)).collect();
+    let rise = |at: usize| waiting[at] - arrived[at];
+    for (at, id) in ids.iter().enumerate().skip(1) {
+        assert!(
+            rise(at) >= rise(at - 1) - 0.01,
+            "{id} had less to rise ({}) than the part before it ({})",
+            rise(at),
+            rise(at - 1)
+        );
+    }
+    assert!(
+        rise(2) > 1.0,
+        "the server's sections did not enter: {}",
+        rise(2)
+    );
+}
+
+/// Waits until the link has sent more reads of this machine than `before`, without the window
+/// taking them: they wait in its queue.
+fn queued(shell: &Entity<Shell>, before: u64, cx: &mut VisualTestContext) {
+    let deadline = Instant::now() + WAIT;
+    while snapshots(shell, cx) <= before {
+        assert!(Instant::now() < deadline, "no read was sent");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn snapshots(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> u64 {
+    shell.read_with(cx, |s, _| s.seen().snapshots.load(Ordering::SeqCst))
+}
+
+fn harbor_of_the_server_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    shell.read_with(cx, |s, cx| {
+        s.machine_shown().as_deref() == Some("server")
+            && s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == "harbor")
+    })
+}
+
+#[gpui_kit::test]
+fn a_read_of_this_machine_queued_before_the_server_s_page_does_not_fill_it(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    settle(&shell, cx);
+
+    // A read of this machine, sent and not yet taken, when the server's page is asked.
+    let before = snapshots(&shell, cx);
+    project(&pc.user, "anchor");
+    queued(&shell, before, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
+    });
+    until(&shell, cx, "the server's page of harbor", |cx| {
+        harbor_of_the_server_shown(&shell, cx)
+    });
+    settle(&shell, cx);
+    // That read is this machine's: its list has anchor, and the server's page stays its own.
+    assert!(harbor_of_the_server_shown(&shell, cx));
+    assert!(
+        shell.read_with(cx, |s, _| s
+            .snapshot()
+            .projects
+            .iter()
+            .any(|p| p.name == "anchor")),
+        "this machine's read was lost"
+    );
+    let progress = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .project_page()
+            .map(|page| page.read(cx).name().to_owned())
+    });
+    assert_eq!(progress.as_deref(), Some("harbor"));
+}
+
+#[gpui_kit::test]
+fn a_read_of_the_server_that_comes_after_its_page_was_left_is_not_shown(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    settle(&shell, cx);
+
+    // The server's page asked, its read slow; this machine's page shown before it comes.
+    relay.delay.store(1500, Ordering::SeqCst);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
+    });
+    until(&shell, cx, "the server is in front", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open(
+            flottille_window::shell::Selection::Project("app".to_owned()),
+            window,
+            cx,
+        )
+    });
+    for _ in 0..200 {
+        step(&shell, cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Late, it is not drawn as this machine's: the list and the page are this machine's.
+    shell.read_with(cx, |s, cx| {
+        assert_eq!(
+            s.machine_shown(),
+            None,
+            "the late read brought the server back"
+        );
+        assert!(
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == "app"),
+            "the late read moved this machine's page"
+        );
+    });
 }

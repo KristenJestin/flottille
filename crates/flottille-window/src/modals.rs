@@ -137,6 +137,11 @@ impl Modals {
         }
     }
 
+    /// How many dialogs are held, open or not.
+    pub fn held(&self) -> usize {
+        self.slots.len()
+    }
+
     /// The open dialogs by their id, the first opened first, the top one last.
     pub fn stack(&self, cx: &App) -> Vec<&'static str> {
         self.slots

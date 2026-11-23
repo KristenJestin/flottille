@@ -2263,6 +2263,24 @@ impl Shell {
         &self.seen
     }
 
+    /// Whether the window holds anything of the pages of `machine` while another is in front:
+    /// its pages, a copy of it, the kept page of one of its sessions.
+    pub fn holds_pages_of(&self, machine: &str) -> bool {
+        self.sides.contains_key(&Some(machine.to_owned()))
+            || self.copies.contains_key(machine)
+            || self.kept_pages.keys().any(|row| {
+                self.snapshot
+                    .elsewhere(row)
+                    .and_then(|session| session.elsewhere.as_ref())
+                    .is_none_or(|there| there.machine == machine)
+            })
+    }
+
+    /// How many dialogs the window holds, open or not: each machine's Settings has its own.
+    pub fn dialogs_held(&self, cx: &App) -> usize {
+        self.shared.modals.read(cx).held()
+    }
+
     pub fn layout(&self) -> Layout {
         self.layout
     }

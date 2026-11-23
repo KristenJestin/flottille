@@ -372,6 +372,14 @@ impl AddProject {
         cx.notify();
     }
 
+    /// The folders `machine` listed, once it answered.
+    pub fn folders_of(&self, machine: Option<&str>) -> Option<&Listed> {
+        self.folders
+            .as_ref()
+            .filter(|(listed, _)| listed.as_deref() == machine)
+            .map(|(_, listed)| listed)
+    }
+
     /// The folders listed by the machine shown, once it answered.
     pub fn folders(&self, cx: &gpui_kit::App) -> Option<&Listed> {
         let shown = crate::machines::shown_machine(cx);
