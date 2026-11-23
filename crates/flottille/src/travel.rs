@@ -588,8 +588,13 @@ async fn read_offered(link: &Link, offer: &GitOffer, file: &Path) -> Result<(), 
     Ok(())
 }
 
-/// The project named `project` here, and the folder of its repository `repository`.
-fn repository_of(daemon: &Daemon, project: &str, repository: &str) -> Result<PathBuf, String> {
+/// The folder of the project named `project` here, and the folder of its repository
+/// `repository`.
+fn repository_of(
+    daemon: &Daemon,
+    project: &str,
+    repository: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     let project = projects::load_project(daemon, project)
         .map_err(|_| format!("the project {project} is not on this machine"))?;
     if !project.repositories.iter().any(|r| r.path == repository) {
@@ -598,10 +603,11 @@ fn repository_of(daemon: &Daemon, project: &str, repository: &str) -> Result<Pat
             project.name
         ));
     }
-    Ok(match repository {
+    let folder = match repository {
         "." => project.folder.clone(),
         path => project.folder.join(path),
-    })
+    };
+    Ok((project.folder, folder))
 }
 
 /// Whether there is a repository at `folder`, which may be a folder of nothing yet.
@@ -622,7 +628,14 @@ fn received_before(folder: &Path) -> Result<bool, String> {
 
 /// `Has`: the commits of the repository's branches and of `refs/flottille/machines/*`.
 async fn has(daemon: &Daemon, asked: &GitRepository) -> Result<Value, String> {
-    let folder = repository_of(daemon, &asked.project, &asked.repository)?;
+    let (root, folder) = repository_of(daemon, &asked.project, &asked.repository)?;
+    // A repository behind a link out of the project is not one of it: its commits are not listed.
+    if !projects::stays_inside(&root, &asked.repository) {
+        return Err(format!(
+            "{} leads outside the project folder",
+            asked.repository
+        ));
+    }
     if !received_before(&folder)? {
         return Ok(json!({"commits": null}));
     }
@@ -654,7 +667,7 @@ async fn offered(
     name: &str,
     offer: GitOffer,
 ) -> Result<Value, String> {
-    let folder = repository_of(daemon, &offer.project, &offer.repository)?;
+    let (root, folder) = repository_of(daemon, &offer.project, &offer.repository)?;
     let machine = hex(from.as_bytes());
     let before = stored(daemon.read(|store| store.travels("in", Some(&machine), &offer.launch)))?;
     if before.iter().any(|travel| travel.workspace.is_some()) {
@@ -663,15 +676,23 @@ async fn offered(
     let scratch = scratch()?;
     let file = scratch.path().join("bundle");
     read_offered(link, &offer, &file).await?;
+    // Checked here, right before anything is made, and not only when the launch was classed: a
+    // link planted since then leads out all the same.
+    if !projects::stays_inside(&root, &offer.repository) {
+        return Err(format!(
+            "{} leads outside the project folder",
+            offer.repository
+        ));
+    }
     let received = if received_before(&folder)? {
         bundle::receive(&folder, &file, &machine, &offer.launch).await?
     } else {
         if folder.exists() {
             std::fs::remove_dir(&folder)
+                .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
         } else {
-            folder.parent().map_or(Ok(()), std::fs::create_dir_all)
+            folders_inside(&root, &offer.repository)?;
         }
-        .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
         bundle::clone(&folder, &file, &machine, &offer.launch).await?
     };
     eprintln!(
@@ -698,6 +719,50 @@ async fn offered(
             .map(|_| ((), None))
     }))?;
     Ok(json!({}))
+}
+
+/// The folders that lead to the repository at `path` of the project folder `root`, made one at a
+/// time: one that is there is taken only as a folder, never a link, so that none planted since
+/// the check leads what is made out of the project.
+fn folders_inside(root: &Path, path: &str) -> Result<(), String> {
+    let cannot =
+        |at: &Path, why: &dyn std::fmt::Display| format!("cannot make {}: {why}", at.display());
+    // The repository `.` is the project folder itself: the clone makes it.
+    let first = match path {
+        "." => root.parent(),
+        _ => Some(root),
+    };
+    if let Some(first) = first {
+        std::fs::create_dir_all(first).map_err(|error| cannot(first, &error))?;
+    }
+    let mut at = root.to_path_buf();
+    for part in Path::new(path)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+    {
+        let std::path::Component::Normal(part) = part else {
+            return Err(cannot(&at.join(part), &"not a folder of the project"));
+        };
+        at.push(part);
+        match std::fs::create_dir(&at) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A link is refused wherever it leads, inside the project too: following it is
+                // what a link planted since the check would use.
+                let meta = std::fs::symlink_metadata(&at).map_err(|error| cannot(&at, &error))?;
+                let shown = at.strip_prefix(root).unwrap_or(&at).display();
+                if meta.is_symlink() {
+                    return Err(format!("{shown} is a link: nothing is made through it"));
+                }
+                if !meta.is_dir() {
+                    return Err(format!("{shown} is not a folder: nothing is made in it"));
+                }
+            }
+            Err(error) => return Err(cannot(&at, &error)),
+        }
+    }
+    Ok(())
 }
 
 /// `Place`: the workspace made of what came for a launch, on the sender's branch name or the
@@ -1031,5 +1096,37 @@ mod tests {
 
         assert_eq!(size, bytes.len() as u64);
         assert_eq!(sha256, hex(&Sha256::digest(&bytes)));
+    }
+
+    #[test]
+    fn a_folder_on_the_way_that_is_a_link_out_of_the_project_is_not_made_through() {
+        let folders = tempfile::tempdir().unwrap();
+        let root = folders.path().join("app");
+        let outside = folders.path().join("elsewhere");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+
+        let refused = folders_inside(&root, "sub/lib").unwrap_err();
+
+        assert!(refused.contains("sub"), "{refused}");
+        // Nothing was made through the link.
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_link_that_stays_inside_the_project_is_refused_as_a_link() {
+        let folders = tempfile::tempdir().unwrap();
+        let root = folders.path().join("app");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("sub")).unwrap();
+
+        let refused = folders_inside(&root, "sub/lib").unwrap_err();
+
+        // It does not lead out, and the message does not say it does: following it is what
+        // reopens the race, so nothing is made through it.
+        assert!(refused.contains("sub is a link"), "{refused}");
+        assert!(!refused.contains("outside"), "{refused}");
+        assert_eq!(std::fs::read_dir(root.join("real")).unwrap().count(), 0);
     }
 }
