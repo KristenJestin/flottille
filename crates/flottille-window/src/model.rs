@@ -824,12 +824,15 @@ pub fn title_of(brief: &str) -> String {
 }
 
 /// The title of the session of `root`: the one its agent or the user gave it, or the one of the
-/// launch that started it, else the first line of its first message; the neutral `agent <id>`
-/// while none says what the work is.
+/// launch of another machine that started it, else the first line of its first message; the
+/// neutral `agent <id>` while none says what the work is.
 fn session_title(root: &Value, id: &str, brief: Option<&String>) -> String {
-    // A root has a title not named by its agent or the user only when a launch gave it one: of
-    // an agent, here or on another machine, or of an extension.
-    if let Some(title) = root["title"].as_str().filter(|title| !title.is_empty()) {
+    // A root none named that has a title and no agent of this machine that launched it was
+    // launched with that title by another machine's agent, or by an extension: its brief is
+    // written for the agent, not the user.
+    if (!root["titled_by"].is_null() || root["launched_by"].is_null())
+        && let Some(title) = root["title"].as_str().filter(|title| !title.is_empty())
+    {
         return title.to_owned();
     }
     brief
@@ -2879,9 +2882,14 @@ mod tests {
 
     #[test]
     fn a_session_its_launch_titled_keeps_that_title_rather_than_its_brief() {
+        // Launched by another machine's agent: no agent of this one launched it.
         let mut launched = agent("r1", None, "idle", None);
         launched["title"] = json!("Rework the login");
-        let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
+        let snapshot = build(json!({"agents": [launched.clone()]}), json!({}), &[]);
         assert_eq!(snapshot.sessions[0].title, "Rework the login");
+        // Launched by an agent of this machine, it keeps its brief's first line until named.
+        launched["launched_by"] = json!("r0");
+        let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Fix the login");
     }
 }
