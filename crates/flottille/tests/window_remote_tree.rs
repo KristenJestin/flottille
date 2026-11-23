@@ -307,8 +307,11 @@ fn pc_and_bare_server(more: &str) -> (TestHub, Machine, Machine) {
 
 #[gpui_kit::test]
 fn the_making_of_a_project_shows_on_the_launch_s_row(cx: &mut TestAppContext) {
-    // A setup that takes its time: the project made there is being prepared.
-    let (_hub, pc, server) = pc_and_bare_server("[[setup]]\nrun = \"sleep 60\"\n");
+    // The project is made there, and its session says nothing back for a while.
+    let (_hub, pc, server) = pc_and_bare_server("");
+    server.user.fake_script(json!({"turns": [
+        {"when": "Finish the export", "do": [{"wait": 60000}, {"say": "done"}]}
+    ]}));
     let (_pilot, mcp) = root(&pc, "auto");
     let agent = led_on_server(&mcp);
     eventually("the session made on server", || {
