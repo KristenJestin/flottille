@@ -145,6 +145,31 @@ pub fn confined_lent(command: &mut tokio::process::Command) -> &mut tokio::proce
     confine(command, None, true)
 }
 
+/// A command of a session in Full, the user's own (`docs/tools.md`, "In Full, a run is the
+/// user's own"): no mount namespace, the user's runtime folder, SSH agent and display within its
+/// reach, and Landlock alone denying it `denied`, Flottille's own folders (its runtime folder,
+/// where the vault's sockets and the bridges' tokens are, its state, the agents' own folders).
+/// Where the kernel has no Landlock (below its second ABI) it runs with no rule at all.
+pub fn kept_from<'a>(
+    command: &'a mut tokio::process::Command,
+    denied: &[PathBuf],
+) -> &'a mut tokio::process::Command {
+    let abi = abi();
+    let denied: Vec<PathBuf> = denied
+        .iter()
+        .filter_map(|folder| folder.canonicalize().ok())
+        .filter(|folder| folder != Path::new("/"))
+        .collect();
+    if abi < 2 || denied.is_empty() {
+        return command;
+    }
+    let rights = rights(abi);
+    let mut paths = Vec::new();
+    allowed(Path::new("/"), &denied, &mut paths);
+    // SAFETY: as in `confine`: the closure allocates nothing and makes system calls alone.
+    unsafe { command.pre_exec(move || restrict(rights, &paths, None, 0, &[], None)) }
+}
+
 fn confine<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,

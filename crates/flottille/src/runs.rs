@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::agent::{AgentState, new_id};
+use flottille_core::agent::{AgentState, GateMode, new_id};
 use flottille_core::approval;
 use flottille_core::command::split_line;
 use flottille_core::project::{Ready, TaskUrl};
@@ -495,7 +495,13 @@ pub async fn run(
         true => String::new(),
         false => format!("started the services it needs: {}\n", started.join(", ")),
     };
-    let env = match environment(daemon, place, &repository) {
+    // Read at each run's start: a switch reaches the next run, never one that goes on.
+    let full = crate::judge::mode(daemon, agent) == GateMode::Full;
+    let env = match full {
+        true => own_environment(place, &repository),
+        false => environment(daemon, place, &repository),
+    };
+    let env = match env {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -503,7 +509,8 @@ pub async fn run(
     // remote's program that receives it is git's own, over a `remote.<name>.receivepack` a run
     // may have written: git takes the first it reads, the repository's, so only the line's own
     // option wins over it (the gate refuses the agent's).
-    let pushing = approved && gate::is_push(&words);
+    // In Full, a push is a run of the user's own as any other: never lent (`own_environment`).
+    let pushing = approved && !full && gate::is_push(&words);
     // The words added to it below (its probe's `--dry-run`) must be read as options of their own.
     if pushing && let Err(refusal) = crate::message_checks::push_options(&words) {
         return Outcome::Refused(refusal);
@@ -597,6 +604,7 @@ pub async fn run(
     let checked_with = match (&lifted, &to_paths) {
         (Some(lifted), _) => Some((lifted, true)),
         (None, Some(to_paths)) => Some((to_paths, false)),
+        (None, None) if full && gate::is_push(&words) => Some((&env, true)),
         (None, None) => None,
     };
     if let Some((pushed_env, outside)) = checked_with {
@@ -677,6 +685,7 @@ pub async fn run(
         Readying { probe, notify },
         guarded,
         &needs,
+        full,
     ) {
         return Outcome::Failed(why);
     }
@@ -788,6 +797,7 @@ pub async fn run_for_user(
         },
         None,
         &task.needs,
+        false,
     )?;
     Ok(id)
 }
@@ -860,6 +870,34 @@ pub(crate) fn environment(
         env.remove(&OsString::from(name));
     }
     Ok(env)
+}
+
+/// The environment of a run of a session in Full: the daemon's, as a command the user typed (the
+/// SSH agent, the session bus, the display, the forge command lines' sign-ins, the user's git
+/// settings and hooks), with the place's variables filled. Only Landlock keeps Flottille's own
+/// folders from it (`start`).
+fn own_environment(
+    place: &Place,
+    repository: &str,
+) -> Result<BTreeMap<OsString, OsString>, String> {
+    let names = names(place, repository);
+    let mut filled = BTreeMap::new();
+    for (name, template) in &place.variables {
+        filled.insert(name.clone(), variables::fill(template, &names)?);
+    }
+    Ok(variables::environment(std::env::vars_os(), &[&filled]))
+}
+
+/// What a run in Full is kept from: Flottille's runtime folder (the daemon's socket, the vault's
+/// and the bridges' sockets and tokens, the pushes' folders, the displays), its state (the store,
+/// the connections' folders and their vault sockets, its keys) and the agents' own folders (each
+/// session's of its provider).
+fn flottille_s_own(daemon: &Daemon) -> Vec<std::path::PathBuf> {
+    vec![
+        daemon.paths.runtime.clone(),
+        daemon.paths.state.clone(),
+        daemon.paths.data.join("agents"),
+    ]
 }
 
 /// The environment of a program the daemon runs beside it for every project, in no place (a
@@ -1154,7 +1192,8 @@ fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
 /// what it is in from the start: a run that ends at once must find it already detached to have
 /// its end delivered. It runs in the sandbox with `env`, or outside it with `lifted`, the
 /// environment of a push the gate let through (`fn lifted`); its probes run in the sandbox with
-/// `env` either way.
+/// `env` either way. A run of a session in `full` is the user's own: no namespace, its `env` the
+/// daemon's (`own_environment`), Landlock alone keeping Flottille's own folders out of its reach.
 #[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
@@ -1168,12 +1207,13 @@ fn start(
     readying: Readying,
     guarded: Option<Guard>,
     needs: &[String],
+    full: bool,
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
-    // A lifted push has the daemon's own display already, and needs none.
-    let display = match lifted {
-        Some(_) => None,
-        None => shown(daemon, &run).map(|shown| {
+    // A lifted push, and a run in Full, have the daemon's own display already, and need none.
+    let display = match lifted.is_some() || full {
+        true => None,
+        false => shown(daemon, &run).map(|shown| {
             env.extend(shown.env);
             shown.folder
         }),
@@ -1198,8 +1238,14 @@ fn start(
         .stderr(writer)
         .kill_on_drop(true);
     crate::children::in_own_session(&mut command);
-    if !outside {
-        crate::landlock::confined_but(&mut command, display.as_ref());
+    match (outside, full) {
+        (true, _) => {}
+        (false, true) => {
+            crate::landlock::kept_from(&mut command, &flottille_s_own(daemon));
+        }
+        (false, false) => {
+            crate::landlock::confined_but(&mut command, display.as_ref());
+        }
     }
     let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
@@ -1991,6 +2037,7 @@ pub async fn restart_by_user(
             readying,
             guarded,
             &needs,
+            false,
         )
     }) {
         // The stop was the user's and its end was not told: the agent hears of both.
@@ -2549,6 +2596,7 @@ pub(crate) fn start_service(
         },
         None,
         &[],
+        false,
     )?;
     Ok(id)
 }

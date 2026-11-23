@@ -662,13 +662,16 @@ fn in_full_inline_interpreter_code_passes() {
     assert_eq!(judge_prompts(&user), 0, "the judge was asked");
 }
 
+// The four below are of a confined run: a run in Full is the user's own
+// (`full_runs.rs`), so they run in Auto, the judge allowing every call.
+
 #[test]
 fn the_test_daemon_reaches_no_session_bus_nor_a_real_launcher() {
     let user = User::with_fake_agent()
         .with_allowing_judge()
         .with_fake_launchers();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
 
     let bus = done(mcp.call("run", json!({"line": "printenv DBUS_SESSION_BUS_ADDRESS"})));
     assert!(
@@ -693,7 +696,7 @@ fn the_test_daemon_reaches_no_session_bus_nor_a_real_launcher() {
 fn a_run_gets_no_session_bus_address() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
 
     let bus = done(mcp.call("run", json!({"line": "printenv DBUS_SESSION_BUS_ADDRESS"})));
 
@@ -713,7 +716,7 @@ fn a_run_cannot_open_the_session_bus_socket_by_its_path() {
     }
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
     let bus = user.path("runtime/bus");
     let _listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
 
@@ -738,7 +741,7 @@ fn a_run_cannot_read_the_user_s_runtime_folder() {
     }
     let user = User::with_fake_agent().with_allowing_judge();
     let (id, mcp, _) = session(&user);
-    set_mode(&user, &id, "full");
+    set_mode(&user, &id, "auto");
     let note = user.path("runtime/note");
     std::fs::write(&note, "kept from runs").unwrap();
     let elsewhere = user.path("home/note");

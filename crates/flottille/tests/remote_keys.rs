@@ -417,10 +417,11 @@ fn a_recursive_read_of_a_folder_above_the_keys_is_refused_in_every_mode() {
     assert!(!place.join("copy").exists());
     assert!(user.escalations().is_empty());
 
-    // A listing shows names, never a byte: in Full, it runs.
+    // A listing shows names, never a byte: the gate lets it run in Full, where Landlock alone
+    // keeps Flottille's state folder out of the run's reach (`docs/tools.md`).
     let listed = mcp.call("run", json!({"line": format!("ls {s}")}));
     assert!(!listed.error, "{}", listed.text);
-    assert!(listed.text.contains("remote"), "{}", listed.text);
+    assert!(!listed.text.starts_with("refused: "), "{}", listed.text);
     // A search's pattern is not a folder: from an ordinary place, it runs.
     for line in ["grep -rn / .", "grep -rn '~' ."] {
         let searched = mcp.call("run", json!({ "line": line }));

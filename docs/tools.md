@@ -554,6 +554,24 @@ pending requests.
     rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
+- **In Full, a run is the user's own.** A command an agent runs while its
+  session is in Full (the mode read at the run's start: a switch reaches the next run, never one
+  that goes on) gets none of the above: the daemon's environment as it is, then the place's
+  variables, as a command the user typed (the SSH agent, the session bus and so the keyring, the
+  display, `XDG_RUNTIME_DIR`, the forge and tracker command lines' sign-ins, the user's git
+  settings and hooks), and no user nor mount namespace, so that `git`, `gh`, `bkt`, `acli` and
+  the `ssh` git runs work as in the user's terminal. Landlock alone (no namespace needed) still
+  denies it Flottille's own folders: its runtime folder (`$XDG_RUNTIME_DIR/flottille`: the
+  daemon's socket, the bridges' tokens, the pushes' folders, the displays), its state folder (the
+  store, the connections' folders and their vault sockets, its keys) and the agents' own folders
+  (`$XDG_DATA_HOME/flottille/agents`, each session's of its provider). A `git push` in Full is
+  such a run too, never the lent push below: the project's message checks and branch format
+  still read it first. `run` stays the only way to start a command, shell syntax stays refused,
+  and the gate's refusals stay (a launcher such as `ssh` named on the line, a login printed);
+  what code the agent runs does with the user's rights is the user's, as Full says
+  (`docs/design.md` §7.1). Leaving Full confines the next run again. The tools `forge` and
+  `tickets` stay for what only they do: following checks and reviews, which wakes the agent, and
+  the window's view of pull requests and tickets.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
@@ -601,7 +619,8 @@ pending requests.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A run that is itself a `git push` (its own
-  line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
+  line, no wrapper) the user, the judge or a rule let through (in Full, a push is a run of the
+  user's own, above) does not get the
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
   environment and `core.hooksPath=/dev/null`, the user's own `ssh` command (never a
   repository's `core.sshCommand`) and git's own transports alone (never an `ext::` URL), and

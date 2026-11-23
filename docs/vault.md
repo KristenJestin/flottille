@@ -370,7 +370,17 @@ push the gate let through, and its checks' dry run, are the exception (below):
   nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
   process still starts in its namespace, or fails to start.
 
-**The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
+**A run in Full is the exception** (`docs/tools.md`, "In Full, a run is the user's own"): it has
+the daemon's environment and no namespace, so the session bus, the SSH agent and the display are
+the user's, as in their terminal, and Landlock alone denies it Flottille's own folders: its runtime
+folder, its state folder (the connections' vault sockets among them) and the agents' own folders.
+Default taken, to confirm: the vault's promise holds in every mode for Flottille itself (no method,
+tool, event or log returns a secret, and the gate still refuses `secret-tool` and the other
+keyring programs), but a program the agent runs in Full reaches the keyring over the session bus
+with the user's rights, as it reaches every login of theirs (`docs/design.md` §7.1, its limit):
+the bus is kept because the forge command lines' sign-ins are often in the keyring.
+
+**The SSH agent stays out of every run but one in Full.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
 by its path: inside the runtime folder it is denied with it; outside it (`/tmp/ssh-…/agent.…`, a
 password manager's under the home), from Landlock's ninth ABI, the folders on the way to it are

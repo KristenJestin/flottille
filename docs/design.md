@@ -177,7 +177,8 @@ and which judges a URL the agent built (`tools.md`, "The web").
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
-`agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
+`agent_launch`, and it cannot do anything the gate did not see (in Full, what a command it runs
+does is the user's own, §7.1). Nor can it drive the daemon from
 a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
 "Transport"). The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
@@ -751,7 +752,14 @@ with says so. Reading another session says the mode of that session's tree too.
   the first message of a session to another it did not start, whose leave only the user gives
   (§7.2), a tracker change that would send the worklog's token to another site or name
   another entry for it (`docs/tickets.md`, "Logging time"), and a worklog deleted
-  (`docs/tickets.md`, "Correcting a worklog"). Bare mode
+  (`docs/tickets.md`, "Correcting a worklog"). **A command it runs is the user's own**: no
+  namespace and the daemon's environment, as a command the user typed (their keys, SSH agent,
+  display and sign-ins), so that the real `git`, `gh`, `bkt`, `acli` and `ssh` work as in their
+  terminal; Landlock alone still keeps Flottille's own folders out of its reach (its runtime
+  folder, where the vault's sockets and the tokens are, its state, the agents' own folders), and
+  leaving Full confines the next command again (`docs/tools.md`, "In Full, a run is the user's
+  own"). It is given its project's map at its start and again at the switch: its repositories with
+  their forge, remote, base branch and command line, its tracker and its place. Bare mode
   stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
   keep the user's logins and Flottille itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),

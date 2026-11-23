@@ -132,7 +132,9 @@ has neither. A place needs its animations and its test as any window change does
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,
   no skill, no plugin and no MCP server but Flottille's. A change that lets an agent run a shell,
   start its own sub-agents or reach anything the gate does not see is a defect, whatever it
-  enables.
+  enables. **Full is the user's exception:** in a session the user put in Full, a command the
+  agent runs is the user's own, as in their terminal (their keys, SSH agent and sign-ins); only
+  Flottille's own folders stay out of its reach, and `run` stays the only way, with no shell.
 - **No tool call waits for a human.** A call held for approval is answered at once; the result
   comes later as a delivery.
 - **Commands run without a shell**, always: shell syntax is refused, never quoted around.
