@@ -2184,7 +2184,10 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
         Some(named) => named,
         None => format!("agent {starter}"),
     };
-    if starter_alive && remote.is_none() {
+    // The starter of a session started from another machine is a stand-in here, which nobody
+    // reads: a handed session's pilot is told nothing, and a led one's was told across.
+    let stood_in = crate::launches::launched_from(daemon, &session.id).is_some();
+    if starter_alive && remote.is_none() && !stood_in {
         deliveries::deliver(
             daemon,
             &starter,
