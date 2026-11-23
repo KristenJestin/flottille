@@ -156,6 +156,22 @@ pub struct Plan {
     cwd: Option<CString>,
     pinned: Vec<CString>,
     read_only: Vec<(CString, libc::c_ulong)>,
+    copies: Copies,
+}
+
+/// The files given to the command as its own (`ssh_owned.rs`): each written into a file system
+/// the namespace makes on `staging` for the time it takes, then put over its `target`.
+#[derive(Default)]
+struct Copies {
+    staging: Option<CString>,
+    files: Vec<Copy>,
+}
+
+struct Copy {
+    staged: CString,
+    target: CString,
+    text: Vec<u8>,
+    tree: libc::c_int,
 }
 
 /// Whether the kernel gives a confined command a private mount namespace.
@@ -297,6 +313,7 @@ pub fn plan(
         cwd: cwd.filter(|cwd| cwd.is_absolute()).and_then(c),
         pinned: Vec::new(),
         read_only: Vec::new(),
+        copies: Copies::default(),
     })
 }
 
@@ -311,6 +328,30 @@ impl Plan {
             .iter()
             .map(|p| Some((c(p)?, locked(p))))
             .collect::<Option<_>>()?;
+        Some(self)
+    }
+
+    /// The plan, which also puts a copy of each file, with its text, over it, read-only and owned
+    /// by the user in the namespace (`ssh_owned.rs`). None where a path cannot be a C string.
+    pub fn giving(mut self, copies: Vec<(PathBuf, Vec<u8>)>) -> Option<Plan> {
+        let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).ok();
+        // Any folder that is there does to stage them: what it holds is hidden for that time only.
+        let Some(staging) = copies.first().and_then(|(target, _)| target.parent()) else {
+            return Some(self);
+        };
+        let mut files = Vec::new();
+        for (n, (target, text)) in copies.into_iter().enumerate() {
+            files.push(Copy {
+                staged: c(&staging.join(format!(".flottille-copy-{n}")))?,
+                target: c(&target)?,
+                text,
+                tree: -1,
+            });
+        }
+        self.copies = Copies {
+            staging: Some(c(staging)?),
+            files,
+        };
         Some(self)
     }
 }
@@ -424,6 +465,9 @@ impl Plan {
                     std::ptr::null(),
                 ) as libc::c_long)?;
             }
+            if let Some(staging) = &self.copies.staging {
+                give(staging, &mut self.copies.files)?;
+            }
             for (kept, tree) in self.kept.iter().zip(self.trees.iter_mut()) {
                 let fd = libc::syscall(
                     libc::SYS_open_tree,
@@ -505,6 +549,82 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+/// Writes each copy into a file system of the namespace's own mounted on `staging`, makes it
+/// read-only, takes each file out of it, takes the file system away, and puts each file over its
+/// target. A target gone since the plan was made is not there to cover.
+///
+/// # Safety
+/// In the child, before its program: plain system calls on what the plan allocated.
+unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
+    let none = std::ptr::null::<libc::c_char>();
+    let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    // SAFETY: as the function says.
+    unsafe {
+        check(libc::mount(
+            c"tmpfs".as_ptr(),
+            staging.as_ptr(),
+            c"tmpfs".as_ptr(),
+            flags,
+            c"mode=0755".as_ptr().cast(),
+        ) as libc::c_long)?;
+        for copy in copies.iter() {
+            let fd = libc::open(
+                copy.staged.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o644,
+            );
+            check(fd as libc::c_long)?;
+            let mut written = 0;
+            while written < copy.text.len() {
+                let rest = &copy.text[written..];
+                let n = libc::write(fd, rest.as_ptr().cast(), rest.len());
+                if n <= 0 {
+                    let error = io::Error::last_os_error();
+                    libc::close(fd);
+                    return Err(error);
+                }
+                written += n as usize;
+            }
+            libc::close(fd);
+        }
+        // Read-only as a file system: no mount of it can be written, and a command, which has no
+        // capability left once it runs its program, cannot remount it.
+        check(libc::mount(
+            none,
+            staging.as_ptr(),
+            none,
+            libc::MS_REMOUNT | libc::MS_RDONLY | flags,
+            std::ptr::null(),
+        ) as libc::c_long)?;
+        for copy in copies.iter_mut() {
+            let fd = libc::syscall(
+                libc::SYS_open_tree,
+                libc::AT_FDCWD,
+                copy.staged.as_ptr(),
+                OPEN_TREE_CLONE | libc::O_CLOEXEC as libc::c_uint,
+            );
+            check(fd)?;
+            copy.tree = fd as libc::c_int;
+        }
+        check(libc::umount2(staging.as_ptr(), libc::MNT_DETACH) as libc::c_long)?;
+        for copy in copies.iter() {
+            let moved = libc::syscall(
+                libc::SYS_move_mount,
+                copy.tree,
+                c"".as_ptr(),
+                libc::AT_FDCWD,
+                copy.target.as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH,
+            );
+            libc::close(copy.tree);
+            if moved != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

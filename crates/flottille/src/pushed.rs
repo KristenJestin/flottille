@@ -195,6 +195,11 @@ pub fn pinned() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// The account's home found at the daemon's start: what `ssh` reads `~` as.
+pub fn account() -> Option<&'static Path> {
+    found().map(|found| found.account.as_path())
+}
+
 fn found() -> Option<&'static Found> {
     FOUND.get()?.as_ref()
 }
@@ -606,7 +611,7 @@ fn configuration(
 
 /// The words of a line of `ssh`'s configuration, as `ssh` splits it: at blanks, the first `=`
 /// too, quotes and a backslash's escape undone (`"ProxyCommand"` is the keyword).
-fn ssh_words(line: &str) -> Vec<String> {
+pub(crate) fn ssh_words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut quote: Option<char> = None;
