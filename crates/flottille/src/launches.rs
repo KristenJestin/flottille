@@ -317,7 +317,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
-    Ok(Outcome::Done(answer(
+    Ok(Outcome::Done(answer_to_caller(
         kind_word(asked.kind),
         &asked.title,
         machine,
@@ -355,7 +355,13 @@ fn actioned(why: &str, machine: &str, provider: &str) -> String {
 
 /// What the caller is told of its launch on `machine`, of `kind` titled `title`: held, and once
 /// started, the result of the user's answer when it was held.
-fn answer(kind: &str, title: &str, machine: &str, launch: &str, placed: &Value) -> String {
+fn answer_to_caller(
+    kind: &str,
+    title: &str,
+    machine: &str,
+    launch: &str,
+    placed: &Value,
+) -> String {
     let id = placed["session"].as_str().unwrap_or_default();
     let named = format!("\"{title}\" (agent {id})");
     let there = placed["branch"].as_str().unwrap_or_default();
@@ -1358,7 +1364,7 @@ fn finish(
     let asked = asked_of(request.number, &here);
     let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
     let placed = placed_of(daemon, &launch, &agent);
-    let result = answer(&launch.kind, title, &here, &launch.launch, &placed);
+    let result = answer_to_caller(&launch.kind, title, &here, &launch.launch, &placed);
     crate::across::tell_decided(
         daemon,
         &launch,
