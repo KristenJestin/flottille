@@ -1463,17 +1463,26 @@ pub(crate) fn unreachable(daemon: &Daemon, away: &Away) -> Option<String> {
     Some(why.split(": ").next().unwrap_or(why).to_owned())
 }
 
-/// The tools of the tree an agent uses about itself, which a caller of another machine is not
-/// given here: every other tool of the tree addresses a session, and is.
-const OWN: [&str; 5] = ["agent_launch", "report", "ask", "ask_user", "ask_parent"];
+/// The tools of the tree that address a session, as a caller of another machine is given them:
+/// those #1250 names, and no other. A tool added to the tree later reaches no caller of another
+/// machine until it is written here. (`approval_answer` keeps its own path, `called`.)
+const STAND_IN_TOOLS: [&str; 5] = [
+    "session_read",
+    "session_send",
+    "agent_status",
+    "agent_send",
+    "agent_stop",
+];
 
 /// The tools of the tree that address a session, as a caller of another machine is given them.
 pub(crate) fn stand_in_tools() -> Vec<&'static str> {
-    crate::tree::TOOLS
-        .iter()
-        .copied()
-        .filter(|tool| !OWN.contains(tool))
-        .collect()
+    STAND_IN_TOOLS.to_vec()
+}
+
+/// The place of a caller of another machine whose project this machine has not: a folder under
+/// this user's own runtime folder, never made, so that it reaches no file of this machine's.
+fn no_place(daemon: &Daemon) -> std::path::PathBuf {
+    daemon.paths.runtime.join("stand-in-no-place")
 }
 
 /// The tools that only read: all a `viewer` device's agents may call on another machine
@@ -1500,16 +1509,12 @@ pub(crate) fn stand_in_name(agent: &Agent) -> Option<String> {
 }
 
 /// The grant of a caller of another machine stood in for here: the tools of the tree that
-/// address a session, in its project here when this machine has one of that name, in an empty
-/// place otherwise (it reaches no file).
+/// address a session, in its project here when this machine has one of that name, in a place
+/// that does not exist otherwise (it reaches no file).
 pub(crate) fn stand_in_grant(daemon: &Daemon, agent: &Agent) -> crate::mcp::Grant {
     let project = crate::projects::load_project(daemon, &agent.project).unwrap_or_else(|_| {
-        flottille_core::project::Project::new(
-            &agent.project,
-            agent.folder.clone(),
-            Vec::new(),
-            &daemon.paths.data,
-        )
+        let nowhere = no_place(daemon);
+        flottille_core::project::Project::new(&agent.project, nowhere.clone(), Vec::new(), &nowhere)
     });
     crate::mcp::Grant {
         agent: agent.id.clone(),
@@ -1549,7 +1554,7 @@ fn stand_in(
         role: "lead".into(),
         project: call.project.clone(),
         workspace: None,
-        folder: daemon.paths.data.clone(),
+        folder: no_place(daemon),
         state: flottille_core::agent::AgentState::Idle,
         state_reason: None,
         created_at: now,
