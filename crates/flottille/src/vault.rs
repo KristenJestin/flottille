@@ -2083,7 +2083,10 @@ mod tests {
                 "the vault entry notes is the project gone's, which is not on this machine: add \
                  the project here first",
             ),
-            (json!({"name": "odd", "for": "bogus"}), "bogus is neither"),
+            (
+                json!({"name": "odd", "for": "bogus"}),
+                "bogus is none of them",
+            ),
         ];
         for (entry, said) in cases {
             let refused = receive(&daemon, &entry, SHARED, "pc").await.unwrap_err();
