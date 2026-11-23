@@ -701,7 +701,8 @@ pub fn launch_for_extension(
 ) -> Result<Agent, Failure> {
     let launcher = crate::extensions::launched(daemon, &parent.id);
     let allowed = match launcher {
-        None => parent.parent.is_none(),
+        // A child an agent of another machine launched has no parent here, and is no session.
+        None => parent.parent.is_none() && parent.depth == 0,
         Some((owner, _)) => owner.name == extension,
     };
     if !allowed {
