@@ -185,19 +185,19 @@ fn forces_own_branch(place: &Place, line: &str) -> bool {
     if !options.iter().all(known) {
         return false;
     }
-    let [remote, refspec] = named.as_slice() else {
+    let [remote, target] = named.as_slice() else {
         return false;
     };
     let remote_plain = remote
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
-    let forced_spec = refspec.starts_with('+');
-    let spec = refspec.trim_start_matches('+');
-    let (source, destination) = spec.split_once(':').unwrap_or((spec, spec));
+    let plus = target.starts_with('+');
+    let pair = target.trim_start_matches('+');
+    let (source, destination) = pair.split_once(':').unwrap_or((pair, pair));
     let destination = destination
         .strip_prefix("refs/heads/")
         .unwrap_or(destination);
-    let forced = forced_spec
+    let forced = plus
         || options
             .iter()
             .any(|option| FORCING.contains(option) || option.starts_with("--force-with-lease="));
