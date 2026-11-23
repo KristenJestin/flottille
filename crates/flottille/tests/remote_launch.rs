@@ -1675,7 +1675,7 @@ fn a_session_an_agent_started_launches_on_another_machine_only_with_the_user() {
     let request = held_there(&server, "server");
     assert!(
         text.contains(&format!(
-            "request #{} on server is waiting for the user",
+            "Waiting for the user's approval, request #{} on server",
             request["number"]
         )),
         "{text}"
@@ -1845,7 +1845,7 @@ fn a_led_session_from_another_machine_launches_back_only_with_the_user() {
     let request = held_there(&pc, "pc");
     assert!(
         text.contains(&format!(
-            "request #{} on pc is waiting for the user",
+            "Waiting for the user's approval, request #{} on pc",
             request["number"]
         )),
         "{text}"
@@ -1920,8 +1920,9 @@ fn a_child_launch_across_machines_is_not_held_for_the_chain() {
 #[test]
 fn a_child_on_another_machine_is_refused_a_session_outright() {
     // A child pc's root launched on the server counts there as a session another agent started
-    // (`launches::launched_from`), and is a child there (its depth, #1274): its led launch is
-    // refused at once, never held for its parent nor the user, never the judge's.
+    // (`launches::launched_from`), and is a child there (its depth, #1274): it has no tool to
+    // start a session, so a led launch is refused at once, never held for its parent nor the
+    // user, never the judge's.
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, _child, child) = launched_on_server(&pc, &server, "child");
@@ -1933,8 +1934,7 @@ fn a_child_on_another_machine_is_refused_a_session_outright() {
     );
 
     assert!(
-        answer.text.starts_with("refused")
-            && answer.text.contains("only the agent the user talks to"),
+        answer.text.starts_with("refused") && answer.text.contains("has no tool agent_launch"),
         "{}",
         answer.text
     );
