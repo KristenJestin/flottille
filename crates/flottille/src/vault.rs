@@ -2283,6 +2283,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_one_line_file_s_value_is_masked_alone_without_a_final_newline() {
+        mask_lines("API_TOKEN=oneline-Value-41");
+        let env = std::collections::BTreeMap::new();
+        let said = secrets::mask("it is oneline-Value-41 now", &env);
+        assert_eq!(said, "it is [masked] now");
+    }
+
+    #[tokio::test]
+    async fn a_new_secret_set_for_a_file_s_entry_is_masked_line_by_line_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "app-.env", "secret": "API_TOKEN=setfile-Value-52",
+                "for": "file:app/.env"}),
+        )
+        .await);
+        let env = std::collections::BTreeMap::new();
+        let said = secrets::mask("it is setfile-Value-52 now", &env);
+        assert_eq!(said, "it is [masked] now");
+    }
+
     #[tokio::test]
     async fn a_file_is_laid_only_from_its_own_entry_shared_by_the_launch_s_machine() {
         let dir = tempfile::tempdir().unwrap();

@@ -408,18 +408,17 @@ fn approve(server: &Machine, request: &Value) {
         .unwrap();
 }
 
-#[test]
-fn full_holds_a_launch_whose_setup_lays_a_file_and_names_its_entry() {
+/// A launch whose setup copies the `.env` `text`, held in Full, allowed and laid; the agent there
+/// reads it whole, then from `at` on: what it reads holds none of `secrets`.
+fn laid_and_read_masked(text: &str, at: usize, secrets: &[&str]) {
     let (_hub, pc, server) = pc_and_server(server_user(None), None);
     pc.register("[[setup]]\ncopy = [\".env\"]\n");
-    std::fs::write(pc.folder().join(".env"), TWO_LINES).unwrap();
-    // The agent there reads the file whole, then its second line alone.
-    let second = TWO_LINES.find("API_TOKEN").unwrap();
+    std::fs::write(pc.folder().join(".env"), text).unwrap();
     server.user.fake_script(json!({"turns": [
         {"when": "Ledger, whole.", "do": [
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}},
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env",
-                "range": {"offset": second}, "again": true}}}
+                "range": {"offset": at}, "again": true}}}
         ]}
     ]}));
     signed_in_there(&pc);
@@ -449,7 +448,7 @@ fn full_holds_a_launch_whose_setup_lays_a_file_and_names_its_entry() {
     approve(&server, &request);
 
     eventually("the .env copied into the workspace", || {
-        std::fs::read_to_string(folder_of(&session).join(".env")).is_ok_and(|t| t == TWO_LINES)
+        std::fs::read_to_string(folder_of(&session).join(".env")).is_ok_and(|t| t == text)
     });
     use std::os::unix::fs::PermissionsExt as _;
     let mode = std::fs::metadata(made.join(".env"))
@@ -480,10 +479,24 @@ fn full_holds_a_launch_whose_setup_lays_a_file_and_names_its_entry() {
     eventually("both reads answered", || reads().len() >= 2);
     for read in reads() {
         assert!(read.contains("[masked]"), "{read}");
-        for secret in ["s3cret-pass", "t0ken-Value-77"] {
+        for secret in secrets {
             assert!(!read.contains(secret), "{read}");
         }
     }
+}
+
+#[test]
+fn full_holds_a_launch_whose_setup_lays_a_file_and_names_its_entry() {
+    // The agent reads the file whole, then its second line alone.
+    let second = TWO_LINES.find("API_TOKEN").unwrap();
+    laid_and_read_masked(TWO_LINES, second, &["s3cret-pass", "t0ken-Value-77"]);
+}
+
+#[test]
+fn a_one_line_file_without_a_final_newline_is_masked_from_an_offset_too() {
+    // The agent reads from the value on: a file of one line holds no line break to split at.
+    let text = "API_TOKEN=t0ken-Value-77";
+    laid_and_read_masked(text, text.find("t0ken").unwrap(), &["t0ken-Value-77"]);
 }
 
 #[test]
