@@ -442,7 +442,7 @@ fn two_machines_put_the_settings_picker_on_the_title_s_line(cx: &mut TestAppCont
     let (shell, cx) = window(&pc, cx);
     settings(&shell, "agents", cx);
 
-    let row = bounds_of(cx, "settings-header-row").expect("the header's row");
+    let row = bounds_of(cx, "settings-header-line").expect("the header's row");
     let title = bounds_of(cx, "settings-header-title").expect("the title");
     let picker = bounds_of(cx, "settings-machine").expect("the picker");
     // On the title's line: within the header's row, level with the title, after it.

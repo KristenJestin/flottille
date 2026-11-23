@@ -2597,7 +2597,7 @@ impl Render for SettingsPage {
         // label. The kit's header has no place right after the title; beside it, the picker
         // stays level with the title whether or not the path line is above it.
         let header = div()
-            .id("settings-header-row")
+            .id("settings-header-line")
             .flex()
             .items_end()
             .child(div().flex_1().min_w_0().child(header))
@@ -2645,7 +2645,7 @@ impl Render for SettingsPage {
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
         // Held after its blocks: what it adds comes after them, and a block's place stays its own.
-        let page = crate::machines::hold(page, window, cx);
+        let page = crate::machines::hold(page, window, cx).test_support();
         div()
             .size_full()
             .flex()
