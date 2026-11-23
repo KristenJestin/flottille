@@ -873,7 +873,7 @@ pub(crate) async fn signed_in_to_write() -> Result<(), String> {
     signed_in_for(true).await
 }
 
-async fn signed_in_for(write: bool) -> Result<(), String> {
+pub(crate) async fn signed_in_for(write: bool) -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {
         Err(Gh::Missing) => Err("Flottille cannot find gh, GitHub's command line: install \
              it (https://cli.github.com) and sign in with `gh auth login` to see the pull \
