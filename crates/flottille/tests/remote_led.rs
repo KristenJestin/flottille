@@ -12,6 +12,7 @@ use crate::remote_launch::{
 };
 
 use crate::common::mcp::Mcp;
+use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 const QUESTION: &str = "Which format first, CSV or JSON?";
@@ -88,6 +89,19 @@ fn followings(machine: &Machine, agent: &str) -> Vec<Value> {
         .filter(|s| s["agent"] == agent && s["source"] == "session")
         .cloned()
         .collect()
+}
+
+/// `machine`'s project `app` as `register` writes it, its repository on a forge.
+fn with_a_forge(machine: &Machine) {
+    let text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\nbranch_prefix = \"\"\n\
+         [[repositories]]\npath = \".\"\nbase = [\"main\"]\n\
+         forge = {{ kind = \"github\", repository = \"acme/app\" }}\n",
+        machine.folder().display(),
+        machine.user.path("work/app-work").display()
+    );
+    machine.user.write_project_file("app", &text);
+    machine.user.call("project.list", json!({})).unwrap();
 }
 
 /// The launches `pc` shows under their pilot (`remote.launches`).
@@ -352,6 +366,8 @@ fn the_pilot_unsubscribes_from_its_led_session_on_another_machine() {
             {"mcp": {"tool": "ask", "arguments": {"question": QUESTION}}}
         ]}]),
     );
+    // A forge declared: the root has the forge tool, whose unsubscribe ends a following.
+    with_a_forge(&pc);
     let (session, root, _, mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
     let following = followings(&pc, &root);
     assert_eq!(following.len(), 1, "{following:#?}");
@@ -368,8 +384,15 @@ fn the_pilot_unsubscribes_from_its_led_session_on_another_machine() {
         answer.text
     );
     assert!(followings(&pc, &root).is_empty());
-    let told = prompt_with(&server, "no longer follows it");
-    assert!(told.contains("[flottille:unfollowed]"), "{told}");
+    // Told between its turns, as one led here is: its turn still runs.
+    eventually("the session told on server", || {
+        Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+            .unwrap()
+            .deliveries(&session, "queued")
+            .unwrap()
+            .iter()
+            .any(|delivery| delivery.kind == "unfollowed")
+    });
     // Its questions now go to the user there; the pilot is not woken by them.
     release(&server);
     let said = tool_answer(&server, "given to the user");
@@ -377,6 +400,8 @@ fn the_pilot_unsubscribes_from_its_led_session_on_another_machine() {
     eventually("the question in server's inbox", || {
         !questions(&server).is_empty()
     });
+    let told = prompt_with(&server, "no longer follows it");
+    assert!(told.contains("[flottille:unfollowed]"), "{told}");
     a_while();
     assert!(
         !pc.prompts().iter().any(|prompt| prompt.contains(QUESTION)),
