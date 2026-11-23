@@ -365,7 +365,6 @@ const TWO_LINES: &str = "DATABASE_URL=postgres://robin:s3cret-pass@db.example.te
 
 /// A root of `pc` whose mode the user switched to Full from a device, signed: its MCP session.
 fn full_root(pc: &Machine, server: &Machine) -> common::mcp::Mcp {
-    pc.wait_for_offer("server", 12);
     let (root, mcp) = pc.root("auto");
     let switched = server
         .user
@@ -459,24 +458,31 @@ fn full_holds_a_launch_whose_setup_lays_a_file_and_names_its_entry() {
         .mode();
     assert_eq!(mode & 0o777, 0o600, "{mode:o}");
     // What the agent read is masked, the whole file and its line alone.
-    let id = session["id"].as_str().unwrap().to_owned();
-    eventually("both reads answered", || {
+    let reads = || -> Vec<String> {
         server
             .user
-            .call("agent.read", json!({"agent": id, "after": 0}))
-            .unwrap()
-            .to_string()
-            .matches("[masked]")
-            .count()
-            >= 2
-    });
-    let page = server
-        .user
-        .call("agent.read", json!({"agent": id, "after": 0}))
-        .unwrap()
-        .to_string();
-    for secret in ["s3cret-pass", "t0ken-Value-77"] {
-        assert!(!page.contains(secret), "{page}");
+            .received()
+            .iter()
+            .filter_map(|entry| {
+                entry["mcp"]["body"]["result"]["content"]
+                    .as_array()
+                    .cloned()
+            })
+            .map(|content| {
+                content
+                    .iter()
+                    .filter_map(|c| c["text"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect()
+    };
+    eventually("both reads answered", || reads().len() >= 2);
+    for read in reads() {
+        assert!(read.contains("[masked]"), "{read}");
+        for secret in ["s3cret-pass", "t0ken-Value-77"] {
+            assert!(!read.contains(secret), "{read}");
+        }
     }
 }
 
