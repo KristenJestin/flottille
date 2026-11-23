@@ -1805,6 +1805,8 @@ fn launched_after_approval(body: &str) -> Option<u64> {
     let (number, rest) = rest.split_once(" (agent_launch) ")?;
     let (_, result) = rest.split_once("has now done it. Its result:\n\n")?;
     result.contains(STARTED_SESSION).then_some(())?;
+    // A launch held on another machine names it: `#4 on server`.
+    let number = number.split_once(' ').map_or(number, |(number, _)| number);
     number.parse().ok()
 }
 
@@ -2647,7 +2649,7 @@ mod tests {
             2,
             "agent.tool_call",
             json!({"id": "l", "update": true, "status": "completed",
-                "raw_output": "Not started yet: request #4 on server is waiting for the user, who allows or refuses it there."}),
+                "raw_output": "Waiting for the user's approval, request #4 on server. This action has not happened; do not assume it did.\nIt will run on server in workspace w there, once allowed."}),
         ));
         c.apply(&event(
             3,
