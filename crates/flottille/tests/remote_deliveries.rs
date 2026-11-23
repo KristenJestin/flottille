@@ -44,7 +44,7 @@ pub(crate) fn child_on_server(
 }
 
 /// The launch's name in the answer of a launch on `server`.
-fn launch_in(text: &str) -> String {
+pub(crate) fn launch_in(text: &str) -> String {
     let marker = "refs/flottille/machines/server/";
     let at = text
         .find(marker)
@@ -261,6 +261,8 @@ fn a_call_from_an_agent_that_did_not_start_the_session_is_refused() {
             agent: child.clone(),
             tool: tool.into(),
             arguments: json!({"agent_id": child, "message": "Stop everything."}).to_string(),
+            // A read carries the caller's project, as any call to a session of another machine.
+            project: "app".into(),
             ..Call::default()
         }))
     };

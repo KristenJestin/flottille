@@ -281,6 +281,9 @@ pub struct Opened {
     pub started_by: Option<String>,
     /// The agent that leads it, by the name it goes by; `None` for a session no agent leads.
     pub led_by: Option<String>,
+    /// The agent of another machine whose child its root is (`agent b1 of pc`): its parent writes
+    /// to it, never the user, so no composer is drawn.
+    pub child_of: Option<String>,
 }
 
 pub struct SessionPage {
@@ -2373,6 +2376,7 @@ impl Render for SessionPage {
                 },
             ))
             .map(|d| match (root, self.ended_line()) {
+                (true, None) if self.opened.child_of.is_some() => d.child(self.read_only(cx)),
                 (true, None) => d.child(self.queued.clone()).child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
                 (false, _) => d.child(self.read_only(cx)),
@@ -2561,7 +2565,7 @@ impl SessionPage {
     /// `None` while the root is shown.
     pub fn read_only_text(&self) -> Option<(String, String)> {
         if self.shown == self.opened.id {
-            return None;
+            return self.child_text().map(|said| (said, String::new()));
         }
         Some((
             format!(
@@ -2573,7 +2577,20 @@ impl SessionPage {
         ))
     }
 
-    /// In place of the composer while a sub-agent is read: it belongs to the conversation.
+    /// What the bar in place of the composer says of a root that is a child of an agent of
+    /// another machine: `None` for a session of the user's.
+    pub fn child_text(&self) -> Option<String> {
+        self.opened.child_of.as_ref().map(|parent| {
+            format!(
+                "This conversation is a child of {parent}, which launched it from there: only \
+                 its parent writes to it."
+            )
+        })
+    }
+
+    /// In place of the composer while a sub-agent is read: it belongs to the conversation. And
+    /// while the conversation is a child of an agent of another machine: it belongs to that agent,
+    /// and there is nothing here to go back to.
     fn read_only(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (said, back) = self.read_only_text().unwrap_or_default();
@@ -2592,12 +2609,15 @@ impl SessionPage {
             .py(space::MD)
             .text_size(px(13.))
             .text_color(p.mute)
+            .aria_label(said.clone())
             .child(div().flex_1().min_w_0().child(SharedString::from(said)))
-            .child(Button::quiet("back-to-root", back).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.select(&root, cx);
-                },
-            )))
+            .when(!back.is_empty(), |d| {
+                d.child(Button::quiet("back-to-root", back).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.select(&root, cx);
+                    },
+                )))
+            })
             .test_support()
     }
 }

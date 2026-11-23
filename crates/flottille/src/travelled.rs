@@ -584,6 +584,7 @@ pub(crate) fn classed(
             tools: Vec::new(),
             place: launch_place(&after, &asked.branch),
             launched: false,
+            reads: None,
         },
         after: &after,
         from,

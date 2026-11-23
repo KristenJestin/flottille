@@ -3,6 +3,9 @@
 //! (the `workspaces_root` key of its file), set from the window. Only workspaces made after a
 //! change follow it: a workspace's record holds its folder, and nothing is ever moved.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use flottille_core::place::{self, Place};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -131,9 +134,12 @@ fn set_default(daemon: &Daemon, word: Option<String>, path: Option<String>) -> R
                     .iter()
                     .map(|repository| project.folder.join(&repository.path))
                     .collect();
-                folder
-                    .and_then(|folder| place::allowed(&folder, &avoid, &repositories, "path"))
+                let folder = folder
+                    .and_then(|folder| {
+                        place::allowed(&folder, &avoid, &repositories, "path").map(|_| folder)
+                    })
                     .map_err(|why| invalid(format!("{why} (for the project {})", project.name)))?;
+                usable(&folder).map_err(Failure::refused)?;
             }
             place
         }
@@ -152,16 +158,65 @@ fn set_default(daemon: &Daemon, word: Option<String>, path: Option<String>) -> R
 /// project follows the default again. The file is read back as a project before it is written, so
 /// a folder that is not absolute is refused with its key.
 fn set_project(daemon: &Daemon, name: &str, own: Option<String>) -> Result<(), Failure> {
-    projects::rewrite(daemon, name, |_, document| {
-        match own {
-            Some(own) => document["workspaces_root"] = toml_edit::value(own),
-            None => {
-                document.remove("workspaces_root");
+    let follows_default = own.is_none();
+    projects::rewrite_checked(
+        daemon,
+        name,
+        |_, document| {
+            match own {
+                Some(own) => document["workspaces_root"] = toml_edit::value(own),
+                None => {
+                    document.remove("workspaces_root");
+                }
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+        // The folder as the project resolves it, before the file is written.
+        |edited| match follows_default {
+            true => Ok(()),
+            false => usable(&edited.workspaces_root).map_err(Failure::refused),
+        },
+    )
     .map(|_| ())
+}
+
+/// Whether the daemon, as its own user, can make `folder` and write in it, found by making a
+/// probe folder there and removing it (and the folders made on the way), never by reading
+/// permissions: a mount, a read-only file system or an ACL says no all the same. The reason is
+/// the sentence a refusal gives: `/srv/nowhere/app: permission denied`.
+pub fn usable(folder: &Path) -> Result<(), String> {
+    static PROBES: AtomicU64 = AtomicU64::new(0);
+    let mut made: Vec<&Path> = Vec::new();
+    for ancestor in folder.ancestors() {
+        if ancestor.symlink_metadata().is_ok() {
+            break;
+        }
+        made.push(ancestor);
+    }
+    let probe = folder.join(format!(
+        ".flottille-probe-{}-{}",
+        std::process::id(),
+        PROBES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tried = std::fs::create_dir_all(folder)
+        .and_then(|()| std::fs::create_dir(&probe))
+        .and_then(|()| std::fs::remove_dir(&probe));
+    // Deepest first, and only what is empty: a folder that is not ours to remove stays.
+    for folder in made {
+        let _ = std::fs::remove_dir(folder);
+    }
+    tried.map_err(|error| format!("{}: {}", folder.display(), reason(&error)))
+}
+
+/// An I/O error as a short lowercase reason: `permission denied`, without the `(os error 13)`.
+fn reason(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    let text = text.split(" (os error").next().unwrap_or(&text);
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => text.to_owned(),
+    }
 }
 
 fn announce(daemon: &Daemon, project: Option<&str>) -> Result<(), Failure> {

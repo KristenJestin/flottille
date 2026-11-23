@@ -656,7 +656,7 @@ fn the_receiving_machine_s_gate_judges_the_launch_in_ask_and_auto() {
     let number = request["number"].as_u64().unwrap();
     assert!(
         text.contains(&format!(
-            "request #{number} on server is waiting for the user"
+            "Waiting for the user's approval, request #{number} on server."
         )),
         "{text}"
     );
@@ -824,6 +824,7 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         repositories: vec![".".into()],
         identities: Vec::new(),
         settings: None,
+        depth: 0,
         copied: Vec::new(),
     }
 }
@@ -1220,7 +1221,7 @@ fn a_launch_the_judge_denies_is_held_for_the_user_and_never_started() {
     );
 
     let text = done(&answer);
-    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(text.contains("Waiting for the user's approval"), "{text}");
     assert!(
         !server.user.judge_received().is_empty(),
         "no judge was asked"
@@ -1251,7 +1252,7 @@ fn a_launch_whose_judge_fails_is_held_for_the_user_and_never_started() {
     );
 
     let text = done(&answer);
-    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(text.contains("Waiting for the user's approval"), "{text}");
     assert!(
         !server.user.judge_received().is_empty(),
         "no judge was asked"
@@ -1620,4 +1621,224 @@ fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
     ));
 
     assert_eq!(titled(&server, "From the child")["gate_mode"], "full");
+}
+
+/// The states of the launches `pc` recorded on other machines, by launch name.
+fn launches_out(pc: &Machine) -> Vec<String> {
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let mut statement = store
+        .prepare("SELECT state FROM launches WHERE way = 'out' ORDER BY launch")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|state| state.unwrap())
+        .collect()
+}
+
+/// The rows `pc` shows under their pilots of the sessions its agents started on other machines.
+fn rows_under_pilots(pc: &Machine) -> Vec<Value> {
+    pc.user.call("remote.launches", json!({})).unwrap()["launches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The prompt `machine` was sent that holds `text`, once it was.
+fn prompt_with(machine: &Machine, text: &str) -> String {
+    prompted(machine, text);
+    machine
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains(text))
+        .unwrap()
+}
+
+#[test]
+fn a_held_launch_allowed_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Allowed there");
+    assert_eq!(launches_out(&pc), vec!["held"]);
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    // A prompt is its JSON: its quotes and line ends escaped.
+    assert!(
+        told.contains(&format!(
+            "Request #{number} on server (agent_launch) was approved by the user, and Flottille \
+             has now done it. Its result:"
+        )),
+        "{told}"
+    );
+    assert!(told.contains("Started a session led by you"), "{told}");
+    assert!(
+        told.contains("[flottille:session-turn-ended] wakes you when it asks, reports or ends"),
+        "{told}"
+    );
+    assert!(told.contains("session_send"), "{told}");
+    eventually("the launch recorded as started", || {
+        launches_out(&pc) == vec!["started"]
+    });
+    let rows = rows_under_pilots(&pc);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["state"], "started", "{rows:#?}");
+}
+
+#[test]
+fn a_held_launch_refused_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused there");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    assert!(
+        told.contains(&format!(
+            "Request #{number} on server (agent_launch) was refused by the user. Nothing was done."
+        )),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+}
+
+#[test]
+fn a_refused_launch_leaves_no_waiting_row_under_its_pilot() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "No row left");
+    let rows = rows_under_pilots(&pc);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["state"], "held", "{rows:#?}");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    eventually("no row left under the pilot", || {
+        rows_under_pilots(&pc).is_empty()
+    });
+}
+
+#[test]
+fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    let held = done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Child, held", "brief": "Do it."}),
+    ))
+    .to_owned();
+    assert!(!held.contains("told nothing more"), "{held}");
+    assert!(
+        held.contains("The answer will be handed to you when the user gives it."),
+        "{held}"
+    );
+    assert!(held.contains("on server in workspace"), "{held}");
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    // Once allowed, its answer says what follows, as a child launched here.
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(told.contains("Child, held"), "{told}");
+    assert!(told.contains("Its result:"), "{told}");
+    assert!(
+        told.contains("Its report, questions and failure come to you"),
+        "{told}"
+    );
+    assert!(told.contains("agent_send"), "{told}");
+}
+
+#[test]
+fn a_led_session_started_on_another_machine_says_what_follows() {
+    let (_hub, pc, _server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Started led", "brief": "Do it."}),
+    ))
+    .to_owned();
+
+    assert!(text.contains("Started a session led by you"), "{text}");
+    assert!(text.contains("[flottille:session-turn-ended]"), "{text}");
+    assert!(text.contains("when it asks, reports or ends"), "{text}");
+    assert!(text.contains("session_send"), "{text}");
+}
+
+#[test]
+fn a_held_launch_whose_session_ends_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Ended while held");
+    let session = titled(&server, "Ended while held");
+
+    server
+        .user
+        .call("agent.stop", json!({"agent": session["id"]}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("its session there ended before the user of server decided"),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    assert!(rows_under_pilots(&pc).is_empty());
+}
+
+#[test]
+fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register("[[setup]]\nrun = \"false\"\n");
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Failing setup",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(&pc, "[flottille:child-failed]");
+    let all = pc.prompts().join("\n");
+    let allowed = all
+        .find(&format!(
+            "Request #{number} on server (agent_launch) was approved"
+        ))
+        .expect(&all);
+    let failed = all.find("[flottille:child-failed]").unwrap();
+    assert!(
+        allowed < failed,
+        "the failure came before the answer:\n{all}"
+    );
 }

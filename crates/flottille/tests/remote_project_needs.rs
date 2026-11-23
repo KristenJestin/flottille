@@ -154,7 +154,10 @@ fn a_setup_needing_a_secret_holds_the_launch_and_asks_to_share_it() {
 
     let answer = led_there(&pc, "Ledger", "auto");
 
-    assert!(answer.contains("waiting for the user"), "{answer}");
+    assert!(
+        answer.contains("Waiting for the user's approval"),
+        "{answer}"
+    );
     let request = the_request(&server);
     let card = request.to_string();
     assert!(
@@ -232,6 +235,38 @@ fn refusing_the_share_refuses_the_launch_saying_what_was_missing() {
             .any(|prompt| prompt.contains("Ledger, whole.")),
         "a refused launch started"
     );
+}
+
+#[test]
+fn allowed_before_the_share_tells_the_caller_nothing_was_done() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    needing_env(&pc);
+    signed_in_there(&pc);
+    led_there(&pc, "Ledger", "auto");
+    let request = the_request(&server);
+    let number = request["number"].as_u64().unwrap();
+
+    // Allowed while .env is still not shared: its setup cannot lay it.
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    eventually("pc's root told", || {
+        pc.prompts().iter().any(|prompt| {
+            prompt.contains(&format!(
+                "Request #{number} on server (agent_launch) was approved by the user, but \
+                 nothing was done"
+            ))
+        })
+    });
+    let told = pc
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("nothing was done"))
+        .unwrap();
+    assert!(told.contains(".env"), "{told}");
+    assert!(!told.contains("runs now"), "{told}");
 }
 
 #[test]
@@ -434,7 +469,10 @@ fn laid_and_read_masked(text: &str, at: usize, secrets: &[&str]) {
 
     // Full: the launch would start at once, but a file is laid from the vault, which the user
     // allows, the entry named.
-    assert!(answer.contains("waiting for the user"), "{answer}");
+    assert!(
+        answer.contains("Waiting for the user's approval"),
+        "{answer}"
+    );
     let request = the_request(&server);
     let card = request.to_string();
     assert!(
@@ -519,7 +557,10 @@ fn in_full_an_entry_of_the_server_s_own_named_as_the_file_is_never_laid() {
     ))
     .to_owned();
 
-    assert!(answer.contains("waiting for the user"), "{answer}");
+    assert!(
+        answer.contains("Waiting for the user's approval"),
+        "{answer}"
+    );
     let request = the_request(&server);
     let card = request.to_string();
     assert!(

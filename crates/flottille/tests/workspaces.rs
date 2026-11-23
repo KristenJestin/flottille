@@ -3349,6 +3349,136 @@ fn a_relative_folder_is_refused_naming_the_field() {
     assert!(!text.contains("workspaces_root"), "{text}");
 }
 
+/// A folder nothing can be made in, made writable again when dropped so that the temporary
+/// folder can be removed.
+struct ReadOnly(PathBuf);
+
+impl ReadOnly {
+    fn new(path: PathBuf) -> ReadOnly {
+        std::fs::create_dir_all(&path).unwrap();
+        set_mode(&path, 0o555);
+        ReadOnly(path)
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        set_mode(&self.0, 0o755);
+    }
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A read-only folder is written by root all the same: such a test says so and stops there.
+fn as_root_the_folder_would_be_written() -> bool {
+    // SAFETY: getuid has no precondition and cannot fail.
+    let root = unsafe { libc::getuid() } == 0;
+    if root {
+        eprintln!("skipped: running as root, which writes in a read-only folder");
+    }
+    root
+}
+
+#[test]
+fn a_workspaces_folder_the_daemon_cannot_make_is_refused() {
+    if as_root_the_folder_would_be_written() {
+        return;
+    }
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let blocked = ReadOnly::new(fixture.user.path("srv/nowhere"));
+    let file = fixture.user.path("config/flottille/workspaces.toml");
+
+    let (code, message) = set_default(
+        &fixture,
+        json!({"place": "own", "path": format!("{}/<project>", blocked.0.display())}),
+    )
+    .unwrap_err();
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        format!("{}/app: permission denied", blocked.0.display())
+    );
+    assert!(!file.exists(), "a folder that cannot be made is never kept");
+    assert!(
+        std::fs::read_dir(&blocked.0).unwrap().next().is_none(),
+        "the probe leaves nothing behind"
+    );
+
+    // A project's own folder is checked the same way, and its file is left as it was.
+    let before = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    let (code, message) = set_default(
+        &fixture,
+        json!({"project": "app", "own": format!("{}/<project>", blocked.0.display())}),
+    )
+    .unwrap_err();
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        format!("{}/app: permission denied", blocked.0.display())
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.user.project_file("app")).unwrap(),
+        before
+    );
+
+    // The daemon goes on, and a folder it can make is kept, the probe removed.
+    let usable = fixture.user.path("Worktrees");
+    let shown = set_default(
+        &fixture,
+        json!({"place": "own", "path": format!("{}/<project>", usable.display())}),
+    )
+    .unwrap();
+    assert_eq!(shown["place"], "own");
+    assert!(file.is_file());
+    assert!(
+        !usable.exists(),
+        "what the probe made is removed: {}",
+        usable.display()
+    );
+}
+
+#[test]
+fn a_workspace_in_a_folder_that_became_unusable_fails_saying_why() {
+    if as_root_the_folder_would_be_written() {
+        return;
+    }
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let parent = fixture.user.path("srv/worktrees");
+    std::fs::create_dir_all(&parent).unwrap();
+    set_default(
+        &fixture,
+        json!({"place": "own", "path": format!("{}/<project>", parent.display())}),
+    )
+    .unwrap();
+    let blocked = ReadOnly::new(parent);
+
+    let (code, message) = fixture.create(json!({})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        format!("{}/app: permission denied", blocked.0.display())
+    );
+    let listed = fixture
+        .user
+        .call("workspace.list", json!({"project": "app"}))
+        .unwrap();
+    assert_eq!(
+        listed["workspaces"],
+        json!([]),
+        "no workspace is recorded: {listed}"
+    );
+    // The daemon goes on: the folder usable again, the same call works.
+    set_mode(&blocked.0, 0o755);
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+}
+
 #[test]
 fn a_project_s_own_folder_wins_over_the_default() {
     let fixture = Fixture::new(false);

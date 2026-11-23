@@ -1992,7 +1992,7 @@ impl Shell {
             self.session_page = Some(kept.clone());
             return Some(kept);
         }
-        let (project, started_by, led_by, folder) = match self.snapshot.session(id) {
+        let (project, started_by, led_by, child_of, folder) = match self.snapshot.session(id) {
             Some(session) => {
                 let project = session.project.clone();
                 let folder = match place {
@@ -2013,12 +2013,14 @@ impl Shell {
                     project,
                     session.started_by.clone(),
                     session.led_by.clone(),
+                    session.child_of.clone(),
                     folder,
                 )
             }
             // Its row is all this window holds of it: its page reads the rest there.
             None => (
                 self.snapshot.elsewhere(id)?.project.clone(),
+                None,
                 None,
                 None,
                 None,
@@ -2032,6 +2034,7 @@ impl Shell {
             folder: folder.map(Into::into),
             started_by,
             led_by,
+            child_of,
         };
         let this = cx.entity().downgrade();
         let reply = match self.replies.get(id) {
