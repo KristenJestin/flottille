@@ -437,8 +437,10 @@ pub enum Command {
         project: String,
         write: CommandWrite,
     },
-    /// The programs and whether each is signed in (`signin.list`, #1185).
+    /// The programs, each to be checked one by one (`signin.list` without its checks, #1315).
     SignIns,
+    /// One program's check, run by its daemon (`signin.list` of that program alone, #1315).
+    SignInCheck(String),
     /// A program's own sign-in, started by its daemon (`signin.start`).
     SignInStart(String),
     /// The code the user pasted for that program's sign-in (`signin.code`), sent once.
@@ -1106,8 +1108,14 @@ pub enum Outcome {
         name: String,
         read: Result<CommandInfo, String>,
     },
-    /// The programs' sign-in states, as `signin.list` answers them, or why they cannot be read.
+    /// The programs, as `signin.list` answers them, or why they cannot be read: each says it is
+    /// being checked, and its check is asked next.
     SignIns(Result<Value, String>),
+    /// One program's check, as `signin.list` of that program alone answers it.
+    SignInChecked {
+        program: String,
+        answer: Result<Value, String>,
+    },
     /// What a program's sign-in said it needs, or why it did not start.
     SignInStarted {
         program: String,
@@ -2856,8 +2864,24 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             }
         }
         Command::SignIns => Outcome::SignIns(
-            ask_alone(connect, "signin.list", json!({}), bounds.quick).and_then(|listed| listed),
+            ask_alone(
+                connect,
+                "signin.list",
+                json!({"checked": false}),
+                bounds.quick,
+            )
+            .and_then(|listed| listed),
         ),
+        Command::SignInCheck(program) => Outcome::SignInChecked {
+            answer: ask_alone(
+                connect,
+                "signin.list",
+                json!({"program": program}),
+                bounds.quick,
+            )
+            .and_then(|listed| listed),
+            program,
+        },
         Command::SignInStart(program) => Outcome::SignInStarted {
             answer: ask_alone(
                 connect,

@@ -2808,6 +2808,10 @@ impl Shell {
                 let section = self.settings.read(cx).sign_in().clone();
                 section.update(cx, |section, cx| section.listed(listed, cx));
             }
+            Outcome::SignInChecked { program, answer } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.checked(&program, answer, cx));
+            }
             Outcome::SignInStarted { program, answer } => {
                 let section = self.settings.read(cx).sign_in().clone();
                 section.update(cx, |section, cx| section.started(&program, answer, cx));
