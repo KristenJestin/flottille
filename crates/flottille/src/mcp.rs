@@ -2454,13 +2454,19 @@ async fn played_whole(
     {
         match crate::session_name::resolve(daemon, grant, tool, args.clone()) {
             Ok(crate::session_name::Resolved::Here(named)) => (named, None, None),
+            // Named by its title, a session this agent started there: called as by its id.
+            Ok(crate::session_name::Resolved::Away(named, _))
+                if crate::across::aimed(daemon, &grant.agent, tool, &named).is_some() =>
+            {
+                (named, None, None)
+            }
             Ok(crate::session_name::Resolved::Away(named, away)) => (named, None, Some(away)),
             Err(refused) => (args, Some(refused), None),
         }
     } else {
         (args, None, None)
     };
-    // Its answer comes as that machine shaped it: masked, escaped and cut there.
+    // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
     let shaped = away.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
