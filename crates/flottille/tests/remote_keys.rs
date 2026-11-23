@@ -417,14 +417,21 @@ fn a_recursive_read_of_a_folder_above_the_keys_is_refused_in_every_mode() {
     assert!(!place.join("copy").exists());
     assert!(user.escalations().is_empty());
 
-    // A listing shows names, never a byte: it runs, in Full as in Auto, and lists them.
-    for mode in ["full", "auto"] {
-        let output = user.run(&["agent", "mode", &id, mode]);
-        assert!(output.status.success(), "{output:?}");
-        let listed = mcp.call("run", json!({"line": format!("ls {s}")}));
-        assert!(!listed.error, "{mode}: {}", listed.text);
-        assert!(listed.text.contains("remote"), "{mode}: {}", listed.text);
-    }
+    // A listing shows names, never a byte: in Auto, a read of Flottille's own folders is base,
+    // held for the user; in Full, where nothing is held back, it runs and lists them.
+    let output = user.run(&["agent", "mode", &id, "auto"]);
+    assert!(output.status.success(), "{output:?}");
+    let held = mcp.call("run", json!({"line": format!("ls {s}")}));
+    assert!(
+        held.text.starts_with("Waiting for the user's approval"),
+        "auto: {}",
+        held.text
+    );
+    let output = user.run(&["agent", "mode", &id, "full"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = mcp.call("run", json!({"line": format!("ls {s}")}));
+    assert!(!listed.error, "full: {}", listed.text);
+    assert!(listed.text.contains("remote"), "full: {}", listed.text);
     // A search's pattern is not a folder: from an ordinary place, it runs.
     for line in ["grep -rn / .", "grep -rn '~' ."] {
         let searched = mcp.call("run", json!({ "line": line }));

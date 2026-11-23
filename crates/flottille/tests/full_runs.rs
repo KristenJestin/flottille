@@ -218,7 +218,15 @@ fn a_run_in_full_does_what_the_user_s_terminal_does() {
     assert!(made, "a file cannot be made at the home's root: {ran}");
     assert!(home.join("kept").is_file());
     // The user's own git settings, which `git config` writes through a lock file beside them.
-    let (configured, ran) = exits_zero(&mcp, "git config --global flottille.tried yes");
+    // The gate refuses `git config --global` named on a line in every mode: a program the agent
+    // runs calls it, as a tool of the user's would.
+    let (configured, ran) = exits_zero(
+        &mcp,
+        &python(
+            "import subprocess, sys; sys.exit(subprocess.run(['git', 'config', '--global', \
+             'flottille.tried', 'yes']).returncode)",
+        ),
+    );
     assert!(configured, "git config --global failed: {ran}");
     assert!(
         std::fs::read_to_string(&settings)
