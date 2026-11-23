@@ -4886,7 +4886,11 @@ fn without_isolation_the_login_refuses_to_fill() {
 
 /// What Chrome leaves in the temporary folder while it runs, by the start of its name:
 /// agent-browser's profile folder (cookies, Local Storage, History…) and Chrome's own files.
-const CHROME_LEFT: [&str; 2] = ["agent-browser-chrome-", ".org.chromium."];
+const CHROME_LEFT: [&str; 3] = [
+    "agent-browser-chrome-",
+    ".org.chromium.",
+    "com.google.Chrome.",
+];
 
 /// What a run of the agent's, in `mode`, lists of each of `folders`: `{"listed": {folder:
 /// [names]}, "errors": {folder: why}}`.
