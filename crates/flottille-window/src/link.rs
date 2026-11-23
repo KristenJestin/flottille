@@ -169,16 +169,27 @@ pub struct Updates {
     sender: UnboundedSender<Update>,
     machine: Option<String>,
     /// Set once the one that made them no longer takes them ([`Updates::ending`]).
-    ended: Option<Arc<AtomicBool>>,
+    ended: Option<Arc<Ending>>,
 }
 
-/// Dropped, the updates it was made with are taken no more: their link ends at its next word.
+/// Whether the updates are taken no more, and the connection of the link that sends them.
+#[derive(Debug, Default)]
+struct Ending {
+    ended: AtomicBool,
+    stream: Mutex<Option<UnixStream>>,
+}
+
+/// Dropped, the updates it was made with are taken no more: their link ends at once, its
+/// connection shut, idle or not.
 #[derive(Debug)]
-pub struct End(Arc<AtomicBool>);
+pub struct End(Arc<Ending>);
 
 impl Drop for End {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.ended.store(true, Ordering::SeqCst);
+        if let Some(stream) = self.0.stream.lock().unwrap().take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 }
 
@@ -194,7 +205,7 @@ impl Updates {
 
     /// The same updates, taken until the [`End`] given with them is dropped.
     pub fn ending(&self) -> (Updates, End) {
-        let ended = Arc::new(AtomicBool::new(false));
+        let ended = Arc::new(Ending::default());
         let updates = Updates {
             ended: Some(ended.clone()),
             ..self.clone()
@@ -205,7 +216,24 @@ impl Updates {
     fn ended(&self) -> bool {
         self.ended
             .as_ref()
-            .is_some_and(|ended| ended.load(Ordering::SeqCst))
+            .is_some_and(|ending| ending.ended.load(Ordering::SeqCst))
+    }
+
+    /// The connection of the link that sends them: shut when they are ended, now if they are.
+    fn hold(&self, stream: &UnixStream) {
+        let Some(ending) = &self.ended else {
+            return;
+        };
+        let Ok(stream) = stream.try_clone() else {
+            return;
+        };
+        let mut held = ending.stream.lock().unwrap();
+        match ending.ended.load(Ordering::SeqCst) {
+            true => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            false => *held = Some(stream),
+        }
     }
 
     /// Fails once the window is gone: nothing takes the updates any more.
@@ -422,6 +450,7 @@ fn follow(
     reads: &ProviderReads,
     aimed: u64,
 ) -> Result<()> {
+    updates.hold(&stream);
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     conn.asking = Some(seen.asking.clone());
     let last = seen.last_seq.load(Ordering::Relaxed);
