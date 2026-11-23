@@ -528,6 +528,41 @@ fn a_project_with_no_forge_nor_tracker_set_is_never_read() {
 }
 
 #[test]
+fn a_source_that_could_not_be_checked_keeps_its_items_and_says_they_could_not_be_refreshed() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    user.gh_script(json!({"pulls": {"acme/api": {"feature-1": pull(1, "x", "OPEN", OLD)}}}));
+    declare(&user, github(), json!(null));
+    refresh(&user);
+    let before = list(&user, json!({}));
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    // The service is down: gh's own check fails, which says nothing of who is signed in.
+    user.gh_script(json!({
+        "status_fail": "error connecting to api.github.com",
+        "pulls": {"acme/api": {"feature-1": pull(1, "x", "OPEN", OLD)}}
+    }));
+    advance(&user, 5 * 60_000 + 1000);
+    refresh(&user);
+
+    assert_eq!(list(&user, json!({})), before, "what was known stays");
+    let sources = user.call("items.list", json!({"project": "app"})).unwrap()["sources"].clone();
+    let github = sources
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["source"] == "github")
+        .unwrap();
+    let problem = github["problem"].as_str().unwrap();
+    assert!(problem.contains("could not be refreshed"), "{sources}");
+    assert!(
+        problem.contains("error connecting to api.github.com"),
+        "{sources}"
+    );
+    assert!(!problem.contains("not signed in"), "{sources}");
+}
+
+#[test]
 fn a_source_signed_out_backs_off_and_says_why_while_the_others_still_update() {
     let user = user();
     project(&user, "git@github.com:acme/api.git");

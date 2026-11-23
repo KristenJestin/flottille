@@ -389,6 +389,45 @@ fn gh_not_signed_in_is_said_and_nothing_else_is_asked_of_it() {
 }
 
 #[test]
+fn gh_that_cannot_be_checked_says_why_and_is_not_called_signed_out() {
+    let user = User::new().with_fake_gh();
+    fixture(&user);
+    user.gh_script(json!({
+        "status_fail": "error connecting to api.github.com\n  - Token: gho_inventedTokenOfATestOnly1234567890"
+    }));
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(problem.contains("gh could not be checked"), "{problem}");
+    assert!(
+        problem.contains("error connecting to api.github.com"),
+        "{problem}"
+    );
+    assert!(problem.contains("could not be refreshed"), "{problem}");
+    assert!(!problem.contains("not signed in"), "{problem}");
+    assert!(!problem.contains("gh auth login"), "{problem}");
+    assert!(!problem.contains("gho_inventedToken"), "{problem}");
+    assert_eq!(repository(&forge, "api")["pull_request"], Value::Null);
+}
+
+#[test]
+fn gh_that_does_not_answer_is_could_not_check_with_no_answer_in_n_seconds() {
+    let user = User::new()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_FORGE_TIMEOUT_MS", "300");
+    fixture(&user);
+    user.gh_script(json!({"delay_ms": 5000}));
+
+    let forge = forge(&user);
+
+    let problem = forge["problem"].as_str().expect("a problem is said");
+    assert!(problem.contains("gh could not be checked"), "{problem}");
+    assert!(problem.contains("no answer in 1 s"), "{problem}");
+    assert!(!problem.contains("not signed in"), "{problem}");
+}
+
+#[test]
 fn the_state_changes_when_gh_answers_differently_and_an_event_says_so() {
     let user = User::new()
         .with_fake_gh()

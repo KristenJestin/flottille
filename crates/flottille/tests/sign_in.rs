@@ -102,7 +102,7 @@ fn each_program_says_whether_it_is_signed_in() {
 
     let listed = list(&user);
 
-    // The agents first, then the forges and trackers, those the projects use first.
+    // The agents first, then the forges and trackers, always in the page's own order.
     let order: Vec<&str> = listed["programs"]
         .as_array()
         .unwrap()
@@ -111,7 +111,7 @@ fn each_program_says_whether_it_is_signed_in() {
         .collect();
     assert_eq!(
         order,
-        ["claude", "opencode", "codex", "acli", "gh", "glab", "bkt"]
+        ["claude", "opencode", "codex", "gh", "acli", "bkt", "glab"]
     );
 
     let gh = row(&listed, "gh");
@@ -524,4 +524,114 @@ fn a_list_asked_at_once_runs_each_status_once() {
         .filter(|line| line.contains(r#""args":["auth","status""#))
         .count();
     assert_eq!(statuses, 1);
+}
+
+/// The programs of the list, in the order it gives them.
+fn order(list: &Value) -> Vec<String> {
+    list["programs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["program"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_rows_keep_their_order_whatever_the_projects_use() {
+    let user = User::new().with_sign_in_programs(&["gh", "glab", "acli", "bkt"]);
+    let bare = order(&list(&user));
+    tracked(&user);
+    let with_a_tracker = order(&list(&user));
+
+    let page = ["claude", "opencode", "codex", "gh", "acli", "bkt", "glab"];
+    assert_eq!(bare, page);
+    assert_eq!(with_a_tracker, page);
+}
+
+#[test]
+fn a_cli_that_says_it_is_not_signed_in_shows_sign_in() {
+    let user = User::new().with_sign_in_programs(&["gh", "glab", "acli", "bkt"]);
+    for program in ["gh", "glab", "acli", "bkt"] {
+        user.sign_in_script(program, json!({"signed_in": false}));
+    }
+
+    let listed = list(&user);
+
+    for program in ["gh", "glab", "acli", "bkt"] {
+        let said = row(&listed, program);
+        assert_eq!(said["signed_in"], false, "{said}");
+        assert_eq!(said["problem"], Value::Null, "{said}");
+        assert_eq!(said["can_sign_in"], true, "{said}");
+    }
+}
+
+#[test]
+fn a_cli_that_cannot_reach_its_service_shows_could_not_check_with_its_reason() {
+    let user = User::new().with_sign_in_programs(&["gh", "glab", "acli", "bkt"]);
+    let said = [
+        ("gh", "error connecting to api.github.com"),
+        ("glab", "x gitlab.com: 502 Bad Gateway"),
+        ("acli", "✗ Error: Something went wrong"),
+        ("bkt", "Error: 503 Service Unavailable (api.bitbucket.org)"),
+    ];
+    for (program, why) in said {
+        // A token the command line printed with its error is never shown.
+        let failing = format!("{why}\n  - Token: {TOKEN}");
+        user.sign_in_script(program, json!({"status_fail": failing}));
+    }
+
+    let listed = list(&user);
+
+    for (program, why) in said {
+        let row = row(&listed, program);
+        assert_eq!(row["found"], true, "{row}");
+        assert_eq!(row["signed_in"], Value::Null, "{row}");
+        assert_eq!(row["problem"], why, "{row}");
+    }
+    assert!(!listed.to_string().contains(TOKEN), "{listed}");
+}
+
+#[test]
+fn a_check_that_hangs_is_could_not_check_with_no_answer_in_n_seconds() {
+    let user = User::new()
+        .with_sign_in_programs(&["gh", "acli"])
+        .with_env("FLOTTILLE_FORGE_TIMEOUT_MS", "300");
+    user.sign_in_script("gh", json!({"delay_ms": 5000}));
+    user.sign_in_script("acli", json!({"delay_ms": 5000}));
+
+    let listed = list(&user);
+
+    for program in ["gh", "acli"] {
+        let row = row(&listed, program);
+        assert_eq!(row["signed_in"], Value::Null, "{row}");
+        assert_eq!(row["problem"], "no answer in 1 s", "{row}");
+    }
+}
+
+#[test]
+fn a_list_asked_without_its_checks_runs_none_and_a_row_asked_alone_is_checked() {
+    let user = User::new().with_sign_in_programs(&["gh", "acli"]);
+    user.sign_in_script("gh", json!({"user": {"login": "octocat"}}));
+
+    let unchecked = user.call("signin.list", json!({"checked": false})).unwrap();
+
+    assert_eq!(
+        order(&unchecked),
+        ["claude", "opencode", "codex", "gh", "acli", "bkt", "glab"]
+    );
+    for said in unchecked["programs"].as_array().unwrap() {
+        assert_eq!(said["checking"], true, "{said}");
+        assert_eq!(said["signed_in"], Value::Null, "{said}");
+    }
+    assert!(
+        !user.path("sign-in-gh/received.jsonl").exists(),
+        "no check was run"
+    );
+
+    let alone = user.call("signin.list", json!({"program": "gh"})).unwrap();
+
+    assert_eq!(order(&alone), ["gh"]);
+    let gh = row(&alone, "gh");
+    assert_eq!(gh["checking"], false, "{gh}");
+    assert_eq!(gh["signed_in"], true, "{gh}");
 }

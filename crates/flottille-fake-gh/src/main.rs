@@ -21,7 +21,9 @@
 //!  "fail": {"acme/api": "HTTP 502: Bad Gateway"}}
 //! ```
 //!
-//! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
+//! `signed_in: false` makes `gh auth status` end with 1, saying it is not logged in; `status_fail`
+//! (`"error connecting to api.github.com"`) makes it end with 1 saying that text, as a check that
+//! could not reach the service does (#1315). `pulls` gives, by repository and branch,
 //! the object `gh pr view --json` answers (`gh pr list --json` answers the fields it asks that the
 //! object has); a branch with none has no pull request. `fail` makes every `pr` call on that
 //! repository end with 1, saying its text. `issues` gives, by repository and number, the object
@@ -213,6 +215,10 @@ fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
     let code = match words.as_slice() {
         ["auth", "status", ..] => {
             wait(script);
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!("{why}");
+                return Some(1);
+            }
             if !sign_in::signed_in(dir, script) {
                 eprintln!(
                     "You are not logged into any GitHub hosts. To log in, run: gh auth login"
