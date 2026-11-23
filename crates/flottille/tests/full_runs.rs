@@ -3,8 +3,10 @@
 //! the display, the sign-ins), nothing held back; out of Full, the next run is confined again and
 //! the agent is told; and a session is told where its project's pull requests and tickets are.
 //! The agents are the fake ACP agent, in throwaway repositories and temporary XDG folders, with
-//! the test's own session bus and SSH agent. Only `ssh` is the machine's: real, given a temporary
-//! home with an empty `~/.ssh`, its exit status alone read.
+//! the test's own session bus and SSH agent, and nothing of the developer's environment. Only
+//! `ssh` is the machine's, the program alone: real, always given `-F` a configuration of the test's
+//! own, since `ssh` reads `~/.ssh/config` from the account's home in the password database, not
+//! from `$HOME`, which would be the developer's own. Its exit status alone is read.
 
 use crate::common;
 
@@ -86,6 +88,23 @@ fn empty_ssh_folder(user: &User) {
         .unwrap();
 }
 
+/// The test's own `ssh` configuration, to give `ssh` with `-F`: the account's real one is never
+/// read. The machine's `/etc/ssh/ssh_config` is skipped as `-F` says.
+fn ssh_config(user: &User) -> PathBuf {
+    let config = user.path("ssh_config");
+    std::fs::write(&config, "Host *\n\tUser test\n\tBatchMode yes\n").unwrap();
+    config
+}
+
+/// A user whose daemon, and so every run in Full, has the test's own environment alone: the fake
+/// agent, an allowing judge, and what the harness sets, none of the developer's (forge tokens,
+/// compositor sockets, sign-ins).
+fn full_user() -> User {
+    User::with_fake_agent()
+        .with_allowing_judge()
+        .with_clean_environment()
+}
+
 /// Python code, run by the agent as one line, that exits 0 when `condition` holds and prints
 /// nothing of what it read.
 fn python(code: &str) -> String {
@@ -112,22 +131,24 @@ fn reads(path: &Path) -> String {
 }
 
 #[test]
-fn a_run_in_full_reads_the_root_owned_ssh_config_with_the_real_ssh() {
+fn a_run_in_full_runs_the_real_ssh_on_a_configuration_of_the_test_s_own() {
     let Some(ssh) = real_ssh() else {
         eprintln!("skipped: this machine has no ssh");
         return;
     };
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     empty_ssh_folder(&user);
+    let config = ssh_config(&user);
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "full");
 
     // `ssh` itself is a launcher the gate refuses in every mode: a program the agent runs calls it,
     // as git does. Its output is never read, only its end.
     let line = python(&format!(
-        "import subprocess, sys; sys.exit(subprocess.run(['{}', '-G', 'example.invalid'], \
-         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)",
-        ssh.display()
+        "import subprocess, sys; sys.exit(subprocess.run(['{}', '-F', '{}', '-G', \
+         'example.invalid'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)",
+        ssh.display(),
+        config.display()
     ));
     let (zero, ran) = exits_zero(&mcp, &line);
 
@@ -142,8 +163,7 @@ fn a_run_in_full_has_the_daemon_s_ssh_agent_and_display() {
         .unwrap();
     let agent = socket.path().join("agent.sock");
     let _listening = std::os::unix::net::UnixListener::bind(&agent).unwrap();
-    let user = User::with_fake_agent()
-        .with_allowing_judge()
+    let user = full_user()
         .with_env("SSH_AUTH_SOCK", agent.to_str().unwrap())
         .with_env("WAYLAND_DISPLAY", "wayland-test")
         .with_env("DISPLAY", ":99");
@@ -168,7 +188,7 @@ fn a_run_in_full_has_the_daemon_s_ssh_agent_and_display() {
 
 #[test]
 fn a_run_in_full_is_held_back_from_nothing_flottille_s_folders_included() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "full");
     // A connection's vault socket, a bridge's MCP configuration with its (invented) token,
@@ -195,7 +215,7 @@ fn a_run_in_full_is_held_back_from_nothing_flottille_s_folders_included() {
 fn a_run_in_full_does_what_the_user_s_terminal_does() {
     // Flottille's state in the home, where it is on a machine: the folders on the way to it
     // (`~`, `~/.local`) are the user's as any other.
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     let home = user.path("home");
     std::fs::create_dir_all(&home).unwrap();
     let state = home.join(".local/state");
@@ -247,8 +267,7 @@ fn in_full_the_bus_and_ssh_agent_a_run_gets_are_the_test_s_own() {
         .unwrap();
     let agent = socket.path().join("agent.sock");
     let _listening = std::os::unix::net::UnixListener::bind(&agent).unwrap();
-    let user = User::with_fake_agent()
-        .with_allowing_judge()
+    let user = full_user()
         .with_fake_launchers()
         .with_env("SSH_AUTH_SOCK", agent.to_str().unwrap());
     let (id, mcp) = session(&user);
@@ -279,9 +298,7 @@ fn a_run_in_auto_is_still_confined() {
         .unwrap();
     let agent = socket.path().join("agent.sock");
     let _listening = std::os::unix::net::UnixListener::bind(&agent).unwrap();
-    let user = User::with_fake_agent()
-        .with_allowing_judge()
-        .with_env("SSH_AUTH_SOCK", agent.to_str().unwrap());
+    let user = full_user().with_env("SSH_AUTH_SOCK", agent.to_str().unwrap());
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "auto");
 
@@ -293,7 +310,7 @@ fn a_run_in_auto_is_still_confined() {
 
 #[test]
 fn leaving_full_confines_the_next_run() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "full");
     let (bus, ran) = exits_zero(&mcp, "printenv DBUS_SESSION_BUS_ADDRESS");
@@ -318,7 +335,7 @@ fn delivered(user: &User, id: &str, kind: &str) -> Vec<String> {
 
 #[test]
 fn leaving_full_tells_the_agent_its_commands_are_confined_again() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     let (id, _mcp) = session(&user);
     set_mode(&user, &id, "full");
     eventually("the delivery of the switch to Full", || {
@@ -341,13 +358,89 @@ fn leaving_full_tells_the_agent_its_commands_are_confined_again() {
 }
 
 #[test]
+fn leaving_full_tells_a_child_and_not_an_agent_that_ended() {
+    let user = full_user();
+    let (id, mcp) = session(&user);
+    let launch = |title: &str| {
+        let text = done(mcp.call(
+            "agent_launch",
+            json!({"kind": "child", "title": title, "brief": "do it"}),
+        ));
+        text.split(|c: char| !c.is_ascii_alphanumeric())
+            .find(|word| word.len() == 12 && word.chars().all(|c| c.is_ascii_hexdigit()))
+            .unwrap_or_else(|| panic!("no agent id in {text}"))
+            .to_owned()
+    };
+    let child = launch("stays");
+    let gone = launch("goes");
+    done(mcp.call("agent_stop", json!({"agent_id": gone})));
+    eventually("the end of the second child", || {
+        let shown = user.call("agent.show", json!({"agent": gone})).unwrap();
+        shown["agent"]["state"] == "ended"
+    });
+
+    set_mode(&user, &id, "full");
+    eventually("the child's delivery of the switch to Full", || {
+        delivered(&user, &child, "mode").len() == 1
+    });
+    set_mode(&user, &id, "auto");
+
+    eventually("the child's delivery of the switch out of Full", || {
+        delivered(&user, &child, "mode")
+            .iter()
+            .any(|body| body.contains("confined again"))
+    });
+    assert!(delivered(&user, &gone, "mode").is_empty());
+}
+
+#[test]
+fn the_newest_mode_delivery_replaces_the_older_ones_the_agent_has_not_read() {
+    let user = full_user();
+    let (id, _mcp) = session(&user);
+
+    // Full, Auto, Full, Auto before the agent's next turn: it is told once, the last.
+    for mode in ["full", "auto", "full", "auto"] {
+        set_mode(&user, &id, mode);
+    }
+
+    eventually("the last delivery", || {
+        delivered(&user, &id, "mode")
+            .iter()
+            .any(|body| body.contains("confined again"))
+    });
+    let told = delivered(&user, &id, "mode");
+    assert_eq!(told.len(), 1, "{told:?}");
+}
+
+#[test]
+fn a_run_in_full_inherits_only_the_test_s_environment() {
+    let user = full_user();
+    let (id, mcp) = session(&user);
+    set_mode(&user, &id, "full");
+
+    // Names alone, never a value: a developer's, or a runner's, forge token, compositor socket
+    // or sign-in is not one of the test's own.
+    let none = python(
+        "import os, sys; names = ['GITHUB_ACTIONS', 'GITHUB_TOKEN', 'GH_TOKEN', 'GITLAB_TOKEN',          'CI', 'HYPRLAND_INSTANCE_SIGNATURE', 'SWAYSOCK', 'NIRI_SOCKET', 'WAYLAND_DISPLAY',          'RUNNER_OS', 'CARGO_HOME']; sys.exit(1 if any(n in os.environ for n in names) else 0)",
+    );
+    let (clean, ran) = exits_zero(&mcp, &none);
+    assert!(
+        clean,
+        "a variable of the developer's reached the run: {ran}"
+    );
+}
+
+#[test]
 fn in_full_a_push_over_ssh_reaches_the_network_though_the_git_settings_changed() {
-    if real_ssh().is_none() {
+    let Some(ssh) = real_ssh() else {
         eprintln!("skipped: this machine has no ssh");
         return;
-    }
-    let user = User::with_fake_agent().with_allowing_judge();
+    };
+    let user = full_user();
     empty_ssh_folder(&user);
+    // The user's own `ssh` command, on a configuration of the test's own: git runs `ssh` as the
+    // terminal would, which reads the account's `~/.ssh/config`, the developer's.
+    let command = format!("{} -F {}", ssh.display(), ssh_config(&user).display());
     std::fs::write(
         user.path("home/.gitconfig"),
         "[user]\n\tname = Test\n\temail = test@example.com\n",
@@ -355,7 +448,9 @@ fn in_full_a_push_over_ssh_reaches_the_network_though_the_git_settings_changed()
     .unwrap();
     // The user's own settings, which the daemon finds at its start: the harness gives none.
     let settings = user.path("home/.gitconfig");
-    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let user = user
+        .with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap())
+        .with_env("GIT_SSH_COMMAND", &command);
     let (id, mcp) = session(&user);
     set_mode(&user, &id, "full");
     user.git(
@@ -431,7 +526,7 @@ fn says_the_map(text: &str) {
 
 #[test]
 fn a_session_in_full_is_told_where_its_pull_requests_and_tickets_are() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     shop(&user);
 
     // At its start: in the part of its instructions that is the session's.
@@ -478,7 +573,7 @@ fn a_session_in_full_is_told_where_its_pull_requests_and_tickets_are() {
 
 #[test]
 fn the_map_of_a_project_of_several_repositories_names_each_one_s_folder() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = full_user();
     let folder = user.path("work/suite");
     for repository in ["api", "web"] {
         let at = folder.join(repository);

@@ -2661,6 +2661,23 @@ fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
 }
 
 #[test]
+fn an_include_made_after_the_daemon_s_start_gives_a_lifted_push_none_of_its_settings() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    // The user's settings include a file that is not there yet (a machine-local one, made by a
+    // later `gh auth setup-git`, a dotfiles update, or a run in Full).
+    let later = user.path("home/later.gitconfig");
+    let user = user_settings(user, &format!("[include]\n\tpath = {}\n", later.display()));
+    let mcp = session(&user, &url);
+    // After the start: a proxy nobody listens on, which a push given it could not get through.
+    std::fs::write(&later, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/included-late");
+
+    assert!(remote_has(&user, "included-late"), "{}", pushed.text);
+}
+
+#[test]
 fn a_decoy_remote_gets_no_forge_helper_asked_for_another_host() {
     let (user, _agent, _bus) = user();
     let (_server, url) = http_remote(&user);
