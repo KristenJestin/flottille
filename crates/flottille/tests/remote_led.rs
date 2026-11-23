@@ -218,7 +218,7 @@ fn the_answer_of_a_led_launch_on_another_machine_says_it_wakes_its_pilot() {
 #[test]
 fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
     // No judge on server: each launch is held for its user.
-    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("auto");
 
