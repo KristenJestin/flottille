@@ -107,6 +107,8 @@ fn read(daemon: &Daemon, asked: Read) -> Result<Value, Failure> {
     };
     let changed = daemon.read(|store| store.read_notifications(which, now_ms()))?;
     changed_event(daemon, &changed, false, "read");
+    // What the phones were told of it is dismissed.
+    crate::phone::check(daemon);
     Ok(json!({"read": changed}))
 }
 
@@ -222,6 +224,7 @@ pub fn keep(daemon: &Arc<Daemon>) {
     changed.sort_unstable();
     changed.dedup();
     changed_event(daemon, &changed, pruned, "kept");
+    crate::phone::check(daemon);
 }
 
 /// The rows of what waits for the user from before the cursor: a request still held for them,
