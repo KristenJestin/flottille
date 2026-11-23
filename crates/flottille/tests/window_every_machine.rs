@@ -57,6 +57,8 @@ struct Relay {
     cut: Arc<Mutex<Vec<&'static str>>>,
     /// The methods this machine's daemon is asked under a name it does not know: it refuses them.
     refuse: Arc<Mutex<Vec<&'static str>>>,
+    /// The links to the server that follow it as a window (a copy's) and are still open.
+    watching: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -83,6 +85,14 @@ impl Relay {
     }
 
     fn carry(&self, window: &UnixStream, daemon: &UnixStream) {
+        let mut watching = false;
+        self.carry_counted(window, daemon, &mut watching);
+        if watching {
+            self.watching.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn carry_counted(&self, window: &UnixStream, daemon: &UnixStream, watching: &mut bool) {
         let mut lines = BufReader::new(window);
         let mut line = String::new();
         loop {
@@ -108,6 +118,10 @@ impl Relay {
                     .as_str()
                     .and_then(|params| serde_json::from_str(params).ok())
                     .unwrap_or_default();
+                if method == "events.watch" && params["client"] == "window" && !*watching {
+                    *watching = true;
+                    self.watching.fetch_add(1, Ordering::SeqCst);
+                }
                 let cut = self.cut.lock().unwrap().contains(&method.as_str());
                 self.asked.lock().unwrap().push((method, params));
                 if cut {
@@ -1681,5 +1695,32 @@ fn a_read_asked_by_the_server_s_answer_after_its_page_was_left_goes_to_the_serve
             .unwrap()
             .iter()
             .any(|(method, _)| method == "vault.list")
+    });
+}
+
+#[gpui_kit::test]
+fn the_link_of_a_copy_ends_once_its_page_is_left(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
+    });
+    until(
+        &shell,
+        cx,
+        "the server's page of harbor follows the server",
+        |cx| {
+            shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+                && relay.watching.load(Ordering::SeqCst) == 1
+        },
+    );
+    settle(&shell, cx);
+
+    // Nothing happens on the server meanwhile: the link ends all the same.
+    click(cx, session_id(&here));
+    until(&shell, cx, "the copy's link ended", |cx| {
+        let _ = cx;
+        relay.watching.load(Ordering::SeqCst) == 0
     });
 }
