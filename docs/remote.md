@@ -1812,9 +1812,11 @@ on a real phone, by hand, and reported.
 - A machine's list holds 500 sessions at most (those of the latest exchange), a title 200
   characters at most; it is told again on any event of a session but what an agent streams during
   a turn, and every 30 seconds while a link is up when it changed.
-- A session's state in a list is `needs you` while its root waits for an answer or a request of
-  its tree is held for the user (a launch held there among them), `running` while a turn runs in
-  its tree, `idle` otherwise.
+- A session's state in a list is `needs you` on the rule its own window follows (`agent.trees`'
+  `needs_user`): while its root waits for the user's answer (not its pilot's: a question that
+  went to the pilot is the pilot's to answer), a request of its tree is held for the user (a
+  launch held there among them; not one its parent or the judge holds), or an agent of its tree
+  asked for a vault entry; `running` while a turn runs in its tree, `idle` otherwise.
 - Opening a session of another machine brings that machine in front: the project pages, the
   "Ended" group, the bell and a new session are that machine's while it is; opening a session of
   this machine brings this one back. A project of another machine only is a group of the list
@@ -2367,7 +2369,8 @@ on a real phone, by hand, and reported.
   whose caller ended: an old launch is never read again. A launch held for the user there is
   `needs you` from the moment it is held, drawn with the request's mark, until the user's answer
   there comes back: allowed, it shows what its machine lists, or `running` until its first
-  delivery; refused, it leaves its pilot's rows.
+  delivery; refused, it leaves its pilot's rows. While it is held, a list that says `idle` (a
+  machine of before, which did not list a held launch as `needs you`) does not take it back.
 - Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
   those sessions, so a project's page, search, a session's page and the inbox do not list them,
   and nothing offers to end them from here.
@@ -2415,6 +2418,10 @@ on a real phone, by hand, and reported.
   cards and the controls. Full asks for a confirmation on the phone (the window has none: a tap in a pocket is not a click). A shared picture asks the
   user to pick the session in the list (a banner, with Discard) rather than a picker of its own. The
   answered card folds 2.5 s after a refusal, long enough to be read.
+- **A held launch an older machine lists `idle` still needs you** (#1333): a machine of before
+  lists a launch held for its user `idle`, as it lists nothing it holds; while the launch is
+  `held` here, that `idle` is not taken over the request's mark. Any other state that machine
+  lists wins, so an allowed launch shows what it does as soon as its list says so.
 
 ## Open questions
 
