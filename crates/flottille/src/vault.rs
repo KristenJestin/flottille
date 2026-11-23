@@ -1255,6 +1255,12 @@ struct Asks {
     open: Vec<Ask>,
 }
 
+/// The agents whose ask for a vault entry waits for the user (`vault.asks`): each session of
+/// theirs needs the user, as the window says it.
+pub(crate) fn asking(store: &Store) -> flottille_core::Result<Vec<String>> {
+    Ok(asks(store)?.open.into_iter().map(|ask| ask.agent).collect())
+}
+
 fn asks(store: &Store) -> flottille_core::Result<Asks> {
     let events = store.events_named(
         &["vault.asked", "vault.ask_joined", "vault.ask_answered"],

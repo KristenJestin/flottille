@@ -1145,7 +1145,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   page, and one with no session is not in the sidebar. A session is titled by the title its agent
   gives it in its first turn (`session_title`, 3 to 8 words, `docs/tools.md`, "The session's
   title") or the user gives it (`Rename…` in its row's "⋯" menu and its header, a dialog with a
-  labelled field; the user's title always wins), and until then by the first line of
+  labelled field; the user's title always wins), a session an agent of another machine or an
+  extension launched by that launch's title (not one an agent of this machine launched, nor one
+  detached from it since), and until then by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
   is `agent <id>` until a later message of the user does); a new title fades in over the old one in
   the row and the header; a session an agent started says it in
