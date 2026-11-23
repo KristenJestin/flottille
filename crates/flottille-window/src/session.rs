@@ -2219,7 +2219,12 @@ impl Render for SessionPage {
                 cx,
             ))
             .child({
-                let (shell, id) = (self.shell.clone(), self.opened.id.clone());
+                // Another machine's session is known in the window by its row.
+                let id = match &self.machine {
+                    Some(machine) => crate::model::elsewhere_id(machine, &self.opened.id),
+                    None => self.opened.id.clone(),
+                };
+                let shell = self.shell.clone();
                 Button::icon("session-rename", Icon::Edit, "Rename the session").on_click(
                     move |_, window, cx| {
                         shell

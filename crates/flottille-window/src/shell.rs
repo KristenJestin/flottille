@@ -1639,14 +1639,17 @@ impl Shell {
     }
 
     /// "Rename…" in a session's row or header: the dialog, its field holding the title it has.
-    pub fn rename_of(&mut self, session: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(title) = self.snapshot.session(session).map(|s| s.title.clone()) else {
+    pub fn rename_of(&mut self, row: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.snapshot.session(row).or(self.snapshot.elsewhere(row));
+        let Some(title) = found.map(|s| s.title.clone()) else {
             return;
         };
-        // A row of this machine's: renamed there, whichever machine's page is shown.
-        let asks = self.actions_of(None);
+        // Renamed on the row's machine, under its id there, whichever machine's page is shown.
+        let machine = self.machine_of(&Selection::Session(row.to_owned()), cx);
+        self.ensure_pages(machine.as_deref(), window, cx);
+        let (agent, asks) = (self.agent_of(row), self.actions_of(machine.as_deref()));
         self.rename
-            .update(cx, |form, cx| form.open(session, &title, asks, window, cx));
+            .update(cx, |form, cx| form.open(&agent, &title, asks, window, cx));
     }
 
     /// The dialog that makes a group of projects.
@@ -2194,19 +2197,18 @@ impl Shell {
             Some(reply) => reply.clone(),
             None => {
                 let (shell, project) = (this.clone(), opened.project.clone());
-                let (session, asks) = (agent.clone(), asks.clone());
+                let (session, its) = (agent.clone(), asks.clone());
                 let extensions = self.extensions.downgrade();
                 let reply = cx.new(|cx| {
-                    Reply::new(shell, asks, session, project, window, cx)
-                        .with_extensions(extensions)
+                    Reply::new(shell, its, session, project, window, cx).with_extensions(extensions)
                 });
                 self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
                     let session = reply.read(cx).session().to_owned();
                     shell.say_draft(&session, cx);
                 }));
                 self.replies.insert(id.clone(), reply.clone());
-                // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
-                self.actions.send(Command::DraftRead {
+                // What its machine keeps of its draft comes back as an `Outcome::Draft`.
+                asks.send(Command::DraftRead {
                     key: DraftKey::Session(agent.clone()),
                 });
                 reply
@@ -2260,6 +2262,15 @@ impl Shell {
             .and_then(|session| session.elsewhere.as_ref())
             .filter(|there| !there.here)
             .map_or_else(|| id.to_owned(), |there| there.agent.clone())
+    }
+
+    /// The row of the session `agent` an answer names: another machine's answers name its own
+    /// id there, and its composer is kept under its row's (#1271).
+    fn row_answered(&self, agent: &str) -> String {
+        match &self.answering {
+            Some(machine) => crate::model::elsewhere_id(machine, agent),
+            None => agent.to_owned(),
+        }
     }
 
     /// The actions of the pages of `machine` (`None`: this one), wherever they wait: what a page
@@ -2998,7 +3009,7 @@ impl Shell {
                 key,
                 answer,
             } => {
-                if let Some(reply) = self.replies.get(&session).cloned() {
+                if let Some(reply) = self.replies.get(&self.row_answered(&session)).cloned() {
                     reply.update(cx, |reply, cx| reply.replied(key, answer, cx));
                 }
             }
@@ -3023,7 +3034,8 @@ impl Shell {
                 }
                 match taken {
                     Ok((text, pictures)) if edit => {
-                        if let Some(reply) = self.replies.get(&session).cloned() {
+                        if let Some(reply) = self.replies.get(&self.row_answered(&session)).cloned()
+                        {
                             reply
                                 .update(cx, |reply, cx| reply.restore(&text, pictures, window, cx));
                         }
@@ -3125,18 +3137,18 @@ impl Shell {
                 }
             }
             Outcome::QuotaResumed { session, refused } => {
-                if let Some(reply) = self.replies.get(&session) {
+                if let Some(reply) = self.replies.get(&self.row_answered(&session)) {
                     reply.update(cx, |reply, cx| reply.quota_answered(refused, cx));
                 }
             }
             Outcome::ModeSet { session, refused } => {
-                if let Some(reply) = self.replies.get(&session) {
+                if let Some(reply) = self.replies.get(&self.row_answered(&session)) {
                     let mode = reply.read(cx).mode.clone();
                     mode.update(cx, |mode, cx| mode.answered(refused, cx));
                 }
             }
             Outcome::OptionsSet { session, refused } => {
-                if let Some(reply) = self.replies.get(&session) {
+                if let Some(reply) = self.replies.get(&self.row_answered(&session)) {
                     let options = reply.read(cx).options().clone();
                     options.update(cx, |options, cx| options.answered(refused, cx));
                 }
@@ -3169,7 +3181,7 @@ impl Shell {
                 }
             }
             Outcome::Interrupted { session, refused } => {
-                if let Some(reply) = self.replies.get(&session).cloned() {
+                if let Some(reply) = self.replies.get(&self.row_answered(&session)).cloned() {
                     reply.update(cx, |reply, cx| reply.interrupted(refused, cx));
                 }
             }
@@ -3589,7 +3601,7 @@ impl Shell {
             // asked again.
             Outcome::Draft { key, found } => match key {
                 DraftKey::Session(id) => {
-                    if let Some(reply) = self.replies.get(&id).cloned() {
+                    if let Some(reply) = self.replies.get(&self.row_answered(&id)).cloned() {
                         match found {
                             Ok(found) => {
                                 reply.update(cx, |reply, cx| reply.draft_read(found, window, cx))
@@ -3613,7 +3625,7 @@ impl Shell {
             },
             Outcome::DraftWritten { key, result } => match key {
                 DraftKey::Session(id) => {
-                    if let Some(reply) = self.replies.get(&id).cloned() {
+                    if let Some(reply) = self.replies.get(&self.row_answered(&id)).cloned() {
                         reply.update(cx, |reply, cx| reply.draft_written(result, cx));
                     }
                 }
