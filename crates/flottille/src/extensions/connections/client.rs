@@ -607,9 +607,23 @@ async fn start_with(
                 .map_err(|error| error.to_string())?;
             // The adapter's server gets its vault's folder, which its browser's plugin reaches.
             let mut vault = None;
+            // And its browser's network, where it can be made.
+            let mut network = None;
             let options = match adapter {
                 Some(_) => {
                     let own = vault.insert(vault_of(daemon, &declaration.name)?);
+                    if let Some(program) = super::adapters::command_line(declaration) {
+                        // Without one it runs as before, its browser in the runs' network, and
+                        // login refuses: the gap is said (`flottille doctor`, the review).
+                        match super::adapters::network(daemon, &program, &folder, own).await {
+                            Ok(made) => network = Some(made),
+                            Err(why) => eprintln!(
+                                "flottille daemon: connection {}: its browser runs in the runs' \
+                                 network, and its login refuses to fill: {why}",
+                                declaration.name
+                            ),
+                        }
+                    }
                     (display, headless) =
                         super::adapters::shown(daemon, declaration, &declaration.name);
                     if let Some(browser) =
@@ -652,6 +666,9 @@ async fn start_with(
                 .into_iter()
                 .chain(vault.as_ref())
                 .collect();
+            if let Some(network) = &network {
+                network.entered(&mut command);
+            }
             let mut child = crate::children::spawn(crate::landlock::confined_given(
                 crate::children::in_own_session(&mut command),
                 &reached,
@@ -1006,7 +1023,9 @@ pub async fn vault_removed(daemon: &Arc<Daemon>, name: &str) {
     // Under the turn: no login nor start of a server of its name makes anything there meanwhile.
     let _turn = server.turn.lock().await;
     server.vault.lock().unwrap().take();
-    let _ = std::fs::remove_dir_all(daemon.paths.runtime.join("vault").join(name));
+    let vault = daemon.paths.runtime.join("vault").join(name);
+    super::network::ended(&vault);
+    let _ = std::fs::remove_dir_all(vault);
 }
 
 /// The browser the server or a login of it started, closed: the next start applies the switch.

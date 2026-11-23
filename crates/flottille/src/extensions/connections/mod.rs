@@ -9,6 +9,7 @@ mod adapters;
 mod bounded;
 mod client;
 pub mod command;
+pub mod network;
 mod oauth;
 pub mod requests;
 mod schema;

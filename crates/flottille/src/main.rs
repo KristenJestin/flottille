@@ -282,6 +282,10 @@ enum Command {
     /// daemon set: what it holds, as JSON
     #[command(name = "read-page", hide = true)]
     ReadPage { kind: String, url: String },
+    /// Hold the network namespace of a connection's browser, which the daemon started it in,
+    /// until the daemon ends it
+    #[command(name = "browser-network", hide = true)]
+    BrowserNetwork,
     /// Open the window: your projects, where their work happens, their sessions, and what waits
     /// for you
     Window {
@@ -454,6 +458,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             action: VaultAction::Provide { .. },
         } => Some("vault provide"),
         Command::ReadPage { .. } => Some("read-page"),
+        Command::BrowserNetwork => Some("browser-network"),
         _ => None,
     };
     let flagged = cli.machine.clone().filter(|name| !name.is_empty());
@@ -477,6 +482,10 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             "flottille {command} is this machine's own: it drives no other (leave out --machine)"
         )
         .into());
+    }
+    // Started by the daemon with no environment, in the namespace it holds.
+    if let Command::BrowserNetwork = &cli.command {
+        extensions::browser_network();
     }
     // The page's reader runs with no environment: it needs no folder of Flottille's.
     if let Command::ReadPage { kind, url } = &cli.command {
@@ -678,6 +687,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             agent: BridgeAgent::Codex,
         } => return codex_bridge::run(&paths),
         Command::ReadPage { .. } => unreachable!("the page's reader returns before the paths"),
+        Command::BrowserNetwork => unreachable!("the namespace's holder never returns"),
         Command::Window { open } => {
             // One window: a second command brings the open one to the front and leaves. When
             // that cannot be told (no runtime folder to hold the place), another window is

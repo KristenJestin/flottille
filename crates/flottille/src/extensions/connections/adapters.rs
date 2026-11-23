@@ -23,6 +23,7 @@ use flottille_core::vault::{self as uses, use_said};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
+use super::network::{self, Network};
 use super::{Declaration, Listing, Reach};
 use crate::daemon::Daemon;
 use crate::mcp::{Grant, Outcome};
@@ -297,6 +298,14 @@ impl Adapter {
             "login loads the entry's own URL itself, then agent-browser fills the form only while \
              the page is of that URL's origin, and the vault gives the secret only for a page of \
              the entry's host; the browser itself goes wherever the agent takes it"
+                .to_owned(),
+        );
+        said.push(
+            "its server, its login and its browser run in a network of their own, through \
+             passt's pasta, where no run reaches Chrome's DevTools, and the browser still reaches \
+             the internet and this machine's local servers; without pasta, or where the kernel \
+             refuses user namespaces, the browser runs in the runs' network and login refuses \
+             to fill"
                 .to_owned(),
         );
         if headed {
@@ -673,33 +682,99 @@ pub fn browser(
 /// whichever of the server and a login started it: it outlives both, in the display folder and
 /// the mode it started with, and the next start must apply the user's switch.
 pub async fn close(daemon: &Daemon, browser: &Browser) {
+    // In the browser's network, as every command of agent-browser's: one that found no browser
+    // would start one where it runs. Without one, as it started.
+    let network = match network::found(browser.vault.path()) {
+        Some(network) => Some(network),
+        None => network::made(browser.vault.path()).await.ok(),
+    };
+    closed_in(
+        daemon,
+        &browser.program,
+        &browser.folder,
+        &browser.vault,
+        network.as_ref(),
+        false,
+    )
+    .await;
+    // Nothing of the browser's runs in it any more.
+    network::ended(browser.vault.path());
+}
+
+/// The network of the browser of the vault folder `vault`, found or made, for a command of
+/// agent-browser's (`program`, run in `folder`) to start in: why not where none can be made. A
+/// browser that answers on the socket folder from outside it (started by a server that ran
+/// without one, or in one whose holder was killed) is closed first: a login would fill it, and a
+/// call of the server's would use it.
+pub async fn network(
+    daemon: &Daemon,
+    program: &[String],
+    folder: &Path,
+    vault: &crate::display::Folder,
+) -> Result<Network, String> {
+    let network = match network::found(vault.path()) {
+        Some(network) => network,
+        None => {
+            network::available()?;
+            network::made(vault.path()).await?
+        }
+    };
+    if !outside(&network, vault).is_empty() {
+        closed_in(daemon, program, folder, vault, Some(&network), true).await;
+    }
+    Ok(network)
+}
+
+/// The browsers that answer on the socket folder of `vault` and do not run in `network`.
+fn outside(network: &Network, vault: &crate::display::Folder) -> Vec<u32> {
+    sockets_in(vault.path())
+        .map(|sockets| network::daemons(&sockets))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pid| !network.holds(*pid))
+        .collect()
+}
+
+/// `agent-browser close` (`--all` its sessions when `all`), in `network` when there is one.
+async fn closed_in(
+    daemon: &Daemon,
+    program: &[String],
+    folder: &Path,
+    vault: &crate::display::Folder,
+    network: Option<&Network>,
+    all: bool,
+) {
     let Ok(mut env) = crate::runs::beside(daemon) else {
         return;
     };
-    if display(&mut env, None, &browser.vault).is_err() {
+    if display(&mut env, None, vault).is_err() {
         return;
     }
-    let mut command = tokio::process::Command::new(&browser.program[0]);
+    let mut command = tokio::process::Command::new(&program[0]);
     command
-        .args(&browser.program[1..])
+        .args(&program[1..])
         .arg("close")
+        .args(all.then_some("--all"))
         .env_clear()
         .envs(&env)
-        .current_dir(&browser.folder)
+        .current_dir(folder)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    if let Some(network) = network {
+        network.entered(&mut command);
+    }
     // Its socket is in the vault folder, which it must reach.
     let mut child = match crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
-        &[&browser.vault],
+        &[vault],
     )) {
         Ok(child) => child,
         Err(error) => {
             eprintln!(
                 "flottille daemon: cannot close the browser of {}: {error}",
-                browser.folder.display()
+                folder.display()
             );
             return;
         }
@@ -830,12 +905,32 @@ pub async fn perform(
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
+        // Never in a browser any run reaches: its DevTools, with no token, reads the password
+        // filled and every cookie.
+        let made = match super::client::vault_of(daemon, name) {
+            Ok(vault) => network(daemon, &program, &folder(daemon, name), &vault).await,
+            Err(why) => Err(why),
+        };
+        let network = match made {
+            Ok(network) => network,
+            Err(why) => return Outcome::Refused(format!("refused: {}", isolation_refused(&why))),
+        };
         let login = Login {
             connection: name.clone(),
             entry: entry_of.name.clone(),
             project: grant.place.project.clone(),
         };
-        match run(daemon, declaration, &program, &login, &url, served).await {
+        match run(
+            daemon,
+            declaration,
+            &program,
+            &login,
+            &url,
+            served,
+            &network,
+        )
+        .await
+        {
             Ok(said) => Outcome::Done(format!(
                 "Signed in with the vault entry {entry}: agent-browser typed its username and \
                  secret into the page's login form; the secret never reaches you. What \
@@ -856,6 +951,16 @@ pub async fn perform(
         }
     })
     .await
+}
+
+/// Why login is refused when the browser cannot run in a network of its own: `why` it cannot.
+fn isolation_refused(why: &str) -> String {
+    format!(
+        "login fills a password only into a browser that runs in a network of its own, where no \
+         run reaches its DevTools, and none can be made here: {why}. The user may {}; the rest of \
+         the browser works meanwhile",
+        network::INSTALL
+    )
 }
 
 /// Whether login may still run under the connection's turn, with the pin it has then: the
@@ -880,7 +985,7 @@ fn web_address(text: &str) -> Option<String> {
 
 /// The words of agent-browser's command line in the server's own command: those before its
 /// `mcp`, global options included, so that it runs as the server does.
-fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
+pub(super) fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
     let Reach::Command(words) = &declaration.reach else {
         return None;
     };
@@ -907,6 +1012,7 @@ async fn run(
     login: &Login,
     url: &str,
     served: Option<crate::display::Shown>,
+    network: &Network,
 ) -> Result<String, String> {
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
@@ -952,9 +1058,19 @@ async fn run(
     // Loaded first, then filled without navigating: agent-browser then checks, before each field
     // and the submit, that the page is still of the URL's origin (scheme, host and port), so a
     // page that redirects elsewhere gets no secret. Its own navigation checks nothing after it.
-    reload(program, &options, &env, &reached, &folder, url)
+    reload(program, &options, &env, &reached, &folder, url, network)
         .await
         .map_err(|failed| format!("Flottille could not load {url}: {failed}"))?;
+    // The browser the page loaded in is the one the login fills: in the network, as every other
+    // that answers on the socket folder.
+    if !outside(network, &vault).is_empty() {
+        return Err(
+            "a browser of this connection runs outside its network, where runs reach its \
+             DevTools: Flottille fills no password into it. Restarting the connection's server \
+             starts it again inside"
+                .to_owned(),
+        );
+    }
     // Written once the page is loaded, which needs no token: it asks for no secret.
     let token_file = socket.with_file_name(TOKEN_FILE);
     written(&token_file, token.as_bytes()).map_err(|error| format!("{error}"))?;
@@ -982,6 +1098,7 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    network.entered(&mut command);
     let mut child = crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
         &reached,
@@ -1033,7 +1150,10 @@ async fn run(
                 "agent-browser did not sign in within {} seconds: it was stopped",
                 limit.as_secs()
             );
-            reloaded(program, &options, &env, &reached, &folder, url, &mut why).await;
+            reloaded(
+                program, &options, &env, &reached, &folder, url, network, &mut why,
+            )
+            .await;
             return Err(why);
         }
     };
@@ -1063,13 +1183,17 @@ async fn run(
     {
         why.push_str(&format!("; Flottille's credential plugin said: {line}"));
     }
-    reloaded(program, &options, &env, &reached, &folder, url, &mut why).await;
+    reloaded(
+        program, &options, &env, &reached, &folder, url, network, &mut why,
+    )
+    .await;
     Err(why)
 }
 
 /// After a login that failed, the entry's page loaded afresh on the same session, by Flottille
 /// and not by an agent: a secret typed into its form does not stay there (a browser does not
 /// restore a password field). `why` says it when that fails too.
+#[allow(clippy::too_many_arguments)]
 async fn reloaded(
     program: &[String],
     options: &[String],
@@ -1077,9 +1201,10 @@ async fn reloaded(
     reached: &[&crate::display::Folder],
     folder: &Path,
     url: &str,
+    network: &Network,
     why: &mut String,
 ) {
-    if let Err(failed) = reload(program, options, env, reached, folder, url).await {
+    if let Err(failed) = reload(program, options, env, reached, folder, url, network).await {
         why.push_str(&format!(
             "; Flottille could not load {url} again to clear the form: {failed}"
         ));
@@ -1093,6 +1218,7 @@ async fn reload(
     reached: &[&crate::display::Folder],
     folder: &Path,
     url: &str,
+    network: &Network,
 ) -> Result<(), String> {
     let mut command = tokio::process::Command::new(&program[0]);
     command
@@ -1106,6 +1232,7 @@ async fn reload(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    network.entered(&mut command);
     let mut child = crate::children::spawn(crate::landlock::confined_given(
         crate::children::in_own_session(&mut command),
         reached,

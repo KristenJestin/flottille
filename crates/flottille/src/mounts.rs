@@ -123,9 +123,21 @@ pub fn sandbox() -> serde_json::Value {
         Some(why) => warnings.push(crate::pushed::unlifted_said(&why)),
         None => warnings.extend(unlent.as_ref().map(|why| crate::pushed::said(why))),
     }
+    // Chrome's DevTools, in the network of the browser a connection runs: out of the runs' reach
+    // only in a namespace of its own (`docs/vault.md`, "The browser's network").
+    let browser = crate::extensions::browser_network_available();
+    if let Err(why) = &browser {
+        warnings.push(format!(
+            "the agent's browser (a connection to agent-browser) cannot run in a network of its \
+             own, where no run reaches its DevTools: {why}. Its login refuses to fill until \
+             then: {}",
+            crate::extensions::BROWSER_NETWORK_INSTALL
+        ));
+    }
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,
+        "browser_network": browser.is_ok(),
         "ssh_lent": unlent.is_none(),
         "warnings": warnings,
     })

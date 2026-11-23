@@ -764,6 +764,21 @@ pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
     connections::provide(socket)
 }
 
+/// `flottille browser-network`: holds the network namespace of a connection's browser
+/// (`connections::network`).
+pub fn browser_network() -> ! {
+    connections::network::hold()
+}
+
+/// What to install where a connection's browser cannot run in a network of its own.
+pub const BROWSER_NETWORK_INSTALL: &str = connections::network::INSTALL;
+
+/// Whether a connection's browser can run in a network of its own here, and why not
+/// (`flottille doctor`).
+pub fn browser_network_available() -> Result<(), String> {
+    connections::network::available()
+}
+
 /// The sign-in of the connection `name` waiting for the browser on this machine, if one does: what
 /// a tunnel of another machine's client may reach (`tunnel.rs`).
 pub fn sign_in_waiting(daemon: &Daemon, name: &str) -> Option<connections::SignInWaiting> {
