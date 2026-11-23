@@ -876,7 +876,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1847,8 +1847,12 @@ on a real phone, by hand, and reported.
   background even while that machine is on: the caller is answered at once (`Sent to agent … on
   server`), and a refusal there is not told back to it; it is dropped with an inbox entry of the
   sending machine (`dropped`), as a message kept 30 days is.
-- `session_read` of a led session on another machine answers what `agent_status` gives: the
-  session's line and its last messages, not its paged conversation.
+- `session_read` and `agent_status` of a session or child the caller started on another machine
+  answer as on one machine: the same pages, `last`, `since`, `until`, `cursor` and cuts, the same
+  refusals (`agent_status` of a led session is refused, `session_read` of a child too). That
+  machine answers them by the same tools as a read of a session the caller did not start, for the
+  caller stood in for, which reads the session it started without a leave and its child as its
+  parent; the answer is masked again on the caller's machine, which cuts it no more.
 - `agent_status` without `agent_id` lists the children of this machine only; a child on another
   machine is read by its id.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
@@ -2281,7 +2285,9 @@ on a real phone, by hand, and reported.
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
   `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
   not start agent …`). A call is judged on the caller's machine as one to a session it started
-  there (ending a led session as `end_led`). A `call` whose `launch` is empty (and not an
+  there (ending a led session as `end_led`), but for the reads (`agent_status`, `session_read`):
+  those are served as a call whose `launch` is empty, and judged there, the launch only saying
+  which session or child the caller reads as its own. A `call` whose `launch` is empty (and not an
   `approval_answer`) is one to any other session of the receiver: served there by its own gate
   and tools for the caller stood in for ("Sessions of another machine").
 - What goes to another machine is kept in the sender's store (`outbox`) before it is sent: in

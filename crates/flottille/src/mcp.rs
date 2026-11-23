@@ -1069,6 +1069,9 @@ pub struct Grant {
     pub place: Place,
     /// The agent is a root another agent started for the user: it starts none without the user.
     pub launched: bool,
+    /// A caller of another machine stood in for here, reading the session or child it started
+    /// here (`across::serve_call`): that agent, read without a leave, its child as its parent.
+    pub reads: Option<String>,
 }
 
 /// What a tool did.
@@ -1619,6 +1622,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
         tools,
         place,
         launched: agent.launched_by.is_some(),
+        reads: None,
     })
 }
 
@@ -2466,8 +2470,17 @@ async fn played_whole(
     } else {
         (args, None, None)
     };
+    // A read of a session or child this agent started there: answered there by the same tool.
+    let launch_read = match (tool, &away) {
+        ("session_read" | "agent_status", None)
+            if grant.tools.contains(&tool) && !replaced && removed.is_none() =>
+        {
+            crate::across::aimed(daemon, &grant.agent, tool, &args)
+        }
+        _ => None,
+    };
     // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
-    let shaped = away.is_some();
+    let shaped = away.is_some() || launch_read.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2488,6 +2501,8 @@ async fn played_whole(
     } else if let Some(away) = &away {
         // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
         crate::across::forward(daemon, grant, tool, &args, away).await
+    } else if let Some(launch) = &launch_read {
+        crate::across::read_launch(daemon, grant, tool, &args, launch).await
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -4282,6 +4297,7 @@ mod tests {
                 home: None,
             },
             launched: false,
+            reads: None,
         }
     }
 
