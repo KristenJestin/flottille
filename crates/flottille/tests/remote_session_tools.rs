@@ -881,15 +881,16 @@ fn a_stand_in_is_not_a_session_this_machine_s_agents_can_reach() {
 
 #[test]
 fn an_unreadable_member_list_keeps_the_stand_ins() {
-    let (_hub, pc, server, _night) = night_lead("runner");
+    let (hub, pc, server, _night) = night_lead("runner");
     let day = user_session(&pc, DAY);
     listed_as(&server, &day, DAY);
     let (_local, mcp) = server.root("full");
     done(&mcp.call("session_read", json!({"session": day})));
     assert_eq!(stand_ins(&pc), 1);
 
-    // pc starts again with a member list it cannot read: it knows no machine, which is not to
-    // say that the server left the members.
+    // pc starts again with a member list it cannot read, and no hub to give it again: it knows
+    // no machine, which is not to say that the server left the members.
+    drop(hub);
     let stopped = pc.user.run(&["daemon", "stop"]);
     assert!(stopped.status.success(), "{}", pc.log());
     std::fs::write(
