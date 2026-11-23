@@ -22,7 +22,8 @@
 //!                                                 "proof": sign_H(refused, K, Nd, Nh, P, pair,
 //!                                                                 reset, reason)}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
-//!                {"list": […]}, {"presence": […]}, {"facts": […]}
+//!                {"list": […]}, {"presence": […]}, {"facts": […]},
+//!                {"notice": {"from": K', "notice": N}}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
 //!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
 //! and each way   {"keepalive": {}}
@@ -36,6 +37,10 @@
 //! proxy on the way does not take the session for idle; a side that hears nothing from the other
 //! for `SILENCE` takes the session as lost, and so does the hub when a device reads nothing it
 //! sends for as long.
+//!
+//! `notice` is what a runner's machine `K'` asked the hub to tell the user's phones (`Ask::Notify`):
+//! a kind and ids (`Notice`), which the hub sends on to each session of a member's phone and reads
+//! no further (`docs/remote.md`, "Notifications").
 //!
 //! `session` is `flottille-hub-session-v1` and a zero byte: nothing else a key signs starts so.
 //! Each side signs the other's fresh nonce and the other's key, so that a proof cannot be played
@@ -576,6 +581,66 @@ pub enum Ask {
     Addresses { addresses: Vec<String> },
     /// Whether a client of this device is active, and when its last input was.
     Presence { active: bool, last_input: u64 },
+    /// What a runner's machine tells the user's phones (`docs/remote.md`, "Notifications").
+    Notify { notice: Notice },
+}
+
+/// What a runner tells the user's phones through the hub: a kind and ids, never a title, an
+/// excerpt, a path or a command (`docs/remote.md`, "Notifications"). The phone links to the
+/// runner and reads the rest itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    /// The number of the runner's notification (`notifications.list`).
+    pub notification: u64,
+    /// The session it is about: its root agent's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<NoticeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    Request,
+    Question,
+    Report,
+    Failure,
+    /// What was told was answered or seen elsewhere: the phone removes its notification.
+    Dismissed,
+}
+
+/// An id in a notice: 1 to 64 letters, digits, `-` or `_`, so that no text rides in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeId(String);
+
+impl NoticeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for NoticeId {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<NoticeId, String> {
+        let fits = (1..=64).contains(&text.len())
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+        match fits {
+            true => Ok(NoticeId(text.to_owned())),
+            false => Err("an id is 1 to 64 letters, digits, - or _".to_owned()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NoticeId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<NoticeId, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// An ask and its number, which its answer names.
@@ -648,6 +713,8 @@ pub enum ToDevice {
     Relayed { from: PublicKey, packet: LinkPacket },
     /// The members' keys whose session to the hub is open now: the devices a link reaches.
     Online(Vec<PublicKey>),
+    /// What the runner whose machine's key is `from` tells this phone.
+    Notice { from: PublicKey, notice: Notice },
     /// Nothing to say: the session is alive.
     Keepalive {},
 }
@@ -818,6 +885,11 @@ pub enum Pushed {
     List(MemberList),
     Presence(Vec<PresenceOf>),
     Facts(Vec<Facts>),
+    /// What the runner whose machine's key is `from` tells this phone.
+    Notice {
+        from: PublicKey,
+        notice: Notice,
+    },
 }
 
 /// What one side signs: the domain, whose proof it is, the other's key, then the other's nonce
@@ -1608,6 +1680,7 @@ async fn drive(
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
                     Some(Ok(ToDevice::Addresses(_))) => {}
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
+                    Some(Ok(ToDevice::Notice { from, notice })) => { let _ = pushing.send(Pushed::Notice { from, notice }); }
                     Some(Ok(ToDevice::Refused { reason, .. })) => {
                         break format!("it refused: {}", shown(&reason, SHOWN));
                     }

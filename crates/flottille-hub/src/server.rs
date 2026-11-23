@@ -12,6 +12,10 @@
 //! any other is dropped. Members are told which members' sessions are open. Each side says
 //! `keepalive` when it has nothing to say, so that a reverse proxy does not close the session.
 //!
+//! What a runner's machine asks to tell the user's phones (`Ask::Notify`: a kind and ids) goes to
+//! every session of a member whose device said it is a phone, said to be from that machine
+//! (`docs/remote.md`, "Notifications"); nothing of it is kept.
+//!
 //! A device that is no member yet may pair (`flottille_link::Pairing`) while pair mode is open:
 //! its proof is checked against the pair mode's secret, the device is paired, and its session is
 //! sent the list and may declare its machine, `PAIR_IDLE` at most.
@@ -43,13 +47,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Ask, Facts, Hello, HubSession, KEEPALIVE, LinkPacket, MemberList, PresenceOf, PublicKey, Role,
-    ToDevice, arrive,
+    Ask, Facts, Hello, HubSession, KEEPALIVE, LinkPacket, MemberList, Notice, PresenceOf,
+    PublicKey, Role, ToDevice, arrive,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
 use crate::relay::Relay;
@@ -76,6 +80,10 @@ const COMMAND_LIMIT: usize = 4 << 10;
 /// at most: twice longer each time it fails again.
 const ACCEPT_WAIT: Duration = Duration::from_millis(50);
 const LONGEST_ACCEPT_WAIT: Duration = Duration::from_secs(1);
+
+/// The notices that may wait for a session to send them on: past them, a slow phone misses the
+/// oldest.
+const NOTICES_WAITING: usize = 64;
 
 /// How long a connection that came in may take for its TLS handshake and the hub's together: a
 /// device needs a few round trips, a stranger that says nothing holds its place no longer.
@@ -112,6 +120,9 @@ struct Shared<C: Clock> {
     waits: Waits,
     /// The sessions the links between devices go through.
     relay: Relay,
+    /// What the runners' machines tell the user's phones, each with the machine's key: every
+    /// session hears it, and a phone's sends it on.
+    notices: broadcast::Sender<(PublicKey, Notice)>,
     /// The URL a pair code holds unless its command gives one: `--public-url`, else the address
     /// the hub listens on; `None` when that one is no address another device dials (`0.0.0.0`, the
     /// loopback): a code that holds it would pair nothing, and says so when it is asked for.
@@ -182,6 +193,7 @@ pub fn serve_with<C: Clock + Send + 'static>(
         hello,
         waits,
         relay,
+        notices: broadcast::channel(NOTICES_WAITING).0,
         url: Mutex::new(url),
     });
     let (stop, stopping) = watch::channel(false);
@@ -456,6 +468,7 @@ async fn run<C: Clock + Send + 'static>(
     // Set once: a pairing's session that keeps asking is closed as one that asks nothing.
     let pair_ends = tokio::time::Instant::now() + shared.waits.pair_idle;
     let mut relays = session.relays();
+    let mut notices = shared.notices.subscribe();
     // Every session is told when this one closes, once it is no longer open to the links: this is
     // let go after `opened`.
     struct SayClosed<'a>(&'a watch::Sender<u64>);
@@ -568,6 +581,15 @@ async fn run<C: Clock + Send + 'static>(
                     return "it closed the connection".to_owned();
                 }
             }
+            told = notices.recv() => {
+                let Ok((from, notice)) = told else { continue };
+                if !is_phone(&shared.hub.lock().unwrap(), &device, paired.as_ref()) {
+                    continue;
+                }
+                if let Err(error) = session.send(&ToDevice::Notice { from, notice }).await {
+                    return error.to_string();
+                }
+            }
             _ = changed.changed() => stale = true,
             _ = idle => {
                 let reason = format!(
@@ -593,6 +615,15 @@ fn is_member<C: Clock>(hub: &Hub<C>, key: &PublicKey) -> bool {
             .get(key)
             .or_else(|| members.by_machine(key))
             .is_some()
+    })
+}
+
+/// Whether `device`'s session is a member's phone: its member said it is one (`Ask::About`).
+fn is_phone<C: Clock>(hub: &Hub<C>, device: &PublicKey, paired: Option<&PublicKey>) -> bool {
+    member_of(hub, device, paired).is_some_and(|member| {
+        hub.facts()
+            .iter()
+            .any(|facts| facts.key == member && facts.kind.as_deref() == Some("phone"))
     })
 }
 
@@ -678,6 +709,23 @@ fn handle<C: Clock>(
             Some(member) => hub.tell_presence(&member, Presence { active, last_input }),
             None => Err(not_member()),
         },
+        // Only a runner's machine runs what the phones are told of; the hub reads no further.
+        Ask::Notify { notice } => {
+            let runner = hub
+                .members()
+                .and_then(|members| members.by_machine(device))
+                .is_some_and(|member| member.role == Role::Runner);
+            drop(hub);
+            return match runner {
+                true => {
+                    let _ = shared.notices.send((*device, notice));
+                    Ok(())
+                }
+                false => Err(HubError(
+                    "only a runner's machine tells the phones".to_owned(),
+                )),
+            };
+        }
     };
     drop(hub);
     if done.is_ok() {

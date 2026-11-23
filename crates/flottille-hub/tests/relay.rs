@@ -566,7 +566,7 @@ async fn phone(place: &Place, key: &DeviceKey, name: &str) -> Session {
         .await
         .unwrap();
     let (pinned, _) = paired.listed().await.unwrap();
-    let mut session = declare(pinned, paired, key, &endpoint).await;
+    let session = declare(pinned, paired, key, &endpoint).await;
     session
         .ask(Ask::About {
             device: "phone".to_owned(),

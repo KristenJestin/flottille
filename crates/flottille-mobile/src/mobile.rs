@@ -1096,7 +1096,8 @@ async fn control(inner: Arc<Inner>, mut session: Session) {
     while let Some(pushed) = session.next().await {
         match pushed {
             Pushed::List(list) => inner.took_list(list),
-            Pushed::Presence(_) | Pushed::Facts(_) => {}
+            // A notice is drawn by the app (#828).
+            Pushed::Presence(_) | Pushed::Facts(_) | Pushed::Notice { .. } => {}
         }
     }
     let why = session.ended();
