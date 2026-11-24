@@ -1,6 +1,7 @@
 //! The user makes a group of projects (`docs/design.md` §10, the sidebar): from the Projects
-//! header's "⋯" menu, a dialog with one labelled field. The group is the user's view of their
-//! projects, kept by the daemon with the rest of the sidebar's state.
+//! header's "⋯" menu, a dialog with one labelled field; the same dialog renames a group, from its
+//! own "⋯" menu. The group is the user's view of their projects, kept by the daemon with the rest
+//! of the sidebar's state.
 
 use gpui_design_system::{Button, Field, Modal, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -21,6 +22,8 @@ pub const NEW_GROUP_LABEL: &str = "New group…";
 pub struct GroupName {
     shell: WeakEntity<Shell>,
     open: bool,
+    /// The group the dialog renames, and the name it has: none while it makes a new one.
+    renaming: Option<(String, String)>,
     field: Entity<InputState>,
     error: Option<SharedString>,
     _subscription: Subscription,
@@ -37,6 +40,7 @@ impl GroupName {
         Self {
             shell,
             open: false,
+            renaming: None,
             field,
             error: None,
             _subscription: subscription,
@@ -56,12 +60,34 @@ impl GroupName {
         &self.field
     }
 
-    /// Opens the dialog, its field empty.
+    /// Whether the dialog renames a group, rather than makes one.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
+    /// Opens the dialog to make a group, its field empty.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.show("", window, cx);
+    }
+
+    /// Opens the dialog to rename the group `id`, its field holding the name it has.
+    pub fn open_rename(
+        &mut self,
+        id: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.renaming = Some((id.to_owned(), name.to_owned()));
+        self.show(name, window, cx);
+    }
+
+    fn show(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.error = None;
         self.field
-            .update(cx, |field, cx| field.set_value("", window, cx));
+            .update(cx, |field, cx| field.set_value(name, window, cx));
         let focus = self.field.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -87,9 +113,11 @@ impl GroupName {
             cx.notify();
             return;
         }
+        let renaming = self.renaming.clone();
+        let besides = renaming.as_ref().map(|(id, _)| id.clone());
         let taken = self
             .shell
-            .read_with(cx, |shell, _| shell.group_named(&name))
+            .read_with(cx, |shell, _| shell.group_named(&name, besides.as_deref()))
             .unwrap_or(false);
         if taken {
             self.error = Some("A group of that name exists.".into());
@@ -98,11 +126,20 @@ impl GroupName {
         }
         let shell = self.shell.clone();
         // Once this update is over: the shell is told while it may be updating this dialog.
-        cx.defer(move |cx| {
-            shell
-                .update(cx, |shell, cx| shell.add_group(&name, cx))
-                .ok();
-        });
+        match renaming {
+            // The name it has: nothing to keep.
+            Some((_, was)) if was == name => {}
+            Some((id, _)) => cx.defer(move |cx| {
+                shell
+                    .update(cx, |shell, cx| shell.rename_group(&id, &name, cx))
+                    .ok();
+            }),
+            None => cx.defer(move |cx| {
+                shell
+                    .update(cx, |shell, cx| shell.add_group(&name, cx))
+                    .ok();
+            }),
+        }
         self.close(cx);
     }
 }
@@ -110,9 +147,17 @@ impl GroupName {
 impl Render for GroupName {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity().downgrade();
-        Modal::new(GROUP_NAME, "New group")
+        let (title, sentence, save) = match self.renaming {
+            Some(_) => ("Rename group", "Its projects stay in it.", "Save"),
+            None => (
+                "New group",
+                "Drag projects into it. Removing a group never removes its projects.",
+                "Create",
+            ),
+        };
+        Modal::new(GROUP_NAME, title)
             .open(self.open)
-            .sentence("Drag projects into it. Removing a group never removes its projects.")
+            .sentence(sentence)
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             })
@@ -133,7 +178,7 @@ impl Render for GroupName {
                     )),
             )
             .action(
-                Button::primary("group-name-save", "Create")
+                Button::primary("group-name-save", save)
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             )
     }

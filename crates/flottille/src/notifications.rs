@@ -508,7 +508,10 @@ fn note(
             "vault",
             format!("vault:{}", event.seq),
             agent,
-            "Asks you for a vault entry",
+            match data["edit"].is_object() {
+                true => "Proposes a vault edit",
+                false => "Asks you for a vault entry",
+            },
             notification::excerpt(data["name"].as_str().unwrap_or_default()),
         )?,
         "vault.ask_answered" => match data["ask"].as_u64() {

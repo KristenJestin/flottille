@@ -1116,6 +1116,15 @@ project does not see it); a second ask for a name while one is open joins it whe
 same project or every project's, and is refused otherwise (`ask under another name`). The schema
 has no field for a secret, and an argument it does not know is refused.
 
+**`vault {action: "propose", name, why, url?, username?, description?, project?, for?}`** proposes
+an edit of an entry the agent's project sees (`docs/vault.md`, "Proposing an edit of an entry"):
+each field given its new value, an empty text clearing it, `url` read as `ask` reads it, `project`
+`this` or `every`, `for` for an entry bound to no use yet. Never its secret. It is held for the
+user in every mode, Full included, and answered at once; the user sees the card of an asked entry
+with each field as before → after and **Dismiss**, **Edit** and **Accept**, Accept being the
+user's own Save with its checks; the outcome comes later as a `vault` delivery. A proposal that
+changes nothing, or a second one for an entry while one waits, is refused.
+
 ## Connections
 
 | Tool | Arguments | |

@@ -867,9 +867,16 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
   chosen where a page is a machine's: Settings' header and Add project's `On` (#1182, #1244), and
-  in a project's composer (the machine picker); the
+  in a project's composer (the machine picker) and its settings' header (#1266); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
+- **A shared project's page** (#1266) lists, after its places, the sessions of each other machine
+  that has it, a block a machine with its icon, its name and its state, each session with the
+  machine's icon (`docs/design.md` §10). A session starts on this machine when it has the project
+  and can run an agent, else on the one machine online that has it; when several do and this one
+  cannot, the composer asks which before it starts anything, and the answer is kept for the
+  project by the window. Its settings switch between the machines that
+  have it, this one first.
 - **The same project.** Two projects are the same when the remotes of their repositories are the
   same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
   `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
@@ -1164,9 +1171,12 @@ local child's work; nothing moves your branch.*
   it approved (its answer settled `started`) tells that caller its stop as the end of the session it
   started (`child-failed`, or `session-turn-ended` for a led one), which its machine takes whether the
   approval reached it or not, and records `ended`, or `refused` when the approval had not reached it
-  (#1374). A refused launch leaves no row under its
+  (#1374). A handed launch's caller hears that stop as a led one's does, `session-turn-ended`
+  (#1385). The user's answer is kept for the caller's machine beyond the 100 messages (up to 104
+  in all), cut to 64,000 characters, so that the end of a session that ran does not find its
+  launch still waiting for it (#1385). A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
-  for that answer, and hears nothing of the session after it.
+  for that answer, and hears of the session after it only its stop, as above.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
   a `led` or `handed` launch whose caller is itself a session another agent started (here, or on
   a third machine) says so (`launched`), and the receiving machine's gate takes it as base: held
@@ -1893,6 +1903,21 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **Another machine can run a shared project's session when it is an online runner that offers the
+  project** (#1266): what agents it has signed in is not looked at, so that a machine is not left
+  out while its providers are not read; a start it cannot run is refused there, and said. This
+  machine "can run" when its role is a runner: its providers are not looked at either, so that the
+  page that opens does not change as they are read (its composer says when none is ready).
+- **A shared project's start and settings switches match the project by its name on each machine**
+  (#1266), as the composer's picker did: a project another machine has under another name (the same
+  repositories) has its sessions on the page, but that machine is not offered to start on nor in
+  the settings' switch. Matching by the remotes there too could come later.
+- **The machine chosen for a shared project is kept with the sidebar's folds** (#1266, `starts`
+  under `sidebar`), not under a key of its own as the arrangement is: two windows choosing at the
+  same moment may keep one choice, which is harmless (the next choice writes it again).
+- **A machine with no session of a shared project has no block on its page** (#1266): the row's
+  marks already say which machines have it.
+
 - **An allowed launch whose setup a restart cut is refused, not resumed** (#1317): the daemon that
   starts again finds the request allowed and its answer never stored; it refuses the launch, removes
   its workspace and tells the caller, which launches it again. Resuming it (laying its files again,
@@ -1907,7 +1932,30 @@ on a real phone, by hand, and reported.
   the session (`child-failed`, `session-turn-ended`), which the caller's machine takes, rather than
   as a second answer, which it refuses. Keeping the launch and resuming its setup instead could come
   later; stopping it is the simpler, and the rule that a launch is answered once stays whole. A
-  handed launch's caller still hears only the user's answer.
+  handed launch's caller is told its end as a led one's (`session-turn-ended`, #1385): it was told
+  the session started, and hears nothing else of it. A caller's machine of the release before
+  #1374 takes that end too and records the launch `ended`; for one whose approval never reached it
+  before the restart (its answer not told), it shows `ended` where this release shows `refused`:
+  either way it no longer runs, and nothing is left waiting.
+- **The user's answer to a launch is kept beyond the cap, up to a ceiling** (#1385): it is kept
+  for the caller's machine even when 100 messages wait for it already, and cut to 64,000
+  characters rather than refused, so that the end of a session that ran does not come to a launch
+  still waiting for its answer, which the caller's machine would record `refused`. What waits for
+  one machine is bounded all the same: the answers go on to 104 (the 100, and the 4 launches the
+  user may hold at once for a machine), past which an answer is dropped with its inbox entry like
+  any delivery: a machine that stays linked and takes nothing for that long fills no disk.
+  Telling the caller's machine apart an end of a session that ran from one that never did would
+  need a new field of the link; keeping the answer needs none, and a caller of the release before
+  gains from it too. A store that cannot keep the answer at all still
+  drops it, said in the inbox.
+- **The user's answer to a held call of another machine's agent is kept the same way** (#1405):
+  the answer to a request of a caller of another machine (`request-<n>`) is kept beyond the 100
+  as a launch's is, to the same 104, and past it, or when the store cannot keep it, is dropped
+  with an inbox entry that says which request's answer it was and for which machine (`The answer
+  to request #12 for pc was not sent: …`), never its text. It used to be dropped with a line on
+  the daemon's stderr only, and the agent that called never heard what the user decided. The
+  answer is still cut to 64,000 characters, without the marker a launch's answer has: the simpler
+  of the two, which a call's answer never needed.
 - **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
   stored, only one whose workspace is still preparing or whose session was never briefed is refused;
   one that ran is left running and its answer is stored again, since its caller was told approved.
@@ -2220,9 +2268,10 @@ on a real phone, by hand, and reported.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
 - At most 100 messages wait for one machine: one more `agent_send` or `session_send` is refused at
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
-  an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
-  the receiver would; a review's result to a pilot of another machine is cut instead, the cut
-  said with the `session_read` that reads the rest there. The kinds a machine takes are the
+  an inbox entry (`dropped`), but the user's answer to a launch or to a held call of another
+  machine's agent, kept beyond up to 104 in all. A message of more
+  than 64,000 characters is refused on the sender, as the receiver would; that answer is cut
+  instead, and so is a review's result to a pilot of another machine, the cut said with the `session_read` that reads the rest there. The kinds a machine takes are the
   session's own and a review's (`review`), no other extension's name.
 - A led session's plain end of a turn (it neither asked nor reported) is kept once per session
   for the machine that took none: the next replaces the one still waiting, so that the turns of a
