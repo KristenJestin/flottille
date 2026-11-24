@@ -219,10 +219,10 @@ and the 2026 practice around it:
    | After #259 (`web`; no other tool shortened: the 29,000 limit of #198 raised to 30,000) | 27 | 29,660 |
    | After #264 (the texts cut from #224 on restored; the two guards) | 27 | 30,866 |
    | Before #1292 (30 tools; with `routine`, #1289, 62,480: over the guard) | 30 | 59,565 |
-   | After #1292 (five families read on demand, repeats said once; `routine` counted whole) | 30 + 1 | 55,385 + 2,915 = 58,300 |
+   | After #1292 (five families read on demand, repeats said once; `routine` counted whole) | 30 + 1 | 55,557 + 2,915 = 58,472 |
 
    By role before #1292: a root 59,565, a child 50,331, a child at the depth limit 41,958; after
-   it 55,385, 47,496 and 39,123 (the size test's count: the definitions as listed, title and
+   it 55,557, 47,668 and 39,295 (the size test's count: the definitions as listed, title and
    annotations included). By role after #264: a root 27 tools and 30,866 characters (about 10,300 tokens at 3 characters
    a token), a child 21 and 23,784, a child at the depth limit 16 and 17,821. The guards leave
    room for 13 more tools and about 29,000 more characters in the biggest list.
