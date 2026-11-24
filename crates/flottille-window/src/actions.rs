@@ -4752,6 +4752,20 @@ mod tests {
     }
 
     #[test]
+    fn allow_never_shares_a_copy_that_came_from_a_third_machine_in_place_of_the_file() {
+        // `app-.env` is bound to the file, but it was received from another machine: it is not
+        // the file of `pc`, which is made again (and refused, the name being taken).
+        let listed = Ok(json!({"entries": [
+            {"name": "app-.env", "for": "file:app/.env", "shared_from": "laptop"}]}));
+        let refused = Err("the vault already has an entry app-.env".to_owned());
+        let (done, asked, told) = shared_with(&needs_of("app-.env"), "server", listed, refused);
+
+        assert!(!done);
+        assert_eq!(methods(&asked), ["vault.list", "vault.from_file"]);
+        assert_eq!(told.last().unwrap().1, crate::waiting::Step::NotMade);
+    }
+
+    #[test]
     fn allow_refuses_a_need_whose_entry_is_not_the_file_s_own() {
         // A daemon that names the user's token as the entry `.env` is made into.
         let listed = Ok(json!({"entries": [{"name": "github-token", "for": null}]}));

@@ -507,6 +507,142 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
     allowed_whole(&shell, (&pc, &server), (&agent, number), cx);
 }
 
+/// A daemon that lists `files` (path and entry) for the card `number`, whatever it listed before:
+/// the list the window gets, set on its waiting section as a poll would, with no poll after it.
+fn list_files(
+    shell: &Entity<Shell>,
+    number: u64,
+    files: &[(&str, &str)],
+    cx: &mut VisualTestContext,
+) {
+    let waiting = page_of(shell, cx)
+        .map(|page| page.read_with(cx, |p, cx| p.waiting(cx)))
+        .unwrap();
+    waiting.update(cx, |waiting, cx| {
+        let mut cards = waiting.cards().to_vec();
+        for card in cards.iter_mut().filter(|card| card.number == number) {
+            card.needs.as_mut().unwrap().files = files
+                .iter()
+                .map(|(path, entry)| flottille_window::waiting::NeededFile {
+                    path: (*path).to_owned(),
+                    entry: (*entry).to_owned(),
+                })
+                .collect();
+        }
+        waiting.set(cards, cx);
+    });
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn a_long_file_path_is_shown_whole_on_its_card(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (agent, number) = held_on_server(&pc, &server);
+    let (shell, cx) = window(&server, cx);
+    open_page(&shell, &agent, cx);
+    the_card_lists_its_files(&shell, number, cx);
+
+    // The consent is read, not glanced at: a path longer than the card is not cut at its start.
+    let long = "pkg/web/config/environments/production/secrets/regional/primary/.env.production.local.2026";
+    list_files(&shell, number, &[(long, "app-secrets")], cx);
+
+    let (row, path, entry) = cx.update(|window, _| {
+        let found = |name: String| window.try_find(id(name)).map(|found| found.bounds());
+        (
+            found(format!("allow-step-{number}-0")),
+            found(format!("allow-step-{number}-0-path")),
+            found(format!("allow-step-{number}-0-object")),
+        )
+    });
+    let (row, path, entry) = (
+        row.expect("the row"),
+        path.expect("the path is an element of its own"),
+        entry.expect("the entry"),
+    );
+    assert!(
+        path.size.height > entry.size.height * 1.5,
+        "the path wraps over lines: {path:?}, {entry:?}"
+    );
+    assert!(
+        path.left() >= row.left() && path.right() <= row.right(),
+        "the path stays inside its row: {path:?} in {row:?}"
+    );
+    assert!(
+        entry.size.width > px(20.),
+        "the entry stays readable: {entry:?}"
+    );
+    let said = label(cx, format!("allow-step-{number}-0-path"));
+    assert_eq!(said.as_deref(), Some(long), "the whole path");
+}
+
+#[gpui_kit::test]
+fn a_card_whose_files_change_starts_its_steps_again(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (agent, number) = held_on_server(&pc, &server);
+    // The server has an entry of its own of that name: `.env` is shared, `config/local.toml` not.
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "app-config-local.toml", "secret": "of-the-server-own"}),
+        )
+        .unwrap();
+    let (shell, cx) = window(&server, cx);
+    open_page(&shell, &agent, cx);
+    the_card_lists_its_files(&shell, number, cx);
+    scroll_cards_down(&shell, number, cx);
+    cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
+    until(&shell, cx, "the failure on the card", |cx| {
+        label(cx, format!("approval-error-{number}")).is_some()
+    });
+    settle(&shell, cx);
+    assert_eq!(word(cx, number, 0).as_deref(), Some("Shared"));
+    assert_eq!(
+        label(cx, format!("allow-{number}")).as_deref(),
+        Some("Try again")
+    );
+
+    // The daemon lists one file more: no step is past its end, and none is shared yet.
+    list_files(
+        &shell,
+        number,
+        &[
+            (".env", "app-.env"),
+            ("config/local.toml", "app-config-local.toml"),
+            ("extra.toml", "app-extra.toml"),
+        ],
+        cx,
+    );
+    for at in 0..3 {
+        assert_eq!(
+            word(cx, number, at).as_deref(),
+            Some("Waiting"),
+            "file {at}"
+        );
+    }
+    assert_eq!(
+        label(cx, format!("allow-word-{number}-approve")).as_deref(),
+        Some("Waiting")
+    );
+    assert_eq!(
+        label(cx, format!("allow-{number}")).as_deref(),
+        Some("Allow")
+    );
+
+    // Other files: nothing of the files listed before is said shared.
+    list_files(&shell, number, &[("other.env", "app-other.env")], cx);
+    assert_eq!(word(cx, number, 0).as_deref(), Some("Waiting"));
+    assert_eq!(word(cx, number, 1), None, "one file listed");
+    assert_eq!(
+        label(cx, format!("allow-{number}")).as_deref(),
+        Some("Allow")
+    );
+    assert_eq!(pending(&server).len(), 1, "the launch is still held");
+}
+
 #[gpui_kit::test]
 fn allow_never_shares_a_hand_made_entry_of_the_file_s_name(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
