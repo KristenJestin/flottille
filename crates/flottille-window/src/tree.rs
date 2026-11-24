@@ -116,6 +116,26 @@ pub fn group_count_id(group: &str) -> ElementId {
     ElementId::Name(format!("projects-list-group-{group}-count").into())
 }
 
+/// The element id of what a folded group's heading says of the rows it hides.
+pub fn group_mark_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}-mark").into())
+}
+
+/// The element id of the "⋯" menu a group's heading offers.
+pub fn group_menu_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-group-menu-{group}").into())
+}
+
+/// The element id of Rename… in a group's menu.
+pub fn group_rename_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-group-rename-{group}").into())
+}
+
+/// The element id of Remove in a group's menu.
+pub fn group_remove_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-group-remove-{group}").into())
+}
+
 /// Why New group… cannot be picked while the projects are shown by machine.
 const SHOWN_BY_MACHINE: &str = "Shown by machine";
 /// Why Group by machine cannot be switched on: there is nothing to group by.
