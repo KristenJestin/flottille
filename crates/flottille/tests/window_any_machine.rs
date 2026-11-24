@@ -21,7 +21,7 @@ use flottille_window::shell::Selection;
 use flottille_window::tree::project_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::seen::{colour, seen};
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, Hsla, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -1109,4 +1109,126 @@ fn leaving_an_off_machine_brings_this_machine_s_own_page_of_the_project(cx: &mut
     });
     settle(&shell, cx);
     assert!(!present(cx, "composer-machine-off"));
+}
+
+/// What is drawn over the fixed header (the title and the tabs) or over the sentence of another
+/// machine's page: the sentence is read in what scrolls, so that it passes with it, and what
+/// scrolls, cut to its page, never reaches the header.
+fn drawn_over_the_header(cx: &mut VisualTestContext) -> Vec<String> {
+    let in_page =
+        |path: &[gpui_kit::ElementId]| path.iter().any(|id| *id == "settings-page".into());
+    cx.update(|window, _| {
+        let tabs = window.find("settings-tabs").bounds();
+        let page = window.find("settings-page").bounds();
+        let own = window.find("settings-own");
+        let mut over = Vec::new();
+        if !in_page(own.path()) {
+            over.push("the sentence stays fixed above what scrolls".to_owned());
+        }
+        if page.origin.y < tabs.bottom() {
+            over.push(format!(
+                "the page starts at {:?}, the tabs end at {:?}",
+                page.origin.y,
+                tabs.bottom()
+            ));
+        }
+        for element in window.elements() {
+            if !in_page(element.path()) {
+                continue;
+            }
+            let drawn = element.bounds().intersect(&page);
+            if drawn.size.width > px(0.) && drawn.size.height > px(0.) && drawn.intersects(&tabs) {
+                over.push(format!("{:?} is drawn at {drawn:?}", element.path().last()));
+            }
+        }
+        over
+    })
+}
+
+#[gpui_kit::test]
+fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    scroll_clear_of_the_own_line(&shell, cx);
+}
+
+/// A machine this device may only view holds its page (its ink fades, its controls are held): the
+/// held page scrolls clear of the sentence as well.
+#[gpui_kit::test]
+fn settings_content_of_a_viewed_machine_never_draws_under_the_fixed_line(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let server = Machine::of(runner());
+    let pc = Machine::of(runner());
+    pair(&hub, &server, "server", "runner");
+    pair(&hub, &pc, "pc", "viewer");
+    pc.wait_for("server", "online");
+    project(&server.user, "app");
+    let (shell, cx) = window(&pc, cx);
+    scroll_clear_of_the_own_line(&shell, cx);
+}
+
+fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    settings(shell, "general", cx);
+    settings_of(shell, "server", cx);
+    for shade in ["light", "dark"] {
+        // The window's own shade, set while it is tall enough to reach the control.
+        cx.simulate_resize(size(px(1000.), px(2400.)));
+        click(shell, "settings-tabs-general", cx);
+        settle(shell, cx);
+        // A held page takes no click; its shade stays the first one.
+        if !present(cx, "page-held-veil") {
+            click(shell, &format!("appearance-shade-{shade}"), cx);
+        }
+        // Short, so that every tab scrolls.
+        for width in [1000., 640., 440.] {
+            cx.simulate_resize(size(px(width), px(520.)));
+            let mut scrolled = false;
+            for tab in [
+                "agents",
+                "approvals",
+                "features",
+                "vault",
+                "machines",
+                "general",
+            ] {
+                click(shell, &format!("settings-tabs-{tab}"), cx);
+                settle(shell, cx);
+                let at = bounds_of(cx, "settings-page").expect("the page").center();
+                let before = content_top(cx);
+                for turn in 0..8 {
+                    assert_eq!(
+                        drawn_over_the_header(cx),
+                        Vec::<String>::new(),
+                        "{tab}, {shade}, {width} px wide, after {turn} turns of the wheel"
+                    );
+                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                        position: at,
+                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
+                        ..Default::default()
+                    });
+                    settle(shell, cx);
+                }
+                scrolled |= content_top(cx) < before;
+            }
+            assert!(scrolled, "the wheel scrolls a tab at {width} px wide");
+        }
+    }
+}
+
+/// Where the first of what the page scrolls is drawn.
+fn content_top(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .path()
+                    .iter()
+                    .any(|id| *id == "settings-page".into())
+            })
+            .filter(|element| element.path().last() != Some(&"settings-page".into()))
+            .map(|element| element.bounds().origin.y)
+            .fold(px(f32::MAX), |least, y| least.min(y))
+    })
 }

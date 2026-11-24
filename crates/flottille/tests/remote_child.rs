@@ -5,9 +5,9 @@
 //! throwaway repositories.
 
 use crate::common;
-use crate::remote_deliveries::{child_on_server, off, on, prompts_with, script};
+use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, release, script};
 use crate::remote_launch::{
-    allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
+    Machine, allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
 };
 
 use common::mcp::{Mcp, server_of};
@@ -65,13 +65,6 @@ fn a_child_launched_from_another_machine_has_a_child_s_tools() {
         .unwrap();
     assert_eq!(listed["launched_from"], shown["launched_from"]);
     assert_eq!(listed["depth"], 1);
-    // Its tools are the same when they are made again for it.
-    server
-        .user
-        .call("agent.reload_tools", json!({"agent": child}))
-        .unwrap();
-    let again = server.agent(&child);
-    assert_eq!(again["tools"], shown["tools"], "{again}");
 }
 
 #[test]
@@ -137,7 +130,7 @@ fn has_a_root_s_tool(tools: &Value) -> bool {
 }
 
 #[test]
-fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_and_a_resume() {
+fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
     prompted(&server, "Write the tests of the export.");
@@ -157,19 +150,8 @@ fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_an
 
     let shown = server.agent(&child);
     assert_eq!(shown["depth"], 1, "{shown}");
-    // Ended, then resumed by the user: its tools are made again at its next start, which its
-    // parent's message wakes, from its depth: a child's.
-    server
-        .user
-        .call("agent.stop", json!({"agent": child}))
-        .unwrap();
-    eventually("the child ended", || {
-        server.agent(&child)["state"] == "ended"
-    });
-    server
-        .user
-        .call("agent.resume", json!({"agent": child}))
-        .unwrap();
+    // Its tools are made again at its next start, which its parent's message wakes, from its
+    // depth: a child's. (The user resumes no child of another machine's agent: its parent does.)
     server.wait_for("pc");
     let sent = mcp.call(
         "agent_send",
@@ -275,4 +257,378 @@ fn a_child_on_another_machine_stops_with_its_parent() {
         "{:#}",
         server.agent(&child)
     );
+}
+
+/// A child of `pc`'s root held in its first turn on `server`: its id.
+fn working_child(pc: &Machine, server: &Machine) -> String {
+    script(
+        server,
+        json!([{"when": "Write the tests of the export.", "times": 1,
+            "do": [{"hold": "release"}]}]),
+    );
+    let (child, _launch, _mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    prompted(server, "Write the tests of the export.");
+    child
+}
+
+/// What the user of `server` is told when `method` is called on a child of another machine's
+/// agent: the same refusal a child here is given, which says whose it is and what only it does.
+fn refused_as_a_child(server: &Machine, child: &str, method: &str, params: Value) -> String {
+    let refused = server.user.call(method, params).unwrap_err().1;
+    assert!(
+        refused.contains(&format!("agent {child} is a child of agent")),
+        "{refused}"
+    );
+    assert!(refused.contains("of pc"), "{refused}");
+    assert!(refused.contains("only its parent"), "{refused}");
+    refused
+}
+
+/// A message `pc`'s root sends its child on `server` while the child's first turn is held: the
+/// child's id, and the id of the delivery it waits as on `server`.
+fn queued_by_the_parent(pc: &Machine, server: &Machine) -> (String, String) {
+    script(
+        server,
+        json!([{"when": "Write the tests of the export.", "times": 1,
+            "do": [{"hold": "release"}]}]),
+    );
+    let (child, _launch, mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    prompted(server, "Write the tests of the export.");
+    let sent = mcp.call(
+        "agent_send",
+        json!({"agent_id": child, "message": "Cover the CSV export too."}),
+    );
+    assert!(!sent.error, "{}", sent.text);
+    eventually("the parent's message queued", || {
+        queued(server, &child).is_some()
+    });
+    let delivery = queued(server, &child).unwrap();
+    (child, delivery)
+}
+
+/// The delivery `agent` waits on `server`, if any.
+fn queued(server: &Machine, agent: &str) -> Option<String> {
+    let db = rusqlite::Connection::open_with_flags(
+        server.user.path("state/flottille/flottille.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.query_row(
+        "SELECT id FROM deliveries WHERE agent = ?1 AND state = 'queued'",
+        [agent],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+#[test]
+fn agent_unqueue_keeps_the_message_the_parent_of_a_child_of_another_machine_queued() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, delivery) = queued_by_the_parent(&pc, &server);
+
+    refused_as_a_child(
+        &server,
+        &child,
+        "agent.unqueue",
+        json!({"agent": child, "delivery": delivery}),
+    );
+
+    assert_eq!(queued(&server, &child), Some(delivery));
+    release(&server);
+    prompted(&server, "Cover the CSV export too.");
+}
+
+#[test]
+fn agent_send_now_leaves_the_message_the_parent_of_a_child_of_another_machine_queued() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, delivery) = queued_by_the_parent(&pc, &server);
+
+    refused_as_a_child(
+        &server,
+        &child,
+        "agent.send_now",
+        json!({"agent": child, "delivery": delivery}),
+    );
+
+    // Its turn goes on, the message waits it out.
+    assert_eq!(server.agent(&child)["state"], "working");
+    assert_eq!(queued(&server, &child), Some(delivery));
+}
+
+#[test]
+fn agent_mode_does_not_set_the_mode_of_a_child_of_another_machine_apart_from_its_tree() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let before = server.agent(&child)["gate_mode"].clone();
+
+    let refused = server
+        .user
+        .call("agent.mode", json!({"agent": child, "mode": "full"}))
+        .unwrap_err()
+        .1;
+
+    assert!(
+        refused.contains(&format!("agent {child} is a child of agent")),
+        "{refused}"
+    );
+    assert!(refused.contains("of pc"), "{refused}");
+    assert!(refused.contains("mode"), "{refused}");
+    assert_eq!(server.agent(&child)["gate_mode"], before);
+}
+
+#[test]
+fn agent_cancel_does_not_cancel_the_turn_of_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let child = working_child(&pc, &server);
+
+    refused_as_a_child(&server, &child, "agent.cancel", json!({"agent": child}));
+
+    assert_eq!(server.agent(&child)["state"], "working");
+}
+
+#[test]
+fn agent_rename_does_not_rename_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    refused_as_a_child(
+        &server,
+        &child,
+        "agent.rename",
+        json!({"agent": child, "title": "Mine now"}),
+    );
+
+    assert_eq!(server.agent(&child)["title"], "Write the tests");
+}
+
+#[test]
+fn agent_quota_resume_is_refused_on_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    refused_as_a_child(
+        &server,
+        &child,
+        "agent.quota_resume",
+        json!({"agent": child, "resume": true}),
+    );
+}
+
+#[test]
+fn the_inactivity_sweep_leaves_a_child_of_another_machine_to_its_parent() {
+    const DAY: u64 = 24 * 3_600_000;
+    let (_hub, pc, server) = pc_and_server(
+        server_user(allowing()).with_env("FLOTTILLE_TEST_CLOCK", "1"),
+        Some(""),
+    );
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    eventually("the child idle", || server.agent(&child)["state"] == "idle");
+    // A session of the server's own, the one the sweep ends: the proof that it ran.
+    let (local, _mcp) = server.root("auto");
+    server
+        .user
+        .call("sessions.set", json!({"days": 1}))
+        .unwrap();
+
+    server
+        .user
+        .call("test.advance", json!({"ms": 2 * DAY}))
+        .unwrap();
+
+    eventually("the server's own session ended", || {
+        server.agent(&local)["state"] == "ended"
+    });
+    assert_eq!(server.agent(&child)["state"], "idle");
+}
+
+#[test]
+fn a_child_of_another_machine_s_agent_gives_the_user_no_review() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    server
+        .user
+        .call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+
+    let refused = server
+        .user
+        .call("review.start", json!({"agent": child}))
+        .unwrap_err()
+        .1;
+
+    assert!(refused.contains("this agent is a child"), "{refused}");
+}
+
+#[test]
+fn a_report_of_a_child_of_another_machine_is_no_notification_of_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The export tests are written."}}}
+        ]}]),
+    );
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    answered(&server, "Your report went to your parent");
+
+    let notified = server
+        .user
+        .call("notifications.list", json!({}))
+        .unwrap()
+        .to_string();
+    let inbox = server
+        .user
+        .call("inbox.list", json!({}))
+        .unwrap()
+        .to_string();
+
+    assert!(!notified.contains(&child), "{notified}");
+    assert!(!inbox.contains(&child), "{inbox}");
+}
+
+#[test]
+fn a_remote_child_stored_by_an_older_release_is_put_above_its_local_children() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // A child of the server's own session, which an older release had started under the remote
+    // child (it allowed it): its parent is the remote child, one depth below a root.
+    let (local, mcp) = server.root("auto");
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "Check the export", "brief": "Check the CSV export."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let grandchild = server
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"] == local.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    off(&server);
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute("UPDATE agents SET depth = 0 WHERE id = ?1", [&child])
+        .unwrap();
+    db.execute(
+        "UPDATE agents SET parent = ?1, depth = 1 WHERE id = ?2",
+        [&child, &grandchild],
+    )
+    .unwrap();
+    drop(db);
+
+    on(&server);
+
+    let depths = (
+        server.agent(&child)["depth"].clone(),
+        server.agent(&grandchild)["depth"].clone(),
+        server.agent(&local)["depth"].clone(),
+    );
+    // The server's own session, a root, stays one.
+    assert_eq!(depths, (json!(1), json!(2), json!(0)), "{depths:?}");
+}
+
+/// A child of `pc`'s root on `server`, and a child of the server's own that sits under it, as an
+/// older release, or a deeper depth limit, let the remote child start: their ids.
+fn child_with_a_local_child(pc: &Machine, server: &Machine) -> (String, String) {
+    let (child, _launch, _mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    let (local, mcp) = server.root("auto");
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "Check the export", "brief": "Check the CSV export."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let grandchild = server
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"] == local.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    off(server);
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE agents SET parent = ?1, depth = 2 WHERE id = ?2",
+        [&child, &grandchild],
+    )
+    .unwrap();
+    drop(db);
+    on(server);
+    (child, grandchild)
+}
+
+#[test]
+fn agent_mode_does_not_set_the_mode_of_a_local_child_of_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, grandchild) = child_with_a_local_child(&pc, &server);
+    let before = server.agent(&child)["gate_mode"].clone();
+
+    let refused = server
+        .user
+        .call("agent.mode", json!({"agent": grandchild, "mode": "full"}))
+        .unwrap_err()
+        .1;
+
+    assert!(refused.contains("of pc"), "{refused}");
+    assert!(refused.contains("mode"), "{refused}");
+    assert_eq!(server.agent(&child)["gate_mode"], before);
+}
+
+#[test]
+fn a_local_child_of_a_child_of_another_machine_is_refused_naming_where_the_user_writes() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, grandchild) = child_with_a_local_child(&pc, &server);
+
+    let refused = server
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": grandchild, "message": "Check the PDF export too."}),
+        )
+        .unwrap_err()
+        .1;
+
+    assert!(
+        refused.contains(&format!("agent {grandchild} is a child of agent {child}")),
+        "{refused}"
+    );
+    // Not the remote child, which the user does not write to either: its root, on pc.
+    assert!(
+        !refused.contains(&format!("its root, agent {child}")),
+        "{refused}"
+    );
+    assert!(refused.contains("on pc"), "{refused}");
+}
+
+#[test]
+fn agent_reload_tools_is_refused_on_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    refused_as_a_child(
+        &server,
+        &child,
+        "agent.reload_tools",
+        json!({"agent": child}),
+    );
+}
+
+#[test]
+fn agent_resume_is_refused_on_an_ended_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // The user's way out, while its parent's machine is off.
+    server
+        .user
+        .call("agent.stop", json!({"agent": child}))
+        .unwrap();
+    eventually("the child ended", || {
+        server.agent(&child)["state"] == "ended"
+    });
+
+    refused_as_a_child(&server, &child, "agent.resume", json!({"agent": child}));
+
+    assert_eq!(server.agent(&child)["state"], "ended");
 }
