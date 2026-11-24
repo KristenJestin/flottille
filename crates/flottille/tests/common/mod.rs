@@ -303,8 +303,15 @@ impl User {
     /// `PATH`: the one program a browser connection's command may name, by its name or by the
     /// path of the file the daemon's `PATH` finds.
     pub fn with_fake_agent_browser(self, fake_mcp: &Path) -> User {
+        self.with_agent_browser(fake_mcp)
+    }
+
+    /// This user with `program` as `agent-browser` in its folder `bin`, first in its `PATH`, as
+    /// an install puts the program on the `PATH` a user's daemon starts with: the connection
+    /// names it `agent-browser`, which is the one name the daemon's `PATH` finds there.
+    pub fn with_agent_browser(self, program: &Path) -> User {
         std::fs::create_dir_all(self.path("bin")).unwrap();
-        std::os::unix::fs::symlink(fake_mcp, self.path("bin/agent-browser")).unwrap();
+        std::os::unix::fs::symlink(program, self.path("bin/agent-browser")).unwrap();
         let path = format!(
             "{}:{}",
             self.path("bin").display(),

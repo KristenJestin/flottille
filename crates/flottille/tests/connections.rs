@@ -6032,9 +6032,18 @@ impl Drop for Closed {
 /// browser), and the program to run: none, said, when this machine lacks either. Its Auto judge
 /// allows everything.
 fn real_user() -> Option<(User, PathBuf)> {
-    let user = User::with_fake_agent()
-        .with_fake_agent_browser(&fake_mcp())
-        .with_allowing_judge();
+    let user = User::with_fake_agent().with_allowing_judge();
+    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
+    let program = match real_agent_browser(&user.path("home")) {
+        Ok(program) => program,
+        Err(why) => {
+            real_browser_skip(&why, required.as_deref());
+            return None;
+        }
+    };
+    // As an install does: the real program is the `agent-browser` of the daemon's `PATH`, which
+    // the connection's command names (`review` refuses any other file).
+    let user = user.with_agent_browser(&program);
     // The test's runtime folder is under `/tmp`, so the sandbox rules each entry of `/tmp` and
     // not `/tmp` itself (`landlock.rs`): Chrome makes its profile in a temporary folder of the
     // test's own, as it does in `/tmp` on a machine whose runtime folder is `/run/user/<uid>`.
@@ -6044,14 +6053,6 @@ fn real_user() -> Option<(User, PathBuf)> {
         .with_env("TMPDIR", temporary.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
-    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
-    let program = match real_agent_browser(&user.path("home")) {
-        Ok(program) => program,
-        Err(why) => {
-            real_browser_skip(&why, required.as_deref());
-            return None;
-        }
-    };
     if !pasta_on_the_path() {
         return None;
     }
@@ -6074,13 +6075,13 @@ fn pasta_on_the_path() -> bool {
 
 /// The connection `browser` running the real `agent-browser mcp`, headless, its actions as the
 /// adapter sets them.
-fn real_connection(user: &User, program: &Path) {
+fn real_connection(user: &User) {
     turn_on(user);
     let added = user
         .call(
             "connection.add",
             json!({"name": "browser", "about": "A browser for the tests.",
-                "command": [program, "mcp"]}),
+                "command": ["agent-browser", "mcp"]}),
         )
         .unwrap();
     if added["given"] != true {
@@ -6280,7 +6281,7 @@ fn a_run_cannot_reach_the_browsers_devtools() {
         vault: vault_folder(&user),
     };
     let (url, _asked) = local_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
@@ -6304,7 +6305,7 @@ fn the_browser_reaches_a_local_server_of_the_host() {
         vault: vault_folder(&user),
     };
     let (url, asked) = local_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
@@ -6330,7 +6331,7 @@ fn the_login_fills_and_no_run_reads_it() {
         vault: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     user.call(
         "vault.set",
@@ -6378,7 +6379,7 @@ fn a_run_finds_none_of_the_real_browsers_profile() {
         vault: vault_folder(&user),
     };
     let (url, _asked) = local_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
@@ -6413,7 +6414,7 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
     };
     let (url, signed_in) = login_page();
     let before = written_by_others(&user);
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     user.call(
         "vault.set",
@@ -9194,6 +9195,8 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     if !pasta_on_the_path() {
         return;
     }
+    // As an install does: the real program is the `agent-browser` of the daemon's `PATH`.
+    let user = user.with_agent_browser(&program);
     let _weston = match weston(&user, "wayland-flottille-test") {
         Ok(weston) => weston,
         Err(why) => {
@@ -9206,7 +9209,7 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     user.call(
         "connection.add",
         json!({"name": "browser", "about": "A real browser for the tests.",
-            "command": [program, "mcp"]}),
+            "command": ["agent-browser", "mcp"]}),
     )
     .unwrap();
     project(&user, "app");

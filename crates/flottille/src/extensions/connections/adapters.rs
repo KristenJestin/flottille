@@ -2140,6 +2140,37 @@ mod tests {
     }
 
     #[test]
+    fn an_npm_global_install_is_accepted_by_its_name_and_by_its_path_on_the_path() {
+        // `npm install --global` links `<prefix>/bin/agent-browser` (a relative link) to a script
+        // under `<prefix>/lib/node_modules`, and the prefix may itself be a link: both sides of
+        // the comparison resolve to the same file.
+        let real = tempfile::tempdir().unwrap();
+        let script = real.path().join("lib/node_modules/agent-browser/bin");
+        std::fs::create_dir_all(&script).unwrap();
+        std::fs::write(script.join("agent-browser.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::create_dir_all(real.path().join("bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/agent-browser/bin/agent-browser.js",
+            real.path().join("bin/agent-browser"),
+        )
+        .unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let prefix = links.path().join("prefix");
+        std::os::unix::fs::symlink(real.path(), &prefix).unwrap();
+        let bin = prefix.join("bin");
+        let by_path = bin.join("agent-browser");
+        let direct = real.path().join("bin");
+        for path in [bin.as_os_str(), direct.as_os_str()] {
+            assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
+            assert_eq!(
+                refused_on(&[by_path.to_str().unwrap(), "mcp"], path),
+                None,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_program_run_by_a_path_that_is_not_the_one_found_on_the_path_is_refused() {
         let (folder, _) = with_program();
         let (other, elsewhere) = with_program();
