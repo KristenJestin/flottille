@@ -334,7 +334,7 @@ fn allowed_whole(
     });
     // The card is the result: it folds away, and the conversation's line says it.
     until(shell, cx, "the card folded away", |cx| {
-        label(cx, format!("approval-{number}")).is_none()
+        cx.update(|window, _| window.try_find(id(format!("approval-{number}"))).is_none())
     });
     until(shell, cx, "the conversation's record", |cx| {
         label(cx, format!("approval-record-{number}"))
