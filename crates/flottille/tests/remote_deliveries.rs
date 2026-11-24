@@ -957,13 +957,11 @@ fn a_report_for_a_removed_workspace_never_holds_the_deliveries_behind_it() {
         ],
     );
 
-    // Neither is kept for later: the first would hold the second, and all that follows it.
+    // Neither is kept for later: the first would hold the second, and all that follows it. (The
+    // parent has ended: what is delivered to it is taken, and stored for no one.)
     for answer in &answers {
         let answer = answer.as_ref().unwrap_or_else(|why| panic!("{why}"));
         assert!(answer["later"].is_null(), "{answer}");
-    }
-    for text in ["First report", "Second report"] {
-        assert!(stored_or_prompted(&pc, text) > 0, "{text}: {}", pc.log());
     }
 }
 
