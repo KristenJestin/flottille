@@ -105,5 +105,7 @@ mod window_vault_ask;
 mod window_vault_share;
 #[path = "../window_whats_new.rs"]
 mod window_whats_new;
+#[path = "../window_words_whole.rs"]
+mod window_words_whole;
 #[path = "../windows.rs"]
 mod windows;
