@@ -4552,6 +4552,11 @@ fn a_revoked_token_refused_as_the_server_starts_signs_out() {
 /// The password of the vault entry `shop-test`, which reaches the page's form alone.
 const PASSWORD: &str = "pa55-of-the-test-acc0unt";
 
+/// The actions that record a session as a flow and keep it in a file agent-browser writes itself
+/// (what a login types included, which no masking reaches): off at the first pin, as the HAR and
+/// the trace are.
+const FLOWS: [&str; 2] = ["agent_browser_flow_save", "agent_browser_flow_steps"];
+
 /// The credential actions of agent-browser's own, which its adapter keeps off.
 const OWN_LOGINS: [&str; 6] = [
     "agent_browser_auth_delete",
@@ -4632,6 +4637,7 @@ fn agent_browser(version: &str) -> Value {
         .chain(&LOCKED_TOO)
         .chain(&SCRIPTS)
         .chain(&FILES)
+        .chain(&FLOWS)
         .chain(&OTHERS)
     {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
@@ -5896,6 +5902,18 @@ fn the_plugins_reason_is_read_up_to_a_kibibyte() {
     assert!(!said.contains(&"x".repeat(1025)), "{} bytes", said.len());
 }
 
+/// What a test of the real agent-browser does when this machine lacks the browser, pasta or what it
+/// needs: `required` is the value of the environment variable `FLOTTILLE_REAL_BROWSER`. Said and
+/// passed by default; a failure where CI's `real-browser` job sets it to `required`, so that a
+/// change of the browser's sandbox never passes with these tests skipped.
+fn real_browser_skip(why: &str, required: Option<&str>) {
+    assert!(
+        required != Some("required"),
+        "{why}, and FLOTTILLE_REAL_BROWSER=required forbids skipping"
+    );
+    eprintln!("skipped: {why}");
+}
+
 /// The real agent-browser 0.43.x to drive, when this machine has it: `FLOTTILLE_TEST_AGENT_BROWSER`
 /// names it, else `agent-browser` on the `PATH`; a launcher beside its native binary (npm's
 /// `agent-browser.js`) is replaced by that binary, which needs no Node in the run's sandbox.
@@ -6011,10 +6029,11 @@ fn real_user() -> Option<(User, PathBuf)> {
         .with_env("TMPDIR", temporary.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
     let program = match real_agent_browser(&user.path("home")) {
         Ok(program) => program,
         Err(why) => {
-            eprintln!("skipped: {why}");
+            real_browser_skip(&why, required.as_deref());
             return None;
         }
     };
@@ -6030,7 +6049,10 @@ fn pasta_on_the_path() -> bool {
     let pasta = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .any(|folder| folder.join("pasta").is_file());
     if !pasta {
-        eprintln!("skipped: no pasta (passt) on the PATH");
+        real_browser_skip(
+            "no pasta (passt) on the PATH",
+            std::env::var("FLOTTILLE_REAL_BROWSER").ok().as_deref(),
+        );
     }
     pasta
 }
@@ -6213,6 +6235,20 @@ fn found_nothing(probe: &Value, mode: &str) {
         probe["stream"], "connected",
         "{mode}: a run reached agent-browser's own port: {probe}"
     );
+}
+
+#[test]
+fn the_required_switch_fails_a_real_browser_test_that_would_be_skipped() {
+    let failed = std::panic::catch_unwind(|| {
+        real_browser_skip("no agent-browser on the PATH", Some("required"));
+    });
+    assert!(failed.is_err(), "a skip under `required` did not fail");
+}
+
+#[test]
+fn without_the_required_switch_a_missing_real_browser_is_skipped() {
+    real_browser_skip("no agent-browser on the PATH", None);
+    real_browser_skip("no agent-browser on the PATH", Some(""));
 }
 
 #[test]
@@ -6768,6 +6804,31 @@ fn har_and_trace_are_off_at_the_first_pin() {
     )
     .unwrap();
     assert_eq!(setting(&user, "agent_browser_trace_start"), "judged");
+}
+
+#[test]
+fn the_flow_tools_are_off() {
+    // `flow save` keeps a recorded session in a file of agent-browser's own, and `flow steps`
+    // lists what it recorded: the values a login types may be in them, where Flottille's masking
+    // does not look. Off at the first pin, beside the HAR and the trace, and the user's to turn on.
+    // `capture` is an argument of `open`, not a tool: nothing of it is tested here.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in FLOWS {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(changed.contains("agent_browser_flow_save"), "{changed}");
+    assert!(changed.contains("not masked"), "{changed}");
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_flow_save": "judged"}}),
+    )
+    .unwrap();
+    assert_eq!(setting(&user, "agent_browser_flow_save"), "judged");
 }
 
 /// A secret holding both quotes, which HTML and JSON escape.
@@ -7540,6 +7601,43 @@ const MOVING: [&str; 7] = [
     "CHROME_CONFIG_HOME",
     "BREAKPAD_DUMP_LOCATION",
 ];
+
+#[test]
+fn a_connection_whose_env_sets_home_is_refused_at_the_login() {
+    // `HOME` moves where agent-browser looks for the Chrome it downloaded and where Chrome reads
+    // `~/.pki/nssdb`: refused like the variables of the browser's folders, by its name and never
+    // its value.
+    let user = user();
+    user.call(
+        "vault.set",
+        json!({"name": "browser-setting", "secret": SETTING}),
+    )
+    .unwrap();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"env": {"HOME": {"vault": "browser-setting"}}}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("HOME"), "{said}");
+    assert!(said.contains("password"), "{said}");
+    assert!(!said.contains(SETTING), "{said}");
+    assert!(logged(&user, "browser", "login").is_empty());
+    assert!(form(&user).is_none());
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert!(
+        review["adapter"]["said"].as_str().unwrap().contains("HOME"),
+        "{review}"
+    );
+}
 
 #[test]
 fn login_is_refused_while_the_connections_env_moves_the_browsers_folders() {
@@ -8824,10 +8922,11 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
         .with_env("TMPDIR", temporary.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
     let program = match real_agent_browser(&user.path("home")) {
         Ok(program) => program,
         Err(why) => {
-            eprintln!("skipped: {why}");
+            real_browser_skip(&why, required.as_deref());
             return;
         }
     };
@@ -8837,7 +8936,7 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     let _weston = match weston(&user, "wayland-flottille-test") {
         Ok(weston) => weston,
         Err(why) => {
-            eprintln!("skipped: {why}");
+            real_browser_skip(&why, required.as_deref());
             return;
         }
     };

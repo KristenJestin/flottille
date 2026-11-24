@@ -87,10 +87,12 @@ pub(crate) fn runner_user() -> User {
     let claude = user.path("home/.claude");
     let stopping = user.path("stopping");
     let slow = user.path("slow-call");
+    let unsettled = user.path("unsettled");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_SLOW_CALL_FILE", slow.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_UNSETTLED_FILE", unsettled.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
@@ -2192,6 +2194,73 @@ fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
     );
 }
 
+#[test]
+fn a_launch_held_elsewhere_is_withdrawn_when_its_caller_ends() {
+    // No judge on server: the launch is held for its user.
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Held child",
+            "brief": "Write the tests."}),
+    ));
+    let held = titled(&server, "Held child");
+    assert_eq!(launch_states(&server), vec!["held"]);
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+
+    // Withdrawn there: nobody waits for it any more, and the user is told why.
+    eventually("the launch withdrawn on server", || {
+        launch_states(&server) == vec!["refused"]
+    });
+    let shown = server.agent(held["id"].as_str().unwrap());
+    assert_eq!(shown["state"], "ended", "{shown:#}");
+    assert_eq!(
+        shown["state_reason"],
+        format!("withdrawn: agent {root} of pc, which asked for it, ended").as_str(),
+        "{shown:#}"
+    );
+    let pending: Vec<Value> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request["state"] == "pending")
+        .collect();
+    assert!(pending.is_empty(), "{pending:#?}");
+}
+
+#[test]
+fn a_launch_not_yet_answered_is_stopped_when_its_caller_ends() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    // pc records what server answered only once this file is gone.
+    let slow = pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+    let launching = std::thread::spawn(move || {
+        launched(
+            &mcp,
+            json!({"kind": "child", "machine": "server", "title": "Late child",
+                "brief": "Write the tests."}),
+        )
+    });
+    let child = titled(&server, "Late child");
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+    eventually("the caller ended on pc", || {
+        pc.agent(&root)["state"] == "ended"
+    });
+    std::fs::remove_file(&slow).unwrap();
+    launching.join().expect("the launching thread ended");
+
+    eventually("the child ended on server", || {
+        server.agent(child["id"].as_str().unwrap())["state"] == "ended"
+    });
+    // Stopped as the children of its parent are, not withdrawn as a held launch is.
+    let stopped = server.agent(child["id"].as_str().unwrap());
+    assert_eq!(stopped["state_reason"], "its parent stopped", "{stopped:#}");
+}
+
 /// The name of the one launch `pc` recorded on another machine, and the id the user's answer
 /// there was sent under, once it came.
 fn answered_launch(pc: &Machine) -> (String, String) {
@@ -2474,5 +2543,69 @@ fn a_held_launch_with_no_request_number_never_says_request_0_when_it_ends() {
     assert!(told.contains("No number"), "{told}");
     eventually("the launch recorded as refused", || {
         launches_out(&pc) == vec!["refused"]
+    });
+}
+
+/// A setup that is still going when a test stops the daemon.
+const SLOW_SETUP: &str = "[[setup]]\nrun = \"sleep 600\"\n";
+
+/// A launch of `kind` held on `server`, whose setup lasts (`SLOW_SETUP`), then allowed there while
+/// its store refused to keep that answer, its setup still going when the daemon there stopped and
+/// started again: its caller was told it was approved first.
+fn told_approved_then_cut(pc: &Machine, server: &Machine, mcp: &Mcp, kind: &str) {
+    done(&launched(
+        mcp,
+        json!({"kind": kind, "machine": "server", "title": "Cut once told",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+    let unsettled = server.user.path("unsettled");
+    std::fs::write(&unsettled, "").unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(
+        pc,
+        &format!("Request #{number} on server (agent_launch) was approved by the user, and"),
+    );
+    eventually("the launch recorded as started", || {
+        launches_out(pc) == vec!["started"]
+    });
+    assert!(!unsettled.exists(), "its answer was kept");
+    restarted(server);
+}
+
+#[test]
+fn a_led_session_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "led");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
+}
+
+#[test]
+fn a_child_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "child");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
     });
 }

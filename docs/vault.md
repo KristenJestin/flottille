@@ -633,7 +633,22 @@ private mount namespace of every command Flottille confines (above), `~/.ssh` is
 with what is below it, and so are the files of the user's own git settings found at the daemon's
 start (`GIT_CONFIG_GLOBAL` when set, else `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`) and
 those they include (`include.path`, `includeIf.*.path`, whatever their condition): those git
-reads at every push, and the daemon reads its user's `core.sshCommand` from. Each folder on the
+reads at every push, and the daemon reads its user's `core.sshCommand` from. Where one of those
+files is reached through a link (a dotfiles manager's), the folder that holds each link on the way
+is read-only too when it is a folder of its own below the home (`~/.config/git`), and so is the
+folder that holds the versions: the one above the folder of the file the link leads to
+(`~/dots/versions` for `~/dots/versions/a/git-config`), the nearest that holds the versions a
+dotfiles manager makes later beside it, never one higher: no run re-points the link, or writes a
+version made after the start. A kept folder is read-only with everything below it, the folders
+kept in place below it included. Not kept, a link there being refused when its settings are
+relinked (below), and nothing kept at all when it is the folder of the versions (a relink is then
+refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
+(their folders as the projects' files and the store say at the daemon's start, whatever their
+name, and the default folder of the workspaces), the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
+`~/.local`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the same way), the folders
+a user keeps projects in by their usual names (`projects`, `workspaces`, `src`, `code`, `dev`,
+`repos`, `git`, `work`, `Documents`, `Downloads`, `Desktop` of the home), and Flottille's own: they hold every other
+program's files, which a run would lose. Each folder on the
 way to them that a command could rename or remove (its own folder is the user's, or one they may
 write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
 the way is renamed to put another file at the path. `~/.ssh` is the account's (the home of the
@@ -828,8 +843,31 @@ The gaps, where the platform does not allow more:
 - a file protected at the daemon's start is protected at the path it had then: a command started
   before the user replaced it (an editor that writes a new file, `git config --global`) still sees
   the new one writable, so the push is lent nothing until the daemon restarts, which ends every
-  run. A process a run of an older Flottille left behind, outside its session and without its
-  marker, is not ended at the start, and has `~/.ssh` as that version left it;
+  run (`flottille daemon stop`: the next command starts another, which finds the settings again).
+  **A settings file that leads elsewhere** is judged again at each push (`pushed::settle`). The
+  start and the push share the judgement of **the links** (which folder may hold one: the same
+  functions); the file itself is kept read-only at the start, whatever it is, and judged at the
+  push by a rule of its own. A dotfiles update that moves the link to a new version is accepted
+  only when **both** hold: each link on the way is in a folder kept read-only since the start
+  (above) or that only root may change, **and the new file lies under a folder kept since the
+  start** (above: the one that holds the old version's folder) or that only root may change, **with no other
+  hard link**. So no command could have written it between the link moving and the push, as a
+  command may write any file of the home outside those folders; the push then reads it, every
+  command started from then on has it read-only, its identity the one recorded then, and a hard
+  link made later is refused at the next push. Refused, saying which rule failed, when a link is
+  in a folder a run can write (the home itself: put the link in a folder of its own below it,
+  `~/.config/git/config`), when the new file is not under a folder kept since the start (a
+  manager that makes its versions elsewhere than beside the one found at the start), when it has
+  another hard link, or when no link leads there at all (a file replaced in its place); until the
+  daemon restarts. What remains: a settings file that includes a file not found at the start (a
+  relative include, which is a file of the new version folder) is refused as before, until a
+  restart; the folders kept are those of the settings the daemon found, so a link that did not
+  exist at the start is not kept; and a version made directly in one of the folders listed above
+  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that puts the
+  file deeper in its versions (`versions/<n>/git/config`) has `versions/<n>` kept, so a relink to
+  another version is refused, not trusted; and a project added after the daemon's start in a kept
+  folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
+  older Flottille left behind, outside its session and without its marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before
   the call, so a run that rewrites it in between sends that call to another host of the same
@@ -911,9 +949,15 @@ server uses the namespace, and a login checks, once its page is loaded, that eve
 answers runs in it. Which process answers is asked of the kernel, by connecting to each socket of
 the socket folder and of the folders in it, never through a link (`SO_PEERCRED`; a namespace puts
 a session's socket in a subfolder, and `--namespace` is refused to the login all the same). The
-connection does not wait for a daemon to accept: one that stops accepting counts as outside, never read from agent-browser's `<session>.pid` files: a socket
-whose process is gone counts as outside. The record is the holder's only while the process at its
-pid has the start time it records: a process that took the pid since is not the holder.
+connection does not wait for a daemon to accept, and a socket it cannot connect to, whatever the
+error, counts as outside: one that stops accepting, one whose path is too long for a socket address,
+one whose mode refuses the connection, and one whose process is gone; so does what cannot be
+looked at (a folder or an entry that cannot be read, a link named as a socket, which agent-browser
+follows). One exception: a socket nobody listens on (the connection is refused) is a browser that
+crashed and left its file, in socket folders that are kept: it is removed before the count, and
+holds nothing. The pids are never read from
+agent-browser's `<session>.pid` files. The record is the holder's only while the process at its pid
+has the start time it records: a process that took the pid since is not the holder.
 
 **Chrome's profile is in the vault folder.** agent-browser makes the browser's profile (its
 cookies, Local Storage, History, and Chrome's `Default/Preferences`, which names a proxy) in the
@@ -972,9 +1016,10 @@ its second ABI, the server still runs, its browser in the runs' network, and the
 to fill**, saying why and its remedy: "install passt (pasta) to let the agent's browser sign in",
 the user namespaces to allow, or the kernel to update. Every other action of the connection works.
 `flottille doctor` says whether the browser's isolation is available (`sandbox.browser_network`),
-with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as `passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces through AppArmor, which
-refuses Flottille's own namespaces, the browser's included, until the user lifts the restriction
-or allows Flottille.
+with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as
+`passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces
+through AppArmor, which refuses Flottille's own namespaces, the browser's included, until the user
+lifts the restriction or allows Flottille.
 
 ## The tests' keyring
 

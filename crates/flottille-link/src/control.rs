@@ -18,11 +18,12 @@
 //! hub → device   {"hub": H, "nonce": Nh, "hello": {…, "signed": sign_H(hello, K, Nd, Nh, …)},
 //!                 "proof": sign_H(session, 1, K, Nd, Nh)}
 //! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
-//! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false,
+//! hub → device   {"welcome": {"notices": true}}  or  {"refused": {"reason": "…", "reset": true | false,
 //!                                                 "proof": sign_H(refused, K, Nd, Nh, P, pair,
 //!                                                                 reset, reason)}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
-//!                {"list": […]}, {"presence": […]}, {"facts": […]}
+//!                {"list": […]}, {"presence": […]}, {"facts": […]},
+//!                {"notice": {"from": K', "notice": N}}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
 //!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
 //! and each way   {"keepalive": {}}
@@ -36,6 +37,12 @@
 //! proxy on the way does not take the session for idle; a side that hears nothing from the other
 //! for `SILENCE` takes the session as lost, and so does the hub when a device reads nothing it
 //! sends for as long.
+//!
+//! `notice` is what a runner's machine `K'` asked the hub to tell the user's phones (`Ask::Notify`):
+//! a kind and ids (`Notice`), which the hub sends on to each member's session that asked for them
+//! (`Ask::About`'s `notices`) and reads no further (`docs/remote.md`, "Notifications"). Neither is
+//! said to a side of before #827, which would end the session: a runner asks `notify` only of a
+//! hub whose welcome said `notices`, and a hub tells `notice` only to a phone that asked for them.
 //!
 //! `session` is `flottille-hub-session-v1` and a zero byte: nothing else a key signs starts so.
 //! Each side signs the other's fresh nonce and the other's key, so that a proof cannot be played
@@ -568,14 +575,80 @@ pub enum Ask {
     /// A member's change of the list.
     Submit { change: Change },
     /// What this device says of itself: what it is (`computer`, `phone`) and its system
-    /// (`linux`).
-    About { device: String, system: String },
+    /// (`linux`); with `notices`, that this session takes the notices of the runners (a phone of
+    /// before #827 does not say it, and is sent none: its session would end at one).
+    About {
+        device: String,
+        system: String,
+        #[serde(default)]
+        notices: bool,
+    },
     /// The addresses a machine of the previous version tells, for the direct link removed on
     /// 2026-11-21: answered and ignored, so that such a machine keeps its session while it waits
     /// for its update. This version never asks it.
     Addresses { addresses: Vec<String> },
     /// Whether a client of this device is active, and when its last input was.
     Presence { active: bool, last_input: u64 },
+    /// What a runner's machine tells the user's phones (`docs/remote.md`, "Notifications").
+    Notify { notice: Notice },
+}
+
+/// What a runner tells the user's phones through the hub: a kind and ids, never a title, an
+/// excerpt, a path or a command (`docs/remote.md`, "Notifications"). The phone links to the
+/// runner and reads the rest itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    /// The number of the runner's notification (`notifications.list`).
+    pub notification: u64,
+    /// The session it is about: its root agent's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<NoticeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    Request,
+    Question,
+    Report,
+    Failure,
+    /// What was told was answered or seen elsewhere: the phone removes its notification.
+    Dismissed,
+}
+
+/// An id in a notice: 1 to 64 letters, digits, `-` or `_`, so that no text rides in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeId(String);
+
+impl NoticeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for NoticeId {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<NoticeId, String> {
+        let fits = (1..=64).contains(&text.len())
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+        match fits {
+            true => Ok(NoticeId(text.to_owned())),
+            false => Err("an id is 1 to 64 letters, digits, - or _".to_owned()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NoticeId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<NoticeId, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// An ask and its number, which its answer names.
@@ -616,8 +689,12 @@ pub struct Facts {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToDevice {
-    /// The session is a member's, or a pairing's.
-    Welcome {},
+    /// The session is a member's, or a pairing's. `notices`: the hub takes `Ask::Notify` (a hub
+    /// of before #827 says nothing, and closes a session that asks it).
+    Welcome {
+        #[serde(default)]
+        notices: bool,
+    },
     /// The device is not one of the members; `reset` when the list it pinned is not the hub's
     /// any more, the hub having been set up again. At the end of the handshake, `proof` is the
     /// hub's signature of it over the handshake (`Transcript::refusal_bytes`); a hub of before
@@ -648,6 +725,8 @@ pub enum ToDevice {
     Relayed { from: PublicKey, packet: LinkPacket },
     /// The members' keys whose session to the hub is open now: the devices a link reaches.
     Online(Vec<PublicKey>),
+    /// What the runner whose machine's key is `from` tells this phone.
+    Notice { from: PublicKey, notice: Notice },
     /// Nothing to say: the session is alive.
     Keepalive {},
 }
@@ -814,10 +893,17 @@ fn relay_ends() -> (RelayPort, Carried) {
 
 /// What the hub pushes to a device, as the session hands it over.
 #[derive(Clone, Debug)]
+// A notice now and then, handed over at once: its key's size costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum Pushed {
     List(MemberList),
     Presence(Vec<PresenceOf>),
     Facts(Vec<Facts>),
+    /// What the runner whose machine's key is `from` tells this phone.
+    Notice {
+        from: PublicKey,
+        notice: Notice,
+    },
 }
 
 /// What one side signs: the domain, whose proof it is, the other's key, then the other's nonce
@@ -1118,6 +1204,8 @@ pub struct Session {
     refused: Option<(String, bool)>,
     /// The device's end of the links the session carries, until it is taken.
     relay: Option<RelayPort>,
+    /// Whether the hub said it takes `Ask::Notify`.
+    notices: bool,
 }
 
 impl fmt::Debug for Session {
@@ -1136,11 +1224,24 @@ pub struct Asker {
     authority: String,
     asks: mpsc::UnboundedSender<(Ask, Answered)>,
     ended: Arc<Mutex<Option<String>>>,
+    notices: bool,
 }
 
 impl Asker {
-    /// Asks the hub, and waits for its answer.
+    /// Whether the hub said it takes `Ask::Notify`.
+    pub fn takes_notices(&self) -> bool {
+        self.notices
+    }
+
+    /// Asks the hub, and waits for its answer. `Ask::Notify` is never sent to a hub that did not
+    /// say it takes it: such a hub would close the session.
     pub async fn ask(&self, ask: Ask) -> Result<(), ControlError> {
+        if matches!(ask, Ask::Notify { .. }) && !self.notices {
+            return Err(ControlError::Refused {
+                hub: self.authority.clone(),
+                reason: "it takes no notice, being of before them: none was sent".to_owned(),
+            });
+        }
         let (answer, answered) = oneshot::channel();
         if self.asks.send((ask, answer)).is_err() {
             return Err(lost(&self.authority, &self.ended));
@@ -1313,8 +1414,10 @@ impl Session {
         let (pushing, pushed) = mpsc::unbounded_channel();
         let ended = Arc::new(Mutex::new(None));
         let (relay, carried) = relay_ends();
+        let mut takes_notices = false;
         let refused = match welcome {
-            ToDevice::Welcome {} => {
+            ToDevice::Welcome { notices } => {
+                takes_notices = notices;
                 tokio::spawn(drive(
                     reader,
                     writer,
@@ -1366,6 +1469,7 @@ impl Session {
             ended,
             refused,
             relay: Some(relay),
+            notices: takes_notices,
         })
     }
 
@@ -1395,6 +1499,7 @@ impl Session {
             authority: self.authority.clone(),
             asks: self.asks.clone(),
             ended: self.ended.clone(),
+            notices: self.notices,
         }
     }
 
@@ -1608,10 +1713,11 @@ async fn drive(
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
                     Some(Ok(ToDevice::Addresses(_))) => {}
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
+                    Some(Ok(ToDevice::Notice { from, notice })) => { let _ = pushing.send(Pushed::Notice { from, notice }); }
                     Some(Ok(ToDevice::Refused { reason, .. })) => {
                         break format!("it refused: {}", shown(&reason, SHOWN));
                     }
-                    Some(Ok(ToDevice::Welcome {})) => {}
+                    Some(Ok(ToDevice::Welcome { .. })) => {}
                     Some(Err(why)) => break why,
                     None => break "it closed the connection".to_owned(),
                 }
@@ -1700,7 +1806,7 @@ impl Arriving {
     /// [`Arriving::welcome`], the session lost after `silence` without a word from the device, or
     /// a line it does not read for as long.
     pub async fn welcome_within(mut self, silence: Duration) -> std::io::Result<HubSession> {
-        write_line(&mut self.writer, &ToDevice::Welcome {}).await?;
+        write_line(&mut self.writer, &ToDevice::Welcome { notices: true }).await?;
         let (sender, asks) = mpsc::channel(16);
         let (relaying, relays) = mpsc::channel(RELAY_WAITING);
         let mut reader = self.reader;
@@ -1940,6 +2046,30 @@ pub async fn arrive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_holds_a_kind_and_ids_and_nothing_else() {
+        let notice: Notice = serde_json::from_value(serde_json::json!({
+            "kind": "question", "notification": 12, "session": "3f2a91bc0d4e"
+        }))
+        .unwrap();
+        assert_eq!(notice.kind, NoticeKind::Question);
+        // A word of what it is about, a path or a command, is no notice.
+        for wrong in [
+            serde_json::json!({"kind": "request", "notification": 1, "title": "Read .env"}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": "../.env"}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": "rm -rf"}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": "a".repeat(65)}),
+            serde_json::json!({"kind": "request", "notification": 1, "session": ""}),
+            serde_json::json!({"kind": "excerpt", "notification": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<Notice>(wrong.clone()).is_err(),
+                "{wrong}"
+            );
+        }
+        assert!("../.env".parse::<NoticeId>().is_err());
+    }
 
     #[test]
     fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {

@@ -2,7 +2,9 @@
 //! and keys"; `docs/protocol.md`, "Remote"): `remote.settings` reads whether it is on,
 //! `remote.configure` writes it in `daemon.toml` (keeping every other key and comment of the
 //! user's file) and takes it at once: the link starts or stops without the daemon being started
-//! again. Both are answered to this machine's own clients only.
+//! again. Both are answered to this machine's own clients only. So is **Notify the phone**
+//! (`[remote] notify`, `away` or `always`: `docs/remote.md`, "Notifications"), read each time a
+//! phone may be told.
 
 use std::sync::Arc;
 
@@ -16,9 +18,9 @@ use crate::projects::Failure;
 pub const OFF: &str =
     "remote is off: turn it on in Settings, Machines, or with flottille remote on";
 
-/// `daemon.toml`'s text with `[remote] on` set to `on`. Every other key and every comment stays as
-/// the user wrote it.
-fn edited(text: &str, on: bool) -> Result<String, String> {
+/// `daemon.toml`'s text with `[remote] on` set to `on` and `notify` to `notify`, those given.
+/// Every other key and every comment stays as the user wrote it.
+fn edited(text: &str, on: Option<bool>, notify: Option<&str>) -> Result<String, String> {
     let mut document: toml_edit::DocumentMut =
         text.parse().map_err(|error: toml_edit::TomlError| {
             format!(
@@ -36,7 +38,12 @@ fn edited(text: &str, on: bool) -> Result<String, String> {
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
         .ok_or("daemon.toml has a `remote` that is not a table")?;
-    table["on"] = toml_edit::value(on);
+    if let Some(on) = on {
+        table["on"] = toml_edit::value(on);
+    }
+    if let Some(notify) = notify {
+        table["notify"] = toml_edit::value(notify);
+    }
     Ok(document.to_string())
 }
 
@@ -57,7 +64,10 @@ fn read(paths: &Paths) -> String {
 
 /// What `remote.settings` and `remote.configure` answer.
 fn shown(daemon: &Daemon) -> Value {
-    json!({"on": crate::remote::on(&daemon.paths)})
+    json!({
+        "on": crate::remote::on(&daemon.paths),
+        "notify": crate::remote::notify(&daemon.paths),
+    })
 }
 
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
@@ -74,14 +84,26 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
 async fn configure(daemon: &Arc<Daemon>, params: &Value) -> Result<Value, Failure> {
     let invalid = |why: String| Failure::new(flottille_protocol::code::INVALID_PARAMS, why);
     let on = match &params["on"] {
-        Value::Null => return Ok(shown(daemon)),
-        Value::Bool(on) => *on,
+        Value::Null => None,
+        Value::Bool(on) => Some(*on),
         _ => return Err(invalid("on is true or false".into())),
     };
+    let notify = match &params["notify"] {
+        Value::Null => None,
+        Value::String(notify) if notify == "away" || notify == "always" => Some(notify.as_str()),
+        _ => return Err(invalid("notify is away or always".into())),
+    };
+    if on.is_none() && notify.is_none() {
+        return Ok(shown(daemon));
+    }
     let paths = &daemon.paths;
     let before = read(paths);
-    let text = edited(&before, on).map_err(Failure::refused)?;
+    let text = edited(&before, on, notify).map_err(Failure::refused)?;
     write(paths, &text).map_err(Failure::refused)?;
+    // How the phones are told is read when they are: nothing to start or stop.
+    if on.is_none() {
+        return Ok(shown(daemon));
+    }
     match apply(daemon).await {
         Ok(()) => Ok(shown(daemon)),
         Err(why) => {

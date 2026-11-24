@@ -235,6 +235,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.close` | local |
 | `remote.settings` | local |
 | `remote.configure` | local |
+| `client.presence` | local |
 | `tunnel.open` | drive |
 | `tunnel.list` | local |
 | `tunnel.close` | local |
@@ -1321,14 +1322,18 @@ that follows over a link reads none of them. A draft is the user's own words: no
 log holds one, and no agent is ever given one. `draft.*` is answered by a task of its own, its
 pictures decoded and written off the runtime's threads.
 
-- `draft.get {kind, target}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
+- `draft.get {kind, target, machine?}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
   "data"}]}}` (the pictures in base64): `kind` is `session` (`target` is the agent's id, a
   session's composer) or `project` (`target` is the project's name, the first message of a new
   session). `not-found` when the agent or the project does not exist, when the session was
   forgotten (it ended and cannot be resumed, or its kept week is over) or its project is gone:
   such a composer has no draft, and the window says nothing of it. `invalid-params` for another
-  `kind`.
-- `draft.set {kind, target, text, images?}` keeps the draft, in place of the one there was, and
+  `kind`. `machine` names the machine the session or the project is of, when it is not this
+  one's (a window that shows another machine's pages): such a draft is kept by this daemon, under
+  that machine's name, and never sent to it; this daemon knows nothing of the session or the
+  project there, so it checks nothing of them (no `not-found`), and a draft of this machine's own
+  (no `machine`) is never the same as one of another machine's of the same name.
+- `draft.set {kind, target, machine?, text, images?}` keeps the draft, in place of the one there was, and
   answers `{"kept"}`. `images` replaces the pictures (the composer's limits hold: 20, 5 MiB each,
   png, jpeg, gif or webp); left out, those the draft has stay. A draft with no text beyond
   blanks and no picture is forgotten (`{"kept": false}`), which is how emptying a composer is
@@ -1337,10 +1342,10 @@ pictures decoded and written off the runtime's threads.
   and this one does not are removed once it commits. The same `not-found` as `draft.get` for a
   session forgotten or a project gone: a write that comes late (a pending wait, the close of a
   window) never brings a draft back.
-- `draft.clear {kind, target}` forgets the draft and its pictures; a session or a project that is
+- `draft.clear {kind, target, machine?}` forgets the draft and its pictures; a session or a project that is
   gone is forgotten all the same.
-- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>"]}`: which composers hold
-  one, never what.
+- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>",
+  "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
@@ -1432,12 +1437,22 @@ not start, `unavailable`, with the reason. No method answers a private key. Ever
 the hub: nothing listens, and no method takes or answers an address of a machine (the direct link
 was removed on 2026-11-21).
 
-- `remote.settings` (local) answers `{"on"}`: whether remote is on.
-- `remote.configure {on?}` (local) turns it on or off and answers `remote.settings`'. It writes
-  `daemon.toml` itself, every other key and comment kept, and takes the change without a restart:
-  the link starts or stops. A file that is not TOML is `refused` and left as it was. A `listen`
-  given is not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing
-  with the hub and the keys; turned on again, the same hub.
+- `remote.settings` (local) answers `{"on", "notify"}`: whether remote is on, and when the phone
+  is told (`docs/remote.md`, "Notifications"): `away`, the default, or `always`.
+- `remote.configure {on?, notify?}` (local) turns it on or off, sets when the phone is told
+  (`away` or `always`; anything else is `invalid-params`), and answers `remote.settings`'. It
+  writes `daemon.toml` itself (`[remote] on`, `[remote] notify`), every other key and comment kept,
+  and takes the change without a restart: the link starts or stops; `notify` is read each time a
+  phone may be told. A file that is not TOML is `refused` and left as it was. A `listen` given is
+  not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing with the
+  hub and the keys; turned on again, the same hub.
+- `client.presence {focused, input?}` (local) is what a client says of the user: whether it is in
+  front of them (the window focused), and `input: true` when they just gave it an input (a key, a
+  click, the wheel). The daemon stamps the input with its clock, keeps it, and tells the hub
+  (`{active, last_input}`, seconds since 1970), which tells the runners; it answers `{}`. The
+  window says it when its focus changes and at an input, every 20 seconds at most. With remote off
+  it is answered and kept nowhere. A runner tells the phone only when no client of the user had an
+  input in the last 2 minutes (`docs/remote.md`, "Notifications").
 
 - `remote.machines` answers `{"this": {"name", "key", "fingerprint"}, "machines": [{"name",
   "key", "fingerprint", "state", "since", "reason", "reached"}]}`: this machine's member name
@@ -1511,8 +1526,17 @@ was removed on 2026-11-21).
   projects are the same one when their `remotes` are equal and not empty. A machine whose list
   came before projects were listed says `null` for them. A session is `{"id", "title", "project", "state",
   "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
-  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  `pilot` the session of the agent that leads it on that machine, or `null`;
+  `pilot_elsewhere` `{"machine", "agent"}` the agent of another machine that leads it, that
+  machine's name and the agent's id there, as the session's machine said it (`pilots`), or
+  `null`: said only of a session of that machine's own list and only naming a member machine
+  other than it, and the window puts the row under that agent's only when that machine lists it,
+  never under a session of this machine (`docs/remote.md`, "One list of every machine"); never its
   conversation. The event `remote.sessions {name}` says that a machine's list changed.
+  Between machines of two builds: `sessions` keeps its closed shape (a field a machine of before
+  does not know makes it refuse the whole list), what is new beside it travels as a message of its
+  own (`projects`, `pilots`) that a machine of before refuses alone, and a machine that receives
+  none of them draws the list as before.
 - `remote.close {request}` keeps the user's close of a session of another machine: `request` is
   `agent.stop {agent}` for that machine, signed by the client with the device key as any request
   for another machine. This machine stores it before it sends it, sends it once that machine is
@@ -2438,9 +2462,10 @@ sessions it leads and theirs in turn, in its project and in others, those that h
 workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
 `unpushed` or `unknown`), `losses` each as a sentence. A session it leads on another machine,
 which ends there with it, is listed too, with `machine` its name, `project` its project there and
-`state` `unknown` and `losses` `["unknown (on <machine>)"]`: what its workspace holds is not
-asked there, so that the answer never waits on another machine. The window reads it for its
-confirmation, each session on another machine said with its machine.
+`state` and `losses` as that machine reads them, asked there and awaited 3 seconds at most:
+`state` `unknown` and `losses` `["unknown (on <machine>)"]` when it is off, does not answer in
+time or is a machine of before (`docs/remote.md`, "A tree across machines"). The window reads
+it for its confirmation, each session on another machine said with its machine.
 
 #### `agent.detach`
 

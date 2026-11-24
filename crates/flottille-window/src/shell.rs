@@ -71,6 +71,9 @@ const SIDEBAR: f32 = 280.;
 const SIDEBAR_MEDIUM: f32 = 260.;
 /// How often the times ago are looked at; a row is drawn again only when its text changes.
 const CLOCK: Duration = Duration::from_secs(30);
+/// How often at most an input at the window is told to the daemon: well within the 2 minutes the
+/// phone waits for (`crate::machines::Remote::presence`).
+const PRESENCE_EVERY: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -376,6 +379,10 @@ pub struct Shell {
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
     _clock: Task<()>,
+    /// What this window last told of the user (`client.presence`): whether it was focused, and
+    /// when it last told an input, which is told again past `PRESENCE_EVERY` only.
+    told_focus: Option<bool>,
+    told_input: Option<std::time::Instant>,
 }
 
 type Forms = (Entity<Composer>, Entity<NewWorkspace>);
@@ -792,6 +799,11 @@ impl Shell {
         });
         cx.observe_window_bounds(window, |this, window, cx| this.relayout(false, window, cx))
             .detach();
+        // Whether the user is at this window tells whether the phone is (`client.presence`).
+        cx.observe_window_activation(window, |this, window, _| {
+            this.tell_presence(window.is_window_active(), false)
+        })
+        .detach();
         let mut shell = Self {
             seen,
             restart: Arc::new(restart_flottille),
@@ -900,6 +912,8 @@ impl Shell {
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
+            told_focus: None,
+            told_input: None,
         };
         shell.relayout(true, window, cx);
         // The colours the user chose, kept by the daemon for every window.
@@ -907,6 +921,27 @@ impl Shell {
         // Given once the window is built: a root built after would take it back.
         cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
+    }
+
+    /// Tells this machine's daemon whether the user is at this window, and that they gave it an
+    /// input: the phone is told only while the user is away (`docs/remote.md`,
+    /// "Notifications"). An input is told at most every `PRESENCE_EVERY`, the focus at once.
+    fn tell_presence(&mut self, focused: bool, input: bool) {
+        let now = std::time::Instant::now();
+        let same = self.told_focus == Some(focused);
+        if input {
+            let recent = self
+                .told_input
+                .is_some_and(|at| now.saturating_duration_since(at) < PRESENCE_EVERY);
+            if same && recent {
+                return;
+            }
+            self.told_input = Some(now);
+        } else if same {
+            return;
+        }
+        self.told_focus = Some(focused);
+        self.remote.presence(focused, input);
     }
 
     /// What this machine's daemon said of the user's machines.
@@ -1569,6 +1604,7 @@ impl Shell {
         };
         let this = cx.entity().downgrade();
         let machine = self.pages_machine();
+        let drafted_on = machine.clone();
         let made = !self.forms.contains_key(name);
         let forms = self.forms.entry(name.clone()).or_insert_with(|| {
             let (a, b) = (
@@ -1583,7 +1619,10 @@ impl Shell {
         if made {
             // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
             self.actions.send(Command::DraftRead {
-                key: DraftKey::Project(name.clone()),
+                key: DraftKey::Project {
+                    machine: drafted_on,
+                    name: name.clone(),
+                },
             });
         }
         let forms = forms.clone();
@@ -2235,10 +2274,11 @@ impl Shell {
             Some(reply) => reply.clone(),
             None => {
                 let (shell, project) = (this.clone(), opened.project.clone());
-                let (session, its) = (agent.clone(), asks.clone());
+                let (session, its, on) = (agent.clone(), asks.clone(), machine.clone());
                 let extensions = self.extensions.downgrade();
                 let reply = cx.new(|cx| {
-                    Reply::new(shell, its, session, project, window, cx).with_extensions(extensions)
+                    Reply::new(shell, its, on, session, project, window, cx)
+                        .with_extensions(extensions)
                 });
                 self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
                     let session = reply.read(cx).session().to_owned();
@@ -2248,7 +2288,10 @@ impl Shell {
                 // What this machine keeps of its draft comes back as an `Outcome::Draft`, said of
                 // the machine whose actions asked (the keeper always asks this one).
                 asks.send(Command::DraftRead {
-                    key: DraftKey::Session(agent.clone()),
+                    key: DraftKey::Session {
+                        machine: machine.clone(),
+                        agent: agent.clone(),
+                    },
                 });
                 reply
             }
@@ -2549,6 +2592,10 @@ impl Shell {
         &self.main
     }
 
+    pub fn sidebar(&self) -> &Entity<Sidebar> {
+        &self.sidebar
+    }
+
     /// The vault's section, whichever page is shown: its form is a dialog over that page.
     pub fn vault(&self, cx: &gpui_kit::App) -> Entity<VaultSection> {
         self.settings.read(cx).vault().clone()
@@ -2646,6 +2693,14 @@ impl Shell {
     fn folds_now(&self, cx: &Context<Self>) -> Folds {
         // What was last asked of the daemon, which the nodes that are not shown now keep.
         let last = self.kept_asked.as_ref().unwrap_or(&self.kept);
+        // No rows yet (a window opening reads what the daemon keeps before its rows): the nodes
+        // say nothing, and writing their empty maps would forget every fold for every window.
+        if self.read.is_none() {
+            return Folds {
+                by_machine: self.by_machine,
+                ..last.clone()
+            };
+        }
         let by_machine = self.is_by_machine();
         let exists = |name: &str| self.snapshot.projects.iter().any(|p| p.name == name);
         Folds {
@@ -3016,6 +3071,7 @@ impl Shell {
                                 exchanged_at: now_ms(),
                                 created_at: now_ms(),
                                 pilot: None,
+                                pilot_elsewhere: None,
                             },
                         ));
                         row
@@ -3700,7 +3756,7 @@ impl Shell {
             // A read that failed is not "no draft": the composer writes nothing, and the read is
             // asked again.
             Outcome::Draft { key, found } => match key {
-                DraftKey::Session(id) => {
+                DraftKey::Session { agent: id, .. } => {
                     if let Some(reply) = self.replies.get(&self.row_answered(&id)).cloned() {
                         match found {
                             Ok(found) => {
@@ -3710,7 +3766,7 @@ impl Shell {
                         }
                     }
                 }
-                DraftKey::Project(name) => {
+                DraftKey::Project { name, .. } => {
                     let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
                     if let Some(composer) = composer {
                         match found {
@@ -3724,12 +3780,12 @@ impl Shell {
                 }
             },
             Outcome::DraftWritten { key, result } => match key {
-                DraftKey::Session(id) => {
+                DraftKey::Session { agent: id, .. } => {
                     if let Some(reply) = self.replies.get(&self.row_answered(&id)).cloned() {
                         reply.update(cx, |reply, cx| reply.draft_written(result, cx));
                     }
                 }
-                DraftKey::Project(name) => {
+                DraftKey::Project { name, .. } => {
                     let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
                     if let Some(composer) = composer {
                         composer.update(cx, |composer, cx| composer.draft_written(result, cx));
@@ -5975,6 +6031,23 @@ impl Render for Shell {
         div()
             .id("shell")
             .track_focus(&self.focus)
+            // Any input, wherever it goes: the user is at this window.
+            .capture_any_mouse_down(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
+            .capture_key_down(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
+            // Reading by the wheel is an input too; no scroll in the window stops it on its way.
+            .on_scroll_wheel(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
             .size_full()
             .relative()
             .bg(p.bg)
