@@ -2611,3 +2611,78 @@ fn a_child_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended()
         launches_out(&pc) == vec!["ended"]
     });
 }
+
+#[test]
+fn a_child_not_told_before_a_restart_there_tells_its_caller_it_was_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Cut before told",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    // Allowed, settled started, its setup going on: the daemon stopped before it told anyone.
+    changed_while_stopped(
+        &server,
+        &format!(
+            "UPDATE approval_requests SET state = 'allowed', decision = 'once', decided_at = 1 \
+             WHERE number = {number}; UPDATE launches SET state = 'started' WHERE way = 'in';"
+        ),
+    );
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("was approved by the user, but nothing was done"),
+        "{told}"
+    );
+    assert!(told.contains("Flottille stopped"), "{told}");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+}
+
+#[test]
+fn a_handed_launch_told_approved_then_cut_by_a_restart_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "handed");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
+}
+
+#[test]
+fn an_end_after_a_dropped_approval_shows_the_session_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Approval dropped");
+    // As many messages wait for pc as may when the user's answer is told.
+    let full = server.user.path("kept-full");
+    std::fs::write(&full, "").unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(&server, "Do the work.");
+    assert!(!full.exists(), "nothing was kept for pc");
+    let session = titled(&server, "Approval dropped");
+    server
+        .user
+        .call("agent.stop", json!({"agent": session["id"]}))
+        .unwrap();
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
+}
