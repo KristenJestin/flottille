@@ -1634,8 +1634,11 @@ pub(crate) async fn losses_there(
         arguments: "{}".to_owned(),
         ..Call::default()
     };
-    let sent = link.send(&Message::Machine(MachineMessage::Call(Box::new(call))));
-    let answer = tokio::time::timeout_at(until, sent).await.ok()?.ok()?;
+    let message = Message::Machine(MachineMessage::Call(Box::new(call)));
+    let answer = tokio::time::timeout_at(until, link.send(&message))
+        .await
+        .ok()?
+        .ok()?;
     let state = answer["state"]
         .as_str()
         .filter(|state| matches!(*state, "clean" | "uncommitted" | "unpushed" | "unknown"))?;
