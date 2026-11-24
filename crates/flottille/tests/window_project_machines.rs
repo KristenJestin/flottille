@@ -628,6 +628,19 @@ fn the_window_draws_no_frame_at_rest_with_marks_and_with_sections(cx: &mut TestA
 // The shared project's page (#1266): its sessions of every machine, where a session starts, and
 // its settings' switch between the machines that have it.
 
+/// A user one of whose providers is ready, as the window sees it: a machine of theirs can run an
+/// agent, and its composer starts.
+fn ready_user() -> User {
+    let user = User::with_fake_providers();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// A hub, `pc` and `server`, each able to run an agent.
+fn ready_machines() -> (TestHub, Machine, Machine) {
+    pc_and_server_on(Machine::of(ready_user()), ready_user())
+}
+
 /// `pc` has been told the projects `names` of `machine`.
 fn told_by(pc: &Machine, machine: &str, names: &[&str]) {
     eventually(&format!("pc is told {machine}'s projects"), || {
@@ -653,15 +666,21 @@ fn page_window<'a>(
     let (shell, cx) = window(pc, cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let others: Vec<String> = others.iter().map(|name| (*name).to_owned()).collect();
-    until(&shell, cx, "the machines are read", |cx| {
-        shell.read_with(cx, |s, cx| {
-            s.machines().read(cx).machines().is_some_and(|read| {
-                others
-                    .iter()
-                    .all(|name| read.machine(name).is_some_and(|m| m.online()))
+    until(
+        &shell,
+        cx,
+        "the machines and this one's providers are read",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.providers().offered().next().is_some()
+                    && s.machines().read(cx).machines().is_some_and(|read| {
+                        others
+                            .iter()
+                            .all(|name| read.machine(name).is_some_and(|m| m.online()))
+                    })
             })
-        })
-    });
+        },
+    );
     settle(&shell, cx);
     (shell, cx)
 }
@@ -683,7 +702,7 @@ fn shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
 
 #[gpui_kit::test]
 fn its_page_lists_the_sessions_of_both_machines(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = machines();
+    let (_hub, pc, server) = ready_machines();
     add(&pc, "app", APP);
     add(&server, "app", APP);
     told(&pc, &["app"]);
@@ -702,7 +721,10 @@ fn its_page_lists_the_sessions_of_both_machines(cx: &mut TestAppContext) {
     assert!(present(cx, machine_block_id("server")));
     assert!(!present(cx, machine_block_id("pc")));
     let mark = label(cx, machine_session_mark_id(&row)).unwrap_or_default();
-    assert!(mark.starts_with("server in "), "{mark}");
+    assert!(
+        mark.contains(" in "),
+        "the server's icon in its colour: {mark}"
+    );
     assert_eq!(
         label(cx, machine_block_id("server")).as_deref(),
         Some("server · online")
@@ -732,8 +754,8 @@ fn its_page_lists_the_sessions_of_both_machines(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn starting_a_session_runs_on_this_machine_when_it_can_else_asks(cx: &mut TestAppContext) {
-    let (hub, pc, server) = machines();
-    let laptop = Machine::of(fake_user());
+    let (hub, pc, server) = ready_machines();
+    let laptop = Machine::of(ready_user());
     crate::remote::pair(&hub, &laptop, "laptop", "runner");
     pc.wait_for("laptop", "online");
     // `app` everywhere; `site` on the server only; `web` on the server and the laptop.
@@ -767,7 +789,16 @@ fn starting_a_session_runs_on_this_machine_when_it_can_else_asks(cx: &mut TestAp
     until(&shell, cx, "app's composer", |cx| {
         present(cx, "place-picker")
     });
-    assert_eq!(shown(&shell, cx), None);
+    let providers = shell.read_with(cx, |s, _| {
+        let p = s.providers();
+        format!(
+            "known {} offered {} why {:?}",
+            p.known,
+            p.offered().count(),
+            p.why_none()
+        )
+    });
+    assert_eq!(shown(&shell, cx), None, "{providers}");
     assert!(!present(cx, "composer-ask"));
 
     // Not here, on one machine online: there, nothing asked.
@@ -820,7 +851,7 @@ fn starting_a_session_runs_on_this_machine_when_it_can_else_asks(cx: &mut TestAp
 
 #[gpui_kit::test]
 fn its_settings_switch_between_the_machines_that_have_it(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = machines();
+    let (_hub, pc, server) = ready_machines();
     add(&pc, "app", APP);
     add(&server, "app", APP);
     add(&pc, "site", SITE);
