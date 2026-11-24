@@ -1906,7 +1906,7 @@ fn the_window_tells_the_hub_its_presence_on_a_scroll(cx: &mut TestAppContext) {
     settle(&shell, cx);
 
     // Reading by the wheel, no click nor key: the user is at the window all the same.
-    let middle = cx.update(|window, _| window.find("shell").bounds().center());
+    let middle = cx.update(|window, _| window.find("main").bounds().center());
     cx.simulate_event(gpui_kit::ScrollWheelEvent {
         position: middle,
         delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-200.))),
