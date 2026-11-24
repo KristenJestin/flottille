@@ -453,15 +453,21 @@ fn allowed(key: &str, text: &str) -> String {
             kept.push(line.to_owned());
         // The last line of a prompt closes its JSON: that stays, on the line before, when the
         // line is left out.
-        } else if let (Some(at), Some(last)) = (line.find(JSON_END), kept.last_mut()) {
+        } else if let (Some(at), Some(last)) = (json_end(line), kept.last_mut()) {
             last.push_str(&line[at..]);
         }
     }
     kept.join("\n")
 }
 
-/// What closes a prompt the fake agent kept, a JSON list of one text block.
-const JSON_END: &str = "\",\"type\":\"text\"}]";
+/// Where a prompt the fake agent kept, a JSON list of one text block, closes on `line`: after the
+/// text when its keys are sorted, after `type` when they keep the order they were written in.
+fn json_end(line: &str) -> Option<usize> {
+    ["\",\"type\":\"text\"}]", "\"}]"]
+        .iter()
+        .filter_map(|end| line.find(end))
+        .min()
+}
 
 /// What a tool answered, said with whether it was an error.
 fn said(answer: &Answer) -> String {
