@@ -9565,6 +9565,7 @@ impl Reply {
     pub fn new(
         shell: WeakEntity<Shell>,
         asks: crate::actions::Actions,
+        machine: Option<String>,
         session: String,
         project: String,
         window: &mut Window,
@@ -9617,7 +9618,10 @@ impl Reply {
             cx.new(|_| SessionOptions::new(shell.clone(), session.clone()).asking(asks.clone()));
         let reply = Self {
             asks,
-            keeping: Keeping::new(DraftKey::Session(session.clone())),
+            keeping: Keeping::new(DraftKey::Session {
+                machine,
+                agent: session.clone(),
+            }),
             session,
             project,
             commands: None,

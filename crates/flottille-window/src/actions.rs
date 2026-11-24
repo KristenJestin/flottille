@@ -1755,6 +1755,15 @@ enum Keep {
     Barrier(Sender<()>),
 }
 
+/// What names a composer's draft to the daemon (`draft.get`, `draft.set`).
+fn draft_params(key: &DraftKey) -> Value {
+    let mut params = json!({"kind": key.kind(), "target": key.target()});
+    if let Some(machine) = key.machine() {
+        params["machine"] = json!(machine);
+    }
+    params
+}
+
 /// The keeper's thread: what the window keeps, one request at a time on a connection kept.
 fn keep(connect: Connect, asked: Receiver<Keep>, updates: Updates, bounds: Bounds) {
     let mut conn: Option<Conn> = None;
@@ -1768,7 +1777,7 @@ fn keep(connect: Connect, asked: Receiver<Keep>, updates: Updates, bounds: Bound
         };
         let outcome = match command {
             Command::DraftRead { key } => {
-                let params = json!({"kind": key.kind(), "target": key.target()});
+                let params = draft_params(&key);
                 let found = match coded(&connect, &mut conn, "draft.get", params, bounds.quick) {
                     Ok(Ok(answer)) => Ok(draft_of(&answer["draft"])),
                     // Gone: no composer, no draft.
@@ -1784,7 +1793,7 @@ fn keep(connect: Connect, asked: Receiver<Keep>, updates: Updates, bounds: Bound
                 pictures,
                 after_read,
             } => {
-                let params = json!({"kind": key.kind(), "target": key.target()});
+                let params = draft_params(&key);
                 // The window is closing and did not read the draft: what is typed replaces it
                 // only if the daemon can say that it holds one the field did not know.
                 let readable = !after_read
