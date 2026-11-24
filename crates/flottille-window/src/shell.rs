@@ -48,6 +48,7 @@ use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapsh
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PageTab, PlaceData, ProjectData, SessionLine};
+use crate::project_removal::ProjectRemoval;
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
 use crate::rename::RenameSession;
@@ -1785,6 +1786,10 @@ impl Shell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A project with no file is in no arrangement: it stays after the user's list.
+        if self.snapshot.unconfigured.iter().any(|p| p.name == project) {
+            return;
+        }
         let change = Change::MoveProject {
             present: self.project_names(),
             key: project.to_owned(),
@@ -3454,13 +3459,17 @@ impl Shell {
                 serial,
                 read,
             } => {
-                if let Some(page) = self.settings_of_project(&project, cx) {
-                    let removal = page.read(cx).removal().clone();
+                if let Some(removal) = self.removal_of(&project, cx) {
                     removal.update(cx, |removal, cx| removal.answered(serial, read, cx));
                 }
             }
             Outcome::ProjectRemoved { project, result } => {
-                if let Some(page) = self.settings_of_project(&project, cx) {
+                // The row of a project with no file asked it: no page is in front of it, and
+                // none is left (the row folds away when the daemon no longer lists the project).
+                let row_removal = self.removal_of_unconfigured(&project, cx);
+                if let Some(removal) = &row_removal {
+                    removal.update(cx, |removal, cx| removal.removed(result.clone(), cx));
+                } else if let Some(page) = self.settings_of_project(&project, cx) {
                     let removal = page.read(cx).removal().clone();
                     removal.update(cx, |removal, cx| removal.removed(result.clone(), cx));
                 } else if let Ok(done) = &result {
@@ -3473,7 +3482,7 @@ impl Shell {
                 }
                 // Another machine's project leaves that machine's copy, never this machine's list;
                 // a page not shown is not left.
-                if result.is_ok() {
+                if result.is_ok() && row_removal.is_none() {
                     self.forms.remove(&project);
                     let next = match self.answering.clone() {
                         None => {
@@ -4167,6 +4176,31 @@ impl Shell {
     }
 
     /// The open settings page, when it is `project`'s.
+    /// The confirmation that asked to remove `project`: its settings page's, or its row's when its
+    /// settings file is gone.
+    fn removal_of(&self, project: &str, cx: &App) -> Option<Entity<ProjectRemoval>> {
+        match self.settings_of_project(project, cx) {
+            Some(page) => Some(page.read(cx).removal().clone()),
+            None => self.removal_of_unconfigured(project, cx),
+        }
+    }
+
+    /// The confirmation on the row of `project`, a project with no settings file.
+    fn removal_of_unconfigured(&self, project: &str, cx: &App) -> Option<Entity<ProjectRemoval>> {
+        self.projects
+            .get(project)
+            .into_iter()
+            .chain(
+                self.machine_projects
+                    .iter()
+                    .filter(|((name, _), _)| name == project)
+                    .map(|(_, node)| node),
+            )
+            .map(|node| node.read(cx))
+            .find(|node| node.unconfigured())
+            .and_then(|node| node.removal().cloned())
+    }
+
     fn settings_of_project(&self, project: &str, cx: &App) -> Option<Entity<ProjectSettingsPage>> {
         self.project_settings
             .clone()
@@ -4696,6 +4730,66 @@ impl Shell {
         shown
     }
 
+    /// The rows of the projects whose settings file is gone, in the section of `machine` when the
+    /// projects are shown by machine: this machine's alone, each with the sessions it holds.
+    fn unconfigured_nodes(
+        &mut self,
+        snapshot: &Snapshot,
+        machine: Option<&str>,
+        sessions: &mut HashMap<String, Entity<SessionRow>>,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, Entity<ProjectNode>)> {
+        let this = cx.entity().downgrade();
+        let mut nodes = Vec::new();
+        for gone in &snapshot.unconfigured {
+            let mut marks = Vec::new();
+            let live: Vec<&crate::model::Session> = snapshot
+                .live_sessions_of(&gone.name)
+                .into_iter()
+                .filter(|session| {
+                    machine.is_none_or(|machine| snapshot.machine_of(session) == machine)
+                })
+                .collect();
+            let rows = self.session_rows(live.iter().copied(), sessions, &mut marks, now, cx);
+            let rows = nested(&live, &rows, cx);
+            let known = match machine {
+                None => self.projects.remove(&gone.name),
+                Some(machine) => self
+                    .machine_projects
+                    .remove(&(gone.name.clone(), machine.to_owned())),
+            };
+            let node = known.unwrap_or_else(|| {
+                let this = this.clone();
+                let name = gone.name.clone();
+                let open = match machine {
+                    None => self.kept.projects.get(&name).copied(),
+                    Some(machine) => self
+                        .kept
+                        .on_machines
+                        .get(&machine_key(machine, &name))
+                        .or_else(|| self.kept.projects.get(&name))
+                        .copied(),
+                }
+                .unwrap_or(true);
+                let machine = machine.map(str::to_owned);
+                cx.new(|cx| ProjectNode::new(name, machine, this, open, cx))
+            });
+            let mark = AgentState::strongest(marks);
+            if !node.read(cx).holds(&rows, mark, cx) {
+                node.update(cx, |node, cx| node.set(rows, mark, cx));
+            }
+            if node.read(cx).commands() != 0 {
+                node.update(cx, |node, cx| node.set_commands(0, cx));
+            }
+            if !node.read(cx).unconfigured() {
+                node.update(cx, |node, cx| node.set_unconfigured(true, cx));
+            }
+            nodes.push((gone.name.clone(), node));
+        }
+        nodes
+    }
+
     /// Brings every row up to `snapshot`, creating and dropping rows as needed. A row whose data
     /// did not change is not drawn again.
     fn show(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
@@ -4778,8 +4872,24 @@ impl Shell {
                             )
                         });
                     }
+                    // A project that has its file again is a project like any.
+                    if node.read(cx).unconfigured() {
+                        node.update(cx, |node, cx| node.set_unconfigured(false, cx));
+                    }
                     nodes.push(node.clone());
                     machine_projects.insert(key, node);
+                }
+                if snapshot.homes.first() == Some(home) {
+                    for (name, node) in self.unconfigured_nodes(
+                        &snapshot,
+                        Some(&home.machine),
+                        &mut sessions,
+                        now,
+                        cx,
+                    ) {
+                        nodes.push(node.clone());
+                        machine_projects.insert((name, home.machine.clone()), node);
+                    }
                 }
                 let section = self.sections.remove(&home.machine).unwrap_or_else(|| {
                     let this = this.clone();
@@ -4831,8 +4941,17 @@ impl Shell {
                         )
                     });
                 }
+                // A project that has its file again is a project like any.
+                if node.read(cx).unconfigured() {
+                    node.update(cx, |node, cx| node.set_unconfigured(false, cx));
+                }
                 project_nodes.push(node.clone());
                 projects.insert(project.name.clone(), node);
+            }
+            // The projects with no file go after the user's own list, to be removed.
+            for (name, node) in self.unconfigured_nodes(&snapshot, None, &mut sessions, now, cx) {
+                project_nodes.push(node.clone());
+                projects.insert(name, node);
             }
         }
         // The rows of the other way of showing the projects are on their way out: their

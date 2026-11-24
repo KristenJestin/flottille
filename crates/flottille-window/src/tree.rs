@@ -25,6 +25,7 @@ use gpui_kit::{
 use crate::end_led::{self, LedEnd};
 use crate::machines::shade;
 use crate::model::{Home, Place, ago};
+use crate::project_removal::ProjectRemoval;
 use crate::session::end_sentence;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
@@ -1110,6 +1111,12 @@ pub struct ProjectNode {
     held: Option<AgentState>,
     /// How many commands its agents run now.
     commands: usize,
+    /// Its settings file is gone, and the daemon still holds sessions or workspaces of it: the
+    /// row says so, and its menu offers Remove, with the confirmation (`docs/projects.md`,
+    /// "Removing a project").
+    unconfigured: bool,
+    removal: Option<Entity<ProjectRemoval>>,
+    menu: Option<(Entity<Menu>, Subscription)>,
     sessions: Entity<Level>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
@@ -1141,6 +1148,9 @@ impl ProjectNode {
             mark: Mark::new(cx),
             held: None,
             commands: 0,
+            unconfigured: false,
+            removal: None,
+            menu: None,
             sessions,
             fold,
             shell,
@@ -1222,6 +1232,47 @@ impl ProjectNode {
         self.open
     }
 
+    /// Whether its settings file is gone.
+    pub fn unconfigured(&self) -> bool {
+        self.unconfigured
+    }
+
+    /// The confirmation of its removal, while its settings file is gone.
+    pub fn removal(&self) -> Option<&Entity<ProjectRemoval>> {
+        self.removal.as_ref()
+    }
+
+    /// Marks the row as one whose settings file is gone, or not any more: only then has it the
+    /// menu with Remove.
+    pub fn set_unconfigured(&mut self, unconfigured: bool, cx: &mut Context<Self>) {
+        if self.unconfigured == unconfigured {
+            return;
+        }
+        self.unconfigured = unconfigured;
+        if unconfigured {
+            let removal = self
+                .removal
+                .get_or_insert_with(|| {
+                    cx.new(|_| ProjectRemoval::new(self.shell.clone().into(), self.name.clone()))
+                })
+                .clone();
+            let name = self.name.clone();
+            let menu = cx.new(|cx| {
+                Menu::new(project_menu_id(&name), "Project actions", cx).danger(
+                    project_remove_id(&name),
+                    "Remove…",
+                    move |_, cx| removal.update(cx, |removal, cx| removal.ask(cx)),
+                )
+            });
+            // The row keeps the menu in sight while it is open: it draws again as it changes.
+            let watch = cx.observe(&menu, |_, _, cx| cx.notify());
+            self.menu = Some((menu, watch));
+        } else {
+            self.menu = None;
+        }
+        cx.notify();
+    }
+
     /// Its sessions' rows in the order drawn: the one that moved last first.
     pub fn sessions(&self, cx: &App) -> Vec<Entity<SessionRow>> {
         self.sessions.read(cx).rows.clone()
@@ -1275,6 +1326,9 @@ impl ProjectNode {
         kept_changed(&self.shell, cx);
     }
 }
+
+/// What a row says of a project whose settings file is gone.
+const MISSING: &str = "settings file missing";
 
 /// The height of a machine's mark, which its tooltip hangs from.
 const MACHINE_MARK: f32 = 16.;
@@ -1377,20 +1431,33 @@ impl Render for ProjectNode {
                 self.mark.icon(&format!("project-{key}")),
                 cx,
             ));
+        // A project with no file has no page: its row folds and unfolds what it holds.
+        let unconfigured = self.unconfigured;
+        let toggled = cx.entity().downgrade();
         let row = TreeLevel::Project
             .row(id, self.title.clone())
             .expanded(self.open)
             .trailing(trailing)
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            .when_some(self.menu.as_ref(), |row, (menu, _)| {
+                row.actions(menu.clone(), menu.read(cx).is_open())
+            })
             // Not a `cx.listener`: that runs inside this node's update, and opening a page may
             // update this node again (#993).
             .on_click(move |_, window, cx| {
                 let project = name.clone();
-                shell
-                    .update(cx, |shell, cx| {
-                        shell.open(Selection::Project(project), window, cx)
-                    })
-                    .ok();
+                match unconfigured {
+                    true => {
+                        toggled.update(cx, |node, cx| node.toggle(cx)).ok();
+                    }
+                    false => {
+                        shell
+                            .update(cx, |shell, cx| {
+                                shell.open(Selection::Project(project), window, cx)
+                            })
+                            .ok();
+                    }
+                }
             });
         // A project only machines that are off have: its row fades its ink, and says since when.
         let greyed = fade(
@@ -1417,6 +1484,21 @@ impl Render for ProjectNode {
                 .child(SharedString::from(since))
                 .test_support(),
         );
+        // What is wrong with it, in words, under its name; it unfolds when the file goes and folds
+        // away when it comes back.
+        let missing = presence(
+            ElementId::Name(format!("project-unconfigured-fade-{key}").into()),
+            self.unconfigured,
+            div()
+                .id(project_unconfigured_id(&self.name))
+                .pl(space::XXL)
+                .pb(space::XS)
+                .text_size(px(11.5))
+                .text_color(p.faint)
+                .aria_label(SharedString::from(MISSING))
+                .child(SharedString::from(MISSING))
+                .test_support(),
+        );
         div()
             .flex()
             .flex_col()
@@ -1427,8 +1509,10 @@ impl Render for ProjectNode {
                     .flex()
                     .flex_col()
                     .child(row)
+                    .child(missing)
                     .child(offline),
             )
+            .children(self.removal.clone().filter(|_| self.unconfigured))
             // A press on what the project holds (a session's row, a button) is that row's own: it
             // never starts the drag of the whole project, which begins on the project's row.
             .child(
