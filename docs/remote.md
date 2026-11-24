@@ -1145,7 +1145,14 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
   the tree later is not given until it is written there), no secret, no file: when its project is
   not on that machine, its place is a folder that does not exist. Its answer, whatever its
-  outcome (a refusal too), is masked again of the caller's machine's secrets; an answer without
+  outcome (a refusal and a "cannot answer now" too), is masked again of the caller's machine's
+  secrets, then cut there as a local result is (a refusal at the error limit), saying so. That
+  machine's cut comes after the masking and splits no secret. The whole answer is masked first,
+  a marker or what looks like one included; then, where the other machine cut it (the end of a
+  text, `‹+N chars›`; the middle of a long result, its marker exactly as `run` writes it, on a
+  line of its own; and in such a result each line end, as a long line is shown as several), the
+  start of such a secret before the cut and its end after it (6 bytes or more) are masked too,
+  so that no half of one is shown; an answer without
   an outcome, or a call without a project, comes from an older daemon and is refused saying that
   daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
@@ -1821,6 +1828,11 @@ on a real phone, by hand, and reported.
   under the user's runtime folder, never made, rather than refused: a read of a session of another
   project is served as on one machine. The callers of one machine are capped at 64, forgotten after
   30 days idle (as long as a message is kept) and when their machine leaves the members.
+- **A session resumed by the user keeps its pilot's cap** (#1361): `agent.resume` of an ended root
+  session led by a stand-in checks, in the very write that revives it, that its pilot still has room
+  in its machine's 64 (as a new session does), and is refused with the cap's own sentence when it
+  has none. The user resumes it, so the refusal is theirs to read; the pilot counts nothing while
+  all its sessions are ended, and the choice is to refuse rather than to forget another pilot.
 - **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
   an answer the user gave before that (within the same second) is answered "send again later"
   (#1263) while a call of that caller to that machine is still unanswered, and kept by its
@@ -1998,7 +2010,10 @@ on a real phone, by hand, and reported.
   refusals (`agent_status` of a led session is refused, `session_read` of a child too). That
   machine answers them by the same tools as a read of a session the caller did not start, for the
   caller stood in for, which reads the session it started without a leave and its child as its
-  parent; the answer is masked again on the caller's machine, which cuts it no more.
+  parent; the answer is masked again on the caller's machine and cut there too, as every answer
+  of another machine to a tool of the tree is (a send, a stop, an approval's answer, their
+  refusals and "cannot answer now"), both halves of a secret a cut of that machine split masked
+  too.
 - `agent_status` without `agent_id` lists the children of this machine only; a child on another
   machine is read by its id.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.

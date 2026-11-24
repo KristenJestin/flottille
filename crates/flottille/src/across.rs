@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use flottille_core::agent::Agent;
 use flottille_core::approval::{self, Request};
+use flottille_core::secrets::Secrets;
 use flottille_core::store::{Launch, LaunchFilter, Outgoing, now_ms};
 use flottille_link::{Call, Deliver, LinkError, MachineMessage, Message, PublicKey, Received};
 use serde_json::{Value, json};
@@ -23,7 +24,8 @@ use serde_json::{Value, json};
 use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::link::Remote;
-use crate::mcp::{Grant, Outcome};
+use crate::mcp::{ERROR_LIMIT, Grant, Outcome, RESULT_LIMIT};
+use crate::place::Place;
 use crate::tree::named;
 
 /// How long a message waits for its machine before it is dropped.
@@ -1776,6 +1778,7 @@ fn machine_name(daemon: &Daemon, launch: &Launch) -> String {
 pub(crate) async fn call(
     daemon: &Arc<Daemon>,
     caller: &Agent,
+    place: &Place,
     tool: &str,
     args: &Value,
 ) -> Option<Outcome> {
@@ -1889,33 +1892,49 @@ pub(crate) async fn call(
                 "call-{}",
                 flottille_core::agent::new_id().unwrap_or_default()
             );
-            match link.send(&Message::Machine(message(id))).await {
-                Ok(answer) if answer["later"].is_string() => refused(format!(
-                    "refused: {name} cannot answer now ({}): agent {agent} cannot be reached now. \
-                     You will be woken by what comes back from it.",
-                    answer["later"].as_str().unwrap_or_default()
-                )),
-                Ok(answer) => {
-                    if tool == "agent_stop" {
-                        let _ = daemon.write(|store| {
-                            store
-                                .end_launch(&launch.machine, &launch.launch)
-                                .map(|()| ((), None))
-                        });
-                    }
-                    let text = answer["text"].as_str().unwrap_or_default();
-                    Some(Outcome::Done(format!("On {name}: {text}")))
-                }
-                Err(LinkError::Declined { reason, .. }) => {
-                    refused(format!("refused by {name}: {reason}"))
-                }
-                Err(error) => refused(format!(
-                    "refused: {error}: agent {agent} cannot be reached now. You will be woken by \
-                     what comes back from it."
-                )),
+            let sent = link.send(&Message::Machine(message(id))).await;
+            if tool == "agent_stop"
+                && let Ok(answer) = &sent
+                && !answer["later"].is_string()
+            {
+                let _ = daemon.write(|store| {
+                    store
+                        .end_launch(&launch.machine, &launch.launch)
+                        .map(|()| ((), None))
+                });
             }
+            Some(call_answered(sent, &name, &agent, place))
         }
     }
+}
+
+/// What the caller's agent is shown of `sent`, the answer of `name` to a call aimed at its agent
+/// `agent`.
+fn call_answered(
+    sent: Result<Value, LinkError>,
+    name: &str,
+    agent: &str,
+    place: &Place,
+) -> Outcome {
+    let outcome = match sent {
+        Ok(answer) if answer["later"].is_string() => Outcome::Refused(format!(
+            "refused: {name} cannot answer now ({}): agent {agent} cannot be reached now. You \
+             will be woken by what comes back from it.",
+            answer["later"].as_str().unwrap_or_default()
+        )),
+        Ok(answer) => {
+            let text = answer["text"].as_str().unwrap_or_default();
+            Outcome::Done(format!("On {name}: {text}"))
+        }
+        Err(LinkError::Declined { reason, .. }) => {
+            Outcome::Refused(format!("refused by {name}: {reason}"))
+        }
+        Err(error) => Outcome::Refused(format!(
+            "refused: {error}: agent {agent} cannot be reached now. You will be woken by what \
+             comes back from it."
+        )),
+    };
+    here(outcome, place)
 }
 
 // A session of another machine, the same as one of this machine (`docs/remote.md`, "A tree
@@ -2356,16 +2375,7 @@ async fn forward_to(
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     let name = aim.name;
-    let session = aim.session;
-    // Why it cannot be reached now, then what the caller is to do: wait to be woken by one it
-    // started, call again otherwise.
-    let unreached = |why: String, again: &str| match aim.woken {
-        true => format!(
-            "refused: {why}: {session} cannot be reached now. You will be woken by what comes \
-             back from it."
-        ),
-        false => format!("refused: {why}: {session} {again}"),
-    };
+    let session = &aim.session;
     // A caller of another machine stood in for here reaches this machine's sessions only: no
     // call goes out on its behalf.
     if is_stand_in(&caller.id) {
@@ -2381,6 +2391,7 @@ async fn forward_to(
         Ok(link) => link,
         Err(why) => {
             return Outcome::Refused(unreached(
+                &aim,
                 why,
                 &format!("runs there, and cannot be reached now; call again once {name} is back"),
             ));
@@ -2414,11 +2425,46 @@ async fn forward_to(
     // Until what it awaits is recorded, or the call is given up: an answer that comes before is
     // sent again, one that comes after none is refused.
     let _sent = Calling::sent(&remote, aim.machine, &caller.id);
-    match link
+    let sent = link
         .send(&Message::Machine(MachineMessage::Call(Box::new(call))))
-        .await
+        .await;
+    if let Ok(answer) = &sent
+        && !answer["later"].is_string()
     {
+        while playing_slow_call() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if let Some(number) = answer["request"].as_u64() {
+            let _ = daemon.write(|store| {
+                store
+                    .await_answer(aim.machine, number, &caller.id)
+                    .map(|()| ((), None))
+            });
+        }
+    }
+    answered(sent, &aim, &grant.place)
+}
+
+/// Why `aim` cannot be reached now, then what the caller is to do: wait to be woken by one it
+/// started, call again otherwise.
+fn unreached(aim: &Aim, why: String, again: &str) -> String {
+    let session = &aim.session;
+    match aim.woken {
+        true => format!(
+            "refused: {why}: {session} cannot be reached now. You will be woken by what comes \
+             back from it."
+        ),
+        false => format!("refused: {why}: {session} {again}"),
+    }
+}
+
+/// What the caller's agent is shown of `sent`, the answer of the machine of `aim` to a call
+/// aimed at it.
+fn answered(sent: Result<Value, LinkError>, aim: &Aim, place: &Place) -> Outcome {
+    let name = aim.name;
+    let outcome = match sent {
         Ok(answer) if answer["later"].is_string() => Outcome::Refused(unreached(
+            aim,
             format!(
                 "{name} cannot answer now ({})",
                 answer["later"].as_str().unwrap_or_default()
@@ -2427,16 +2473,6 @@ async fn forward_to(
         )),
         Ok(answer) => {
             let text = answer["text"].as_str().unwrap_or_default().to_owned();
-            while playing_slow_call() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            if let Some(number) = answer["request"].as_u64() {
-                let _ = daemon.write(|store| {
-                    store
-                        .await_answer(aim.machine, number, &caller.id)
-                        .map(|()| ((), None))
-                });
-            }
             match answer["outcome"].as_str() {
                 Some("ok") => Outcome::Done(text),
                 Some("held") => Outcome::Held(text),
@@ -2452,10 +2488,130 @@ async fn forward_to(
             Outcome::Refused(format!("refused by {name}: {reason}"))
         }
         Err(error) => Outcome::Refused(unreached(
+            aim,
             error.to_string(),
             "cannot be reached now; call again in a moment",
         )),
+    };
+    here(outcome, place)
+}
+
+/// `outcome`, said by another machine, as this machine's agent is shown it, whatever it says
+/// (`docs/remote.md`): masked of this machine's secrets, and cut at the limit of its kind, as a
+/// local one is.
+fn here(outcome: Outcome, place: &Place) -> Outcome {
+    let known = Secrets::new(&std::env::vars_os().collect(), &place.secret_values());
+    let shown = |text: String, limit| masked_and_cut(&text, &known, limit);
+    match outcome {
+        Outcome::Done(text) => Outcome::Done(shown(text, RESULT_LIMIT)),
+        Outcome::Held(text) => Outcome::Held(shown(text, RESULT_LIMIT)),
+        Outcome::Failed(text) => Outcome::Failed(shown(text, ERROR_LIMIT)),
+        Outcome::Refused(text) => Outcome::Refused(shown(text, ERROR_LIMIT)),
+        Outcome::Invalid(text) => Outcome::Invalid(shown(text, ERROR_LIMIT)),
     }
+}
+
+/// `text` masked, then cut at `limit` saying so; and wherever the other machine cut it, the
+/// halves of a secret its cut split masked too: masking by the whole value cannot find them.
+/// Masked whole before this machine cuts it, no secret is split by its own cut.
+fn masked_and_cut(text: &str, known: &Secrets, limit: usize) -> String {
+    crate::mcp::cut(&cuts_masked(text, known), limit)
+}
+
+/// `text` masked whole, then, around each cut the other machine made in it, the end of the piece
+/// a cut closes masked when it starts a secret, and the start of the piece a cut opens in the
+/// middle of the text masked when it ends one. Masked whole first, nothing the other machine
+/// wrote, a marker or what looks like one, is shown unmasked.
+fn cuts_masked(text: &str, known: &Secrets) -> String {
+    let masked = known.mask(text);
+    let piece = |piece: &str, opened: bool, closed: bool| {
+        let mut piece = piece.to_owned();
+        if closed {
+            piece = known.mask_cut_end(&piece);
+        }
+        if opened {
+            piece = known.mask_cut_start(&piece);
+        }
+        piece
+    };
+    let mut shown = String::with_capacity(masked.len());
+    let (mut from, mut opened) = (0, false);
+    for (span, goes_on) in cuts(&masked) {
+        if span.start < from {
+            continue;
+        }
+        shown.push_str(&piece(&masked[from..span.start], opened, true));
+        shown.push_str(&masked[span.clone()]);
+        (from, opened) = (span.end, goes_on);
+    }
+    shown.push_str(&piece(&masked[from..], opened, false));
+    shown
+}
+
+/// Every cut a daemon makes in the answer of a tool, found in `text`, in order: where it is, and
+/// whether what follows goes on from the middle of the text cut. They are the end of a text
+/// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the middle of a long
+/// result `results::shorten` left out (its marker, exactly as it writes it, on a line of its
+/// own); and, in a result cut so, each new line: one may split a line longer than
+/// `results::LINE_CHARS`, and masking may have shortened that line below it.
+fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut cuts = Vec::new();
+    for (at, open) in text.match_indices("\u{2039}+") {
+        let rest = &text[at + open.len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let close = " chars\u{203a}";
+        if digits > 0 && rest[digits..].starts_with(close) {
+            cuts.push((at..at + open.len() + digits + close.len(), false));
+        }
+    }
+    for (at, _) in text.match_indices('[') {
+        let Some(length) = left_out(&text[at..]) else {
+            continue;
+        };
+        let end = at + length;
+        let alone = (at == 0 || text[..at].ends_with('\n'))
+            && (end == text.len() || text[end..].starts_with('\n'));
+        if alone {
+            let start = at.saturating_sub(usize::from(at > 0));
+            let end = end + usize::from(end < text.len());
+            cuts.push((start..end, true));
+        }
+    }
+    if cuts.iter().any(|(_, goes_on)| *goes_on) {
+        // A marker holds no new line but the ones around it: those are the only ones already a
+        // cut, and looking them up in a set keeps this linear however many lines the text has.
+        let taken: std::collections::HashSet<usize> = cuts
+            .iter()
+            .flat_map(|(span, _)| [span.start, span.end - 1])
+            .filter(|&at| text.as_bytes()[at] == b'\n')
+            .collect();
+        for (at, _) in text.match_indices('\n') {
+            if !taken.contains(&at) {
+                cuts.push((at..at + 1, true));
+            }
+        }
+    }
+    cuts.sort_by_key(|(span, _)| span.start);
+    cuts
+}
+
+/// The length of the marker of `results::shorten` that `text` starts with, written exactly so:
+/// `[N characters left out (lines A-B of C): read them with run_status {"run": "res_…",
+/// "start": A}]`.
+fn left_out(text: &str) -> Option<usize> {
+    fn digits(text: &str) -> Option<&str> {
+        let rest = text.trim_start_matches(|c: char| c.is_ascii_digit());
+        (rest.len() < text.len()).then_some(rest)
+    }
+    let rest = digits(text.strip_prefix('[')?)?;
+    let rest = digits(rest.strip_prefix(" characters left out (lines ")?)?;
+    let rest = digits(rest.strip_prefix('-')?)?;
+    let rest = digits(rest.strip_prefix(" of ")?)?;
+    let rest = rest.strip_prefix("): read them with run_status {\"run\": \"res_")?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let rest = digits(rest.strip_prefix("\", \"start\": ")?)?;
+    let rest = rest.strip_prefix("}]")?;
+    Some(text.len() - rest.len())
 }
 
 /// The answer of request `request`, held for the user of this machine, of a caller of another
@@ -2568,6 +2724,284 @@ fn delivered_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secret only the caller's machine knows, in a secret file of its agent's place.
+    const SECRET: &str = "pc-only-token-7f3a9c";
+
+    fn place_with_secret(dir: &std::path::Path) -> Place {
+        std::fs::write(dir.join(".env"), format!("API_TOKEN={SECRET}\n")).unwrap();
+        Place {
+            project: "app".into(),
+            workspace: None,
+            root: dir.into(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        }
+    }
+
+    fn aim() -> Aim<'static> {
+        Aim {
+            machine: "00",
+            name: "server",
+            agent: "ab12",
+            launch: "",
+            session: "agent ab12".to_owned(),
+            woken: true,
+        }
+    }
+
+    fn text_of(outcome: Outcome) -> String {
+        match outcome {
+            Outcome::Done(text)
+            | Outcome::Held(text)
+            | Outcome::Failed(text)
+            | Outcome::Refused(text)
+            | Outcome::Invalid(text) => text,
+        }
+    }
+
+    /// No piece of the secret, its start or its end at least as long as the shortest value
+    /// masked, is in `text`.
+    fn holds_no_piece_of_the_secret(text: &str) {
+        for at in 0..=SECRET.len() - flottille_core::secrets::VAULT_SHORTEST {
+            let start = &SECRET[..SECRET.len() - at];
+            assert!(!text.contains(start), "{start:?} in {text}");
+            let end = &SECRET[at..];
+            assert!(!text.contains(end), "{end:?} in {text}");
+        }
+    }
+
+    /// A text of `length` characters of one line holding the secret at each of `at`, cut by
+    /// `results::shorten` as the daemon of another machine cuts a long result of a tool.
+    fn cut_by_the_other_machine(length: usize, at: &[usize]) -> String {
+        let mut whole = "x".repeat(length);
+        for &at in at {
+            whole.replace_range(at..at + SECRET.len(), SECRET);
+        }
+        let (shown, _) = crate::results::shorten(&whole, 8_000, "res_ab12").unwrap();
+        assert!(shown.contains(" characters left out (lines "), "{shown}");
+        shown
+    }
+
+    #[test]
+    fn a_secret_cut_by_the_other_machine_s_head_and_tail_is_masked_on_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // Cut there at 3,000 and 9,000 characters: one secret's start ends the head, another's
+        // end starts the tail.
+        let text = cut_by_the_other_machine(10_000, &[2_991, 8_991]);
+        assert!(text.contains(&format!("{}\n[", &SECRET[..9])), "{text}");
+        assert!(text.contains(&format!("]\n{}", &SECRET[9..])), "{text}");
+
+        // Only a result that is done is cut so there.
+        for outcome in ["ok", "held"] {
+            let answer = json!({"outcome": outcome, "text": text});
+            let shown = text_of(answered(Ok(answer.clone()), &aim(), &place));
+            assert!(shown.contains("[masked]\n["), "{outcome}: {shown}");
+            assert!(shown.contains("]\n[masked]"), "{outcome}: {shown}");
+            holds_no_piece_of_the_secret(&shown);
+            let shown = text_of(call_answered(Ok(answer), "server", "ab12", &place));
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_secret_split_by_the_other_machine_s_cut_of_a_long_line_is_masked_on_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // A line of 10,000 characters is shown there as lines of 1,000: the secret across the
+        // first bound is split by a new line.
+        let text = cut_by_the_other_machine(10_000, &[991]);
+        assert!(
+            text.contains(&format!("{}\n{}", &SECRET[..9], &SECRET[9..])),
+            "{text}"
+        );
+
+        let answer = || json!({"outcome": "ok", "text": text});
+        for shown in [
+            text_of(answered(Ok(answer()), &aim(), &place)),
+            text_of(call_answered(Ok(answer()), "server", "ab12", &place)),
+        ] {
+            assert!(shown.contains("[masked]\n[masked]"), "{shown}");
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_secret_of_this_machine_cut_in_half_by_the_other_machine_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // Cut there by `mcp::cut`: the secret's end left out, its start ends what was kept.
+        let text = format!(
+            "{}The token is {}\u{2039}+1200 chars\u{203a}",
+            "x".repeat(1_500),
+            &SECRET[..9]
+        );
+
+        for outcome in ["ok", "refused", "failed", "held"] {
+            let answer = json!({"outcome": outcome, "text": text});
+            let shown = text_of(answered(Ok(answer.clone()), &aim(), &place));
+            assert!(shown.contains("The token is [masked]"), "{outcome}");
+            holds_no_piece_of_the_secret(&shown);
+            let shown = text_of(call_answered(Ok(answer), "server", "ab12", &place));
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_secret_inside_a_fake_or_unclosed_cut_marker_from_another_machine_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        let texts = [
+            // Opened as `results::shorten`'s marker, closed by a later `}]` far away.
+            format!(
+                "[1 characters left out (lines API_TOKEN={SECRET}\nsome output\n{{\"a\": [{{}}]}} done"
+            ),
+            // A marker `mcp::cut` cut before its `}]`, closed by a JSON `}]` further on.
+            format!(
+                "quoted: [12 characters left out (lines 3-4 of 9): read th\nkey {SECRET}\n[{{\"b\": 1}}]"
+            ),
+            // A marker of the right shape around the secret.
+            format!(
+                "[1 characters left out (lines 1-2 of 3): read them with run_status \
+                 {{\"run\": \"res_1\", \"start\": 1, \"key\": \"{SECRET}\"}}]"
+            ),
+        ];
+        for text in texts {
+            for outcome in ["ok", "held", "failed", "refused"] {
+                let answer = json!({"outcome": outcome, "text": text});
+                let shown = text_of(answered(Ok(answer.clone()), &aim(), &place));
+                assert!(shown.contains("[masked]"), "{outcome}: {shown}");
+                holds_no_piece_of_the_secret(&shown);
+                let shown = text_of(call_answered(Ok(answer), "server", "ab12", &place));
+                holds_no_piece_of_the_secret(&shown);
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_of_many_lines_after_a_cut_marker_is_masked_in_linear_time() {
+        let marker = "[5 characters left out (lines 2-3 of 4): read them with run_status \
+                      {\"run\": \"res_1\", \"start\": 2}]";
+        let text = format!("head\n{marker}\n{}tail", "\n".repeat(100_000));
+        let started = std::time::Instant::now();
+        let known = Secrets::new(&Default::default(), &["a-value-of-the-caller".to_owned()]);
+        let shown = cuts_masked(&text, &known);
+        assert!(shown.ends_with("tail"), "{}", &shown[..80]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_secret_of_digits_that_a_marker_of_another_machine_counts_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let digits = "4815162342";
+        std::fs::write(dir.path().join(".env"), format!("PIN_TOKEN={digits}\n")).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let place = Place {
+            root: dir.path().into(),
+            ..place_with_secret(other.path())
+        };
+        let text = format!(
+            "head\n[{digits} characters left out (lines 2-9 of 10): read them with run_status \
+             {{\"run\": \"res_1\", \"start\": 2}}]\ntail"
+        );
+        let answer = || json!({"outcome": "ok", "text": text});
+        for shown in [
+            text_of(answered(Ok(answer()), &aim(), &place)),
+            text_of(call_answered(Ok(answer()), "server", "ab12", &place)),
+        ] {
+            assert!(!shown.contains(digits), "{shown}");
+            assert!(shown.contains("[[masked] characters left out"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_or_a_cannot_answer_now_of_another_machine_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        let declined = || {
+            Err(LinkError::Declined {
+                peer: "server".into(),
+                reason: format!("the request {SECRET} is not known"),
+            })
+        };
+        let later = || Ok(json!({"later": format!("busy with {SECRET}")}));
+
+        for outcome in [
+            call_answered(declined(), "server", "ab12", &place),
+            call_answered(later(), "server", "ab12", &place),
+            answered(declined(), &aim(), &place),
+            answered(later(), &aim(), &place),
+        ] {
+            let Outcome::Refused(text) = outcome else {
+                panic!("not refused");
+            };
+            assert!(text.contains("server"), "{text}");
+            assert!(text.contains("[masked]"), "{text}");
+            holds_no_piece_of_the_secret(&text);
+        }
+    }
+
+    #[test]
+    fn an_answer_without_an_outcome_is_refused_saying_its_daemon_needs_updating_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+
+        // An older daemon answers with a text alone.
+        let answer = json!({"text": format!("Night lead said {SECRET}.")});
+        let outcome = answered(Ok(answer), &aim(), &place);
+
+        let Outcome::Refused(text) = outcome else {
+            panic!("not refused");
+        };
+        assert!(
+            text.starts_with("refused: the daemon of server needs updating"),
+            "{text}"
+        );
+        assert!(text.contains("Night lead said [masked]."), "{text}");
+        holds_no_piece_of_the_secret(&text);
+    }
+
+    #[test]
+    fn an_answer_of_another_machine_longer_than_the_result_limit_is_cut_here_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // The secret straddles where this machine cuts, with or without "On server: " before
+        // it: cut before it is masked, its start would end what is kept.
+        let text = format!(
+            "{}{SECRET}{}",
+            "x".repeat(RESULT_LIMIT - 35),
+            "y".repeat(60_000)
+        );
+        let answer = || json!({"outcome": "ok", "text": text});
+
+        for outcome in [
+            answered(Ok(answer()), &aim(), &place),
+            call_answered(Ok(answer()), "server", "ab12", &place),
+        ] {
+            let Outcome::Done(shown) = outcome else {
+                panic!("not done");
+            };
+            assert!(shown.chars().count() <= RESULT_LIMIT, "{}", shown.len());
+            assert!(
+                shown.contains("x[masked]"),
+                "{}",
+                &shown[shown.len() - 40..]
+            );
+            assert!(
+                shown.ends_with(" chars\u{203a}"),
+                "{}",
+                &shown[shown.len() - 40..]
+            );
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
 
     #[test]
     fn a_text_of_any_length_is_cut_to_what_another_machine_takes() {
@@ -2722,6 +3156,46 @@ mod tests {
             pilot_stand_in(&daemon, &a_led_launch("old"), "app", Default::default()).unwrap();
 
         assert_eq!(pilot, "old@aa");
+    }
+
+    #[test]
+    fn a_resumed_session_led_by_a_stand_in_at_the_cap_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS, &["old"]);
+        let ended = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+
+        let refused = crate::agents::resume_write(&daemon, &ended).err().unwrap();
+
+        assert!(
+            refused
+                .message
+                .contains("64 agents calling this machine's sessions already"),
+            "{}",
+            refused.message
+        );
+        // Still ended: nothing was written, and its pilot still counts for nothing.
+        let after = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+        assert!(after.state.is_final());
+    }
+
+    #[test]
+    fn a_resumed_session_led_by_a_stand_in_under_the_cap_counts_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS - 1, &["old"]);
+        let ended = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+
+        let resumed = crate::agents::resume_write(&daemon, &ended).ok().unwrap();
+
+        assert!(!resumed.state.is_final());
     }
 
     #[test]

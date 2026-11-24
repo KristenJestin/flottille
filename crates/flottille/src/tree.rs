@@ -67,7 +67,7 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     // A session it started on another machine is reached through its daemon.
-    if let Some(outcome) = crate::across::call(daemon, &caller, tool, &args).await {
+    if let Some(outcome) = crate::across::call(daemon, &caller, &grant.place, tool, &args).await {
         return outcome;
     }
     let done = match tool {
