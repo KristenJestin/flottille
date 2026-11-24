@@ -1369,7 +1369,7 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
         tokio::spawn(async move {
             let from = launch.asked["from"].as_str().unwrap_or_default().to_owned();
             let laid = crate::travelled::lay(&daemon, &launch.project, &needs, &from).await;
-            finish(&daemon, launch, &request, agent, laid.map_err(Some));
+            finish(&daemon, launch, &request, agent, laid.map_err(Some), false);
         });
         return;
     }
@@ -1377,7 +1377,7 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
         true => Ok(()),
         false => Err(None),
     };
-    finish(daemon, launch, request, agent, answer);
+    finish(daemon, launch, request, agent, answer, false);
 }
 
 /// The files the setup of `launch` copies that its project here lacked when it was judged.
@@ -1387,13 +1387,14 @@ fn needs_of(launch: &Launch) -> Vec<crate::travelled::Need> {
 
 /// The end of the user's answer to the held `launch`, its agent `agent`: `Ok` when it is allowed
 /// and what it needed is made, `Err` with why when that failed, or `Err(None)` when the user
-/// refused it.
+/// refused it. With `told`, its caller may have been told it was approved already.
 fn finish(
     daemon: &Arc<Daemon>,
     mut launch: Launch,
     request: &Request,
     agent: String,
     answer: Result<(), Option<String>>,
+    told: bool,
 ) {
     // Then its project's settings, which its setup follows, laid only on the project the user
     // allowed them for: a launch whose settings cannot be used here, or whose project changed
@@ -1466,7 +1467,10 @@ fn finish(
             ),
             (None, true) => format!("{asked} was refused by the user. Nothing was done."),
         };
-        crate::across::tell_decided(daemon, &launch, &body, false);
+        match told {
+            true => crate::across::tell_stopped(daemon, &launch, &body),
+            false => crate::across::tell_decided(daemon, &launch, &body, false),
+        }
         crate::tree::stop_tree(daemon, &agent, &reason);
         // Its setup never runs: the workspace made of its code goes once its agent ended, and
         // the project made for it then.
@@ -1646,6 +1650,9 @@ fn interrupted(daemon: &Arc<Daemon>, request: &Request) {
         }
         return;
     }
+    // Settled started, its caller may have heard it was approved: the answer then may not have been
+    // kept (#1374).
+    let told = launch.state == "started";
     // Stopped before its answer was settled: settled as allowed, which `finish` refuses.
     if launch.state == "held"
         && let Ok(Some(workspace_id)) = daemon.write(|store| {
@@ -1657,7 +1664,14 @@ fn interrupted(daemon: &Arc<Daemon>, request: &Request) {
         launch.state = "started".into();
         launch.workspace_id = workspace_id;
     }
-    finish(daemon, launch, request, agent, Err(Some(why.to_owned())));
+    finish(
+        daemon,
+        launch,
+        request,
+        agent,
+        Err(Some(why.to_owned())),
+        told,
+    );
 }
 
 /// Whether the `agent` of the allowed `launch` ran: its workspace is no longer being prepared and
