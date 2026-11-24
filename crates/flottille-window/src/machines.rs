@@ -1556,6 +1556,7 @@ fn carry(pair: &Pair, machine: Option<&(String, Arc<DeviceKey>)>) -> std::io::Re
 mod tests {
     use super::{
         Holding, Listed, Lists, Machine, Machines, Member, front_choice, holding, project_choices,
+        sharing_held,
     };
     use serde_json::Value;
 
@@ -1617,6 +1618,27 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn a_viewer_device_signs_no_share_from_the_machine_it_views() {
+        // In front: this machine, where the launch is held. The files are server's.
+        assert_eq!(
+            sharing_held("server", Some(&machines("online", "viewer"))),
+            Some(Holding {
+                line: "This device may only view server".to_owned(),
+                offline: false,
+            })
+        );
+        assert_eq!(
+            sharing_held("server", Some(&machines("online", "controller"))),
+            None
+        );
+        // This machine's own files are this device's to share.
+        assert_eq!(
+            sharing_held("pc", Some(&machines("online", "viewer"))),
+            None
+        );
+    }
+
     fn listing(project: &str) -> Listed {
         Listed {
             id: "s1".to_owned(),
