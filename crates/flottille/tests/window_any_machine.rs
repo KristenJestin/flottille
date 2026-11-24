@@ -1171,6 +1171,7 @@ fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContex
         // Short, so that every tab scrolls.
         for width in [1000., 640., 440.] {
             cx.simulate_resize(size(px(width), px(520.)));
+            let mut scrolled = false;
             for tab in [
                 "agents",
                 "approvals",
@@ -1182,6 +1183,7 @@ fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContex
                 click(shell, &format!("settings-tabs-{tab}"), cx);
                 settle(shell, cx);
                 let at = bounds_of(cx, "settings-page").expect("the page").center();
+                let before = content_top(cx);
                 for turn in 0..8 {
                     assert_eq!(
                         drawn_over_the_own_line(cx),
@@ -1195,7 +1197,27 @@ fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContex
                     });
                     settle(shell, cx);
                 }
+                scrolled |= content_top(cx) < before;
             }
+            assert!(scrolled, "the wheel scrolls a tab at {width} px wide");
         }
     }
+}
+
+/// Where the first of what the page scrolls is drawn.
+fn content_top(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .path()
+                    .iter()
+                    .any(|id| *id == "settings-page".into())
+            })
+            .filter(|element| element.path().last() != Some(&"settings-page".into()))
+            .map(|element| element.bounds().origin.y)
+            .fold(px(f32::MAX), |least, y| least.min(y))
+    })
 }
