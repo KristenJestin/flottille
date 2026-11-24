@@ -904,8 +904,8 @@ fn its_settings_switch_between_the_machines_that_have_it(cx: &mut TestAppContext
 // machines hold, and a read of them that changes nothing on it draws nothing.
 
 /// A shared project `app` on `pc`, `server` and a paired `laptop`: the server has a session that
-/// is running (its turn held until `release` is written in its agent's folder) and one that
-/// ended, the laptop one that ended and then went off. The window on `pc` shows the page of
+/// has a turn that runs while the page opens (held until `release` is written in its agent's
+/// folder, which the scenario does once the page shows it) and one that ended, the laptop one that ended and then went off. The window on `pc` shows the page of
 /// `app`, settled: it asks for no animation frame.
 fn shared_page_settled(
     cx: &mut TestAppContext,
@@ -967,6 +967,16 @@ fn shared_page_settled(
     show(&shell, Selection::Project("app".into()), cx);
     until(&shell, cx, "both machines' blocks", |cx| {
         present(cx, machine_block_id("server")) && present(cx, machine_block_id("laptop"))
+    });
+    // Its turn ends with the page shown: the page takes the snapshot that says so. A session that
+    // runs spins its mark, by design, and is no rest (`window_at_rest.rs` waits for every agent
+    // to be idle); the page is measured once it ended.
+    std::fs::write(server.user.path("fake-claude/release"), "").unwrap();
+    eventually("the server's session ends its turn", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": running}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
     });
     quiet(&shell, cx);
     (hub, pc, server, shell, cx)
