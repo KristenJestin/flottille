@@ -802,6 +802,19 @@ pub fn brief(daemon: &Arc<Daemon>, child: &Agent) {
     );
 }
 
+/// Whether the first message of `agent` was delivered.
+pub fn briefed(daemon: &Daemon, agent: &Agent) -> bool {
+    let key = format!("brief-{}-{}", agent.id, agent.epoch);
+    // A compaction's new session was given its brief again under the replay's id: given all
+    // the same, it is never given a third time as news.
+    let replay = flottille_core::prompt::replay_id(&key);
+    [&key, &replay].into_iter().any(|id| {
+        daemon
+            .read(|store| store.delivery(id))
+            .is_ok_and(|d| d.is_some())
+    })
+}
+
 /// At start: an agent whose first message was never delivered (a daemon stopped while its new
 /// workspace was preparing, and the wait for it lived in memory only, or before an extension's
 /// session was sent its first message) gets it, once its workspace is ready. The delivery's id is the key, so one stored already is not stored twice.
@@ -823,15 +836,7 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
         if agent.state.is_final() || agent.brief.is_none() || !launched {
             continue;
         }
-        let key = format!("brief-{}-{}", agent.id, agent.epoch);
-        // A compaction's new session was given its brief again under the replay's id: given all
-        // the same, it is never given a third time as news.
-        let replay = flottille_core::prompt::replay_id(&key);
-        if [&key, &replay].into_iter().any(|id| {
-            daemon
-                .read(|store| store.delivery(id))
-                .is_ok_and(|d| d.is_some())
-        }) {
+        if briefed(daemon, &agent) {
             continue;
         }
         match agent.workspace {

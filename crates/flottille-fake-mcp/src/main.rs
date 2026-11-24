@@ -77,11 +77,19 @@
 //! (`agent-browser auth login <name> --credential-provider <plugin> --item <ref> [--url <url>]`,
 //! with `--config <file>`): it runs the plugin that file declares with `credential.read`, asks it
 //! for the credential over `agent-browser.plugin.v1`, and writes what it got to the file `form`
-//! of the script's `login`, as a page's login form would be filled. `login` takes `token`
-//! (`"drop"`: the plugin is run without `FLOTTILLE_VAULT_TOKEN`; `"wrong"`: with another one),
+//! of the script's `login`, as a page's login form would be filled. As agent-browser 0.43.0 does,
+//! the plugin is run by the browser's daemon and not by the command line: never with the command
+//! line's environment (its `FLOTTILLE_VAULT_TOKEN` included), and its failure said only as
+//! `Plugin '<name>' exited unsuccessfully` (or `returned success=false`), never its own words.
+//! `login` takes `token` (`"drop"`: the run's token file beside the plugin's socket, `vault.token`,
+//! is removed before the plugin is asked; `"wrong"`: another token is written there),
 //! `replay` (the plugin is asked once more, with the same token) and `echo` (the password is
 //! written on its output, as a careless command line would) and `fail` (the password is written
 //! on its error output, and it fails; the form is filled first, as a page that refused it keeps it).
+//! `hold` names a file: before the plugin is asked, the log says `held` (`token_seen`: whether
+//! the run's `vault.token` is there), `<file>.started` is written, and it waits for the file (30 s
+//! at most). `why_planted` makes `vault.why` a link to that path before the plugin is asked;
+//! after it answered, `why_link` replaces it with a link to that path, `why_big` with 1 MiB.
 //! With `open` among its arguments (and no `mcp`), it plays `agent-browser open <url>`: its log line
 //! `open` says its arguments and folder, and it empties the form, as a page loaded afresh does;
 //! `open_fail` in `login` makes it fail instead. It keeps the address of the page it lands on
@@ -99,12 +107,17 @@
 //! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
 //! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
 //! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
+//! As the real one's Chrome, the browser it starts makes its profile in the temporary folder
+//! (`$TMPDIR`, else `/tmp`): `agent-browser-chrome-<socket folder's name>`, and the file
+//! `.org.chromium.Chromium.<socket folder's name>`; `close` removes them.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
 //! epoch), written once the call is answered; `received` (the tool) is written as a call arrives,
-//! before it sleeps or answers, so a test can wait for a call in progress.
+//! before it sleeps or answers, so a test can wait for a call in progress. Every line carries
+//! `netns`, the inode of the network namespace the process ran in, and `folders`, the variables
+//! that say where Chrome writes outside its profile.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -369,6 +382,11 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
         let browser = json!({"headed": loaded_config(args)["headed"],
             "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
         std::fs::write(&file, browser.to_string()).unwrap();
+        // As Chrome does, its profile in the temporary folder.
+        let [profile, chromium] = profile_files(&folder);
+        let _ = std::fs::create_dir_all(&profile);
+        let _ = std::fs::write(profile.join("Cookies"), "");
+        let _ = std::fs::write(chromium, "");
         browser
     });
     write_log(
@@ -377,19 +395,72 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
     );
 }
 
+/// The inode of this process's network namespace.
+fn network_namespace() -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self/ns/net")
+        .ok()
+        .map(|ns| ns.ino())
+}
+
+/// The variables that say where Chrome writes outside its profile (its crash database, its
+/// caches, its default configuration folder), as this process got them: the tests check that each
+/// command of agent-browser's is given folders of the vault's.
+fn chrome_folders() -> Value {
+    let mut folders = serde_json::Map::new();
+    for name in [
+        "AGENT_BROWSER_SOCKET_DIR",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "CHROME_CONFIG_HOME",
+        "BREAKPAD_DUMP_LOCATION",
+    ] {
+        folders.insert(name.into(), json!(std::env::var(name).ok()));
+    }
+    Value::Object(folders)
+}
+
+/// What Chrome leaves in the temporary folder (`$TMPDIR`, else `/tmp`) while it runs for the
+/// browser of the socket folder `folder`: agent-browser's profile folder, which holds its cookies,
+/// and Chrome's own `.org.chromium.Chromium.*` file. Named after the socket folder, so that
+/// `close` removes this browser's alone.
+fn profile_files(folder: &std::ffi::OsStr) -> [std::path::PathBuf; 2] {
+    let name = std::path::Path::new(folder)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let temporary = std::env::temp_dir();
+    [
+        temporary.join(format!("agent-browser-chrome-{name}")),
+        temporary.join(format!(".org.chromium.Chromium.{name}")),
+    ]
+}
+
 /// `agent-browser close`: the browser on `AGENT_BROWSER_SOCKET_DIR` ends.
 fn close(args: &[String], log: &Option<String>) {
     if let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") {
         let _ = std::fs::remove_file(std::path::Path::new(&folder).join("browser.json"));
+        let [profile, file] = profile_files(&folder);
+        let _ = std::fs::remove_dir_all(profile);
+        let _ = std::fs::remove_file(file);
     }
     write_log(log, json!({"event": "close", "args": args}));
     println!("✓ Browser closed");
 }
 
-fn write_log(log: &Option<String>, line: Value) {
+fn write_log(log: &Option<String>, mut line: Value) {
     let Some(path) = log else {
         return;
     };
+    // The network namespace each command ran in: the tests check that every command of
+    // agent-browser's runs in the browser's own.
+    if let Some(fields) = line.as_object_mut() {
+        fields.insert("netns".into(), json!(network_namespace()));
+        fields.insert("folders".into(), chrome_folders());
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1013,25 +1084,31 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     let request = json!({"protocol": "agent-browser.plugin.v1", "type": "credential.resolve",
         "capability": "credential.read", "request": {"profileName": name,
             "itemRef": option("--item"), "url": url}});
-    let token = std::env::var("FLOTTILLE_VAULT_TOKEN").ok();
     let ask = |plugin: &Value| -> Value {
         let mut command = std::process::Command::new(plugin["command"].as_str().unwrap_or("?"));
-        for arg in plugin["args"].as_array().into_iter().flatten() {
-            command.arg(arg.as_str().unwrap_or_default());
+        let args: Vec<&str> = plugin["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|arg| arg.as_str().unwrap_or_default())
+            .collect();
+        command.args(&args);
+        // The token file of Flottille's run, beside the socket the plugin is given last.
+        let token_file = args
+            .last()
+            .map(|socket| std::path::Path::new(socket).with_file_name("vault.token"));
+        match (behaviour["token"].as_str(), &token_file) {
+            (Some("drop"), Some(file)) => {
+                let _ = std::fs::remove_file(file);
+            }
+            (Some("wrong"), Some(file)) => {
+                let _ = std::fs::write(file, "not-the-token-of-this-run");
+            }
+            _ => {}
         }
-        match behaviour["token"].as_str() {
-            Some("drop") => {
-                command.env_remove("FLOTTILLE_VAULT_TOKEN");
-            }
-            Some("wrong") => {
-                command.env("FLOTTILLE_VAULT_TOKEN", "not-the-token-of-this-run");
-            }
-            _ => {
-                if let Some(token) = &token {
-                    command.env("FLOTTILLE_VAULT_TOKEN", token);
-                }
-            }
-        }
+        // The browser's daemon runs it, with the environment it was started with: never the
+        // command line's.
+        command.env_remove("FLOTTILLE_VAULT_TOKEN");
         let child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1044,8 +1121,10 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         writeln!(stdin, "{request}").ok();
         drop(stdin);
         let output = child.wait_with_output().unwrap();
-        serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|_| json!({"success": false, "error": "no JSON on its output"}))
+        let mut answer: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| json!({"success": false, "error": "no JSON on its output"}));
+        answer["exited"] = json!(output.status.success());
+        answer
     };
     let Some(plugin) = plugin else {
         write_log(
@@ -1058,7 +1137,36 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         std::process::exit(1);
     };
     browser(args, log, "login");
+    // Beside the socket the plugin is given last: Flottille's files of the run.
+    let beside = |file: &str| {
+        plugin["args"]
+            .as_array()
+            .and_then(|args| args.last())
+            .and_then(Value::as_str)
+            .map(|socket| std::path::Path::new(socket).with_file_name(file))
+    };
+    if let Some(until) = behaviour["hold"].as_str() {
+        let token_seen = beside("vault.token").is_some_and(|file| file.is_file());
+        write_log(log, json!({"event": "held", "token_seen": token_seen}));
+        std::fs::write(format!("{until}.started"), "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !std::path::Path::new(until).exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    if let (Some(target), Some(why)) = (behaviour["why_planted"].as_str(), beside("vault.why")) {
+        let _ = std::os::unix::fs::symlink(target, why);
+    }
     let answer = ask(&plugin);
+    if let Some(why) = beside("vault.why") {
+        if let Some(target) = behaviour["why_link"].as_str() {
+            let _ = std::fs::remove_file(&why);
+            let _ = std::os::unix::fs::symlink(target, &why);
+        }
+        if behaviour["why_big"] == true {
+            std::fs::write(&why, "x".repeat(1 << 20)).unwrap();
+        }
+    }
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
         "cwd": std::env::current_dir().ok(), "display": display_environment(),
@@ -1069,7 +1177,12 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     }
     write_log(log, line);
     if !success {
-        eprintln!("✗ the credential provider failed");
+        // agent-browser 0.43.0's own words: the plugin's are not relayed.
+        if answer["exited"] == false {
+            eprintln!("✗ Plugin '{provider}' exited unsuccessfully");
+        } else {
+            eprintln!("✗ Plugin '{provider}' returned success=false");
+        }
         std::process::exit(1);
     }
     let credential = &answer["credential"];

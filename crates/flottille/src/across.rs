@@ -1085,6 +1085,22 @@ fn delivered(
         true => format!("decided-{}-{}", deliver.launch, deliver.id),
         false => format!("{}-{}", deliver.launch, deliver.id),
     };
+    // The user answers a launch once: an answer to one answered already is taken only as the
+    // one stored, sent again by a machine that did not hear it was taken, and changes nothing.
+    if decided && !undecided(&launch) {
+        let stored = daemon
+            .read(|store| store.delivery(&id))
+            .map_err(|error| Refused::Now(error.to_string()))?
+            .is_some();
+        return match stored {
+            true => Ok(json!({})),
+            false => Err(format!(
+                "launch {} on {name} was answered already: the user answers it once",
+                deliver.launch
+            )
+            .into()),
+        };
+    }
     // An agent removed since is no one to deliver to: dropped, not kept in the queue.
     let agent = agent_here(daemon, &deliver.agent)?.ok_or_else(|| {
         format!(
@@ -1150,10 +1166,14 @@ fn delivered(
 }
 
 /// Whether a delivery of `kind` for `agent` is of `launch`: one its agent started, not refused,
-/// or the user's answer that refused it, sent again by a machine that did not hear it was taken
-/// (stored once by its id).
+/// or the user's answer to it, which `delivered` takes on a refused launch only as the one stored.
 fn delivered_to(launch: &Launch, agent: &str, kind: &str) -> bool {
     launch.caller == agent && (launch.state != "refused" || kind == "approval")
+}
+
+/// Whether the user there has not answered `launch` yet, held for them.
+fn undecided(launch: &Launch) -> bool {
+    matches!(launch.state.as_str(), "held" | "accepted")
 }
 
 /// A `call` the machine of `from` sent: done as the tool would be here, only when the agent that

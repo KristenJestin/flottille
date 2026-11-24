@@ -581,8 +581,10 @@ pending requests.
   `git config --global` in Full (run by a program, as the gate refuses it on a line) replaces
   `~/.gitconfig`** (git writes a new file and renames it
   over the old), which is no longer the file the daemon found at its start: from then on every
-  push over SSH in Ask or Auto is refused, saying so, until the daemon restarts, or the work is
-  done in Full (#1322). The tools
+  push over SSH in Ask or Auto is refused, saying so (`flottille daemon stop`, and the next
+  command starts another daemon), until the daemon restarts, or the work is done in Full. A link
+  that a dotfiles update moves to a new version folder is judged again at the push instead
+  (`docs/vault.md`, "The gaps"). The tools
   `forge` and `tickets` stay for what only they do: following checks and reviews, which wakes the
   agent, the window's view of pull requests and tickets, and every write to Jira.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may

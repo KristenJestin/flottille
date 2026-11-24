@@ -664,7 +664,11 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             .map(|status| status["sandbox"].clone()),
         Ok(None) => {
             crate::ssh_agent::find();
-            crate::pushed::find(false);
+            // The projects' files alone: the store is the daemon's to open.
+            let work = crate::projects::Projects::open(paths)
+                .map(|projects| crate::daemon::work_folders(&projects, None))
+                .unwrap_or_default();
+            crate::pushed::find(false, &work);
             let mut sandbox = crate::mounts::sandbox();
             sandbox["probed"] = "no daemon running: probed by doctor".into();
             Ok(sandbox)
