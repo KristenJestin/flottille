@@ -3659,11 +3659,13 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let projects = before
-            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
-            .and_then(|before| before.get("projects").cloned());
-        if let (Some(projects), Some(list)) = (projects, list.as_object_mut()) {
-            list.entry("projects").or_insert(projects);
+        // What the machine says beside its sessions stays until it says it again.
+        let before = before.and_then(|before| serde_json::from_str::<Value>(&before).ok());
+        for part in ["projects", "pilots"] {
+            let kept = before.as_ref().and_then(|before| before.get(part).cloned());
+            if let (Some(kept), Some(list)) = (kept, list.as_object_mut()) {
+                list.entry(part).or_insert(kept);
+            }
         }
         transaction.execute(
             "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
@@ -3683,6 +3685,20 @@ impl Store {
         projects: &Value,
         at: u64,
     ) -> Result<()> {
+        self.keep_machine_part(machine, name, "projects", projects, at)
+    }
+
+    /// Keeps `value` as the `part` of the list of the machine of key `machine` (named `name`), told
+    /// at `at` beside the sessions it told (none yet when this is the first it says): its
+    /// `projects`, or the `pilots` of another machine of its led sessions.
+    pub fn keep_machine_part(
+        &mut self,
+        machine: &str,
+        name: &str,
+        part: &str,
+        value: &Value,
+        at: u64,
+    ) -> Result<()> {
         let transaction = self.connection.transaction()?;
         let before: Option<String> = transaction
             .query_row(
@@ -3695,7 +3711,7 @@ impl Store {
             .and_then(|before| serde_json::from_str::<Value>(&before).ok())
             .filter(Value::is_object)
             .unwrap_or_else(|| serde_json::json!({"sessions": []}));
-        list["projects"] = projects.clone();
+        list[part] = value.clone();
         transaction.execute(
             "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3",
