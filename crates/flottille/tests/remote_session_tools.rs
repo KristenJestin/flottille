@@ -845,6 +845,24 @@ fn a_refusal_of_a_session_it_started_elsewhere_comes_back_masked() {
     assert!(!text.contains("pc-only"), "{text}");
 }
 
+#[test]
+fn a_refusal_of_an_answer_to_a_request_held_elsewhere_comes_back_masked() {
+    let (_hub, pc, _server, _root, mcp, _child, _launch) = started_on_server("child");
+    // A secret only pc knows, in a secret file of the caller's place: a number, which the
+    // server's refusal says back as the request it does not hold.
+    std::fs::write(pc.folder().join(".env"), "API_PIN=73519246\n").unwrap();
+
+    let answer = mcp.call(
+        "approval_answer",
+        json!({"request_id": 73519246, "machine": "server", "decision": "deny",
+            "why": "Not needed."}),
+    );
+
+    let text = refused(&answer);
+    assert!(text.contains("request #[masked] is not held"), "{text}");
+    assert!(!text.contains("735192"), "{text}");
+}
+
 /// A session or child pc's root started on the server, in Full: the hub, the two machines, the
 /// root's id, its MCP session, and the id and launch of what it started.
 fn started_on_server(
