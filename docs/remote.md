@@ -1795,6 +1795,11 @@ on a real phone, by hand, and reported.
   under the user's runtime folder, never made, rather than refused: a read of a session of another
   project is served as on one machine. The callers of one machine are capped at 64, forgotten after
   30 days idle (as long as a message is kept) and when their machine leaves the members.
+- **A session resumed by the user keeps its pilot's cap** (#1361): `agent.resume` of an ended root
+  session led by a stand-in checks, in the very write that revives it, that its pilot still has room
+  in its machine's 64 (as a new session does), and is refused with the cap's own sentence when it
+  has none. The user resumes it, so the refusal is theirs to read; the pilot counts nothing while
+  all its sessions are ended, and the choice is to refuse rather than to forget another pilot.
 - **The answer of a held call is awaited from the moment the call's answer comes back** (#1250):
   an answer the user gave before that (within the same second) is answered "send again later"
   (#1263) while a call of that caller to that machine is still unanswered, and kept by its
