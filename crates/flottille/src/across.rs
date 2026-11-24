@@ -24,6 +24,7 @@ use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::link::Remote;
 use crate::mcp::{Grant, Outcome};
+use crate::place::Place;
 use crate::tree::named;
 
 /// How long a message waits for its machine before it is dropped.
@@ -1774,6 +1775,7 @@ fn machine_name(daemon: &Daemon, launch: &Launch) -> String {
 pub(crate) async fn call(
     daemon: &Arc<Daemon>,
     caller: &Agent,
+    place: &Place,
     tool: &str,
     args: &Value,
 ) -> Option<Outcome> {
@@ -1887,32 +1889,47 @@ pub(crate) async fn call(
                 "call-{}",
                 flottille_core::agent::new_id().unwrap_or_default()
             );
-            match link.send(&Message::Machine(message(id))).await {
-                Ok(answer) if answer["later"].is_string() => refused(format!(
-                    "refused: {name} cannot answer now ({}): agent {agent} cannot be reached now. \
-                     You will be woken by what comes back from it.",
-                    answer["later"].as_str().unwrap_or_default()
-                )),
-                Ok(answer) => {
-                    if tool == "agent_stop" {
-                        let _ = daemon.write(|store| {
-                            store
-                                .end_launch(&launch.machine, &launch.launch)
-                                .map(|()| ((), None))
-                        });
-                    }
-                    let text = answer["text"].as_str().unwrap_or_default();
-                    Some(Outcome::Done(format!("On {name}: {text}")))
-                }
-                Err(LinkError::Declined { reason, .. }) => {
-                    refused(format!("refused by {name}: {reason}"))
-                }
-                Err(error) => refused(format!(
-                    "refused: {error}: agent {agent} cannot be reached now. You will be woken by \
-                     what comes back from it."
-                )),
+            let sent = link.send(&Message::Machine(message(id))).await;
+            if tool == "agent_stop"
+                && let Ok(answer) = &sent
+                && !answer["later"].is_string()
+            {
+                let _ = daemon.write(|store| {
+                    store
+                        .end_launch(&launch.machine, &launch.launch)
+                        .map(|()| ((), None))
+                });
             }
+            Some(call_answered(sent, &name, &agent, place))
         }
+    }
+}
+
+/// What the caller's agent is shown of `sent`, the answer of `name` to a call aimed at its agent
+/// `agent`.
+fn call_answered(
+    sent: Result<Value, LinkError>,
+    name: &str,
+    agent: &str,
+    _place: &Place,
+) -> Outcome {
+    match sent {
+        Ok(answer) if answer["later"].is_string() => Outcome::Refused(format!(
+            "refused: {name} cannot answer now ({}): agent {agent} cannot be reached now. You \
+             will be woken by what comes back from it.",
+            answer["later"].as_str().unwrap_or_default()
+        )),
+        Ok(answer) => {
+            let text = answer["text"].as_str().unwrap_or_default();
+            Outcome::Done(format!("On {name}: {text}"))
+        }
+        Err(LinkError::Declined { reason, .. }) => {
+            Outcome::Refused(format!("refused by {name}: {reason}"))
+        }
+        Err(error) => Outcome::Refused(format!(
+            "refused: {error}: agent {agent} cannot be reached now. You will be woken by what \
+             comes back from it."
+        )),
     }
 }
 
@@ -2337,16 +2354,7 @@ async fn forward_to(
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     let name = aim.name;
-    let session = aim.session;
-    // Why it cannot be reached now, then what the caller is to do: wait to be woken by one it
-    // started, call again otherwise.
-    let unreached = |why: String, again: &str| match aim.woken {
-        true => format!(
-            "refused: {why}: {session} cannot be reached now. You will be woken by what comes \
-             back from it."
-        ),
-        false => format!("refused: {why}: {session} {again}"),
-    };
+    let session = &aim.session;
     // A caller of another machine stood in for here reaches this machine's sessions only: no
     // call goes out on its behalf.
     if is_stand_in(&caller.id) {
@@ -2362,6 +2370,7 @@ async fn forward_to(
         Ok(link) => link,
         Err(why) => {
             return Outcome::Refused(unreached(
+                &aim,
                 why,
                 &format!("runs there, and cannot be reached now; call again once {name} is back"),
             ));
@@ -2395,11 +2404,46 @@ async fn forward_to(
     // Until what it awaits is recorded, or the call is given up: an answer that comes before is
     // sent again, one that comes after none is refused.
     let _sent = Calling::sent(&remote, aim.machine, &caller.id);
-    match link
+    let sent = link
         .send(&Message::Machine(MachineMessage::Call(Box::new(call))))
-        .await
+        .await;
+    if let Ok(answer) = &sent
+        && !answer["later"].is_string()
     {
+        while playing_slow_call() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if let Some(number) = answer["request"].as_u64() {
+            let _ = daemon.write(|store| {
+                store
+                    .await_answer(aim.machine, number, &caller.id)
+                    .map(|()| ((), None))
+            });
+        }
+    }
+    answered(sent, &aim, &grant.place)
+}
+
+/// Why `aim` cannot be reached now, then what the caller is to do: wait to be woken by one it
+/// started, call again otherwise.
+fn unreached(aim: &Aim, why: String, again: &str) -> String {
+    let session = &aim.session;
+    match aim.woken {
+        true => format!(
+            "refused: {why}: {session} cannot be reached now. You will be woken by what comes \
+             back from it."
+        ),
+        false => format!("refused: {why}: {session} {again}"),
+    }
+}
+
+/// What the caller's agent is shown of `sent`, the answer of the machine of `aim` to a call
+/// aimed at it.
+fn answered(sent: Result<Value, LinkError>, aim: &Aim, _place: &Place) -> Outcome {
+    let name = aim.name;
+    match sent {
         Ok(answer) if answer["later"].is_string() => Outcome::Refused(unreached(
+            aim,
             format!(
                 "{name} cannot answer now ({})",
                 answer["later"].as_str().unwrap_or_default()
@@ -2408,16 +2452,6 @@ async fn forward_to(
         )),
         Ok(answer) => {
             let text = answer["text"].as_str().unwrap_or_default().to_owned();
-            while playing_slow_call() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            if let Some(number) = answer["request"].as_u64() {
-                let _ = daemon.write(|store| {
-                    store
-                        .await_answer(aim.machine, number, &caller.id)
-                        .map(|()| ((), None))
-                });
-            }
             match answer["outcome"].as_str() {
                 Some("ok") => Outcome::Done(text),
                 Some("held") => Outcome::Held(text),
@@ -2433,6 +2467,7 @@ async fn forward_to(
             Outcome::Refused(format!("refused by {name}: {reason}"))
         }
         Err(error) => Outcome::Refused(unreached(
+            aim,
             error.to_string(),
             "cannot be reached now; call again in a moment",
         )),
