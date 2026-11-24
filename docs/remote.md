@@ -933,7 +933,8 @@ local child's work; nothing moves your branch.*
   a question goes when the parent is off"). The other methods of the user that a child here refuses
   are refused for it too, each in the same words as for a child here and naming its parent's
   machine: `agent.unqueue` and `agent.send_now` (a message its parent queued is its parent's to
-  take back or send now), `agent.cancel`, `agent.rename`, `agent.quota_resume`, and `agent.mode`
+  take back or send now), `agent.cancel`, `agent.rename`, `agent.quota_resume`,
+  `agent.reload_tools`, `agent.resume` (its session is not kept for the user), and `agent.mode`
   (its mode is its session's, set on the machine of its parent's session: no switch here sets it
   apart from its tree). The inactivity sweep never ends it (it ends with its parent), a review is
   not asked for it, `session_title` is refused to it, and its report and failure are no
@@ -941,9 +942,13 @@ local child's work; nothing moves your branch.*
   its parent's machine is off stays the user's. It is subscribed to nothing automatically, and
   gets its brief again after a compaction, as a child does. A `led` or `handed` launch asked for by a
   caller below its root (a `depth` above 0) is refused there, as its own machine refuses it. A
-  child stored by a Flottille of before, at depth 0, is put at depth 1 when the store opens, so it
-  takes a child's tools at its next start; the agents a Flottille of before let it start here move one
-  depth down with it, so that a stop ordered by depth ends them before it.
+  child stored by a Flottille of before, at depth 0, or at depth 1 with the agents it started
+  here left at theirs, is put at its caller's depth plus one when the store opens (1 when its launch
+  names none), so it takes a child's tools at its next start, and each agent under it one depth
+  below its parent, so that a stop ordered by depth ends them before it; a depth is only raised,
+  never lowered. An agent it starts here is a child of the tree of its parent's machine too: a
+  method the user's door refuses for a child names that tree's root, on that machine, as the one
+  the user writes to, and `agent.mode` is refused on it as on the remote child.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
@@ -1723,6 +1728,11 @@ on a real phone, by hand, and reported.
   message of the link, and the mode of a session is set where it runs; the simpler refusal can be
   replaced by a forward later. Its report and failure are left out of the user's notifications and
   inbox, its question to the user (while its parent's machine is off) is kept in them.
+- **An old remote child's depth is taken from its launch** (#1304): the store's repair puts a
+  remote child stored by a release of before at its caller's depth plus one, as the launch it came
+  with says (1 when it says none), and every agent under it one below its parent, raising a depth
+  only. Its caller's depth read from the launch is the one the child would have been given, rather
+  than 1 for every such child.
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
   with the link's own refusal rather than run as any root's: the agent is answered `refused by
