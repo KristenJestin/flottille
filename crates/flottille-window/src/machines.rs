@@ -1186,7 +1186,8 @@ impl Machines {
 
     /// The name the machine `to` (`None`: this one) has the project `name` of the machine `from`
     /// by, when it has it ([`same`]): one of `to`'s own projects of the same remotes, else the
-    /// same name when one of the two machines does not say its remotes (`has_project`). What
+    /// same name (`has_project`) unless both say remotes, which differ: a machine that does not
+    /// say them, or a project with no remote, is matched by its name, as before (#1410). What
     /// another machine lists matches this machine's project only by the remotes this machine's
     /// own daemon says of it.
     pub fn project_on(&self, from: Option<&str>, name: &str, to: Option<&str>) -> Option<String> {
@@ -1203,8 +1204,11 @@ impl Machines {
         }) {
             return Some(held.name.clone());
         }
-        (same((&identity, name), (&self.identity(to, name), name)) && self.has_project(to, name))
-            .then(|| name.to_owned())
+        let both_remotes = matches!(
+            (&identity, &self.identity(to, name)),
+            (Identity::Remotes(_), Identity::Remotes(_))
+        );
+        (!both_remotes && self.has_project(to, name)).then(|| name.to_owned())
     }
 }
 
@@ -1813,9 +1817,9 @@ mod tests {
         );
         assert_eq!(read.project_on(Some("server"), "app", None), None);
         assert_eq!(
-            read.project_on(None, "notes", Some("server")),
-            None,
-            "no remote"
+            read.project_on(None, "notes", Some("server")).as_deref(),
+            Some("notes"),
+            "no remote: by the name"
         );
         assert_eq!(
             read.project_on(Some("pc"), "app", None).as_deref(),
