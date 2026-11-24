@@ -1089,7 +1089,9 @@ fn a_folded_group_shows_its_strongest_mark(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the rows", |cx| present(cx, project_id("app")));
     until(&shell, cx, "the agent runs", |cx| {
-        cx.update(|window, _| window.try_find(icon_id(AgentState::Running)).is_some())
+        shell.read_with(cx, |shell, cx| {
+            shell.session(&agent).and_then(|row| row.read(cx).mark()) == Some(AgentState::Running)
+        })
     });
     new_group("Work", &shell, cx);
     let id = group_id(&shell, "Work", cx);
