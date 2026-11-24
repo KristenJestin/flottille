@@ -2314,6 +2314,11 @@ impl Shell {
 
     /// The actions of the pages of `machine` (`None`: this one), wherever they wait: what a page
     /// of that machine asks goes there, whichever machine's page is shown then (#1271).
+    ///
+    /// While another machine's answer is taken aside ([`Shell::on_pages`]), `self.actions` are
+    /// that machine's and the front's wait outside `sides`: this answers wrongly for the front
+    /// then. Pages ask through their [`crate::commands::ShellOf`] from clicks, timers and defers,
+    /// outside that update, so nothing is known to ask it there.
     fn actions_of(&self, machine: Option<&str>) -> Option<Actions> {
         if machine == self.front.as_deref() {
             return Some(self.actions.clone());

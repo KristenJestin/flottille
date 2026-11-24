@@ -122,19 +122,14 @@ impl CheckSection {
 
     fn ask(&mut self, method: &str, params: Value, then: Then, cx: &mut Context<Self>) {
         self.pending += 1;
-        let machine = self.shell.machine().map(str::to_owned);
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform_on(
-                    machine.as_deref(),
-                    Command::Ask {
-                        method: method.to_owned(),
-                        params,
-                        then: crate::extensions::Then::Check(then),
-                    },
-                )
-            })
-            .ok();
+        self.shell.perform(
+            Command::Ask {
+                method: method.to_owned(),
+                params,
+                then: crate::extensions::Then::Check(then),
+            },
+            cx,
+        );
     }
 
     /// The fix of a provider that is off: what its switch in Settings does.
