@@ -277,33 +277,16 @@ fn a_child_on_another_machine_stops_with_its_parent() {
     );
 }
 
-/// A child of `pc`'s root held in its first turn on `server`, with a message of its parent
-/// waiting for it: the child's id and the waiting delivery's.
-fn child_with_a_message_waiting(pc: &Machine, server: &Machine) -> (String, String) {
+/// A child of `pc`'s root held in its first turn on `server`: its id.
+fn working_child(pc: &Machine, server: &Machine) -> String {
     script(
         server,
         json!([{"when": "Write the tests of the export.", "times": 1,
             "do": [{"hold": "release"}]}]),
     );
-    let (child, _launch, mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    let (child, _launch, _mcp) = child_on_server(pc, server, "Write the tests of the export.");
     prompted(server, "Write the tests of the export.");
-    let sent = mcp.call(
-        "agent_send",
-        json!({"agent_id": child, "message": "Cover the CSV export too."}),
-    );
-    assert!(!sent.error, "{}", sent.text);
-    let waiting = |server: &Machine| -> Option<String> {
-        let tree = server
-            .user
-            .call("agent.tree", json!({"agent": child}))
-            .unwrap();
-        tree["agents"][0]["queued"][0]["delivery"]
-            .as_str()
-            .map(str::to_owned)
-    };
-    eventually("its parent's message waits", || waiting(server).is_some());
-    let delivery = waiting(server).unwrap();
-    (child, delivery)
+    child
 }
 
 /// What the user of `server` is told when `method` is called on a child of another machine's
@@ -320,48 +303,30 @@ fn refused_as_a_child(server: &Machine, child: &str, method: &str, params: Value
 }
 
 #[test]
-fn agent_unqueue_leaves_a_message_the_parent_of_another_machine_queued() {
+fn agent_unqueue_is_refused_on_a_child_of_another_machine() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
-    let (child, delivery) = child_with_a_message_waiting(&pc, &server);
+    let child = working_child(&pc, &server);
 
+    // Whatever the delivery: a child's messages are its parent's, never the user's to move.
     refused_as_a_child(
         &server,
         &child,
         "agent.unqueue",
-        json!({"agent": child, "delivery": delivery}),
-    );
-
-    let tree = server
-        .user
-        .call("agent.tree", json!({"agent": child}))
-        .unwrap();
-    assert_eq!(
-        tree["agents"][0]["queued"][0]["delivery"],
-        delivery.as_str(),
-        "{tree}"
+        json!({"agent": child, "delivery": "d-1"}),
     );
 }
 
 #[test]
-fn agent_send_now_leaves_a_message_the_parent_of_another_machine_queued() {
+fn agent_send_now_is_refused_on_a_child_of_another_machine() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
-    let (child, delivery) = child_with_a_message_waiting(&pc, &server);
+    let child = working_child(&pc, &server);
 
+    // Whatever the delivery: a child's messages are its parent's, never the user's to move.
     refused_as_a_child(
         &server,
         &child,
         "agent.send_now",
-        json!({"agent": child, "delivery": delivery}),
-    );
-
-    let tree = server
-        .user
-        .call("agent.tree", json!({"agent": child}))
-        .unwrap();
-    assert_eq!(
-        tree["agents"][0]["queued"][0]["delivery"],
-        delivery.as_str(),
-        "{tree}"
+        json!({"agent": child, "delivery": "d-1"}),
     );
 }
 
@@ -389,7 +354,7 @@ fn agent_mode_does_not_set_the_mode_of_a_child_of_another_machine_apart_from_its
 #[test]
 fn agent_cancel_does_not_cancel_the_turn_of_a_child_of_another_machine() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
-    let (child, _delivery) = child_with_a_message_waiting(&pc, &server);
+    let child = working_child(&pc, &server);
 
     refused_as_a_child(&server, &child, "agent.cancel", json!({"agent": child}));
 
@@ -455,6 +420,11 @@ fn the_inactivity_sweep_leaves_a_child_of_another_machine_to_its_parent() {
 fn a_child_of_another_machine_s_agent_gives_the_user_no_review() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    server
+        .user
+        .call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
 
     let refused = server
         .user
