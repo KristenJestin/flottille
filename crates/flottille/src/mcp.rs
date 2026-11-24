@@ -991,8 +991,12 @@ const PROJECT_WHOLE: &str = "This project's settings. settings reads each reposi
     tracker; set_settings declares them (null removes one; a tracker left out is kept), \
     and a repository's base branches and dependencies; what is left out is kept, a \
     refused change saves nothing. rules reads how agents are told to work (the global \
-    rules, then the project's); set_rules replaces the project's text and sets \
-    rules_alone, for the agents created after. A change is done once the judge or the \
+    rules, then the project's); set_rules replaces the project's text whole \
+    (text, at most 8000 characters), so send every rule, never one alone, and sets \
+    rules_alone, for the agents created after. A forge is \
+    {kind: github | bitbucket-cloud, repository} or {kind: bitbucket-data-center, host, \
+    repository}, a tracker {kind: github, repository} or {kind: jira, site, projects}. \
+    A change is done once the judge or the \
     user allows it, of the tracker or of the rules only once the user does: you are \
     answered at once, the result may come later. {\"action\": \"set_settings\", \
     \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
