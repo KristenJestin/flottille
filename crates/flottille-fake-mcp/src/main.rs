@@ -435,6 +435,8 @@ fn chrome_folders() -> Value {
         "XDG_DATA_HOME",
         "CHROME_CONFIG_HOME",
         "BREAKPAD_DUMP_LOCATION",
+        "AGENT_BROWSER_SCREENSHOT_DIR",
+        "AGENT_BROWSER_DOWNLOAD_PATH",
     ] {
         folders.insert(name.into(), json!(std::env::var(name).ok()));
     }

@@ -4598,18 +4598,44 @@ const FILES: [&str; 4] = [
 
 /// Other actions of agent-browser's, judged at the first pin: `login` is offered beside every one
 /// of them, as agent-browser's own login restricts nothing after it.
-const OTHERS: [&str; 11] = [
+const OTHERS: [&str; 9] = [
     "agent_browser_react_inspect",
     "agent_browser_react_tree",
     "agent_browser_get_attr",
     "agent_browser_get_html",
     "agent_browser_get_value",
     "agent_browser_network_requests",
-    "agent_browser_pdf",
-    "agent_browser_storage_get",
     "agent_browser_click",
     "agent_browser_fill",
     "agent_browser_get_text",
+];
+
+/// Actions its adapter keeps off because they reach the browser's profile, which lasts between
+/// browsers and holds the sign-ins: they answer with the cookies, the storage or the saved state,
+/// or read or write a file by a path the agent gives, through the server, which reaches the
+/// profile however the path is made (a link a run planted).
+const PROFILE_LOCKED: [&str; 10] = [
+    "agent_browser_cookies_get",
+    "agent_browser_storage_get",
+    "agent_browser_state_save",
+    "agent_browser_state_show",
+    "agent_browser_cookies_set_curl",
+    "agent_browser_upload",
+    "agent_browser_download",
+    "agent_browser_pdf",
+    "agent_browser_record_start",
+    "agent_browser_record_restart",
+];
+
+/// Actions agent-browser serves that take a file's path beside their other arguments, and those
+/// arguments: the adapter refuses a call that gives one.
+const FILE_ARGUMENTS: [(&str, &[&str]); 6] = [
+    ("agent_browser_screenshot", &["path", "screenshotDir"]),
+    ("agent_browser_wait_for_download", &["path"]),
+    ("agent_browser_profiler_stop", &["path"]),
+    ("agent_browser_flow_save", &["output"]),
+    ("agent_browser_diff_snapshot", &["baseline"]),
+    ("agent_browser_diff_screenshot", &["baseline", "output"]),
 ];
 
 fn agent_browser(version: &str) -> Value {
@@ -4633,8 +4659,16 @@ fn agent_browser(version: &str) -> Value {
         .chain(&SCRIPTS)
         .chain(&FILES)
         .chain(&OTHERS)
+        .chain(&PROFILE_LOCKED)
     {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
+    }
+    for (name, files) in FILE_ARGUMENTS {
+        let properties: serde_json::Map<String, Value> = files
+            .iter()
+            .map(|file| (file.to_string(), json!({"type": "string"})))
+            .collect();
+        tools.push(tool(name, Value::Object(properties)));
     }
     json!({
         "server": {"name": "agent-browser", "version": version},
@@ -6743,6 +6777,248 @@ fn connect_and_state_load_stay_off_with_the_adapter() {
         json!({"action": "agent_browser_connect", "arguments": {"name": "9222"}}),
     ));
     assert!(logged(&user, "browser", "call").is_empty());
+}
+
+/// `action` is off and stays off: the user cannot turn it on, the review says it is because of the
+/// browser's profile, and the agent's call of it with `arguments` is refused before the server
+/// sees anything.
+fn locked_for_the_profile(user: &User, mcp: &Mcp, action: &str, arguments: Value) {
+    assert_eq!(setting(user, action), "off", "{action}");
+    let refused_accept = user
+        .call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {action: "judged"}}),
+        )
+        .unwrap_err();
+    assert!(refused_accept.1.contains(action), "{refused_accept:?}");
+    assert!(refused_accept.1.contains("profile"), "{refused_accept:?}");
+    assert_eq!(setting(user, action), "off", "{action}");
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": action, "arguments": arguments}),
+    ));
+    assert!(answer.contains("off"), "{action}: {answer}");
+    assert!(logged(user, "browser", "call").is_empty(), "{action}");
+}
+
+/// The agent's call of `action` with `arguments` is refused, saying `why`, before the server sees
+/// anything.
+fn refused_unseen(user: &User, mcp: &Mcp, action: &str, arguments: Value, why: &str) {
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": action, "arguments": arguments}),
+    ));
+    assert!(answer.contains(why), "{action} {arguments}: {answer}");
+    assert!(
+        logged(user, "browser", "call").is_empty(),
+        "{action} {arguments}"
+    );
+}
+
+/// What Flottille tells the agent of the browser, beside the server's instructions.
+fn flottilles_words(mcp: &Mcp) -> String {
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "help", "for": "@instructions"}),
+    ))
+}
+
+#[test]
+fn an_agent_cannot_read_a_cookie_s_value_through_the_browser() {
+    // The profile lasts between browsers and holds the sign-ins, by hand or through the vault: a
+    // session cookie of a site the vault signed in to is a credential, and so is a token in the
+    // page's storage.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    locked_for_the_profile(&user, &mcp, "agent_browser_cookies_get", json!({}));
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_storage_get",
+        json!({"storageType": "local"}),
+    );
+    let said = flottilles_words(&mcp);
+    assert!(said.contains("cookies"), "{said}");
+    assert!(said.contains("storage"), "{said}");
+}
+
+#[test]
+fn an_agent_cannot_save_the_browser_s_state_to_a_file() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let file = user.path("state.json");
+    let file = file.to_str().unwrap();
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_state_save",
+        json!({"path": file}),
+    );
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_state_show",
+        json!({"path": file}),
+    );
+    // agent-browser takes restore and restoreSave on every action, though no schema says it: they
+    // save the cookies and storage to a file of its own, under the home runs reach. extraArgs
+    // carries its options on any call, --restore among them.
+    let open = "agent_browser_open";
+    let url = "https://shop.example.com/";
+    refused_unseen(
+        &user,
+        &mcp,
+        open,
+        json!({"url": url, "restore": true}),
+        "restore",
+    );
+    refused_unseen(
+        &user,
+        &mcp,
+        open,
+        json!({"url": url, "restoreSave": "always"}),
+        "restoreSave",
+    );
+    refused_unseen(
+        &user,
+        &mcp,
+        "agent_browser_snapshot",
+        json!({"extraArgs": ["--restore", "shop"]}),
+        "extraArgs",
+    );
+    let said = flottilles_words(&mcp);
+    assert!(said.contains("saved state"), "{said}");
+}
+
+#[test]
+fn an_agent_cannot_upload_a_file_of_the_browser_s_profile() {
+    // A run can plant a link to the profile's cookies under a name built in a script, which the
+    // gate never sees, and have the agent upload it to a page of its own: the server follows the
+    // link, as it reaches the profile. No check of the path holds against a link swapped after
+    // it, so the actions that read a file by its path are off.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let cookies = user.path("state/flottille/browsers/browser/profile/Default/Cookies");
+    let link = user.path("innocent.txt");
+    std::os::unix::fs::symlink(&cookies, &link).unwrap();
+    let link = link.to_str().unwrap();
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_upload",
+        json!({"selector": "#file", "files": [link]}),
+    );
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_cookies_set_curl",
+        json!({"file": link}),
+    );
+    // Every action takes caCert, a file the server reads.
+    refused_unseen(
+        &user,
+        &mcp,
+        "agent_browser_open",
+        json!({"url": "https://shop.example.com/", "caCert": link}),
+        "caCert",
+    );
+    let said = flottilles_words(&mcp);
+    assert!(said.contains("upload"), "{said}");
+}
+
+#[test]
+fn an_agent_cannot_write_into_the_browser_s_profile_through_a_download_or_a_screenshot() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let into = user.path("state/flottille/browsers/browser/profile/Default/Cookies");
+    let into = into.to_str().unwrap();
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_download",
+        json!({"selector": "#report", "path": into}),
+    );
+    locked_for_the_profile(&user, &mcp, "agent_browser_pdf", json!({"path": into}));
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_record_start",
+        json!({"path": into}),
+    );
+    locked_for_the_profile(
+        &user,
+        &mcp,
+        "agent_browser_record_restart",
+        json!({"path": into}),
+    );
+    // The others that take a file's path run without one; with one they are refused, whatever it
+    // names.
+    for (action, files) in FILE_ARGUMENTS {
+        for file in files {
+            refused_unseen(&user, &mcp, action, json!({*file: "shot.png"}), file);
+        }
+    }
+    // HAR and traces are the user's to turn on; their path is refused all the same.
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {
+            "agent_browser_network_har_stop": "judged",
+            "agent_browser_trace_stop": "judged",
+        }}),
+    )
+    .unwrap();
+    for action in ["agent_browser_network_har_stop", "agent_browser_trace_stop"] {
+        refused_unseen(&user, &mcp, action, json!({"path": into}), "path");
+    }
+    // A screenshot's folder given as one of agent-browser's options.
+    refused_unseen(
+        &user,
+        &mcp,
+        "agent_browser_screenshot",
+        json!({"extraArgs": ["--screenshot-dir", into]}),
+        "extraArgs",
+    );
+    // A namespace moves the daemon's socket and its restore folders.
+    refused_unseen(
+        &user,
+        &mcp,
+        "agent_browser_snapshot",
+        json!({"namespace": "elsewhere"}),
+        "namespace",
+    );
+    // Without a path, a screenshot goes to a folder Flottille makes in the connection's vault
+    // folder, out of every run's reach, and so does a download.
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_screenshot", "arguments": {"fullPage": true}}),
+    ));
+    assert_eq!(logged(&user, "browser", "call").len(), 1);
+    let vault = vault_folder(&user);
+    let starts: Vec<Value> = logged(&user, "browser", "start")
+        .into_iter()
+        .filter(|line| !line["config"].is_null())
+        .collect();
+    assert!(!starts.is_empty());
+    for line in starts {
+        for name in [
+            "AGENT_BROWSER_SCREENSHOT_DIR",
+            "AGENT_BROWSER_DOWNLOAD_PATH",
+        ] {
+            let folder = line["folders"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("no {name}: {line}"));
+            assert!(
+                Path::new(folder).starts_with(&vault) && Path::new(folder) != vault,
+                "{name} is outside the vault folder: {line}"
+            );
+        }
+    }
+    let said = flottilles_words(&mcp);
+    assert!(said.contains("screenshot"), "{said}");
 }
 
 #[test]
