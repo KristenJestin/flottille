@@ -2667,6 +2667,55 @@ mod tests {
     }
 
     #[test]
+    fn request_numbers_of_two_machines_never_overwrite_each_other() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        // Each machine counts its own requests: a #4 here and a #4 on server.
+        for (n, (id, title, machine, waiting)) in [
+            ("here", "Local", None, "request #4."),
+            ("there", "Remote", Some("server"), "request #4 on server."),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut asked = json!({"kind": "led", "title": title, "brief": "Go"});
+            if let Some(machine) = machine {
+                asked["machine"] = machine.into();
+            }
+            c.apply(&event(
+                2 * n as u64 + 1,
+                "agent.tool_call",
+                json!({"id": id, "title": "mcp__flottille__agent_launch",
+                    "status": "in_progress", "raw_input": asked}),
+            ));
+            c.apply(&event(
+                2 * n as u64 + 2,
+                "agent.tool_call",
+                json!({"id": id, "update": true, "status": "completed",
+                    "raw_output": format!("Waiting for the user's approval, {waiting} This \
+                        action has not happened; do not assume it did.")}),
+            ));
+        }
+        let started = |text: &str| Block::Notice {
+            kind: STARTED_SESSION_KIND.into(),
+            text: text.into(),
+        };
+
+        c.apply(&event(
+            5,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 on server (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Remote\" (agent 0123456789ab), on server, in workspace w there."}),
+        ));
+        assert_eq!(c.blocks().last(), Some(&started("\"Remote\"")));
+        c.apply(&event(
+            6,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Local\" (agent 0123456789ac), in w."}),
+        ));
+        assert_eq!(c.blocks().last(), Some(&started("\"Local\"")));
+        assert!(c.held_sessions.is_empty(), "{:?}", c.held_sessions);
+    }
+
+    #[test]
     fn a_child_reads_its_brief_from_its_parent() {
         let mut c = Conversation::new("web-form".into(), Some("lead".into()));
         c.apply(&event(
