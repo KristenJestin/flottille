@@ -1171,9 +1171,12 @@ local child's work; nothing moves your branch.*
   it approved (its answer settled `started`) tells that caller its stop as the end of the session it
   started (`child-failed`, or `session-turn-ended` for a led one), which its machine takes whether the
   approval reached it or not, and records `ended`, or `refused` when the approval had not reached it
-  (#1374). A refused launch leaves no row under its
+  (#1374). A handed launch's caller hears that stop as a led one's does, `session-turn-ended`
+  (#1385). The user's answer is kept for the caller's machine beyond the 100 messages (up to 104
+  in all), cut to 64,000 characters, so that the end of a session that ran does not find its
+  launch still waiting for it (#1385). A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
-  for that answer, and hears nothing of the session after it.
+  for that answer, and hears of the session after it only its stop, as above.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
   a `led` or `handed` launch whose caller is itself a session another agent started (here, or on
   a third machine) says so (`launched`), and the receiving machine's gate takes it as base: held
@@ -1929,7 +1932,22 @@ on a real phone, by hand, and reported.
   the session (`child-failed`, `session-turn-ended`), which the caller's machine takes, rather than
   as a second answer, which it refuses. Keeping the launch and resuming its setup instead could come
   later; stopping it is the simpler, and the rule that a launch is answered once stays whole. A
-  handed launch's caller still hears only the user's answer.
+  handed launch's caller is told its end as a led one's (`session-turn-ended`, #1385): it was told
+  the session started, and hears nothing else of it. A caller's machine of the release before
+  #1374 takes that end too and records the launch `ended`; for one whose approval never reached it
+  before the restart (its answer not told), it shows `ended` where this release shows `refused`:
+  either way it no longer runs, and nothing is left waiting.
+- **The user's answer to a launch is kept beyond the cap, up to a ceiling** (#1385): it is kept
+  for the caller's machine even when 100 messages wait for it already, and cut to 64,000
+  characters rather than refused, so that the end of a session that ran does not come to a launch
+  still waiting for its answer, which the caller's machine would record `refused`. What waits for
+  one machine is bounded all the same: the answers go on to 104 (the 100, and the 4 launches the
+  user may hold at once for a machine), past which an answer is dropped with its inbox entry like
+  any delivery: a machine that stays linked and takes nothing for that long fills no disk.
+  Telling the caller's machine apart an end of a session that ran from one that never did would
+  need a new field of the link; keeping the answer needs none, and a caller of the release before
+  gains from it too. A store that cannot keep the answer at all still
+  drops it, said in the inbox.
 - **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
   stored, only one whose workspace is still preparing or whose session was never briefed is refused;
   one that ran is left running and its answer is stored again, since its caller was told approved.
@@ -2242,9 +2260,10 @@ on a real phone, by hand, and reported.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
 - At most 100 messages wait for one machine: one more `agent_send` or `session_send` is refused at
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
-  an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
-  the receiver would; a review's result to a pilot of another machine is cut instead, the cut
-  said with the `session_read` that reads the rest there. The kinds a machine takes are the
+  an inbox entry (`dropped`), but the user's answer to a launch, kept beyond up to 104 in all. A
+  message of more
+  than 64,000 characters is refused on the sender, as the receiver would; that answer is cut
+  instead, and so is a review's result to a pilot of another machine, the cut said with the `session_read` that reads the rest there. The kinds a machine takes are the
   session's own and a review's (`review`), no other extension's name.
 - A led session's plain end of a turn (it neither asked nor reported) is kept once per session
   for the machine that took none: the next replaces the one still waiting, so that the turns of a
