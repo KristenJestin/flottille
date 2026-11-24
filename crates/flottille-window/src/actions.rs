@@ -4590,4 +4590,153 @@ mod tests {
         assert_eq!(answer.notice.as_deref(), Some("agent a has ended"));
         assert_eq!(answer.refused, None);
     }
+
+    /// What an Allow that shares files asked of `from`, each method with its parameters, and
+    /// what it told the card, when `from` holds `listed` and answers `from_file` with `made`.
+    #[allow(clippy::type_complexity)]
+    fn shared_with(
+        needs: &crate::waiting::Needs,
+        here: &str,
+        listed: Result<Value, String>,
+        made: Result<Value, String>,
+    ) -> (
+        bool,
+        Vec<(String, Value)>,
+        Vec<(Option<usize>, crate::waiting::Step, Option<String>)>,
+    ) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let told = std::cell::RefCell::new(Vec::new());
+        let done = share_files(
+            needs,
+            0,
+            here,
+            |method, params| {
+                asked.borrow_mut().push((method.to_owned(), params));
+                match method {
+                    "vault.list" => listed.clone(),
+                    "vault.from_file" => made.clone(),
+                    _ => Ok(json!({})),
+                }
+            },
+            |at, step, why| {
+                told.borrow_mut().push((at, step, why));
+                true
+            },
+        );
+        (done, asked.into_inner(), told.into_inner())
+    }
+
+    fn needs_of(entry: &str) -> crate::waiting::Needs {
+        crate::waiting::Needs {
+            from: "pc".to_owned(),
+            to: "server".to_owned(),
+            project: "app".to_owned(),
+            files: vec![crate::waiting::NeededFile {
+                path: ".env".to_owned(),
+                entry: entry.to_owned(),
+            }],
+        }
+    }
+
+    fn methods(asked: &[(String, Value)]) -> Vec<&str> {
+        asked.iter().map(|(method, _)| method.as_str()).collect()
+    }
+
+    #[test]
+    fn allow_never_shares_an_entry_of_the_same_name_that_holds_another_secret() {
+        // `app-.env` on pc is a hand-made entry, bound to nothing: it is no file's.
+        let listed = Ok(json!({"entries": [{"name": "app-.env", "for": null}]}));
+        let refused = Err("the vault entry app-.env holds another secret".to_owned());
+        let (done, asked, told) = shared_with(&needs_of("app-.env"), "server", listed, refused);
+
+        assert!(!done);
+        assert_eq!(methods(&asked), ["vault.list", "vault.from_file"]);
+        assert_eq!(
+            told.last().unwrap(),
+            &(
+                Some(0),
+                crate::waiting::Step::NotMade,
+                Some(".env was not made: the vault entry app-.env holds another secret".to_owned())
+            )
+        );
+
+        // Bound to another use, the same.
+        let listed = Ok(json!({"entries": [{"name": "app-.env", "for": "connection:wiki"}]}));
+        let refused = Err("the vault entry app-.env is for the connection wiki".to_owned());
+        let (_, asked, _) = shared_with(&needs_of("app-.env"), "server", listed, refused);
+        assert_eq!(methods(&asked), ["vault.list", "vault.from_file"]);
+    }
+
+    #[test]
+    fn allow_shares_the_file_s_own_entry_without_making_it_again() {
+        let listed = Ok(json!({"entries": [{"name": "app-.env", "for": "file:app/.env"}]}));
+        let (done, asked, _) = shared_with(&needs_of("app-.env"), "server", listed, Ok(json!({})));
+
+        assert!(done);
+        assert_eq!(methods(&asked), ["vault.list", "vault.share"]);
+    }
+
+    #[test]
+    fn allow_refuses_a_need_whose_entry_is_not_the_file_s_own() {
+        // A daemon that names the user's token as the entry `.env` is made into.
+        let listed = Ok(json!({"entries": [{"name": "github-token", "for": null}]}));
+        let (done, asked, told) =
+            shared_with(&needs_of("github-token"), "server", listed, Ok(json!({})));
+
+        assert!(!done);
+        assert!(
+            !methods(&asked).contains(&"vault.share"),
+            "nothing is shared: {asked:?}"
+        );
+        assert!(
+            !methods(&asked).contains(&"vault.from_file"),
+            "nothing is made: {asked:?}"
+        );
+        let (at, step, why) = told.last().unwrap();
+        assert_eq!((*at, *step), (Some(0), crate::waiting::Step::NotMade));
+        assert_eq!(
+            why.as_deref(),
+            Some(".env is not shared: its entry would be github-token, not app-.env")
+        );
+    }
+
+    #[test]
+    fn allow_refuses_files_for_another_machine_than_the_one_the_launch_is_held_on() {
+        let listed = Ok(json!({"entries": []}));
+        let (done, asked, told) =
+            shared_with(&needs_of("app-.env"), "laptop", listed, Ok(json!({})));
+
+        assert!(!done);
+        assert!(asked.is_empty(), "nothing is asked of pc: {asked:?}");
+        assert_eq!(
+            told,
+            [(
+                None,
+                crate::waiting::Step::Waiting,
+                Some(
+                    "Its files would go to server, not to laptop where the launch is held: \
+                     nothing is shared"
+                        .to_owned()
+                )
+            )]
+        );
+    }
+
+    #[test]
+    fn a_vault_that_cannot_be_read_blames_no_file() {
+        let listed = Err("cannot reach pc".to_owned());
+        let (done, asked, told) =
+            shared_with(&needs_of("app-.env"), "server", listed, Ok(json!({})));
+
+        assert!(!done);
+        assert_eq!(methods(&asked), ["vault.list"]);
+        assert_eq!(
+            told,
+            [(
+                None,
+                crate::waiting::Step::Waiting,
+                Some("The vault of pc cannot be read: cannot reach pc".to_owned())
+            )]
+        );
+    }
 }

@@ -317,6 +317,24 @@ fn scroll_cards_down(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestCont
     }
 }
 
+/// What the card `number` says of the entries Deny leaves, its details open.
+fn deny_leaves(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) -> Option<String> {
+    let open = cx.update(|window, _| {
+        window
+            .try_find(id(format!("approval-more-{number}")))
+            .is_some()
+    });
+    if !open {
+        scroll_cards_down(shell, number, cx);
+        cx.update(|window, cx| window.click(id(format!("approval-details-{number}")), cx));
+    }
+    settle(shell, cx);
+    label(cx, format!("approval-shared-stay-{number}"))
+}
+
+const DENY_LEAVES: &str =
+    "Deny leaves on server the entries already shared: each is bound to its file alone.";
+
 fn word(cx: &mut VisualTestContext, number: u64, at: usize) -> Option<String> {
     label(cx, format!("allow-word-{number}-{at}"))
 }
@@ -329,7 +347,7 @@ fn the_card_lists_its_files(shell: &Entity<Shell>, number: u64, cx: &mut VisualT
     settle(shell, cx);
     assert_eq!(
         label(cx, format!("allow-files-{number}")).as_deref(),
-        Some("From pc → to server · 2 files")
+        Some("From pc → to server · app · 2 files")
     );
     assert_eq!(
         label(cx, format!("allow-step-{number}-0")).as_deref(),
@@ -436,6 +454,9 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
     let (shell, cx) = window(&server, cx);
     open_page(&shell, &agent, cx);
     the_card_lists_its_files(&shell, number, cx);
+    // Nothing shared yet: Deny would leave nothing.
+    assert_eq!(deny_leaves(&shell, number, cx), None);
+    scroll_cards_down(&shell, number, cx);
     cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
     until(&shell, cx, "the failure on the card", |cx| {
         label(cx, format!("approval-error-{number}")).is_some()
@@ -460,6 +481,11 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
         label(cx, format!("allow-{number}")).as_deref(),
         Some("Try again")
     );
+    // `.env` is shared: Deny says it stays.
+    assert_eq!(
+        deny_leaves(&shell, number, cx).as_deref(),
+        Some(DENY_LEAVES)
+    );
     // Held and failed, the card draws nothing more once its marks and its dot rested.
     advance(cx, Duration::from_secs(7));
     assert_eq!(
@@ -474,6 +500,40 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
         .call("vault.remove", json!({"name": "app-config-local.toml"}))
         .unwrap();
     allowed_whole(&shell, (&pc, &server), (&agent, number), cx);
+}
+
+#[gpui_kit::test]
+fn allow_never_shares_a_hand_made_entry_of_the_file_s_name(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (agent, number) = held_on_server(&pc, &server);
+    // On pc, `app-.env` is an entry the user made by hand: another secret, no file's.
+    pc.user
+        .call(
+            "vault.set",
+            json!({"name": "app-.env", "secret": "a-hand-made-secret-of-pc"}),
+        )
+        .unwrap();
+
+    let (shell, cx) = window(&server, cx);
+    open_page(&shell, &agent, cx);
+    the_card_lists_its_files(&shell, number, cx);
+    cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
+    until(&shell, cx, "the refusal on the card", |cx| {
+        label(cx, format!("approval-error-{number}")).is_some()
+    });
+    settle(&shell, cx);
+
+    let error = label(cx, format!("approval-error-{number}")).unwrap();
+    assert!(error.starts_with(".env was not made: "), "{error}");
+    assert!(error.contains("holds another secret"), "{error}");
+    assert_eq!(word(cx, number, 0).as_deref(), Some("Not made"));
+    assert_eq!(word(cx, number, 1).as_deref(), Some("Waiting"));
+    assert!(
+        !entries(&server).contains(&"app-.env".to_owned()),
+        "the hand-made entry never left pc"
+    );
+    assert_eq!(pending(&server).len(), 1, "the launch is still held");
+    assert_eq!(deny_leaves(&shell, number, cx), None);
 }
 
 #[gpui_kit::test]
