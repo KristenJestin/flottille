@@ -683,8 +683,10 @@ pub fn display(
 }
 
 /// The variables [`display`] sets, or removes, for the browser: where agent-browser puts its
-/// socket, and where Chrome writes its profile, caches and crash dumps.
-pub const FOLDERS_OF_THE_BROWSER: [&str; 7] = [
+/// socket, and where Chrome writes its profile, caches and crash dumps; and `HOME`, which moves
+/// where agent-browser looks for the Chrome it downloaded and where Chrome reads `~/.pki/nssdb`.
+pub const FOLDERS_OF_THE_BROWSER: [&str; 8] = [
+    "HOME",
     "AGENT_BROWSER_SOCKET_DIR",
     "TMPDIR",
     "XDG_CONFIG_HOME",
