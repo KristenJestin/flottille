@@ -542,6 +542,11 @@ impl Composer {
         self.error.as_deref()
     }
 
+    /// What it asks before it starts anything: on which machine, when several could.
+    pub fn asks_where(&self) -> Option<&str> {
+        None
+    }
+
     pub fn is_sending(&self) -> bool {
         self.sending.is_some()
     }

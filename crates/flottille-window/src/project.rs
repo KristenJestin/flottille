@@ -14,6 +14,16 @@ mod place;
 pub use ended::EndedRuns;
 pub use place::{PlaceBlock, block_id, session_end_id, session_menu_id, session_row_id};
 
+/// The block of the sessions of the machine `machine` on a shared project's page.
+pub fn machine_block_id(machine: &str) -> ElementId {
+    ElementId::Name(format!("machine-block-{machine}").into())
+}
+
+/// The machine's icon on the row of the session `id` of another machine.
+pub fn machine_session_mark_id(id: &str) -> ElementId {
+    ElementId::Name(format!("machine-session-mark-{id}").into())
+}
+
 use std::collections::HashMap;
 
 use gpui_design_system::color::mix;
