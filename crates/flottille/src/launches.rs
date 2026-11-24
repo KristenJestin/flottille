@@ -296,7 +296,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         crate::travel::Testing::default(),
     )
     .await;
-    let placed = match sent {
+    let mut placed = match sent {
         Ok(placed) => placed,
         Err(why) => {
             let _ = daemon.write(|store| {
@@ -319,9 +319,22 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
+    // The user there may have answered between the two writes: their answer, come first, was
+    // kept (`Store::decide_launch`), and the caller is never told it waits for it.
+    let decided = daemon
+        .read(|store| store.launches("out", Some(&record.machine), LaunchFilter::Named(&launch)))
+        .ok()
+        .and_then(|recorded| recorded.into_iter().next())
+        .map(|recorded| recorded.state)
+        .filter(|state| record.request.is_some() && state != "held");
+    if let Some(state) = &decided {
+        placed["decided"] = state.clone().into();
+    }
     // Its pilot follows it from here, as a session it leads here: held, from now on too, since its
-    // first wake may come before anything else is heard of it.
-    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent) {
+    // first wake may come before anything else is heard of it. Refused already, it never runs.
+    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent)
+        && decided.as_deref().is_none_or(|state| state == "started")
+    {
         crate::subscriptions::lead_elsewhere(daemon, &caller.id, session, &asked.title, machine)
             .map_err(refused)?;
     }
@@ -400,6 +413,23 @@ fn answer_to_caller(
     let back = format!("{back}{kept}");
     // Said as a call held here, then where it will run: the user's answer comes as a held call's.
     if let Some(number) = placed["request"].as_u64() {
+        // Unless that answer came before this call returned: it was handed to the caller already.
+        let asked = format!("Request #{number} on {machine} (agent_launch)");
+        match placed["decided"].as_str() {
+            Some("started") => {
+                return format!(
+                    "{asked} was approved by the user there before this call returned: its \
+                     result was handed to you."
+                );
+            }
+            Some(_) => {
+                return format!(
+                    "{asked} was refused by the user there before this call returned. Nothing \
+                     was done; why was handed to you."
+                );
+            }
+            None => {}
+        }
         let waiting = crate::approvals::waiting(number).replacen(
             &format!("#{number}."),
             &format!("#{number} on {machine}."),
@@ -1286,6 +1316,8 @@ pub(crate) fn held_by_request(daemon: &Daemon, number: u64) -> Option<Launch> {
 /// workspace is removed.
 pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Request, allowed: bool) {
     let Some(agent) = launch.agent.clone() else {
+        let why = allowed.then_some("its session there is gone");
+        never_started(daemon, &launch, request, why);
         return;
     };
     let state = match allowed {
@@ -1309,6 +1341,18 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
             eprintln!(
                 "flottille daemon: launch {}: its answer cannot be kept: {why}",
                 launch.launch
+            );
+            // Its caller would wait for the answer for ever.
+            let here = this_machine(daemon);
+            let asked = asked_of(Some(request.number), &here, &launch);
+            crate::across::tell_decided(
+                daemon,
+                &launch,
+                &format!(
+                    "{asked} was answered by the user, but nothing was done: the answer could not \
+                     be kept there."
+                ),
+                false,
             );
             false
         }
@@ -1406,7 +1450,7 @@ fn finish(
         // The agent that launched it is told, and what it lacked, as a held call's result comes:
         // it would wait for nothing.
         let here = this_machine(daemon);
-        let asked = asked_of(request.number, &here);
+        let asked = asked_of(Some(request.number), &here, &launch);
         let body = match (&why, missing.is_empty()) {
             (_, false) => refused_for_missing(&asked, &here, &missing, why.as_deref()),
             (Some(why), true) => format!(
@@ -1437,7 +1481,7 @@ fn finish(
     }
     // Told before its setup goes on, so that a setup that fails at once is never heard of first.
     let here = this_machine(daemon);
-    let asked = asked_of(request.number, &here);
+    let asked = asked_of(Some(request.number), &here, &launch);
     let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
     let placed = placed_of(daemon, &launch, &agent);
     let result = answer_to_caller(&launch.kind, title, &here, &launch.launch, &placed);
@@ -1492,10 +1536,102 @@ fn this_machine(daemon: &Daemon) -> String {
         .unwrap_or_else(|| "the other machine".to_owned())
 }
 
-/// The request `number` of a held launch, as its caller is told of the user's answer, as a held
-/// call's answer names its request: `Request #4 on server (agent_launch)`.
-fn asked_of(number: u64, here: &str) -> String {
-    format!("Request #{number} on {here} (agent_launch)")
+/// The request `number` of the held `launch`, as its caller is told of the user's answer, as a
+/// held call's answer names its request: `Request #4 on server (agent_launch)`. A launch with no
+/// request is named by its title.
+fn asked_of(number: Option<u64>, here: &str, launch: &Launch) -> String {
+    match number {
+        Some(number) => format!("Request #{number} on {here} (agent_launch)"),
+        None => {
+            let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
+            format!("Your launch \"{title}\" on {here}")
+        }
+    }
+}
+
+/// The held `launch`, answered by `request`, never starts: it has no session here, or, with
+/// `why`, it could not start. Refused, its workspace removed, and its caller told, which would
+/// otherwise wait for ever.
+fn never_started(daemon: &Arc<Daemon>, launch: &Launch, request: &Request, why: Option<&str>) {
+    if let Err(error) = daemon.write(|store| {
+        store.settle_launch(&launch.machine, &launch.launch, "refused")?;
+        store
+            .refuse_started_launch(&launch.machine, &launch.launch)
+            .map(|()| ((), None))
+    }) {
+        eprintln!(
+            "flottille daemon: launch {}: its refusal cannot be kept: {error}",
+            launch.launch
+        );
+    }
+    if let Some(workspace) = launch.workspace_id {
+        remove_workspace(daemon, workspace, None);
+    }
+    if let Err(error) = daemon.write(|store| Ok(((), store.settle_unsent(request, "refused")?))) {
+        eprintln!(
+            "flottille daemon: request #{}: its answer cannot be stored: {error}",
+            request.number
+        );
+    }
+    let here = this_machine(daemon);
+    let asked = asked_of(Some(request.number), &here, launch);
+    let body = match why {
+        Some(why) => format!(
+            "{asked} was approved by the user, but nothing was done: it could not start there: \
+             {why}."
+        ),
+        None => format!("{asked} was refused by the user. Nothing was done."),
+    };
+    crate::across::tell_decided(daemon, launch, &body, false);
+    crate::travelled::unmake(daemon, launch);
+}
+
+/// At start: a request allowed whose answer was never stored, which held a launch of another
+/// machine here: the daemon stopped while it set it up, before its caller was told. It never
+/// starts, and its caller is told so.
+pub(crate) fn interrupted_at_start(daemon: &Arc<Daemon>) {
+    let unsettled = match daemon.read(|store| store.unsettled_requests()) {
+        Ok(unsettled) => unsettled,
+        Err(error) => {
+            eprintln!("flottille daemon: reading the requests: {error}");
+            return;
+        }
+    };
+    for request in unsettled {
+        interrupted(daemon, &request);
+    }
+}
+
+/// The launch held by `request`, cut while it was set up (`interrupted_at_start`), if it is one.
+fn interrupted(daemon: &Arc<Daemon>, request: &Request) {
+    let Some(mut launch) = daemon
+        .read(|store| store.launches("in", None, LaunchFilter::Request(request.number)))
+        .ok()
+        .and_then(|launches| {
+            launches
+                .into_iter()
+                .find(|launch| matches!(launch.state.as_str(), "held" | "started"))
+        })
+    else {
+        return;
+    };
+    let why = "Flottille stopped there while it was setting it up";
+    let Some(agent) = launch.agent.clone() else {
+        never_started(daemon, &launch, request, Some(why));
+        return;
+    };
+    // Stopped before its answer was settled: settled as allowed, which `finish` refuses.
+    if launch.state == "held"
+        && let Ok(Some(workspace_id)) = daemon.write(|store| {
+            store
+                .settle_launch(&launch.machine, &launch.launch, "started")
+                .map(|settled| (settled, None))
+        })
+    {
+        launch.state = "started".into();
+        launch.workspace_id = workspace_id;
+    }
+    finish(daemon, launch, request, agent, Err(Some(why.to_owned())));
 }
 
 /// What the agent of the other machine that asked `asked` is told when it is refused for lacking
@@ -1546,7 +1682,7 @@ pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
     if matches!(settled, Ok(Some(_))) {
         // Its caller would wait for the user's answer for ever.
         let here = this_machine(daemon);
-        let asked = asked_of(launch.request.unwrap_or_default(), &here);
+        let asked = asked_of(launch.request, &here, &launch);
         crate::across::tell_decided(
             daemon,
             &launch,
