@@ -763,3 +763,61 @@ fn a_file_not_committed_disables_the_rail_s_removal_with_its_reason(cx: &mut Tes
         "the disabled button does nothing"
     );
 }
+
+/// #1285: a session in the project's folder, whose repository `api` is on a long branch.
+#[gpui_kit::test]
+fn a_repository_s_name_stays_whole_beside_a_long_branch(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = user.path("work/app");
+    let dir = folder.join("api");
+    user.git_init(&dir);
+    std::fs::write(dir.join("README.md"), "api\n").unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    user.git(
+        &dir,
+        &[
+            "checkout",
+            "--quiet",
+            "-b",
+            "fix/a-long-branch-name-of-a-fix",
+        ],
+    );
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("its first turn", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+    });
+
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        present(cx, &session_id(&lead))
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the rail names the repository", |cx| {
+        let _ = session_page(&shell, cx);
+        present(cx, "rail-repository-api-value") && present(cx, "rail-fact-Machine")
+    });
+    settle(cx);
+
+    let name = rect(cx, "rail-repository-api-label");
+    let branch = rect(cx, "rail-repository-api-value");
+    let line = rect(cx, "rail-line-repository-api");
+    assert!(
+        f32::from(name.size.height) <= 24.,
+        "the name is one line, not a letter a line: {name:?}"
+    );
+    assert!(
+        name.right() <= branch.origin.x,
+        "{name:?} before {branch:?}"
+    );
+    assert!(
+        branch.right() <= line.right(),
+        "the branch is cut, it never leaves the rail: {branch:?} in {line:?}"
+    );
+}
