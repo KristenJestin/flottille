@@ -17,7 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const SYSTEM_CONFIG: &str = "/etc/ssh/ssh_config";
 
 /// The variable that plays the machine's configuration, read by a test build only.
-const SYSTEM: &str = "FLOTTILLE_TEST_SSH_SYSTEM_CONFIG";
+pub const SYSTEM: &str = "FLOTTILLE_TEST_SSH_SYSTEM_CONFIG";
+
+/// The variable naming a file while which the copies fail, read by a test build only: a copy is
+/// then asked over a path below that file, which no file system can be mounted on.
+const FAILING: &str = "FLOTTILLE_TEST_SSH_COPY_FAILS";
 
 /// How deep `Include`s go, as `ssh` reads them.
 const INCLUDES_MAX: usize = 16;
@@ -49,7 +53,13 @@ pub fn copies() -> Vec<(PathBuf, Vec<u8>)> {
         Some(system) => PathBuf::from(system),
         None => PathBuf::from(SYSTEM_CONFIG),
     };
-    copies_of(&system, crate::pushed::account(), 0)
+    let mut copies = copies_of(&system, crate::pushed::account(), 0);
+    if let Some(failing) = std::env::var_os(FAILING).filter(|_| cfg!(debug_assertions))
+        && Path::new(&failing).is_file()
+    {
+        copies.insert(0, (Path::new(&failing).join("ssh_config"), Vec::new()));
+    }
+    copies
 }
 
 /// The files `owner` owns that `system` and the `account`'s `~/.ssh/config` include, with their
@@ -75,6 +85,11 @@ fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<(PathBuf,
         }
     }
     walk.copies
+}
+
+/// What the walk of `copies_of` leaves to `ssh`'s refusal, in the user's words.
+fn gaps_of(_system: &Path, _account: Option<&Path>, _owner: u32) -> Vec<String> {
+    Vec::new()
 }
 
 /// A walk of the files `ssh` includes. What a confined run can write never steers it: the
@@ -212,13 +227,94 @@ mod tests {
 
         let copies = copies_of(&etc.join("ssh_config"), Some(&account), me());
 
+        // `ssh` refuses a `~` in the machine's configuration (a "bad include path", and the
+        // configuration with it): the user's home is never read from there.
         assert_eq!(
             given(&copies),
-            vec![
-                etc.join("conf.d/10-a.conf"),
-                etc.join("deeper"),
-                account.join("mine"),
-            ]
+            vec![etc.join("conf.d/10-a.conf"), etc.join("deeper")]
+        );
+    }
+
+    #[test]
+    fn a_link_on_the_way_to_an_included_file_is_not_followed() {
+        // A folder on the real path found, swapped for a link before the file is opened: what
+        // is opened is no longer what was judged.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        file(&root.join("real/x.conf"), "", 0o644);
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+
+        assert!(read(&root.join("real/x.conf")).is_some());
+        assert!(read(&root.join("linked/x.conf")).is_none());
+    }
+
+    #[test]
+    fn a_wildcard_under_a_linked_folder_is_expanded_as_ssh_expands_it() {
+        // `glob(3)`, which `ssh` expands an `Include` with, goes through a link to a folder.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let etc = root.join("etc");
+        file(&etc.join("ssh_config"), "Include conf.d/*.conf\n", 0o644);
+        file(&root.join("usr/conf.d/10-a.conf"), "", 0o644);
+        std::os::unix::fs::symlink(root.join("usr/conf.d"), etc.join("conf.d")).unwrap();
+
+        let copies = copies_of(&etc.join("ssh_config"), None, me());
+
+        assert_eq!(given(&copies), vec![root.join("usr/conf.d/10-a.conf")]);
+    }
+
+    #[test]
+    fn the_user_s_config_is_given_when_root_owns_it() {
+        // `ssh` reads `~/.ssh/config` only when it is the user's or root's, as it does an include.
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        file(&account.join(".ssh/config"), "", 0o644);
+
+        let copies = copies_of(&account.join("no-system"), Some(&account), me());
+
+        assert_eq!(given(&copies), vec![account.join(".ssh/config")]);
+    }
+
+    #[test]
+    fn copies_past_the_limits_are_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().canonicalize().unwrap();
+        file(&etc.join("ssh_config"), "Include conf.d/*\n", 0o644);
+        for n in 0..=COPIES_MAX {
+            file(&etc.join(format!("conf.d/{n:03}.conf")), "", 0o644);
+        }
+        let big = etc.join("conf.d/big.conf");
+        file(&big, &"#".repeat(CONFIG_MAX as usize + 1), 0o644);
+
+        let gaps = gaps_of(&etc.join("ssh_config"), None, me());
+
+        assert!(gaps.iter().any(|gap| gap.contains("64 files")), "{gaps:?}");
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains(&big.display().to_string()) && gap.contains("1 MB")),
+            "{gaps:?}"
+        );
+    }
+
+    #[test]
+    fn a_root_owned_file_included_from_outside_ssh_is_said() {
+        // Not followed, so that no run steers the daemon's walk: said instead.
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        file(
+            &account.join(".ssh/config"),
+            "Include ~/.config/ssh/*\n",
+            0o600,
+        );
+        let outside = account.join(".config/ssh/outside.conf");
+        file(&outside, "", 0o644);
+
+        let gaps = gaps_of(&account.join("no-system"), Some(&account), me());
+
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains(&outside.display().to_string())),
+            "{gaps:?}"
         );
     }
 
@@ -290,7 +386,10 @@ mod tests {
 
         let copies = copies_of(&account.join("no-system"), Some(&account), me());
 
-        assert_eq!(given(&copies), vec![ssh.join("inside.conf")]);
+        assert_eq!(
+            given(&copies),
+            vec![ssh.join("config"), ssh.join("inside.conf")]
+        );
     }
 
     #[test]

@@ -635,6 +635,22 @@ fn session_with_empty_ssh(user: &User) -> (Mcp, PathBuf) {
     session(user)
 }
 
+/// The user whose daemon is told the machine's configuration is a file of the test's that
+/// includes the machine's own, root's, with that file: `ssh` told to read it (`-F`) includes a
+/// root-owned file whatever the machine's configuration includes (#1334). None, saying so, on a
+/// machine with no `/etc/ssh/ssh_config`.
+fn with_root_owned_include(user: User) -> Option<(User, PathBuf)> {
+    if !std::fs::metadata("/etc/ssh/ssh_config").is_ok_and(|m| m.is_file()) {
+        eprintln!("skipped: no /etc/ssh/ssh_config on this machine");
+        return None;
+    }
+    std::fs::create_dir_all(user.path("system")).unwrap();
+    let system = user.path("system/ssh_config");
+    std::fs::write(&system, "Include /etc/ssh/ssh_config\n").unwrap();
+    let user = user.with_env("FLOTTILLE_TEST_SSH_SYSTEM_CONFIG", system.to_str().unwrap());
+    Some((user, system))
+}
+
 #[test]
 fn a_run_s_ssh_reads_the_root_owned_system_config() {
     if skipped_without_user_namespaces() || !ssh_client() {
@@ -643,15 +659,22 @@ fn a_run_s_ssh_reads_the_root_owned_system_config() {
     // The machine's configuration is root's, and so are the fragments it includes: in the run's
     // namespace they were owned by no one ssh knows, and it refused them (#1302). What ssh says
     // is not looked at, only whether it read its configuration.
-    let user = User::with_fake_agent().with_allowing_judge();
+    let Some((user, system)) =
+        with_root_owned_include(User::with_fake_agent().with_allowing_judge())
+    else {
+        return;
+    };
     let (mcp, place) = session_with_empty_ssh(&user);
 
     let out = ran(
         &mcp,
         &place,
-        "import subprocess\n\
-         out['ssh'] = subprocess.run(['ssh', '-G', 'example.invalid'],\n\
-         \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n",
+        &format!(
+            "import subprocess\n\
+             out['ssh'] = subprocess.run(['ssh', '-G', '-F', {system}, 'example.invalid'],\n\
+             \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n",
+            system = py(&system),
+        ),
     );
 
     assert_eq!(out["ssh"], 0, "{out}");
@@ -664,18 +687,27 @@ fn a_run_fetches_from_an_ssh_remote_with_a_root_owned_system_config() {
     }
     // The real git and ssh, to a host that does not resolve: they get as far as the network,
     // past the configuration that stopped them before (#1302).
-    let user = User::with_fake_agent().with_allowing_judge();
+    let Some((user, system)) =
+        with_root_owned_include(User::with_fake_agent().with_allowing_judge())
+    else {
+        return;
+    };
     let (mcp, place) = session_with_empty_ssh(&user);
 
     let out = ran(
         &mcp,
         &place,
-        "import subprocess\n\
-         for name, line in [('ls-remote', ['git', 'ls-remote', 'ssh://nohost.invalid/x']),\n\
-         \x20   ('fetch', ['git', 'fetch', 'ssh://nohost.invalid/x'])]:\n\
-         \x20   said = subprocess.run(line, capture_output=True, text=True).stderr\n\
-         \x20   out[name] = 'refused' if 'Bad owner or permissions' in said else \\\n\
-         \x20       'unresolved' if 'nohost.invalid' in said and 'resolve' in said else said[-500:]\n",
+        &format!(
+            "import shlex, subprocess\n\
+             env = dict(os.environ, GIT_SSH_COMMAND='ssh -F ' + shlex.quote({system}))\n\
+             for name, line in [('ls-remote', ['git', 'ls-remote', 'ssh://nohost.invalid/x']),\n\
+             \x20   ('fetch', ['git', 'fetch', 'ssh://nohost.invalid/x'])]:\n\
+             \x20   said = subprocess.run(line, capture_output=True, text=True, env=env).stderr\n\
+             \x20   out[name] = 'refused' if 'Bad owner or permissions' in said else \\\n\
+             \x20       'unresolved' if 'nohost.invalid' in said and 'resolve' in said \\\n\
+             \x20       else said[-500:]\n",
+            system = py(&system),
+        ),
     );
 
     assert_eq!(out["ls-remote"], "unresolved", "{out}");
@@ -792,7 +824,9 @@ fn the_daemon_s_fetch_of_an_ssh_origin_reaches_the_network() {
     // The daemon's own fetch of a workspace's base runs confined as a run does, with the real git
     // and ssh: an origin on a host that does not resolve fails on the host, past the machine's
     // root-owned configuration that stopped it before (#1302).
-    let user = User::with_fake_agent();
+    let Some((user, _)) = with_root_owned_include(User::with_fake_agent()) else {
+        return;
+    };
     std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -816,4 +850,60 @@ fn the_daemon_s_fetch_of_an_ssh_origin_reaches_the_network() {
         said.contains("could not be fetched") && said.contains("nohost.invalid"),
         "{said}"
     );
+}
+
+#[test]
+fn doctor_says_the_ssh_settings_could_not_be_copied_until_they_are() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    // While the copies fail, `flottille doctor` says so; a command that gets them clears it.
+    let Some((user, _)) = with_root_owned_include(User::with_fake_agent().with_allowing_judge())
+    else {
+        return;
+    };
+    std::fs::write(user.path("system/failing"), "").unwrap();
+    let failing = user.path("system/failing");
+    let user = user.with_env("FLOTTILLE_TEST_SSH_COPY_FAILS", failing.to_str().unwrap());
+    let (mcp, place) = session_with_empty_ssh(&user);
+    ran(&mcp, &place, "out['ran'] = True\n");
+    let (_, failed) = lent(&user);
+
+    std::fs::remove_file(&failing).unwrap();
+    ran(&mcp, &place, "out['ran'] = True\n");
+    let (_, given) = lent(&user);
+
+    assert!(failed.contains("could not be copied"), "{failed}");
+    assert!(!given.contains("could not be copied"), "{given}");
+}
+
+#[test]
+fn doctor_says_the_root_owned_files_past_those_copied() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    // More root-owned files included than are copied: a run's ssh refuses the rest, and the
+    // user is told. The machine's own licence files, root's, play them.
+    let many = std::fs::read_dir("/usr/share/doc")
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().join("copyright").is_file())
+                .count()
+        })
+        .unwrap_or(0);
+    if many <= 64 {
+        eprintln!("skipped: fewer than 65 files /usr/share/doc/*/copyright on this machine");
+        return;
+    }
+    let user = User::with_fake_agent();
+    std::fs::create_dir_all(user.path("system")).unwrap();
+    let system = user.path("system/ssh_config");
+    std::fs::write(&system, "Include /usr/share/doc/*/copyright\n").unwrap();
+    let user = user.with_env("FLOTTILLE_TEST_SSH_SYSTEM_CONFIG", system.to_str().unwrap());
+    started(&user);
+
+    let (_, warnings) = lent(&user);
+
+    assert!(warnings.contains("64 files"), "{warnings}");
 }
