@@ -160,6 +160,7 @@ pub fn sandbox() -> serde_json::Value {
     let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
     // What a confined command's `ssh` refuses of the root-owned files its settings include.
     if namespaces == Namespaces::Available {
+        warnings.extend(whole_refused());
         warnings.extend(copies_failed());
         warnings.extend(crate::ssh_owned::gaps());
     }
@@ -184,6 +185,59 @@ pub fn sandbox() -> serde_json::Value {
         "browser_network": browser.is_ok(),
         "ssh_lent": unlent.is_none(),
         "warnings": warnings,
+    })
+}
+
+/// Why every command Flottille confines is refused its start, if it is: Landlock is there (its
+/// second ABI), and the system refuses one of the calls that make what a push reads read-only with
+/// every mount below it (`Plan::enter`), as a seccomp filter written for an older kernel does.
+pub fn whole_refused() -> Option<String> {
+    static REFUSED: OnceLock<Option<&'static str>> = OnceLock::new();
+    if crate::landlock::abi() < 2 {
+        return None;
+    }
+    let refused = *REFUSED.get_or_init(|| {
+        let none = std::ptr::null::<u8>();
+        // Each with arguments it refuses at once: only a call the system does not answer fails
+        // with `ENOSYS`.
+        // SAFETY: invalid descriptors, an empty C string and no structure: nothing is touched.
+        let calls = unsafe {
+            [
+                (
+                    "openat2",
+                    libc::syscall(libc::SYS_openat2, -1, c"".as_ptr(), none, 0),
+                ),
+                (
+                    "open_tree",
+                    libc::syscall(libc::SYS_open_tree, -1, c"".as_ptr(), 0),
+                ),
+                (
+                    "mount_setattr",
+                    libc::syscall(libc::SYS_mount_setattr, -1, c"".as_ptr(), 0, none, 0),
+                ),
+                (
+                    "move_mount",
+                    libc::syscall(libc::SYS_move_mount, -1, c"".as_ptr(), -1, c"".as_ptr(), 0),
+                ),
+            ]
+            .map(|(name, result)| {
+                (
+                    name,
+                    result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS),
+                )
+            })
+        };
+        calls
+            .into_iter()
+            .find(|(_, refused)| *refused)
+            .map(|(name, _)| name)
+    });
+    refused.map(|call| {
+        format!(
+            "the system refuses {call} to Flottille (a seccomp filter, Landlock being there), \
+             which makes what a push reads read-only to the commands it confines with every mount \
+             below it: each is refused its start (docs/vault.md, \"The runtime folder\")"
+        )
     })
 }
 
@@ -213,6 +267,9 @@ pub struct Plan {
     cwd: Option<CString>,
     pinned: Vec<CString>,
     read_only: Vec<(CString, libc::c_ulong)>,
+    /// Whether the read-only paths must be made read-only with every mount below them, or the
+    /// command not start: where Landlock keeps the rest (`landlock::abi`, its second ABI).
+    whole: bool,
     copies: Copies,
 }
 
@@ -379,6 +436,7 @@ pub fn plan(
         cwd: cwd.filter(|cwd| cwd.is_absolute()).and_then(c),
         pinned: Vec::new(),
         read_only: Vec::new(),
+        whole: false,
         copies: Copies::default(),
     })
 }
@@ -394,6 +452,7 @@ impl Plan {
             .iter()
             .map(|p| Some((c(p)?, locked(p))))
             .collect::<Option<_>>()?;
+        self.whole = crate::landlock::abi() >= 2;
         Some(self)
     }
 
@@ -615,10 +674,12 @@ impl Plan {
                         if fd < 0
                             && matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ELOOP)) => {
                     }
-                    // Before Linux 5.12, the top mount alone: such a kernel has no Landlock of the
+                    // A kernel without the calls: before Linux 5.12, with no Landlock of the
                     // second ABI either, so no push is lent anything or run outside the sandbox
-                    // (`pushed::ssh_unlent`, `pushed::unlifted`).
-                    Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => {
+                    // (`pushed::ssh_unlent`, `pushed::unlifted`). With Landlock, a filter of the
+                    // system's refuses them: the command is refused its start, never left with a
+                    // mount below a read-only one writable.
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSYS) && !self.whole => {
                         read_only_by_path(path, *flags)?
                     }
                     Err(error) => return Err(error),

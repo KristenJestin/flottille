@@ -637,7 +637,12 @@ the way is renamed to put another file at the path. `~/.ssh` is the account's (t
 user database, which `ssh` reads `~` as, whatever `HOME` says); the daemon makes it at its start
 (`0700`, as `ssh` would) when it is missing, since a folder that is not there could not be kept
 read-only. A command started at any time has them read-only from its start, and nothing it runs
-can unmount them (above).
+can unmount them (above). Each path is opened once, following no link on its way (one put there
+since the start is not followed, and the path is then not protected: the push judges it), and
+made read-only through that one descriptor, with every mount below it. Where Landlock is there and
+the system refuses one of the calls that does it (a seccomp filter written for an older kernel),
+every command Flottille confines is refused its start, saying so (and `flottille doctor` says it),
+rather than started with a mount below a read-only one left writable.
 
 What that cannot hold is not protected file by file: the user's SSH agent is then **lent to no
 push**, no `SSH_AUTH_SOCK` and no `ssh` among the transports allowed (a push over SSH fails, saying
