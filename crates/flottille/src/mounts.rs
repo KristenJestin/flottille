@@ -188,6 +188,45 @@ pub fn sandbox() -> serde_json::Value {
     })
 }
 
+/// The first of the calls a whole read-only copy needs that the system does not answer
+/// (`ENOSYS`), asked each time (`whole_refused` keeps its answer).
+fn refused_call() -> Option<&'static str> {
+    let none = std::ptr::null::<u8>();
+    // Each with arguments it refuses at once: only a call the system does not answer fails
+    // with `ENOSYS`.
+    // SAFETY: invalid descriptors, an empty C string and no structure: nothing is touched.
+    let calls = unsafe {
+        [
+            (
+                "openat2",
+                libc::syscall(libc::SYS_openat2, -1, c"".as_ptr(), none, 0),
+            ),
+            (
+                "open_tree",
+                libc::syscall(libc::SYS_open_tree, -1, c"".as_ptr(), 0),
+            ),
+            (
+                "mount_setattr",
+                libc::syscall(libc::SYS_mount_setattr, -1, c"".as_ptr(), 0, none, 0),
+            ),
+            (
+                "move_mount",
+                libc::syscall(libc::SYS_move_mount, -1, c"".as_ptr(), -1, c"".as_ptr(), 0),
+            ),
+        ]
+        .map(|(name, result)| {
+            (
+                name,
+                result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS),
+            )
+        })
+    };
+    calls
+        .into_iter()
+        .find(|(_, refused)| *refused)
+        .map(|(name, _)| name)
+}
+
 /// Why every command Flottille confines is refused its start, if it is: Landlock is there (its
 /// second ABI), and the system refuses one of the calls that make what a push reads read-only with
 /// every mount below it (`Plan::enter`), as a seccomp filter written for an older kernel does.
@@ -196,42 +235,7 @@ pub fn whole_refused() -> Option<String> {
     if crate::landlock::abi() < 2 {
         return None;
     }
-    let refused = *REFUSED.get_or_init(|| {
-        let none = std::ptr::null::<u8>();
-        // Each with arguments it refuses at once: only a call the system does not answer fails
-        // with `ENOSYS`.
-        // SAFETY: invalid descriptors, an empty C string and no structure: nothing is touched.
-        let calls = unsafe {
-            [
-                (
-                    "openat2",
-                    libc::syscall(libc::SYS_openat2, -1, c"".as_ptr(), none, 0),
-                ),
-                (
-                    "open_tree",
-                    libc::syscall(libc::SYS_open_tree, -1, c"".as_ptr(), 0),
-                ),
-                (
-                    "mount_setattr",
-                    libc::syscall(libc::SYS_mount_setattr, -1, c"".as_ptr(), 0, none, 0),
-                ),
-                (
-                    "move_mount",
-                    libc::syscall(libc::SYS_move_mount, -1, c"".as_ptr(), -1, c"".as_ptr(), 0),
-                ),
-            ]
-            .map(|(name, result)| {
-                (
-                    name,
-                    result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS),
-                )
-            })
-        };
-        calls
-            .into_iter()
-            .find(|(_, refused)| *refused)
-            .map(|(name, _)| name)
-    });
+    let refused = *REFUSED.get_or_init(refused_call);
     refused.map(|call| {
         format!(
             "the system refuses {call} to Flottille (a seccomp filter, Landlock being there), \
@@ -1355,6 +1359,34 @@ mod tests {
                 libc::SECCOMP_MODE_FILTER,
                 &program as *const libc::sock_fprog,
             ) as libc::c_long)
+        }
+    }
+
+    #[test]
+    fn the_call_the_system_refuses_is_the_one_said() {
+        // In a child of its own: the filter stays with the process that installs it.
+        // SAFETY: the child makes system calls alone, then leaves without unwinding.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "{}", io::Error::last_os_error());
+        if child == 0 {
+            // SAFETY: as `refuse_mount_setattr` says; this process is the test's alone.
+            let code = match unsafe { refuse_mount_setattr() } {
+                Err(_) => 2,
+                Ok(()) => match refused_call() {
+                    Some("mount_setattr") => 0,
+                    _ => 1,
+                },
+            };
+            // SAFETY: leaves the child at once, as a forked child of a test must.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child made above.
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        match libc::WEXITSTATUS(status) {
+            2 => eprintln!("skipped: no seccomp filter can be installed here"),
+            code => assert_eq!(code, 0, "the refused call was not said as mount_setattr"),
         }
     }
 
