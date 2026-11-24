@@ -1735,8 +1735,10 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The ended or failed roots whose session is kept to be resumed: those the sweep forgets in
-    /// time. A child of another machine's agent kept by a release of before is among them.
+    /// The ended or failed sessions marked as kept to be resumed: those the sweep looks at. A root
+    /// is kept for `tree::KEPT_MS`. A child of another machine's agent that a release of before
+    /// kept as a root is among them too, to be forgotten at once: since a child's end clears
+    /// `reopens`, no other child is.
     pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state IN ('ended', 'failed') \
@@ -1757,7 +1759,7 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let now = now_ms();
         if let Some(state) = change.state {
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE agents SET state = ?2, state_reason = ?3, \
                  ended_at = CASE WHEN ?4 THEN ?5 ELSE ended_at END \
                  WHERE id = ?1 AND state NOT IN ('ended', 'failed')",
@@ -1769,6 +1771,16 @@ impl Store {
                     now
                 ],
             )?;
+            // A child's session is never kept to be resumed (`tree::keeps_session`): its end
+            // says so, so that the sweep never finds it among the kept sessions and forgets
+            // what its own task forgets.
+            if changed > 0 && state.is_final() {
+                transaction.execute(
+                    "UPDATE agents SET reopens = 0 \
+                     WHERE id = ?1 AND (parent IS NOT NULL OR depth > 0)",
+                    params![id],
+                )?;
+            }
         }
         // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
         // So does a wait for the quota's reset: an ended session is never resumed by it.
