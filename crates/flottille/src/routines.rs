@@ -269,64 +269,7 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             json!({"run": run.to_json()})
         }
         "routine.add" => add(daemon, params, None)?,
-        "routine.edit" => {
-            let asked: Edit = serde_json::from_value(params)?;
-            let mut routine = find(daemon, &asked.routine)?;
-            let event = trigger(asked.schedule.as_deref(), asked.event.as_ref())?;
-            // Another project's events are not this one's: what it saw and held is forgotten.
-            let project_moves = asked
-                .project
-                .as_ref()
-                .is_some_and(|project| *project != routine.project);
-            let event_moves = event.is_some() || asked.schedule.is_some();
-            let schedule_moves = event_moves || asked.zone.is_some();
-            // Giving one replaces the other.
-            if event.is_some() {
-                routine.event = event;
-                routine.schedule = String::new();
-            } else if asked.schedule.is_some() {
-                routine.event = None;
-            }
-            let fields = [
-                (&mut routine.name, asked.name),
-                (&mut routine.project, asked.project),
-                (&mut routine.prompt, asked.prompt),
-                (&mut routine.schedule, asked.schedule),
-                (&mut routine.mode, asked.mode),
-                (&mut routine.rings, asked.rings),
-            ];
-            for (field, value) in fields {
-                if let Some(value) = value {
-                    *field = value;
-                }
-            }
-            // An empty text clears what may be left to the defaults.
-            for (field, value) in [
-                (&mut routine.zone, asked.zone),
-                (&mut routine.provider, asked.provider),
-                (&mut routine.model, asked.model),
-                (&mut routine.effort, asked.effort),
-            ] {
-                if let Some(value) = value {
-                    *field = (!value.is_empty()).then_some(value);
-                }
-            }
-            if let Some(hours) = asked.missed_hours {
-                routine.missed_hours = hours;
-            }
-            checked(daemon, &mut routine)?;
-            let now = now_ms();
-            if schedule_moves || routine.next_at.is_none() {
-                routine.next_at = next_of(&routine, now);
-                routine.delayed = None;
-            }
-            routine.updated_at = now;
-            daemon.read(|store| store.update_routine(&routine))?;
-            if event_moves || project_moves {
-                daemon.read(|store| store.reset_routine_event(&routine.id))?;
-            }
-            changed(daemon, &routine)?
-        }
+        "routine.edit" => edit(daemon, params, None)?,
         "routine.pause" | "routine.resume" => {
             let asked: Named = serde_json::from_value(params)?;
             let mut routine = find(daemon, &asked.routine)?;
@@ -381,6 +324,74 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
     Ok(answer)
 }
 
+/// `routine.edit`: a routine changed, by the user (`edited_by` none, the last agent's edit
+/// still said) or by the agent of that session with the tool `routine`.
+pub(crate) fn edit(
+    daemon: &Daemon,
+    params: Value,
+    edited_by: Option<&str>,
+) -> Result<Value, Failure> {
+    let asked: Edit = serde_json::from_value(params)?;
+    let mut routine = find(daemon, &asked.routine)?;
+    let event = trigger(asked.schedule.as_deref(), asked.event.as_ref())?;
+    // Another project's events are not this one's: what it saw and held is forgotten.
+    let project_moves = asked
+        .project
+        .as_ref()
+        .is_some_and(|project| *project != routine.project);
+    let event_moves = event.is_some() || asked.schedule.is_some();
+    let schedule_moves = event_moves || asked.zone.is_some();
+    // Giving one replaces the other.
+    if event.is_some() {
+        routine.event = event;
+        routine.schedule = String::new();
+    } else if asked.schedule.is_some() {
+        routine.event = None;
+    }
+    let fields = [
+        (&mut routine.name, asked.name),
+        (&mut routine.project, asked.project),
+        (&mut routine.prompt, asked.prompt),
+        (&mut routine.schedule, asked.schedule),
+        (&mut routine.mode, asked.mode),
+        (&mut routine.rings, asked.rings),
+    ];
+    for (field, value) in fields {
+        if let Some(value) = value {
+            *field = value;
+        }
+    }
+    // An empty text clears what may be left to the defaults.
+    for (field, value) in [
+        (&mut routine.zone, asked.zone),
+        (&mut routine.provider, asked.provider),
+        (&mut routine.model, asked.model),
+        (&mut routine.effort, asked.effort),
+    ] {
+        if let Some(value) = value {
+            *field = (!value.is_empty()).then_some(value);
+        }
+    }
+    if let Some(hours) = asked.missed_hours {
+        routine.missed_hours = hours;
+    }
+    checked(daemon, &mut routine)?;
+    if let Some(session) = edited_by {
+        routine.edited_by = Some(session.to_owned());
+    }
+    let now = now_ms();
+    if schedule_moves || routine.next_at.is_none() {
+        routine.next_at = next_of(&routine, now);
+        routine.delayed = None;
+    }
+    routine.updated_at = now;
+    daemon.read(|store| store.update_routine(&routine))?;
+    if event_moves || project_moves {
+        daemon.read(|store| store.reset_routine_event(&routine.id))?;
+    }
+    changed(daemon, &routine)
+}
+
 /// `routine.add`: a new routine, made by the user (`made_by` none) or by the agent of that
 /// session with the tool `routine`.
 pub(crate) fn add(daemon: &Daemon, params: Value, made_by: Option<&str>) -> Result<Value, Failure> {
@@ -415,6 +426,7 @@ pub(crate) fn add(daemon: &Daemon, params: Value, made_by: Option<&str>) -> Resu
         created_at: now,
         updated_at: now,
         made_by: made_by.map(str::to_owned),
+        edited_by: None,
     };
     checked(daemon, &mut routine)?;
     routine.next_at = next_of(&routine, now);
@@ -422,17 +434,22 @@ pub(crate) fn add(daemon: &Daemon, params: Value, made_by: Option<&str>) -> Resu
     changed(daemon, &routine)
 }
 
-/// The routine as the clients are given it, with the title of the session that made it, read
-/// now: a session is named after it starts.
+/// The routine as the clients are given it, with the titles of the sessions that made it and
+/// last edited it, read now: a session is named after it starts.
 pub(crate) fn shown(daemon: &Daemon, routine: &Routine) -> Value {
     let mut shown = routine.to_json();
-    if let Some(session) = &routine.made_by {
-        let title = daemon
-            .read(|store| store.agent(session))
-            .ok()
-            .flatten()
-            .and_then(|agent| agent.title);
-        shown["made_by"] = json!({"session": session, "title": title});
+    for (key, by) in [
+        ("made_by", &routine.made_by),
+        ("edited_by", &routine.edited_by),
+    ] {
+        if let Some(session) = by {
+            let title = daemon
+                .read(|store| store.agent(session))
+                .ok()
+                .flatten()
+                .and_then(|agent| agent.title);
+            shown[key] = json!({"session": session, "title": title});
+        }
     }
     shown
 }
@@ -462,6 +479,18 @@ fn checked(daemon: &Daemon, routine: &mut Routine) -> Result<(), Failure> {
     routine.name = routine.name.trim().to_owned();
     if routine.name.is_empty() {
         return Err(invalid("a routine needs a name".into()));
+    }
+    // A routine is found by its id or its name: a name shaped as an id could be another's.
+    if routine.name.len() == 12
+        && routine
+            .name
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(invalid(format!(
+            "{} is shaped as a routine's id: give it a name in words",
+            routine.name
+        )));
     }
     if routine.prompt.trim().is_empty() {
         return Err(invalid(
@@ -643,13 +672,14 @@ pub(crate) fn start(
     due: u64,
     trigger: Option<&str>,
 ) -> Result<Run, String> {
+    let mode = run_mode(daemon, routine);
     let run = daemon
         .read(|store| {
             store.add_routine_run(&NewRun {
                 routine: &routine.id,
                 due_at: due,
                 started_at: now_ms(),
-                mode: &routine.mode,
+                mode: &mode,
                 outcome: routine::RUNNING,
                 why: None,
                 trigger,
@@ -679,6 +709,19 @@ pub(crate) fn start(
     }
 }
 
+/// The mode a run starts in: its routine's, and for a routine an agent made never above that
+/// agent's session's mode now (an ended one's last): a session lowered after it made a routine
+/// does not keep, through it, what it was given before.
+fn run_mode(daemon: &Daemon, routine: &Routine) -> String {
+    let Some(author) = &routine.made_by else {
+        return routine.mode.clone();
+    };
+    match (routine.mode.as_str(), crate::judge::mode(daemon, author)) {
+        (routine::AUTO, GateMode::Ask) => routine::ASK.to_owned(),
+        (mode, _) => mode.to_owned(),
+    }
+}
+
 fn session(
     daemon: &Arc<Daemon>,
     routine: &Routine,
@@ -705,7 +748,7 @@ fn session(
             provider: routine.provider.clone(),
             model: routine.model.clone(),
             effort: routine.effort.clone(),
-            gate_mode: Some(match routine.mode.as_str() {
+            gate_mode: Some(match run.mode.as_str() {
                 routine::ASK => GateMode::Ask,
                 _ => GateMode::Auto,
             }),

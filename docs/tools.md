@@ -1577,15 +1577,27 @@ too ("make me a routine that lists my reviews every morning", "what did last nig
 
 | Tool | |
 |---|---|
-| `routine {action: list \| show \| result \| create \| edit \| pause \| resume \| run \| remove, routine?, name?, prompt?, schedule?, event?, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?, date?}` | The routines of the caller's project, each named by its name in `routine`, answered as the daemon's methods answer the user (`docs/protocol.md`, "The routine methods"), in JSON. `list`: the project's routines, each with its last run. `show`: one, its settings, its next run and its history, each run with its session's id. `result`: a run's result, its summary, its items with their `new` marks, what `left`, and its report (`body`), with its session's id: the last run that gave one, or with `date` (`YYYY-MM-DD`, in the routine's zone) the last of that day; a run that failed or was skipped gave none. `create {name, prompt, schedule \| event, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?}` makes one in the caller's project, as `routine.add` does, marked as made by the caller's session (`made_by`); `edit` changes what it is given (`name` renames it), as `routine.edit`; `pause`, `resume`, `run` (now: a new session, refused while a run is under way) and `remove`, as their methods. |
+| `routine {action: list \| show \| result \| create \| edit \| pause \| resume \| run \| remove, routine?, name?, prompt?, schedule?, event?, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?, date?}` | The routines of the caller's project, each named by its name in `routine`, answered as the daemon's methods answer the user (`docs/protocol.md`, "The routine methods"), in JSON. `list`: the project's routines, each with its last run. `show`: one, its settings, its next run and its history, each run with its session's id. `result`: a run's result, its summary, its items with their `new` marks, what `left`, and its report (`body`), with its session's id: the last run that gave one, or with `date` (`YYYY-MM-DD`, in the routine's zone) the last of that day; a run that failed or was skipped gave none. `create {name, prompt, schedule \| event, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?}` makes one in the caller's project, as `routine.add` does, marked as made by the caller's session (`made_by`); `edit` changes what it is given (`name` renames it), as `routine.edit`, marked as edited by the caller's session (`edited_by`); `pause`, `resume`, `run` (now: a new session, refused while a run is under way) and `remove`, as their methods. |
 
 - **Reads run at once**: `list`, `show` and `result`, a read-only routine's run included.
 - **Every write is to judge**, as the other writes of the project ("The project"): a card in
   Ask, the judge in Auto, through in Full. Its request says what it does in words, the prompt
   whole (`Create the routine Tickets to review in project app: weekdays 08:30, Read only, rings
-  something`, `Its prompt: …`; `Run the routine Nightly now: a new session in Auto, asked: …`).
-  A write that cannot be done (a routine of another project, a name taken, no schedule nor event)
-  is refused before anything is asked. A read-only routine's run writes none of them.
+  something`, `Its prompt: …`; `Run the routine Nightly now: a new session in Auto, asked: …`); an
+  `edit` and a `resume` say the mode and the whole prompt the routine runs with afterwards (`Edit
+  the routine Nightly: its runs are new sessions in Ask, asked: …`, then each field given).
+  A write that cannot be done (a routine of another project, a name taken, a name shaped as a
+  routine's id, no schedule nor event) is refused before anything is asked; a name taken says
+  only that (`refused: the name … is taken: choose another`), never whose it is.
+- **A routine left to act by itself is the user's** (base, `docs/design.md` §7.1): a `create`, an
+  `edit` or a `resume` that leaves the routine in `ask` or `auto` is a card for the user in every
+  mode, Full included, and never goes to the judge, as the project's rules are (`it leaves a
+  routine in ask or auto, whose runs start sessions that act by themselves: …`). One that leaves
+  it `read_only`, a `pause`, a `run` and a `remove` are judged as above.
+- **A routine's run writes no routine.** A session a run started (and its tree) reads them
+  (`list`, `show`, `result`) and is refused every write (`refused: this session is a routine's
+  run: …`), in every mode: a run that could change routines could change what runs next. A
+  read-only routine's run writes nothing at all (below).
 - **A routine never gets more than its author.** A `create`, or an `edit` that leaves the routine
   (its `mode` given, or the one it has) above the caller's session's mode, is refused, in every
   mode: an Ask session makes and edits only `read_only` and `ask` routines, an Auto or a Full one
@@ -1593,6 +1605,12 @@ too ("make me a routine that lists my reviews every morning", "what did last nig
   ask, never auto: …`). It is checked when the call is made and again when it is done, the
   session's mode read then: a request allowed after the session went down to Ask is not done.
   Without it, a session could schedule an Auto session for itself, with its own words for prompt.
+  So for each run: a run of a routine an agent made starts no higher than that session's mode at
+  the time of the run (an ended session's last mode, Ask when it is gone): an `auto` routine whose
+  author went down to Ask runs in Ask.
+- **Who wrote it is said.** `create` marks the routine with the caller's session (`made_by`), an
+  agent's `edit` with the session that edited it last (`edited_by`); the routine's page says both
+  (`Made by`, `Edited by`, with the session's title).
 - **What a run said is data.** A result's summary, items and report are the run's agent's words,
   masked when they were kept and given as JSON values, never as instructions of Flottille's.
 - **A run's session is read with `session_read`**, as any root session of the project ("Sessions

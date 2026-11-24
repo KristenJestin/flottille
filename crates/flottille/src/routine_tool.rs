@@ -103,6 +103,42 @@ fn above_its_author(daemon: &Daemon, grant: &Grant, mode: &str) -> Option<String
     })
 }
 
+/// Whether a call leaves a routine running in `ask` or `auto`: a create, an edit or a resume
+/// that does is the user's to decide, in every mode (`gate::routine_runs`).
+pub fn leaves_running(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
+    let Ok(call) = arguments::<Call>(TOOL, args.clone()) else {
+        return false;
+    };
+    let mode = match call.action.as_str() {
+        "create" => mode_after(&call, None),
+        "edit" | "resume" => match own(daemon, grant, call.routine.as_deref()) {
+            Ok(routine) if call.action == "edit" => mode_after(&call, Some(&routine)),
+            Ok(routine) => routine.mode,
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    mode != routine::READ_ONLY
+}
+
+/// The refusal of a write of a routine made by a session a routine's run started, or by its
+/// tree: a run that could change routines could change what runs next, its own included.
+pub fn refuses_a_run(daemon: &Daemon, agent: &str, tool: &str, args: &Value) -> Option<String> {
+    if tool != TOOL || !writes(args) {
+        return None;
+    }
+    let root = crate::tree::root_of(daemon, agent);
+    daemon
+        .read(|store| store.routine_run_of(&root))
+        .ok()
+        .flatten()
+        .map(|_| {
+            "refused: this session is a routine's run: it reads routines (list, show, result) \
+             and never creates, edits, pauses, resumes, runs or removes one"
+                .to_owned()
+        })
+}
+
 /// The routine of the caller's project named `key`; another project's is none.
 fn own(daemon: &Daemon, grant: &Grant, key: Option<&str>) -> Result<Routine, Outcome> {
     let Some(key) = key else {
@@ -171,9 +207,10 @@ pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>,
                     "refused: create needs name, prompt and a schedule or an event".into(),
                 ));
             };
+            // Names are unique across projects: whose it is, is not this project's to know.
             if let Ok(Some(_)) = daemon.read(|store| store.routine(name)) {
                 return Err(Outcome::Refused(format!(
-                    "refused: there is a routine named {name} already"
+                    "refused: the name {name} is taken: choose another"
                 )));
             }
             let trigger = match (&call.schedule, &call.event) {
@@ -201,8 +238,20 @@ pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>,
             if let Some(why) = above_its_author(daemon, grant, &mode) {
                 return Err(Outcome::Refused(why));
             }
-            let mut said = vec![format!("Edit the routine {}", named(&routine))];
-            for field in FIELDS {
+            let prompt = call
+                .prompt
+                .as_deref()
+                .unwrap_or_else(|| routine.as_ref().map_or("", |r| r.prompt.as_str()));
+            // What it runs as once edited, whole, whatever the edit changes.
+            let mut said = vec![format!(
+                "Edit the routine {}: its runs are new sessions in {}, asked: {prompt}",
+                named(&routine),
+                mode_said(&mode)
+            )];
+            for field in FIELDS
+                .into_iter()
+                .filter(|f| !matches!(*f, "prompt" | "mode"))
+            {
                 if let Some(value) = args.get(field) {
                     let value = value
                         .as_str()
@@ -216,7 +265,15 @@ pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>,
             "Pause the routine {}: no run until it is resumed",
             named(&routine)
         )],
-        "resume" => vec![format!("Resume the routine {}", named(&routine))],
+        "resume" => {
+            let r = routine.as_ref().expect("an action on a routine");
+            vec![format!(
+                "Resume the routine {}: its runs start again, each a new session in {}, asked: {}",
+                r.name,
+                mode_said(&r.mode),
+                r.prompt
+            )]
+        }
         "run" => {
             let r = routine.as_ref().expect("an action on a routine");
             vec![format!(
@@ -294,7 +351,7 @@ pub fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
                     }
                     let mut params = given();
                     params["routine"] = json!(routine.id);
-                    answered(routines::call(daemon, "routine.edit", params))
+                    answered(routines::edit(daemon, params, Some(&grant.agent)))
                 }
                 "pause" | "resume" | "run" | "remove" => {
                     answered(routines::call(daemon, &format!("routine.{action}"), named))

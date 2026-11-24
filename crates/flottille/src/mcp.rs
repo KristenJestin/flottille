@@ -2585,6 +2585,7 @@ async fn played_in(
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
+                                && !gate::asks_routine(&ask)
                                 && !gate::asks_launch_elsewhere(&ask)
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
@@ -2839,6 +2840,9 @@ pub fn judged(
     if let Some(why) = crate::routines::refuses(daemon, &grant.agent, tool, args) {
         return (gate::Verdict::Deny(why), Vec::new());
     }
+    if let Some(why) = crate::routine_tool::refuses_a_run(daemon, &grant.agent, tool, args) {
+        return (gate::Verdict::Deny(why), Vec::new());
+    }
     let first = match tool {
         "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
         _ => Vec::new(),
@@ -2908,6 +2912,10 @@ fn verdict_of(
         && let Some(refused) = gate::too_long("brief", &args["brief"])
     {
         return refused;
+    }
+    if tool == crate::routine_tool::TOOL && crate::routine_tool::leaves_running(daemon, grant, args)
+    {
+        return gate::routine_runs(classified(daemon, grant, tool, args));
     }
     let Some(steps) = crate::actions::plays(daemon, grant, tool, args) else {
         return with_services(
