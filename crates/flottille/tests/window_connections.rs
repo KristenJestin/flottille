@@ -2669,6 +2669,9 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         !present(cx, &format!("{locked}-pick")),
         "no box to tick it with"
     );
+    // Folded again: the reason, which says every lock of the adapter, is long.
+    click(cx, &format!("{locked}-row"));
+    assert!(!present(cx, &format!("{locked}-locked")));
     // Eval is off at its first pin, and the user's to turn on: its row has all four choices.
     let eval = row_of(cx, "agent_browser_eval");
     click(cx, &format!("{eval}-row"));
