@@ -6,12 +6,15 @@
 //! throwaway user. No window opens on a screen.
 
 use crate::common;
+use crate::remote::{Machine, TestHub, pc_and_server_on};
+use crate::window_any_machine as machines;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_window::Shell;
+use flottille_window::shell::Selection;
 use flottille_window::tree::{
     project_id, project_menu_id, project_remove_id, project_unconfigured_id, session_id,
 };
@@ -284,4 +287,139 @@ fn a_workspace_holding_work_is_kept_and_the_confirmation_says_so(cx: &mut TestAp
     );
     assert!(present(cx, project_id("app")));
     assert!(dirty.join("draft.txt").exists(), "its work is not lost");
+}
+
+/// This machine (`pc`) has no settings file for `app` while its daemon still holds a session of
+/// it, and another machine (`server`) has the project `app` with a session of its own. The
+/// sessions: this machine's, and the server's.
+fn app_gone_here_and_on_another_machine() -> (TestHub, Machine, Machine, String, String) {
+    let (hub, pc, server) = pc_and_server_on(Machine::of(machines::runner()), machines::runner());
+    machines::project(&pc.user, "app");
+    machines::project(&server.user, "app");
+    workspace(&pc.user, "app", "clean");
+    let here = idle_root(&pc.user, "app", "clean");
+    let there = server
+        .user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::remove_file(pc.user.project_file("app")).unwrap();
+    (hub, pc, server, here, there)
+}
+
+#[gpui_kit::test]
+fn an_unconfigured_project_beside_another_machine_s_project_of_its_name_is_one_row_each(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, here, there) = app_gone_here_and_on_another_machine();
+    let (shell, cx) = machines::window(&pc, cx);
+    machines::until(&shell, cx, "the server's session is in the tree", |cx| {
+        present(cx, session_id(&there))
+    });
+
+    // Refresh after refresh, the group of the other machine stays the one node it was, never
+    // the row with no file, and each session is under one row only.
+    let group = shell.read_with(cx, |s, _| s.project("app").map(|node| node.entity_id()));
+    assert!(group.is_some(), "the project app has a row");
+    for _ in 0..30 {
+        step(&shell, cx);
+        shell.read_with(cx, |s, cx| {
+            let node = s.project("app").expect("the row of app");
+            assert_eq!(Some(node.entity_id()), group, "the row is the same node");
+            assert!(
+                !node.read(cx).unconfigured(),
+                "the other machine's project is no project without its file"
+            );
+            let held: Vec<String> = node
+                .read(cx)
+                .sessions(cx)
+                .iter()
+                .map(|row| row.read(cx).id().to_owned())
+                .collect();
+            assert_eq!(held, [there.clone()], "it holds the server's session only");
+        });
+    }
+    assert!(
+        present(cx, session_id(&here)),
+        "this machine's session is under the row with no file"
+    );
+}
+
+#[gpui_kit::test]
+fn another_machine_s_project_of_the_same_name_still_drags(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, there) = app_gone_here_and_on_another_machine();
+    let (shell, cx) = machines::window(&pc, cx);
+    machines::until(&shell, cx, "the server's session is in the tree", |cx| {
+        present(cx, session_id(&there))
+    });
+
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_group("Work", cx);
+        let work = shell.listing().groups[0].id.clone();
+        shell.project_moved("app", Some(&work), 0, window, cx);
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.listing().groups[0].projects.clone()),
+        ["app"],
+        "the project of the other machine is in the group it was dragged to"
+    );
+}
+
+#[gpui_kit::test]
+fn removing_another_machine_s_project_of_the_same_name_is_answered_on_its_page(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, there) = app_gone_here_and_on_another_machine();
+    let (shell, cx) = machines::window(&pc, cx);
+    machines::until(&shell, cx, "the server's session is in the tree", |cx| {
+        present(cx, session_id(&there))
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
+    machines::until(&shell, cx, "the server is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    machines::until(&shell, cx, "the server's settings of app are read", |cx| {
+        shell
+            .read_with(cx, |s, cx| {
+                s.main().read(cx).project_settings_page().cloned()
+            })
+            .is_some_and(|page| {
+                page.read_with(cx, |page, cx| page.is_loaded() && page.has_read(cx))
+            })
+    });
+    machines::click(&shell, "project-more", cx);
+    machines::click(&shell, "remove-project", cx);
+    machines::until(&shell, cx, "the confirmation is asked", |cx| {
+        machines::present(cx, "project-removal-action")
+    });
+    machines::click(&shell, "project-removal-action", cx);
+
+    machines::until(&shell, cx, "the server's page is left", |cx| {
+        shell.read_with(cx, |s, _| {
+            !matches!(s.selected(), Some(Selection::ProjectSettings(_)))
+        })
+    });
+    let on_server = server.user.call("project.list", json!({})).unwrap();
+    assert!(
+        on_server["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|project| project["name"] != "app"),
+        "the server's app was removed: {on_server}"
+    );
+    let here = pc.user.call("project.list", json!({})).unwrap();
+    assert_eq!(
+        here["unconfigured"][0]["name"], "app",
+        "this machine's is untouched: {here}"
+    );
 }
