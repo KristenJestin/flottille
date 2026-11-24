@@ -589,7 +589,9 @@ pub struct Conversation {
     /// The title of each session for the user an `agent_launch` call starts, by the call's id,
     /// then, once held, by its request: it is no sub-agent, and is said as a session.
     sessions: HashMap<String, String>,
-    held_sessions: HashMap<u64, String>,
+    /// Each machine counts its own requests: a held session is keyed by its request and the
+    /// machine it is held on, `None` for this one.
+    held_sessions: HashMap<(u64, Option<String>), String>,
     /// The arguments of each `fs_edit` call still running, for its diff once it is done: its
     /// updates do not repeat them.
     edits: HashMap<String, Value>,
@@ -1491,8 +1493,8 @@ impl Conversation {
             strings(&data["raw_output"], &mut texts);
             if texts.iter().any(|text| text.contains(STARTED_SESSION)) {
                 changes.extend(self.push(started_session(title)));
-            } else if let Some(number) = texts.iter().find_map(|text| held_request(text)) {
-                self.held_sessions.insert(number, title);
+            } else if let Some(held) = texts.iter().find_map(|text| held_launch(text)) {
+                self.held_sessions.insert(held, title);
             }
         }
         // A report, or the end of a command, delivered as a note on the result.
@@ -1537,8 +1539,8 @@ impl Conversation {
                     }
                 }
                 changes.extend(self.push(block));
-                if let Some(title) = launched_after_approval(&body)
-                    .and_then(|number| self.held_sessions.remove(&number))
+                if let Some(title) =
+                    launched_after_approval(&body).and_then(|held| self.held_sessions.remove(&held))
                 {
                     changes.extend(self.push(started_session(title)));
                 }
@@ -1799,15 +1801,30 @@ fn started_session(said: String) -> Block {
 }
 
 /// An `agent_launch` the user allowed and the daemon performed, which started a session: its
-/// request.
-fn launched_after_approval(body: &str) -> Option<u64> {
+/// request, and the machine it was held on when it is another.
+fn launched_after_approval(body: &str) -> Option<(u64, Option<String>)> {
     let rest = body.strip_prefix("Request #")?;
     let (number, rest) = rest.split_once(" (agent_launch) ")?;
     let (_, result) = rest.split_once("has now done it. Its result:\n\n")?;
     result.contains(STARTED_SESSION).then_some(())?;
     // A launch held on another machine names it: `#4 on server`.
-    let number = number.split_once(' ').map_or(number, |(number, _)| number);
-    number.parse().ok()
+    match number.split_once(" on ") {
+        Some((number, machine)) => Some((number.parse().ok()?, Some(machine.to_owned()))),
+        None => Some((number.parse().ok()?, None)),
+    }
+}
+
+/// The request a held `agent_launch` answers (`… request #4 …`), and the machine it is held on
+/// when it is another (`… request #4 on server. …`).
+fn held_launch(text: &str) -> Option<(u64, Option<String>)> {
+    let number = held_request(text)?;
+    let (_, rest) = text.split_once(&format!("request #{number}"))?;
+    let machine = rest
+        .strip_prefix(" on ")
+        .and_then(|rest| rest.split_whitespace().next())
+        // The sentence's own period: a name may hold a dot.
+        .map(|machine| machine.strip_suffix('.').unwrap_or(machine).to_owned());
+    Some((number, machine))
 }
 
 /// The request a held call's answer names (`… request #4 …`).
