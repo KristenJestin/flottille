@@ -852,9 +852,13 @@ pub fn title_of(brief: &str) -> String {
 fn session_title(root: &Value, id: &str, brief: Option<&String>) -> String {
     // A root none named that has a title and no agent of this machine that launched it, nor was
     // detached from one (which forgets who launched it), was launched with that title by another
-    // machine's agent, or by an extension: its brief is written for the agent, not the user.
-    if (!root["titled_by"].is_null()
-        || (root["launched_by"].is_null() && root["detached_from"].is_null()))
+    // machine's agent, or by an extension: its brief is written for the agent, not the user. The
+    // agent of another machine that launched it is recorded here as a stand-in `<caller>@<machine>`
+    // (an id of this machine never has a `@`), which is no agent of this machine either.
+    let launcher_here = root["launched_by"]
+        .as_str()
+        .is_some_and(|launcher| !launcher.contains('@'));
+    if (!root["titled_by"].is_null() || (!launcher_here && root["detached_from"].is_null()))
         && let Some(title) = root["title"].as_str().filter(|title| !title.is_empty())
     {
         return title.to_owned();
