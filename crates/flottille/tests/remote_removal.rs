@@ -273,16 +273,10 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
     assert_ne!(one["project"], two["project"], "{one:#}\n{two:#}");
     let workspace = one["workspace"].as_str().unwrap().to_owned();
     let (one_there, two_there) = (folder_of(&one), folder_of(&two));
+    // Ended with no commit of their own: nothing is left to send back, which pc, stood in for
+    // by the test, is never asked to take.
     ended_there(&server, &first.0);
     ended_there(&server, &second.0);
-    prompted(&pc, "Your following of it is over.");
-    eventually("both ends told", || {
-        pc.prompts()
-            .iter()
-            .filter(|prompt| prompt.contains("Your following of it is over."))
-            .count()
-            == 2
-    });
     let caller = root_id(&pc);
     let key = pc.stand_in();
 
@@ -315,9 +309,13 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
             .collect::<String>()
             .parse()
             .unwrap();
+        // The caller's uncommitted work laid there is lost with it: the user says to discard it.
         server
             .user
-            .call("approval.approve", json!({"number": number}))
+            .call(
+                "approval.approve",
+                json!({"number": number, "discard": true}),
+            )
             .unwrap();
         eventually("the workspace of the launch named removed", || {
             !gone.exists()
