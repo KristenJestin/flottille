@@ -4703,6 +4703,15 @@ fn signed_up(user: &User) -> (String, Mcp) {
     (id, mcp)
 }
 
+/// `signed_up`, its session in Auto with a judge allowing every call: a run in Full is the
+/// user's own, confined in no way (`docs/tools.md`, "In Full, a run is the user's own"), so what
+/// a confined run cannot reach is tested in Auto. The user is made `with_allowing_judge`.
+fn signed_up_confined(user: &User) -> (String, Mcp) {
+    let (id, mcp) = signed_up(user);
+    set_mode(user, &id, "auto");
+    (id, mcp)
+}
+
 fn form(user: &User) -> Option<Value> {
     std::fs::read_to_string(form_file(user))
         .ok()
@@ -5547,14 +5556,14 @@ fn a_run_cannot_get_the_credential() {
     // A run of the agent's own waits for a login of Flottille's, reads the token beside the
     // plugin's socket and speaks to that socket with the entry and its site's URL: it gets
     // nothing, and the login still signs in.
-    let user = user();
+    let user = user().with_allowing_judge();
     let until = user.path("probe-done");
     browser(
         &user,
         &agent_browser("0.43.0"),
         json!({"hold": until.to_str().unwrap()}),
     );
-    let (_, mcp) = signed_up(&user);
+    let (_, mcp) = signed_up_confined(&user);
     let result = user.path("probe-result.json");
     // The run cannot read the configuration that names the socket (it is in the vault folder):
     // it is told the socket's path, which anyone can guess.
@@ -5649,7 +5658,7 @@ fn probed_login(user: &User, probe: &str) -> (Answer, Value) {
         &agent_browser("0.43.0"),
         json!({"hold": until.to_str().unwrap()}),
     );
-    let (_, mcp) = signed_up(user);
+    let (_, mcp) = signed_up_confined(user);
     let result = user.path("probe-result.json");
     let folders: Vec<String> = browser_folders(user)
         .iter()
@@ -5682,7 +5691,7 @@ fn a_run_cannot_swap_the_login_plugin() {
     // and over while a login loads its page and starts: its plugin, a script that would be run by
     // agent-browser's daemon with the vault folder in reach, is never run, and the login fills
     // with Flottille's own plugin.
-    let user = user();
+    let user = user().with_allowing_judge();
     let marker = user.path("swapped-plugin-ran");
     let plugin = user.path("plugin.sh");
     std::fs::write(
@@ -5738,7 +5747,7 @@ fn a_run_cannot_drive_the_browser() {
     // A run of the agent's own looks for agent-browser's daemon while a login runs, in the folder
     // `AGENT_BROWSER_SOCKET_DIR` names (the fake's browser is its `browser.json` there, the real
     // one's a socket): it finds nothing to connect to, and reads none of it.
-    let user = user();
+    let user = user().with_allowing_judge();
     let probe = r#"import json, os, socket, time
 started, until, result, folders = {STARTED}, {UNTIL}, {RESULT}, {FOLDERS}
 deadline = time.time() + 30
