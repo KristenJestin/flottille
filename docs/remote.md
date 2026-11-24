@@ -995,7 +995,8 @@ local child's work; nothing moves your branch.*
   here left at theirs, is put at its caller's depth plus one when the store opens (1 when its launch
   names none), so it takes a child's tools at its next start, and each agent under it one depth
   below its parent, so that a stop ordered by depth ends them before it; a depth is only raised,
-  never lowered. An agent it starts here is a child of the tree of its parent's machine too: a
+  never lowered. Such a child that had ended then was kept to be resumed, as a root: the next
+  sweep forgets its session and its images, as a child's are when it ends (#1368). An agent it starts here is a child of the tree of its parent's machine too: a
   method the user's door refuses for a child names that tree's root, on that machine, as the one
   the user writes to, and `agent.mode` is refused on it as on the remote child.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
@@ -1138,7 +1139,11 @@ local child's work; nothing moves your branch.*
   request and its machine (a name may hold spaces and dots), each machine counting its own, and says
   a session started when the call itself answers that the user allowed it before it returned. A restart
   there never stops a session that ran: an allowed launch whose workspace is ready and whose session
-  was briefed only has its answer settled again. A refused launch leaves no row under its
+  was briefed only has its answer settled again. One a restart cut after its caller may have heard
+  it approved (its answer settled `started`) tells that caller its stop as the end of the session it
+  started (`child-failed`, or `session-turn-ended` for a led one), which its machine takes whether the
+  approval reached it or not, and records `ended`, or `refused` when the approval had not reached it
+  (#1374). A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
@@ -1834,6 +1839,13 @@ on a real phone, by hand, and reported.
   user's answer to a held launch, the caller is told nothing was done, while the launch there stays
   held until its session ends; the refusal that end sends is a second answer, which the caller's
   machine refuses.
+- **A launch a restart cut after it was told approved is stopped, its caller told it ended** (#1374):
+  when the store could not keep the user's answer, the caller may have heard "approved" while the
+  daemon there, started again, finds the launch's setup cut and stops it. Its stop goes as the end of
+  the session (`child-failed`, `session-turn-ended`), which the caller's machine takes, rather than
+  as a second answer, which it refuses. Keeping the launch and resuming its setup instead could come
+  later; stopping it is the simpler, and the rule that a launch is answered once stays whole. A
+  handed launch's caller still hears only the user's answer.
 - **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
   stored, only one whose workspace is still preparing or whose session was never briefed is refused;
   one that ran is left running and its answer is stored again, since its caller was told approved.
