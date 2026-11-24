@@ -31,6 +31,9 @@ use crate::projects::Failure;
 pub const DELAY_MS: u64 = 30_000;
 /// An input at a client this recent means the user is there: the phone is not told.
 pub const AWAY_MS: u64 = 2 * 60_000;
+/// An input said to come later than this is taken from a clock that is wrong, and not counted:
+/// it would keep the phone silent until that time.
+const AHEAD_MS: u64 = 60_000;
 /// The rows of the centre looked at, the last ones.
 const LOOKED: usize = 200;
 /// How long the hub may take to take a notice.
@@ -94,10 +97,11 @@ fn control(daemon: &Daemon) -> Option<std::sync::Arc<crate::hub_session::Control
 }
 
 /// Whether no client of the user had an input in the last `AWAY_MS`, as this machine's clients
-/// said it and the hub told every other's but the phones'. With no session to the hub, the user
-/// is away.
+/// said it and the hub told every other's but the phones'. An input said to come more than
+/// `AHEAD_MS` from now is not counted. With no session to the hub, the user is away.
 fn away(control: &crate::hub_session::Control, now: u64) -> bool {
-    let recent = |at_ms: u64| now.saturating_sub(at_ms) < AWAY_MS;
+    let recent =
+        |at_ms: u64| at_ms <= now.saturating_add(AHEAD_MS) && now.saturating_sub(at_ms) < AWAY_MS;
     if control.local_input().is_some_and(recent) {
         return false;
     }
