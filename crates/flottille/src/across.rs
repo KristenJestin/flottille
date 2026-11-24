@@ -1275,6 +1275,8 @@ fn called(
                 format!("{} has {} already.", named(&agent), agent.state.as_str())
             } else {
                 let reason = match (child, args["why"].as_str()) {
+                    (true, Some(PARENT_STOPPED)) => crate::tree::ITS_PARENT_STOPPED.to_owned(),
+                    (true, Some(PARENT_FAILED)) => crate::tree::ITS_PARENT_FAILED.to_owned(),
                     (true, _) => format!("stopped by its parent, agent {caller} of {name}"),
                     (false, Some(PILOT_ENDED)) => crate::tree::ITS_PILOT_ENDED.to_owned(),
                     (false, _) => {
@@ -1379,6 +1381,10 @@ pub(crate) fn detached(daemon: &Arc<Daemon>, session: &Agent, title: &str) -> Op
 
 /// What a pilot's machine says of the stop it sends for the session it led, its pilot ended.
 const PILOT_ENDED: &str = "pilot-ended";
+/// What a parent's machine says of the stop it sends for its child, its parent stopped.
+const PARENT_STOPPED: &str = "parent-stopped";
+/// What a parent's machine says of the stop it sends for its child, its parent failed.
+const PARENT_FAILED: &str = "parent-failed";
 
 /// The pilot `caller` of this machine no longer follows the session `session` it leads on
 /// another machine (it unsubscribed, or its following `paused`, or resumed `on`): that machine is
@@ -1437,15 +1443,25 @@ fn keep_call(
 }
 
 /// The sessions `pilot` of this machine leads on other machines that have not ended, the oldest
-/// first, each with the name of its machine: those its end ends there (`end_led`).
+/// first, each with the name of its machine: those its end ends there (`ended`).
 pub(crate) fn led_elsewhere_by(daemon: &Daemon, pilot: &str) -> Vec<(Launch, String)> {
+    started_elsewhere_by(daemon, pilot)
+        .into_iter()
+        .filter(|(launch, _)| launch.kind == "led")
+        .collect()
+}
+
+/// The sessions `caller` of this machine leads and the children it started on other machines,
+/// started and not ended, the oldest first, each with the name of its machine. Only launches
+/// this machine made: nothing another machine names.
+fn started_elsewhere_by(daemon: &Daemon, caller: &str) -> Vec<(Launch, String)> {
     daemon
         .read(|store| store.launches("out", None, LaunchFilter::All))
         .unwrap_or_default()
         .into_iter()
         .filter(|launch| {
-            launch.caller == pilot
-                && launch.kind == "led"
+            launch.caller == caller
+                && matches!(launch.kind.as_str(), "led" | "child")
                 && launch.agent.is_some()
                 && !matches!(launch.state.as_str(), "refused" | "ended")
         })
@@ -1456,12 +1472,19 @@ pub(crate) fn led_elsewhere_by(daemon: &Daemon, pilot: &str) -> Vec<(Launch, Str
         .collect()
 }
 
-/// The pilot `pilot` of this machine ended for good: each session it leads on another machine
-/// ends with it there, as one it leads here does, the stop kept until that machine takes it
+/// The agent `agent` of this machine ended for good, or `failed`: each child it started on another
+/// machine stops there, as its children here do, and, unless it failed (it can be resumed), each
+/// session it leads there ends with it, the stop kept until that machine takes it
 /// (`docs/tools.md`, "Sessions an agent starts").
-pub(crate) fn end_led(daemon: &Arc<Daemon>, pilot: &str) {
-    for (launch, name) in led_elsewhere_by(daemon, pilot) {
-        let args = json!({"agent_id": launch.agent, "why": PILOT_ENDED});
+pub(crate) fn ended(daemon: &Arc<Daemon>, agent: &str, failed: bool) {
+    for (launch, name) in started_elsewhere_by(daemon, agent) {
+        let why = match (launch.kind.as_str(), failed) {
+            ("child", false) => PARENT_STOPPED,
+            ("child", true) => PARENT_FAILED,
+            (_, false) => PILOT_ENDED,
+            (_, true) => continue,
+        };
+        let args = json!({"agent_id": launch.agent, "why": why});
         match keep_call(daemon, &launch, "agent_stop", &args) {
             Ok(()) => {
                 let _ = daemon.write(|store| {
@@ -1470,10 +1493,10 @@ pub(crate) fn end_led(daemon: &Arc<Daemon>, pilot: &str) {
                         .map(|()| ((), None))
                 });
             }
-            Err(why) => eprintln!(
-                "flottille daemon: the session {} its pilot led on {} is not ended with it: {why}",
+            Err(error) => eprintln!(
+                "flottille daemon: agent {} that agent {agent} started on {name} is not stopped \
+                 with it: {error}",
                 launch.agent.as_deref().unwrap_or_default(),
-                name
             ),
         }
     }
