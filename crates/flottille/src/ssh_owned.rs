@@ -651,6 +651,28 @@ mod tests {
     }
 
     #[test]
+    fn doctor_follows_no_link_before_the_wildcard_of_an_outside_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        file(
+            &account.join(".ssh/config"),
+            "Include ~/work/*.conf ~/deeper/work/*.conf\n",
+            0o600,
+        );
+        // A run replaced `~/work`, and a folder above `~/deeper/work`, with links to a folder of
+        // files the owner owns.
+        let elsewhere = account.join("elsewhere");
+        file(&elsewhere.join("named.conf"), "", 0o644);
+        file(&elsewhere.join("work/deeper.conf"), "", 0o644);
+        std::os::unix::fs::symlink(&elsewhere, account.join("work")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, account.join("deeper")).unwrap();
+
+        let gaps = gaps_of(&account.join("no-system"), Some(&account), me());
+
+        assert!(gaps.is_empty(), "{gaps:?}");
+    }
+
+    #[test]
     fn a_glob_past_its_budget_is_cut_and_said() {
         let dir = tempfile::tempdir().unwrap();
         let etc = dir.path().canonicalize().unwrap();
