@@ -102,11 +102,32 @@ impl TestHub {
 
     /// [`TestHub::up`], the build of the hub saying `hello`: an old one, say.
     fn up_as(&mut self, hello: Hello) {
-        let served = self.runtime.block_on(async {
-            let hub = Hub::open(&self._folder.path().join("hub"), SystemClock).unwrap();
-            let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();
-            flottille_hub::serve(hub, listener, None, hello).unwrap()
-        });
+        // The old hub's folder lock and port go with its last open descriptor. Another test of
+        // this process that starts a program holds a copy of every descriptor until that program
+        // has run `exec` (the descriptors are close-on-exec), which under load is a while after
+        // `down` returned: the restart waits until the folder and the port are free.
+        let deadline = Instant::now() + WAIT;
+        let served = loop {
+            let opened = self.runtime.block_on(async {
+                let hub = Hub::open(&self._folder.path().join("hub"), SystemClock)
+                    .map_err(|error| error.to_string())?;
+                let listener = tokio::net::TcpListener::bind(self.address)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                flottille_hub::serve(hub, listener, None, hello.clone())
+                    .map_err(|error| error.to_string())
+            });
+            match opened {
+                Ok(served) => break served,
+                Err(why) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the hub cannot start again: {why}"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        };
         self.served = Some(served);
     }
 
