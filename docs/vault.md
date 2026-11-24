@@ -683,11 +683,14 @@ files is reached through a link (a dotfiles manager's), the folder that holds ea
 is read-only too when it is a folder of its own below the home (`~/.config/git`), and so is the
 folder that holds the versions: the one above the folder of the file the link leads to
 (`~/dots/versions` for `~/dots/versions/a/git-config`), the nearest that holds the versions a
-dotfiles manager makes later beside it, never one higher: no run re-points the link, or writes a
-version made after the start. A kept folder is read-only with everything below it, the folders
+dotfiles manager makes later beside it, and the one above that (`~/dots`) when it can be kept, the
+manager's own folder, where it may stage a version before moving it in among the others; never
+one higher: no run re-points the link, writes a version made after the start, or makes (and holds
+open) the file a manager then moves in as its own. A kept folder is read-only with everything below it, the folders
 kept in place below it included. Not kept, a link there being refused when its settings are
-relinked (below), and nothing kept at all when it is the folder of the versions (a relink is then
-refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
+relinked (below), nothing kept above the folder of the versions when it is the one above it (that
+folder is then the manager's own), and nothing kept at all when it is the folder of the versions
+(a relink is then refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
 (their folders as the projects' files and the store say at the daemon's start, whatever their
 name, and the default folder of the workspaces), the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
 `~/.local`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the same way), the folders
@@ -700,7 +703,12 @@ the way is renamed to put another file at the path. `~/.ssh` is the account's (t
 user database, which `ssh` reads `~` as, whatever `HOME` says); the daemon makes it at its start
 (`0700`, as `ssh` would) when it is missing, since a folder that is not there could not be kept
 read-only. A command started at any time has them read-only from its start, and nothing it runs
-can unmount them (above).
+can unmount them (above). Each path is opened once, following no link on its way (one put there
+since the start is not followed, and the path is then not protected: the push judges it), and
+made read-only through that one descriptor, with every mount below it. Where Landlock is there and
+the system refuses one of the calls that does it (a seccomp filter written for an older kernel),
+every command Flottille confines is refused its start, saying so (and `flottille doctor` says it),
+rather than started with a mount below a read-only one left writable.
 
 What that cannot hold is not protected file by file: the user's SSH agent is then **lent to no
 push**, no `SSH_AUTH_SOCK` and no `ssh` among the transports allowed (a push over SSH fails, saying
@@ -926,10 +934,16 @@ The gaps, where the platform does not allow more:
   relative include, which is a file of the new version folder) is refused as before, until a
   restart; the folders kept are those of the settings the daemon found, so a link that did not
   exist at the start is not kept; and a version made directly in one of the folders listed above
-  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that puts the
-  file deeper in its versions (`versions/<n>/git/config`) has `versions/<n>` kept, so a relink to
-  another version is refused, not trusted; and a project added after the daemon's start in a kept
-  folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
+  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that stages a
+  version outside the folders kept (in `~/.cache`, or beside its own folder in the home, where a
+  run writes) and then moves it in among its versions is trusted, not refused: the file is then
+  under a kept folder with one name, and nothing tells a file moved in from one made there, so a
+  run that made it first, and holds it open, writes what the push reads. A manager staging in its
+  own folder (`~/dots/staging` beside `~/dots/versions`) is covered: that folder is kept. A
+  manager that puts the file deeper in its versions (`versions/<n>/git/config`) has `versions`
+  kept, the folder above `versions/<n>`, so a relink to another version is accepted, and a version
+  it stages beside `versions` is one moved in from a folder a run writes (above); and a project
+  added after the daemon's start in a kept folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
   older Flottille left behind, outside its session and without its marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before

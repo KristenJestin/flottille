@@ -3066,3 +3066,66 @@ fn a_confined_run_cannot_write_below_ssh_where_a_folder_is_kept_in_place() {
     }
     assert!(!folder.join("planted").exists(), "{said}");
 }
+
+#[test]
+fn a_version_moved_into_the_kept_folder_from_a_folder_runs_write_is_refused() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/gitlink/config");
+    let (user, a, own) = dotfiles(user, &link);
+    let planted = user.path("home/.ssh/planted");
+    marker(&user, &planted);
+    let mcp = session(&user, SSH_REMOTE);
+
+    // A run prepares the next version where the manager stages it, beside the folder of the
+    // versions, with a `ssh` command of its own choosing.
+    let staged = user.path("home/dots/staging/b/git-config");
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "import errno\nstaged = {staged:?}\n\
+             try:\n\
+             \x20   os.makedirs(os.path.dirname(staged))\n\
+             \x20   open(staged, 'w').write('[core]\\n\\tsshCommand = {planted}\\n')\n\
+             \x20   print('staged=written')\n\
+             except OSError as e:\n\
+             \x20   print('staged=' + errno.errorcode[e.errno])\n",
+            staged = staged.to_str().unwrap(),
+            planted = planted.display(),
+        ),
+    );
+    // The manager stages the version, unless a file is there already (the one a run holds open,
+    // and writes after the manager), moves it in among the versions, and relinks.
+    if !staged.exists() {
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(
+            &staged,
+            format!("[core]\n\tsshCommand = {}\n", own.display()),
+        )
+        .unwrap();
+    }
+    let b = user.path("home/dots/versions/b");
+    std::fs::rename(staged.parent().unwrap(), &b).unwrap();
+    relink(&link, &b.join("git-config"), &a);
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/moved-in"}),
+    );
+
+    assert!(
+        said.contains("staged=EROFS") || said.contains("staged=EACCES"),
+        "{said}"
+    );
+    assert!(
+        !user.path("home/.ssh/planted-ran").exists(),
+        "{}",
+        pushed.text
+    );
+    // What the manager staged itself is the user's own: the push reads it.
+    assert!(remote_has(&user, "moved-in"), "{}", pushed.text);
+    assert!(user.path("home/.ssh/own-b-ran").exists(), "{}", pushed.text);
+}
