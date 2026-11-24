@@ -745,6 +745,93 @@ fn a_run_of_an_agent_s_routine_is_capped_at_its_author_s_current_mode() {
         "ask",
         "no more than its author now"
     );
+    assert_eq!(
+        runs(&user, "Fixer")[0]["mode"],
+        "ask",
+        "the run records the mode it ran in, not its routine's"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn a_run_of_a_routine_whose_author_ended_is_capped_at_its_last_mode() {
+    let user = user();
+    project(&user, "app");
+    let (id, mcp) = root(&user, "auto");
+    let number = held(mcp.call(
+        "routine",
+        json!({"action": "create", "name": "Fixer", "prompt": HOLD,
+            "schedule": "every day 07:00", "mode": "auto"}),
+    ));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the routine is made", || {
+        user.call("routine.show", json!({"routine": "Fixer"}))
+            .is_ok()
+    });
+    user.call("routine.pause", json!({"routine": "Fixer"}))
+        .unwrap();
+    user.call("agent.mode", json!({"agent": id, "mode": "ask"}))
+        .unwrap();
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    user.call("routine.run", json!({"routine": "Fixer"}))
+        .unwrap();
+    eventually("the run's session", || {
+        runs(&user, "Fixer")
+            .first()
+            .is_some_and(|run| run["session"].is_string())
+    });
+
+    let run = runs(&user, "Fixer")[0].clone();
+    assert_eq!(run["mode"], "ask", "{run}");
+    let session = run["session"].as_str().unwrap().to_owned();
+    assert_eq!(
+        user.call("agent.show", json!({"agent": session})).unwrap()["agent"]["gate_mode"],
+        "ask"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn a_skipped_run_records_the_capped_mode() {
+    let user = user();
+    project(&user, "app");
+    let (id, mcp) = root(&user, "auto");
+    let number = held(mcp.call(
+        "routine",
+        json!({"action": "create", "name": "Fixer", "prompt": HOLD,
+            "schedule": "every day 07:00", "mode": "auto"}),
+    ));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the routine is made", || {
+        user.call("routine.show", json!({"routine": "Fixer"}))
+            .is_ok()
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "ask"}))
+        .unwrap();
+    user.call("routine.run", json!({"routine": "Fixer"}))
+        .unwrap();
+    eventually("the run's session", || {
+        runs(&user, "Fixer")
+            .first()
+            .is_some_and(|run| run["session"].is_string())
+    });
+
+    // The next day's run is due while this one still runs: skipped, and said.
+    user.call("test.advance", json!({"ms": DAY})).unwrap();
+
+    eventually("the skipped run", || {
+        runs(&user, "Fixer")
+            .iter()
+            .any(|run| run["outcome"] == "skipped")
+    });
+    let skipped = runs(&user, "Fixer")
+        .into_iter()
+        .find(|run| run["outcome"] == "skipped")
+        .unwrap();
+    assert_eq!(skipped["mode"], "ask", "{skipped}");
     std::fs::write(user.path("fake/release"), "").unwrap();
 }
 
@@ -773,6 +860,39 @@ fn a_routine_s_run_session_reads_routines_but_never_writes_them() {
         json!({"action": "pause", "routine": "Other"}),
         json!({"action": "resume", "routine": "Other"}),
         json!({"action": "run", "routine": "Other"}),
+        json!({"action": "remove", "routine": "Other"}),
+    ] {
+        let refusal = refused(run.call("routine", call.clone()));
+        assert!(refusal.contains("routine's run"), "{call}: {refusal}");
+    }
+    assert!(requests(&user).is_empty(), "nothing asked");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn a_run_session_is_still_refused_after_its_routine_is_removed() {
+    let user = user();
+    project(&user, "app");
+    add(
+        &user,
+        "app",
+        "Asker",
+        json!({"mode": "ask", "prompt": HOLD}),
+    );
+    add(&user, "app", "Other", json!({}));
+    let opened = user.received_requests("session/new").len();
+    user.call("routine.run", json!({"routine": "Asker"}))
+        .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let run = Mcp::initialize(&url, &authorization);
+
+    // Removing a routine forgets its runs: the session of one still open writes nothing.
+    user.call("routine.remove", json!({"routine": "Asker"}))
+        .unwrap();
+
+    for call in [
+        json!({"action": "create", "name": "Copy", "prompt": LIST, "schedule": "every day 07:00"}),
+        json!({"action": "pause", "routine": "Other"}),
         json!({"action": "remove", "routine": "Other"}),
     ] {
         let refusal = refused(run.call("routine", call.clone()));

@@ -1194,3 +1194,53 @@ fn a_routine_an_agent_edited_says_which_session(cx: &mut TestAppContext) {
     );
     assert!(!present(cx, "routine-made-by"), "the user made it");
 }
+
+#[gpui_kit::test]
+fn a_routine_never_shows_the_editor_of_the_one_before(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Mornings", LIST_REVIEWS, json!({}));
+    add(&user, "Evenings", LIST_REVIEWS, json!({}));
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let titled = mcp.call("session_title", json!({"title": "Tidy the mornings"}));
+    assert!(!titled.error, "{}", titled.text);
+    let edited = mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Mornings", "rings": "never"}),
+    );
+    assert!(!edited.error, "{}", edited.text);
+
+    let (shell, cx) = open_routine(&user, "Mornings", cx);
+    until(&shell, cx, "its editor shows", |cx| {
+        present(cx, "routine-edited-by")
+    });
+    click(cx, "routines-back");
+    let row = "routine-Evenings";
+    until(&shell, cx, "the other is listed", |cx| present(cx, row));
+    click(cx, row);
+    until(&shell, cx, "its page shows", |cx| {
+        present(cx, "routine-header")
+    });
+
+    // Not a frame of its page, folding or not, says who edited the other one.
+    for _ in 0..30 {
+        assert_eq!(
+            label(cx, "routine-edited-by").filter(|said| said.contains("Tidy the mornings")),
+            None,
+            "the other routine's editor"
+        );
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+}

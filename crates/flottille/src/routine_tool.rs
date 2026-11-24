@@ -139,6 +139,10 @@ pub fn refuses_a_run(daemon: &Daemon, agent: &str, tool: &str, args: &Value) -> 
         })
 }
 
+fn is_a_run<E>(flags: impl IntoIterator<Item = Result<bool, E>>) -> bool {
+    flags.into_iter().any(|flag| flag.unwrap_or(false))
+}
+
 /// The routine of the caller's project named `key`; another project's is none.
 fn own(daemon: &Daemon, grant: &Grant, key: Option<&str>) -> Result<Routine, Outcome> {
     let Some(key) = key else {
@@ -396,5 +400,18 @@ fn result(daemon: &Daemon, routine: &Routine, date: Option<&str>) -> Outcome {
                 routine.name
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_store_that_cannot_be_read_refuses_the_write() {
+        let broken = || Err::<bool, String>("the store is locked".into());
+        assert!(is_a_run([Ok(false), broken()]), "fails closed");
+        assert!(is_a_run([Ok::<_, String>(false), Ok(true)]));
+        assert!(!is_a_run([Ok::<_, String>(false), Ok(false)]));
     }
 }
