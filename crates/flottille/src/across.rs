@@ -2578,8 +2578,15 @@ fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
         }
     }
     if cuts.iter().any(|(_, goes_on)| *goes_on) {
+        // A marker holds no new line but the ones around it: those are the only ones already a
+        // cut, and looking them up in a set keeps this linear however many lines the text has.
+        let taken: std::collections::HashSet<usize> = cuts
+            .iter()
+            .flat_map(|(span, _)| [span.start, span.end - 1])
+            .filter(|&at| text.as_bytes()[at] == b'\n')
+            .collect();
         for (at, _) in text.match_indices('\n') {
-            if !cuts.iter().any(|(span, _)| span.contains(&at)) {
+            if !taken.contains(&at) {
                 cuts.push((at..at + 1, true));
             }
         }
