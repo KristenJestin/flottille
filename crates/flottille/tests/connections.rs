@@ -7567,6 +7567,108 @@ fn login_is_refused_while_the_connections_env_moves_the_browsers_folders() {
     }
 }
 
+/// The server's command of the connection `browser`, its `words` before the fake's own.
+fn browser_command_after(user: &User, words: &[&str]) -> Value {
+    let mut command: Vec<Value> = words.iter().map(|word| json!(word)).collect();
+    command.extend(
+        command_of(user, "browser")
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    command.push(json!("mcp"));
+    json!(command)
+}
+
+/// Login is refused, by `named`, at the login and at the review, and nothing was typed.
+fn login_and_review_refused(user: &User, mcp: &Mcp, named: &str) {
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains(named), "{named}: {said}");
+    assert!(said.contains("password"), "{named}: {said}");
+    assert!(!said.contains("/tmp/elsewhere"), "{named}: {said}");
+    assert!(logged(user, "browser", "login").is_empty(), "{named}");
+    assert!(form(user).is_none(), "{named}");
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let said = review["adapter"]["said"].as_str().unwrap();
+    assert!(said.contains(named), "{named}: {review}");
+    assert!(!said.contains("/tmp/elsewhere"), "{named}: {review}");
+}
+
+#[test]
+fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
+    for named in MOVING.iter().copied().chain(["HOME"]) {
+        let user = user();
+        let assignment = format!("{named}=/tmp/elsewhere");
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"command": browser_command_after(&user, &["env", &assignment])}),
+        );
+        let (_, mcp) = signed_up(&user);
+        // A folder variable is said by its name; any other assignment, by the launcher.
+        let said = if MOVING.contains(&named) {
+            named.to_owned()
+        } else {
+            "starts with env".to_owned()
+        };
+        login_and_review_refused(&user, &mcp, &said);
+    }
+    // An edit after the user accepted a clean command is refused as well.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    std::fs::remove_file(form_file(&user)).ok();
+    let before = logged(&user, "browser", "login").len();
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "command": browser_command_after(
+            &user, &["env", "AGENT_BROWSER_SOCKET_DIR=/tmp/elsewhere"])}),
+    )
+    .unwrap();
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("AGENT_BROWSER_SOCKET_DIR"), "{said}");
+    assert!(!said.contains("/tmp/elsewhere"), "{said}");
+    assert_eq!(logged(&user, "browser", "login").len(), before);
+}
+
+#[test]
+fn a_connection_whose_command_starts_with_a_launcher_is_refused() {
+    for launcher in [
+        &["nohup"][..],
+        &["setsid"],
+        &["nice", "-n", "5"],
+        &["timeout", "600"],
+        &["/usr/bin/env"],
+        &["env", "-i"],
+    ] {
+        let user = user();
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"command": browser_command_after(&user, launcher)}),
+        );
+        let (_, mcp) = signed_up(&user);
+        login_and_review_refused(&user, &mcp, &format!("starts with {}", launcher[0]));
+    }
+}
+
 #[test]
 fn a_harmless_variable_of_agent_browsers_is_accepted() {
     let user = user();
