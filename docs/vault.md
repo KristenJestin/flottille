@@ -215,6 +215,51 @@ an entry to the vault, not a request with rules of its own.
 The secret goes from the form's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.
 
+## Proposing an edit of an entry
+
+An entry may be almost right: its URL points to a page with no login form, its username is wrong,
+it is bound to the wrong project. The agent does not tell the user, in words, to retype it: it
+proposes the edit, which the user accepts, edits or dismisses. It is the request of an asked entry,
+with the same card, the same place and the same answer; only what the card says and its buttons
+differ.
+
+- **`vault {action: "propose", name, why, url?, username?, description?, project?, for?}`.**
+  `name` is an entry the agent's project sees (another project's is no entry for it); each field
+  given is its new value, an empty text clearing it: `url`, read as an ask reads it (refused when it
+  is no `https` address, or `http` on this machine), `username`, `description`, `project` (`this`,
+  the agent's project alone, or `every`) and `for` (`worklog`, or `connection:<name>` for a
+  connection the user declared) for an entry bound to no use yet: an entry keeps its one use, and
+  the refusal does not name it. A proposal that changes nothing is refused, and so is a second one
+  for an entry while one waits.
+- **Never the secret.** The schema has no field for it and an argument it does not know is
+  refused; Accept rewrites the metadata only, as an edit that keeps the secret does: the keyring
+  item is never written, replaced or deleted, and read only to mask a new username's Basic form.
+- **Always held for the user**, in every mode, Full included: no rule applies it. The call is
+  answered at once (`… is held for the user, who accepts, edits or dismisses it`), and the answer
+  comes later as a delivery.
+- **Its card**, in **Waiting for you** with the asked entries' (and the inbox, the bell, the
+  session's "waits for you" mark, the conversation's quiet line `proposed an edit of the vault
+  entry <name> · waiting for you`, then `… · accepted`, `… · saved` or `… · dismissed`): **Proposes
+  a vault edit**, the entry's name, each field changed on a line of its own as before → after
+  (`URL: https://id.example.invalid/realms/dev/ → https://id.example.invalid/realms/dev/account`),
+  the host a new URL sends the secret to (**Goes to**, the daemon's reading), and the agent's
+  reason. Its buttons: **Dismiss**, **Edit** and **Accept**, all disabled while Accept or Dismiss
+  runs. Accept applies it in one action; Edit opens the entry's own form of an edit (`Edit
+  <name>`, the secret left empty to keep it) prefilled with the proposal and the agent's reason,
+  where the user changes what they want and saves, or closes it and nothing changes; Dismiss
+  changes nothing.
+- **Checked as a hand edit.** Accept is the user's own Save of the entry as it is then with the
+  fields proposed, in the daemon: every check of that Save applies (a login's entry on plain
+  `http` to another machine, an address login cannot read, a project the use refuses), its refusal
+  is said in a toast and the request stays open, for Edit or Dismiss. An entry removed meanwhile
+  is not made anew: it would have no secret.
+- **Answered as an asked entry is**: the agent whose project sees the entry is handed
+  `the user accepted your proposed edit of the vault entry <name>`, or, saved from its form or any
+  other way, `the user saved the vault entry <name> from its form after your proposed edit`; on
+  Dismiss, `the user dismissed your proposed edit of the vault entry <name>: nothing of it
+  changed`. Like the card of an asked entry, it has no command of its own: the user's
+  `flottille vault edit` saves the entry, which answers it.
+
 ## How a secret is used
 
 Through Flottille's own tools: a tool that needs a secret takes the entry's **name**, and the

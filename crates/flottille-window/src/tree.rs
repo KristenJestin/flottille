@@ -147,6 +147,26 @@ pub fn group_count_id(group: &str) -> ElementId {
     ElementId::Name(format!("projects-list-group-{group}-count").into())
 }
 
+/// The element id of what a folded group's heading says of the rows it hides.
+pub fn group_mark_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-list-group-{group}-mark").into())
+}
+
+/// The element id of the "⋯" menu a group's heading offers.
+pub fn group_menu_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-group-menu-{group}").into())
+}
+
+/// The element id of Rename… in a group's menu.
+pub fn group_rename_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-group-rename-{group}").into())
+}
+
+/// The element id of Remove in a group's menu.
+pub fn group_remove_id(group: &str) -> ElementId {
+    ElementId::Name(format!("projects-group-remove-{group}").into())
+}
+
 /// Why New group… cannot be picked while the projects are shown by machine.
 const SHOWN_BY_MACHINE: &str = "Shown by machine";
 /// Why Group by machine cannot be switched on: there is nothing to group by.
@@ -370,6 +390,99 @@ impl Mark {
     }
 }
 
+/// What a folded group's heading says of the projects it hides: their strongest mark, which comes
+/// in and goes with a fade. A heading that leaves draws it once more, as it was: this holds
+/// nothing the group's removal clears.
+struct GroupMark {
+    mark: Mark,
+    /// The mark that went is still drawn while it folds away: it is held until then, so that the
+    /// heading keeps its slot.
+    leaving: Option<Task<()>>,
+}
+
+impl GroupMark {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            mark: Mark::new(cx),
+            leaving: None,
+        }
+    }
+
+    /// Whether it says this already.
+    fn says(&self, state: Option<AgentState>) -> bool {
+        self.mark.shown == state
+    }
+
+    fn set(&mut self, state: Option<AgentState>, cx: &mut Context<Self>) {
+        let changed = self.mark.set(state, cx);
+        match state {
+            Some(_) => self.leaving = None,
+            None if changed => {
+                self.leaving = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(PANEL).await;
+                    this.update(cx, |this, cx| {
+                        this.leaving = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+            None => {}
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Whether the heading has a mark to draw: one that is shown, or one that folds away.
+    fn drawn(&self) -> bool {
+        self.mark.shown.is_some() || self.leaving.is_some()
+    }
+}
+
+/// A group's heading: its "⋯" menu (Rename…, Remove) and its mark.
+struct GroupParts {
+    menu: Entity<Menu>,
+    mark: Entity<GroupMark>,
+    /// The sidebar is drawn again as the mark comes and goes.
+    _watch: Subscription,
+}
+
+impl GroupParts {
+    fn new(id: &str, shell: WeakEntity<Shell>, cx: &mut Context<Sidebar>) -> Self {
+        let menu = cx.new(|cx| {
+            let (renames, removes) = (shell.clone(), shell);
+            let (rename, remove) = (id.to_owned(), id.to_owned());
+            Menu::new(group_menu_id(id), "Group actions", cx)
+                .entry(
+                    group_rename_id(id),
+                    crate::rename::RENAME_LABEL,
+                    Some(Icon::Edit),
+                    move |window, cx| {
+                        let id = rename.clone();
+                        renames
+                            .update(cx, |shell, cx| shell.ask_rename_group(&id, window, cx))
+                            .ok();
+                    },
+                )
+                .entry(
+                    group_remove_id(id),
+                    "Remove",
+                    Some(Icon::Trash),
+                    move |window, cx| {
+                        let id = remove.clone();
+                        removes
+                            .update(cx, |shell, cx| shell.remove_group(&id, window, cx))
+                            .ok();
+                    },
+                )
+        });
+        let mark = cx.new(GroupMark::new);
+        let _watch = cx.observe(&mark, |_, _, cx| cx.notify());
+        Self { menu, mark, _watch }
+    }
+}
+
 /// The side panel: the primary button, the `PROJECTS` label, the projects and, pinned at the
 /// panel's bottom under a line whatever the tree's length, the "Ended" group, which unfolds upward
 /// over the tree.
@@ -394,6 +507,9 @@ pub struct Sidebar {
     by_machine: bool,
     /// The Projects header's "⋯": Group by machine, offered once there are machines to group by.
     arrange: Option<Entity<Menu>>,
+    /// What each group's heading holds, by the group's id: its "⋯" menu and the mark it shows
+    /// while folded. They outlive the group while its heading folds away.
+    group_parts: HashMap<String, GroupParts>,
     offered: bool,
     /// The "Ended" group, and whether it holds a session: it folds away when it holds none.
     ended: Option<(Entity<EndedNode>, bool)>,
@@ -431,6 +547,7 @@ impl Sidebar {
             section_list: Listing::default(),
             by_machine: false,
             arrange: None,
+            group_parts: HashMap::new(),
             offered: false,
             ended: None,
             ending: None,
@@ -457,8 +574,26 @@ impl Sidebar {
     /// keeps what it was, folding away as a whole.
     pub fn set_arranged(&mut self, arranged: Arranged, cx: &mut Context<Self>) {
         if !self.by_machine && self.arranged != arranged {
+            self.group_parts_for(&arranged, cx);
             self.arranged = arranged;
             cx.notify();
+        }
+    }
+
+    /// Each group has its menu and its mark from the first time it is drawn, and a mark that
+    /// changed says it.
+    fn group_parts_for(&mut self, arranged: &Arranged, cx: &mut Context<Self>) {
+        self.group_parts
+            .retain(|id, _| arranged.groups.iter().any(|group| &group.id == id));
+        for group in &arranged.groups {
+            if !self.group_parts.contains_key(&group.id) {
+                let parts = GroupParts::new(&group.id, self.shell.clone(), cx);
+                self.group_parts.insert(group.id.clone(), parts);
+            }
+            let parts = &self.group_parts[&group.id];
+            if !parts.mark.read(cx).says(group.mark) {
+                parts.mark.update(cx, |mark, cx| mark.set(group.mark, cx));
+            }
         }
     }
 
@@ -721,6 +856,8 @@ pub struct ArrangedGroup {
     pub name: String,
     pub open: bool,
     pub rows: Vec<Entity<ProjectNode>>,
+    /// The strongest mark of what its projects hold, which its heading shows while it is folded.
+    pub mark: Option<AgentState>,
 }
 
 /// The projects' rows as the user arranged them: the groups, then the rows outside any group.
@@ -844,6 +981,16 @@ impl Sidebar {
         let mut list = Reorderable::new(projects_list_id());
         for group in &self.arranged.groups {
             let mut held = ReorderGroup::new(group.id.clone(), group.name.clone()).open(group.open);
+            // Built again at each frame, up to a moment after the group is gone: both hold
+            // entities of their own, never what the group's removal clears.
+            if let Some(parts) = self.group_parts.get(&group.id) {
+                let (menu, mark) = (parts.menu.clone(), parts.mark.clone());
+                if mark.read(cx).drawn() {
+                    let id = group.id.clone();
+                    held = held.mark(move |_, cx| mark.read(cx).mark.icon(&id).into_any_element());
+                }
+                held = held.trailing(move |_, _| menu.clone());
+            }
             for (key, place) in &order {
                 if place.as_deref() == Some(group.id.as_str())
                     && let Some(item) = items.remove(key)
@@ -1244,6 +1391,11 @@ impl ProjectNode {
 
     pub fn mark(&self) -> Option<AgentState> {
         self.mark.shown
+    }
+
+    /// The strongest mark of what it holds, whether it is folded or not.
+    pub fn held(&self) -> Option<AgentState> {
+        self.held
     }
 
     /// The machines that have it, as the row marks them.
