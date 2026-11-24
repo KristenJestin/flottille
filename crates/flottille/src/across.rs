@@ -2518,40 +2518,42 @@ fn masked_and_cut(text: &str, known: &Secrets, limit: usize) -> String {
     crate::mcp::cut(&cuts_masked(text, known), limit)
 }
 
-/// `text` masked piece by piece between the cuts the other machine made in it, the end of each
-/// piece a cut closes masked when it starts a secret, and the start of each piece a cut
-/// opens in the middle of the text masked when it ends one.
+/// `text` masked whole, then, around each cut the other machine made in it, the end of the piece
+/// a cut closes masked when it starts a secret, and the start of the piece a cut opens in the
+/// middle of the text masked when it ends one. Masked whole first, nothing the other machine
+/// wrote, a marker or what looks like one, is shown unmasked.
 fn cuts_masked(text: &str, known: &Secrets) -> String {
+    let masked = known.mask(text);
     let piece = |piece: &str, opened: bool, closed: bool| {
-        let mut masked = known.mask(piece);
+        let mut piece = piece.to_owned();
         if closed {
-            masked = known.mask_cut_end(&masked);
+            piece = known.mask_cut_end(&piece);
         }
         if opened {
-            masked = known.mask_cut_start(&masked);
+            piece = known.mask_cut_start(&piece);
         }
-        masked
+        piece
     };
-    let mut shown = String::with_capacity(text.len());
+    let mut shown = String::with_capacity(masked.len());
     let (mut from, mut opened) = (0, false);
-    for (span, goes_on) in cuts(text) {
+    for (span, goes_on) in cuts(&masked) {
         if span.start < from {
             continue;
         }
-        shown.push_str(&piece(&text[from..span.start], opened, true));
-        shown.push_str(&text[span.clone()]);
+        shown.push_str(&piece(&masked[from..span.start], opened, true));
+        shown.push_str(&masked[span.clone()]);
         (from, opened) = (span.end, goes_on);
     }
-    shown.push_str(&piece(&text[from..], opened, false));
+    shown.push_str(&piece(&masked[from..], opened, false));
     shown
 }
 
 /// Every cut a daemon makes in the answer of a tool, found in `text`, in order: where it is, and
 /// whether what follows goes on from the middle of the text cut. They are the end of a text
 /// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the middle of a long
-/// result `results::shorten` left out (`[N characters left out (lines a-b of c): …]`, on a line
-/// of its own, its end after it); and, in a result cut so, the bound of each line longer than
-/// `results::LINE_CHARS` it showed as several (a new line after a line of that many characters).
+/// result `results::shorten` left out (its marker, exactly as it writes it, on a line of its
+/// own); and, in a result cut so, each new line: one may split a line longer than
+/// `results::LINE_CHARS`, and masking may have shortened that line below it.
 fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
     let mut cuts = Vec::new();
     for (at, open) in text.match_indices("\u{2039}+") {
@@ -2562,35 +2564,47 @@ fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
             cuts.push((at..at + open.len() + digits + close.len(), false));
         }
     }
-    for (at, said) in text.match_indices(" characters left out (lines ") {
-        let before = &text[..at];
-        let number = before.trim_end_matches(|c: char| c.is_ascii_digit());
-        let (Some(open), Some(close)) =
-            (number.strip_suffix('['), text[at + said.len()..].find("}]"))
-        else {
+    for (at, _) in text.match_indices('[') {
+        let Some(length) = left_out(&text[at..]) else {
             continue;
         };
-        if number.len() == before.len() {
-            continue;
+        let end = at + length;
+        let alone = (at == 0 || text[..at].ends_with('\n'))
+            && (end == text.len() || text[end..].starts_with('\n'));
+        if alone {
+            let start = at.saturating_sub(usize::from(at > 0));
+            let end = end + usize::from(end < text.len());
+            cuts.push((start..end, true));
         }
-        let start = open.strip_suffix('\n').unwrap_or(open).len();
-        let end = at + said.len() + close + "}]".len();
-        let end = end + usize::from(text[end..].starts_with('\n'));
-        cuts.push((start..end, true));
     }
     if cuts.iter().any(|(_, goes_on)| *goes_on) {
-        let mut line = 0;
         for (at, _) in text.match_indices('\n') {
-            if text[line..at].chars().count() >= crate::results::LINE_CHARS
-                && !cuts.iter().any(|(span, _)| span.contains(&at))
-            {
+            if !cuts.iter().any(|(span, _)| span.contains(&at)) {
                 cuts.push((at..at + 1, true));
             }
-            line = at + 1;
         }
     }
     cuts.sort_by_key(|(span, _)| span.start);
     cuts
+}
+
+/// The length of the marker of `results::shorten` that `text` starts with, written exactly so:
+/// `[N characters left out (lines A-B of C): read them with run_status {"run": "res_…",
+/// "start": A}]`.
+fn left_out(text: &str) -> Option<usize> {
+    fn digits(text: &str) -> Option<&str> {
+        let rest = text.trim_start_matches(|c: char| c.is_ascii_digit());
+        (rest.len() < text.len()).then_some(rest)
+    }
+    let rest = digits(text.strip_prefix('[')?)?;
+    let rest = digits(rest.strip_prefix(" characters left out (lines ")?)?;
+    let rest = digits(rest.strip_prefix('-')?)?;
+    let rest = digits(rest.strip_prefix(" of ")?)?;
+    let rest = rest.strip_prefix("): read them with run_status {\"run\": \"res_")?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let rest = digits(rest.strip_prefix("\", \"start\": ")?)?;
+    let rest = rest.strip_prefix("}]")?;
+    Some(text.len() - rest.len())
 }
 
 /// The answer of request `request`, held for the user of this machine, of a caller of another
