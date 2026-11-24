@@ -1161,19 +1161,116 @@ pub(crate) async fn serve_call(
         Err(refused) => Err(refused),
         // A session its agent did not start: served as a call of this machine's agents is.
         Ok(daemon) if call.launch.is_empty() && call.tool != "approval_answer" => {
-            session_call(&daemon, &remote, &from, *call, None).await
+            session_call(&daemon, &remote, &from, *call, None, false).await
         }
+        // The review of a session its agent leads here: served as the same call of a pilot of
+        // this machine, and only that review.
+        Ok(daemon) if call.tool == REVIEW => match led_review(&daemon, &remote, &from, &call) {
+            Ok(()) => session_call(&daemon, &remote, &from, *call, None, true).await,
+            Err(refused) => Err(refused),
+        },
         // A read of a session or child its agent started here: served by the same tool as one it
         // did not start, that session or child read as its starter reads it on one machine.
         Ok(daemon) if READS.contains(&call.tool.as_str()) => {
             match own_launch(&daemon, &remote, &from, &call) {
-                Ok(launch) => session_call(&daemon, &remote, &from, *call, launch.agent).await,
+                Ok(launch) => {
+                    session_call(&daemon, &remote, &from, *call, launch.agent, false).await
+                }
                 Err(refused) => Err(refused),
             }
         }
         Ok(daemon) => called(&daemon, &remote, &from, *call),
     };
     received.answer(answer_of(answer, "a call"));
+}
+
+/// The review tool, which the pilot of a session of this machine calls from another machine to
+/// start that session's review, and for nothing else.
+const REVIEW: &str = "review";
+
+/// Whether `call`, a `review` of the machine of `from`, is the one it may send: the start of the
+/// review of the session its agent leads here, `{"action": "start", "agent": <that session>}`.
+/// Its own change, a pull request, a pass and a report are no review of that session.
+fn led_review(
+    daemon: &Daemon,
+    remote: &Remote,
+    from: &PublicKey,
+    call: &Call,
+) -> Result<(), Refused> {
+    let launch = own_launch(daemon, remote, from, call)?;
+    let asked: Value = serde_json::from_str(&call.arguments)
+        .map_err(|_| "the call's arguments are not JSON".to_owned())?;
+    if launch.kind != "led" || asked != json!({"action": "start", "agent": call.agent}) {
+        return Err(
+            "from another machine, review only starts the review of a session its pilot leads \
+             here: {\"action\": \"start\", \"agent\": \"<that session>\"}"
+                .to_owned()
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// `review {start, agent}` of `lead` aimed at `id`, a session it leads on another machine: sent
+/// there and judged there, as the same call of a pilot of that machine; its findings go to that
+/// session, and `lead` is told of them as of a session it leads here. `None` when it leads no
+/// such session.
+pub(crate) async fn review_led(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    lead: &Agent,
+    id: &str,
+) -> Option<Outcome> {
+    if daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+    let launch = daemon
+        .read(|store| store.launches("out", None, LaunchFilter::Agent(id)))
+        .ok()?
+        .into_iter()
+        .find(|launch| {
+            launch.caller == lead.id && launch.kind == "led" && launch.state != "refused"
+        })?;
+    let name = machine_name(daemon, &launch);
+    let session = match launch.asked["title"].as_str().map(str::trim) {
+        Some(title) if !title.is_empty() => format!("the session \"{title}\" (agent {id})"),
+        _ => format!("the session agent {id}"),
+    };
+    let aim = Aim {
+        machine: &launch.machine,
+        name: &name,
+        agent: id,
+        launch: &launch.launch,
+        session,
+        // Nothing comes back from a review that was refused: the lead calls again.
+        woken: false,
+    };
+    let args = json!({"action": "start", "agent": id});
+    Some(older_review(
+        forward_to(daemon, grant, REVIEW, &args, aim).await,
+        &name,
+    ))
+}
+
+/// What `outcome`, the answer of `name` to a `review` call, says to the lead: a machine of before
+/// the review of a led session answers that review is no tool another machine calls.
+fn older_review(outcome: Outcome, name: &str) -> Outcome {
+    match outcome {
+        Outcome::Refused(text)
+            if text.contains("\"review\" is not a tool another machine calls") =>
+        {
+            Outcome::Refused(format!(
+                "refused: {name} needs updating to review a session it runs for you: update \
+                 {name}, then call again"
+            ))
+        }
+        other => other,
+    }
 }
 
 fn called(
@@ -2211,13 +2308,15 @@ fn stand_in_cap(name: &str) -> String {
 /// judge and the same tool, the caller stood in for by an agent of its own (`stand_in`), in its
 /// tree's mode (Full only with the user's signed switch). A `viewer` device's agents only read.
 /// `reads`: the session or child of this machine the caller started, which it reads as its
-/// starter (`Grant::reads`).
+/// starter (`Grant::reads`). `review`: the call is the review of the session it leads here
+/// (`led_review`), the one call for which it is given the review tool.
 async fn session_call(
     daemon: &Arc<Daemon>,
     remote: &Arc<Remote>,
     from: &PublicKey,
     call: Call,
     reads: Option<String>,
+    review: bool,
 ) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
@@ -2253,8 +2352,13 @@ async fn session_call(
             .to_owned()
             .into());
     }
-    let tool = stand_in_tools()
+    let tools: Vec<&'static str> = stand_in_tools()
         .into_iter()
+        .chain(review.then_some(REVIEW))
+        .collect();
+    let tool = tools
+        .iter()
+        .copied()
         .find(|tool| *tool == call.tool)
         .ok_or_else(|| format!("{:?} is not a tool another machine calls", call.tool))?;
     let args: Value = serde_json::from_str(&call.arguments)
@@ -2292,6 +2396,7 @@ async fn session_call(
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
     let grant = Arc::new(crate::mcp::Grant {
         reads,
+        tools,
         ..stand_in_grant(daemon, &agent)
     });
     let played = crate::mcp::played_for(daemon, &grant, tool, args, &call.id).await;
@@ -2808,6 +2913,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_machine_of_before_the_review_is_told_to_be_updated() {
+        let said = "refused by server: \"review\" is not a tool another machine calls".to_owned();
+
+        let told = text_of(older_review(Outcome::Refused(said), "server"));
+
+        assert!(told.contains("server needs updating"), "{told}");
+        assert!(
+            !told.contains("is not a tool another machine calls"),
+            "{told}"
+        );
+    }
+
+    #[test]
+    fn another_refusal_of_a_review_is_left_as_it_is() {
+        let said = "refused by server: no.".to_owned();
+
+        let told = text_of(older_review(Outcome::Refused(said.clone()), "server"));
+
+        assert_eq!(told, said);
+    }
+
     fn text_of(outcome: Outcome) -> String {
         match outcome {
             Outcome::Done(text)
@@ -3274,6 +3401,46 @@ mod tests {
             pilot_stand_in(&daemon, &a_led_launch("old"), "app", Default::default()).unwrap();
 
         assert_eq!(pilot, "old@aa");
+    }
+
+    #[test]
+    fn a_resumed_session_led_by_a_stand_in_at_the_cap_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS, &["old"]);
+        let ended = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+
+        let refused = crate::agents::resume_write(&daemon, &ended).err().unwrap();
+
+        assert!(
+            refused
+                .message
+                .contains("64 agents calling this machine's sessions already"),
+            "{}",
+            refused.message
+        );
+        // Still ended: nothing was written, and its pilot still counts for nothing.
+        let after = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+        assert!(after.state.is_final());
+    }
+
+    #[test]
+    fn a_resumed_session_led_by_a_stand_in_under_the_cap_counts_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS - 1, &["old"]);
+        let ended = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+
+        let resumed = crate::agents::resume_write(&daemon, &ended).ok().unwrap();
+
+        assert!(!resumed.state.is_final());
     }
 
     #[test]

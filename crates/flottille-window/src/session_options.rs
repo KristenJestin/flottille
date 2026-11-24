@@ -39,6 +39,8 @@ const MARK: &str = "session-agent-pending";
 
 pub struct SessionOptions {
     shell: WeakEntity<Shell>,
+    /// How it asks its session's machine, given when its session's page is made (#1271).
+    asks: Option<crate::actions::Actions>,
     /// The root agent: the only one whose options this changes.
     session: String,
     runs: Runs,
@@ -51,9 +53,16 @@ pub struct SessionOptions {
 }
 
 impl SessionOptions {
+    /// Asks through `asks`, its session's machine's actions, whichever machine is shown.
+    pub fn asking(mut self, asks: crate::actions::Actions) -> Self {
+        self.asks = Some(asks);
+        self
+    }
+
     pub fn new(shell: WeakEntity<Shell>, session: String) -> Self {
         Self {
             shell,
+            asks: None,
             session,
             runs: Runs::default(),
             providers: Providers::default(),
@@ -184,9 +193,7 @@ impl SessionOptions {
             model,
             effort,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        crate::commands::ask(&self.shell, &self.asks, command, cx);
     }
 
     /// The daemon's answer: a refusal takes the change back and a toast says why.

@@ -213,6 +213,13 @@ impl AgentState {
 }
 
 impl Agent {
+    /// Whether the agent is a child: it has a parent here, or it is one an agent of another
+    /// machine launched, stored with no parent and below depth 0 (`docs/remote.md`, "A tree
+    /// across machines"). Every check of a root reads this, never the parent alone.
+    pub fn is_child(&self) -> bool {
+        self.parent.is_some() || self.depth > 0
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("an agent is always JSON")
     }
