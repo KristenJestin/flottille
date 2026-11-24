@@ -19,14 +19,13 @@ use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians,
+    TestSupportExt as _, Transformation, Window, div, px, radians,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::{perform_later, spaced, stack};
 use crate::settings::Reveal;
-use crate::shell::Shell;
 
 /// What a project's editor says when its text starts with the global one.
 pub const REPEATS: &str = "These rules repeat the global ones; you can remove that part.";
@@ -96,7 +95,7 @@ impl Shown {
 }
 
 pub struct RulesEditor {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The project it edits the rules of; the user's own for every project when none.
     project: Option<String>,
     /// It edits the Auto judge's guidance, not the rules.
@@ -125,7 +124,7 @@ pub struct RulesEditor {
 }
 
 impl RulesEditor {
-    pub fn new(shell: WeakEntity<Shell>, project: Option<String>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: Option<String>) -> Self {
         Self {
             shell,
             project,
@@ -145,7 +144,7 @@ impl RulesEditor {
     }
 
     /// The editor of the Auto judge's guidance.
-    pub fn judge(shell: WeakEntity<Shell>) -> Self {
+    pub fn judge(shell: crate::commands::ShellOf) -> Self {
         Self {
             judge: true,
             ..Self::new(shell, None)
@@ -153,7 +152,7 @@ impl RulesEditor {
     }
 
     /// The editor of the compactor's guidance.
-    pub fn compaction(shell: WeakEntity<Shell>) -> Self {
+    pub fn compaction(shell: crate::commands::ShellOf) -> Self {
         Self {
             compaction: true,
             ..Self::new(shell, None)
@@ -161,7 +160,7 @@ impl RulesEditor {
     }
 
     /// The editor of the guidance of the part `name` of Flottille, titled `title`.
-    pub fn part(shell: WeakEntity<Shell>, name: &str, title: &str) -> Self {
+    pub fn part(shell: crate::commands::ShellOf, name: &str, title: &str) -> Self {
         Self {
             part: Some((name.to_owned(), title.to_owned())),
             ..Self::new(shell, None)
@@ -176,7 +175,7 @@ impl RulesEditor {
 
     /// The editor of the instructions of the check `part` of the part `name` of Flottille, the
     /// check named `title`.
-    pub fn check(shell: WeakEntity<Shell>, name: &str, part: &str, title: &str) -> Self {
+    pub fn check(shell: crate::commands::ShellOf, name: &str, part: &str, title: &str) -> Self {
         Self {
             check: Some((name.to_owned(), part.to_owned(), title.to_owned())),
             ..Self::new(shell, None)

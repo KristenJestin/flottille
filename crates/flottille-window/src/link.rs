@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -153,6 +153,121 @@ pub enum Update {
         token: u64,
         update: crate::session_link::SessionUpdate,
     },
+    /// An update of another machine's connections ([`Updates::of`]): what its pages asked, or
+    /// read of it.
+    Machine {
+        machine: String,
+        update: Box<Update>,
+    },
+}
+
+/// Where the window's updates go: each one of another machine's connections is said of that
+/// machine ([`Update::Machine`]), so that what is read of one machine never fills a page of
+/// another.
+#[derive(Clone, Debug)]
+pub struct Updates {
+    sender: UnboundedSender<Update>,
+    machine: Option<String>,
+    /// Set once the one that made them no longer takes them ([`Updates::ending`]).
+    ended: Option<Arc<Ending>>,
+}
+
+/// Whether the updates are taken no more, and the connection of the link that sends them.
+#[derive(Debug, Default)]
+struct Ending {
+    ended: AtomicBool,
+    stream: Mutex<Option<UnixStream>>,
+}
+
+/// Dropped, the updates it was made with are taken no more: their link ends at once, its
+/// connection shut, idle or not.
+#[derive(Debug)]
+pub struct End(Arc<Ending>);
+
+impl Drop for End {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::SeqCst);
+        if let Some(stream) = self.0.stream.lock().unwrap().take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+impl Updates {
+    /// The same updates, said of `machine`.
+    pub fn of(&self, machine: &str) -> Updates {
+        Updates {
+            sender: self.sender.clone(),
+            machine: Some(machine.to_owned()),
+            ended: self.ended.clone(),
+        }
+    }
+
+    /// The same updates, taken until the [`End`] given with them is dropped.
+    pub fn ending(&self) -> (Updates, End) {
+        let ended = Arc::new(Ending::default());
+        let updates = Updates {
+            ended: Some(ended.clone()),
+            ..self.clone()
+        };
+        (updates, End(ended))
+    }
+
+    fn ended(&self) -> bool {
+        self.ended
+            .as_ref()
+            .is_some_and(|ending| ending.ended.load(Ordering::SeqCst))
+    }
+
+    /// The connection of the link that sends them: shut when they are ended, now if they are.
+    fn hold(&self, stream: &UnixStream) {
+        let Some(ending) = &self.ended else {
+            return;
+        };
+        let Ok(stream) = stream.try_clone() else {
+            return;
+        };
+        let mut held = ending.stream.lock().unwrap();
+        match ending.ended.load(Ordering::SeqCst) {
+            true => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            false => *held = Some(stream),
+        }
+    }
+
+    /// Fails once the window is gone: nothing takes the updates any more.
+    pub fn unbounded_send(&self, update: Update) -> std::result::Result<(), Gone> {
+        if self.ended() {
+            return Err(Gone);
+        }
+        let update = match &self.machine {
+            Some(machine) => Update::Machine {
+                machine: machine.clone(),
+                update: Box::new(update),
+            },
+            None => update,
+        };
+        self.sender.unbounded_send(update).map_err(|_| Gone)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed() || self.ended()
+    }
+}
+
+/// The window that took the updates is gone.
+#[derive(Debug)]
+pub struct Gone;
+
+impl From<UnboundedSender<Update>> for Updates {
+    fn from(sender: UnboundedSender<Update>) -> Updates {
+        Updates {
+            sender,
+            machine: None,
+            ended: None,
+        }
+    }
 }
 
 /// What the link has seen, readable from any thread: the number of the last event, and how many
@@ -179,7 +294,7 @@ pub struct Seen {
 pub const NOT_ANSWERING: Duration = Duration::from_secs(30);
 
 /// [`NOT_ANSWERING`], or what a scenario of the window set for the window it opens on its thread.
-fn not_answering() -> Duration {
+pub(crate) fn not_answering() -> Duration {
     #[cfg(feature = "test-support")]
     if let Some(limit) = NOT_ANSWERING_HERE.with(std::cell::Cell::get) {
         return limit;
@@ -225,7 +340,7 @@ pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
 }
 
 /// Starts the link's thread, sending its updates to `sender`.
-pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen> {
+pub fn spawn_into(connect: Connect, sender: impl Into<Updates>) -> Arc<Seen> {
     spawn_aimed_into(connect, Arc::default(), sender)
 }
 
@@ -234,8 +349,9 @@ pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen
 pub fn spawn_aimed_into(
     connect: Connect,
     aimed: Arc<AtomicU64>,
-    sender: UnboundedSender<Update>,
+    sender: impl Into<Updates>,
 ) -> Arc<Seen> {
+    let sender: Updates = sender.into();
     let seen = Arc::new(Seen {
         aimed,
         ..Seen::default()
@@ -264,7 +380,7 @@ fn now_ms() -> u64 {
 
 /// Says when what the link asked waits past `limit`, and when it is answered after that; ends
 /// with the window.
-fn watch(asking: &AtomicU64, updates: &UnboundedSender<Update>, limit: Duration) {
+fn watch(asking: &AtomicU64, updates: &Updates, limit: Duration) {
     let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
     let mut told = None;
     while !updates.is_closed() {
@@ -286,7 +402,7 @@ fn watch(asking: &AtomicU64, updates: &UnboundedSender<Update>, limit: Duration)
     }
 }
 
-fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
+fn run(connect: Connect, updates: Updates, seen: Arc<Seen>) {
     let mut retry = FIRST_RETRY;
     let mut briefs = Briefs::default();
     let reads = ProviderReads::default();
@@ -328,12 +444,13 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
 fn follow(
     stream: UnixStream,
     connect: &Connect,
-    updates: &UnboundedSender<Update>,
+    updates: &Updates,
     seen: &Seen,
     briefs: &mut Briefs,
     reads: &ProviderReads,
     aimed: u64,
 ) -> Result<()> {
+    updates.hold(&stream);
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     conn.asking = Some(seen.asking.clone());
     let last = seen.last_seq.load(Ordering::Relaxed);
@@ -590,7 +707,7 @@ struct ReadState {
 }
 
 impl ProviderReads {
-    fn start(&self, connect: &Connect, updates: &UnboundedSender<Update>) {
+    fn start(&self, connect: &Connect, updates: &Updates) {
         let (reads, connect, updates) = (self.clone(), connect.clone(), updates.clone());
         self.begin(move || {
             std::thread::Builder::new()
@@ -630,7 +747,7 @@ impl ProviderReads {
         state.running
     }
 
-    fn run(&self, connect: &Connect, updates: &UnboundedSender<Update>) {
+    fn run(&self, connect: &Connect, updates: &Updates) {
         loop {
             // Numbered as it is asked, whoever asks (`providers::next_read`).
             let read = crate::providers::next_read();
@@ -989,6 +1106,7 @@ mod tests {
         let asking = Arc::new(AtomicU64::new(0));
         let (updates, mut said) = unbounded();
         let watched = asking.clone();
+        let updates = Updates::from(updates);
         let watcher =
             std::thread::spawn(move || watch(&watched, &updates, Duration::from_millis(100)));
         let next = |said: &mut UnboundedReceiver<Update>| {

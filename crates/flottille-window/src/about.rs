@@ -13,13 +13,12 @@ use gpui_design_system::{
 use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    SharedString, Styled, Subscription, TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::{boxed, line_field, perform_later, spaced, stack};
-use crate::shell::Shell;
 
 /// What the section says under its title.
 const SENTENCE: &str = "What every agent is told about you, before the rules, and what an agent \
@@ -65,7 +64,7 @@ impl Shown {
 }
 
 pub struct AboutEditor {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// Made when first drawn, since a text field needs a window.
     fields: Option<Fields>,
     shown: Option<Shown>,
@@ -84,7 +83,7 @@ struct Fields {
 }
 
 impl AboutEditor {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf) -> Self {
         Self {
             shell,
             fields: None,

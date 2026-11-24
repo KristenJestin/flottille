@@ -16,8 +16,8 @@ use std::rc::Rc;
 
 use gpui_design_system::Modal;
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, Entity, FocusHandle, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window, div,
+    AnyView, App, AppContext as _, Context, Entity, EntityId, FocusHandle, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
 };
 
 /// What gives a dialog's focus handle, when it has a field to take the focus.
@@ -27,6 +27,8 @@ type Focus = Rc<dyn Fn(&App) -> Option<FocusHandle>>;
 struct Slot {
     /// The id of its modal: what a test and `Modals::open` name it by.
     id: &'static str,
+    /// The entity it belongs to: gone with it ([`Modals::forget`]).
+    owner: EntityId,
     view: AnyView,
     open: Rc<dyn Fn(&App) -> bool>,
     /// What takes the focus when it is the top one again, if it has a field to give it to.
@@ -89,6 +91,7 @@ impl Modals {
         let (opened, focused) = (section.clone(), section.clone());
         self.slots.push(Slot {
             id,
+            owner: section.entity_id(),
             view: view.into(),
             open: Rc::new(move |cx| open(opened.read(cx))),
             focus: Rc::new(move |cx| focus(focused.read(cx), cx)),
@@ -109,6 +112,7 @@ impl Modals {
         let opened = view.clone();
         self.slots.push(Slot {
             id,
+            owner: view.entity_id(),
             view: view.clone().into(),
             open: Rc::new(move |cx| open(opened.read(cx))),
             focus: Rc::new(|_| None),
@@ -124,12 +128,31 @@ impl Modals {
     }
 
     /// The dialog `id` is being opened: it goes on top of the ones already open.
+    /// Each machine's Settings has its own sections, and so its own dialog of the same id: they
+    /// all go on top, and the one whose section opened it is drawn.
     pub fn open(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        if let Some(at) = self.slots.iter().position(|slot| slot.id == id) {
-            let slot = self.slots.remove(at);
-            self.slots.push(slot);
+        let (opened, others) = std::mem::take(&mut self.slots)
+            .into_iter()
+            .partition::<Vec<_>, _>(|slot| slot.id == id);
+        self.slots = others;
+        if !opened.is_empty() {
+            self.slots.extend(opened);
             cx.notify();
         }
+    }
+
+    /// Lets go of the dialogs of `owners`, whose pages are gone (a machine removed, #1271).
+    pub fn forget(&mut self, owners: &[EntityId], cx: &mut Context<Self>) {
+        let held = self.slots.len();
+        self.slots.retain(|slot| !owners.contains(&slot.owner));
+        if self.slots.len() != held {
+            cx.notify();
+        }
+    }
+
+    /// How many dialogs are held, open or not.
+    pub fn held(&self) -> usize {
+        self.slots.len()
     }
 
     /// The open dialogs by their id, the first opened first, the top one last.

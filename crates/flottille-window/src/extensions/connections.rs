@@ -21,8 +21,8 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
-    WeakEntity, Window, div, px, relative,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, Window,
+    div, px, relative,
 };
 use serde_json::{Map, Value, json};
 
@@ -31,7 +31,6 @@ use crate::commands::{
     boxed, line_field, optional_line, perform_later, problem_line, section_blocks, spaced, stack,
 };
 use crate::modals::Modals;
-use crate::shell::Shell;
 use crate::vault::{VaultEntry, VaultSection};
 
 /// Its name in `extension.list`.
@@ -956,7 +955,7 @@ fn entry_options(
 }
 
 pub struct ConnectionsSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The window's host of dialogs: the form and the review open through it, over any page.
     modals: Entity<Modals>,
     vault: Entity<VaultSection>,
@@ -1016,7 +1015,7 @@ type MenuMade = (bool, bool, bool, Option<String>);
 
 impl ConnectionsSection {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         vault: Entity<VaultSection>,
         modals: Entity<Modals>,
     ) -> Self {
@@ -1253,6 +1252,13 @@ impl ConnectionsSection {
     }
 
     /// The servers as last listed; `None` until the daemon has said.
+    /// What the section says of `name`'s copy on another machine.
+    pub fn elsewhere_said(&self, name: &str) -> Option<String> {
+        self.elsewhere
+            .get(name)
+            .map(|(machine, state)| state.said(machine))
+    }
+
     pub fn servers(&self) -> Option<&[Server]> {
         self.listed.as_deref()
     }
@@ -1410,6 +1416,8 @@ impl ConnectionsSection {
                             .insert(name.clone(), (machine.clone(), Elsewhere::SignedOut));
                         let this = cx.entity().downgrade();
                         let (to_sign, on) = (name.clone(), machine.clone());
+                        // Clicked once another machine is in front: still this section's, which
+                        // asks its own machine.
                         toast(
                             Toast::success(format!("Connection {name} shared with {machine}"))
                                 .detail(format!("It signs in on {machine} for itself."))

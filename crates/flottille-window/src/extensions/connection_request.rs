@@ -14,15 +14,14 @@ use gpui_design_system::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity,
-    Window, div, px,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div,
+    px,
 };
 use serde_json::{Value, json};
 
 use super::connections::{Server, ServerSecret, command_line};
 use crate::actions::Command;
 use crate::commands::{perform_later, problem_line};
-use crate::shell::Shell;
 
 /// The id of the dialog's modal, the one the window's host holds.
 pub const MODAL: &str = "connection-request";
@@ -219,7 +218,10 @@ fn setting_said(setting: &str) -> &'static str {
 }
 
 pub struct ConnectionRequest {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
+    /// The machine of the request (`None`: this one): the one whose page opened it, which it
+    /// asks and whose answers it takes, whichever is in front (#1271).
+    machine: Option<String>,
     /// The request open, kept while the dialog fades out.
     number: Option<u64>,
     open: bool,
@@ -272,9 +274,10 @@ fn entries_said(said: &str) -> Vec<(String, Option<String>)> {
 }
 
 impl ConnectionRequest {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf) -> Self {
         Self {
             shell,
+            machine: None,
             number: None,
             open: false,
             proposal: None,
@@ -303,11 +306,25 @@ impl ConnectionRequest {
             params,
             then: super::Then::ConnectionRequest(then),
         };
-        perform_later(&self.shell, command, cx);
+        // The request's machine, whichever is in front when the user decides (#1271).
+        let shell = crate::commands::ShellOf::on((*self.shell).clone(), self.machine.clone());
+        perform_later(&shell, command, cx);
+    }
+
+    /// The machine of the request open (`None`: this one).
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+
+    /// Its machine is no longer the user's: the dialog closes, and its answers are not taken.
+    pub fn forget(&mut self, cx: &mut Context<Self>) {
+        self.number = None;
+        self.close(cx);
     }
 
     /// Opens the dialog on the request `number`: the daemon says what it would write.
-    pub fn open(&mut self, number: u64, cx: &mut Context<Self>) {
+    pub fn open(&mut self, number: u64, machine: Option<String>, cx: &mut Context<Self>) {
+        self.machine = machine;
         self.number = Some(number);
         self.open = true;
         self.proposal = None;
@@ -488,9 +505,10 @@ impl ConnectionRequest {
         let Some(number) = self.number else {
             return;
         };
+        let machine = self.machine.clone();
         self.shell
             .update(cx, |shell, cx| {
-                shell.add_vault_entry_for_request(number, &entry, host, window, cx)
+                shell.add_vault_entry_for_request(number, machine, &entry, host, window, cx)
             })
             .ok();
         cx.notify();
@@ -499,8 +517,11 @@ impl ConnectionRequest {
     /// "Review": the connection's review opens over the page, first: the request stays held.
     fn review(&mut self, name: String, cx: &mut Context<Self>) {
         self.open = false;
+        let machine = self.machine.clone();
         self.shell
-            .update(cx, |shell, cx| shell.review_connection(&name, cx))
+            .update(cx, |shell, cx| {
+                shell.review_connection_on(machine, &name, cx)
+            })
             .ok();
         cx.notify();
     }
@@ -514,10 +535,10 @@ impl ConnectionRequest {
             return;
         };
         self.open = false;
-        let adding = proposal.action == "add";
+        let (adding, machine) = (proposal.action == "add", self.machine.clone());
         self.shell
             .update(cx, |shell, cx| {
-                shell.answer_connection_request(number, &server, adding, window, cx)
+                shell.answer_connection_request(number, machine, &server, adding, window, cx)
             })
             .ok();
         cx.notify();
