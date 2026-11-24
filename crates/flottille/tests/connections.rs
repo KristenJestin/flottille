@@ -5900,6 +5900,14 @@ fn the_plugins_reason_is_read_up_to_a_kibibyte() {
     assert!(!said.contains(&"x".repeat(1025)), "{} bytes", said.len());
 }
 
+/// What a test of the real agent-browser does when this machine lacks the browser, pasta or what it
+/// needs: `required` is the value of the environment variable `FLOTTILLE_REAL_BROWSER`. Said and
+/// passed by default; a failure where CI's `real-browser` job sets it to `required`, so that a
+/// change of the browser's sandbox never passes with these tests skipped.
+fn real_browser_skip(why: &str, required: Option<&str>) {
+    eprintln!("skipped: {why}");
+}
+
 /// The real agent-browser 0.43.x to drive, when this machine has it: `FLOTTILLE_TEST_AGENT_BROWSER`
 /// names it, else `agent-browser` on the `PATH`; a launcher beside its native binary (npm's
 /// `agent-browser.js`) is replaced by that binary, which needs no Node in the run's sandbox.
@@ -6015,17 +6023,18 @@ fn real_user() -> Option<(User, PathBuf)> {
         .with_env("TMPDIR", temporary.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
     let program = match real_agent_browser(&user.path("home")) {
         Ok(program) => program,
         Err(why) => {
-            eprintln!("skipped: {why}");
+            real_browser_skip(&why, required.as_deref());
             return None;
         }
     };
     let pasta = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .any(|folder| folder.join("pasta").is_file());
     if !pasta {
-        eprintln!("skipped: no pasta (passt) on the PATH");
+        real_browser_skip("no pasta (passt) on the PATH", required.as_deref());
         return None;
     }
     Some((user, program))
@@ -6209,6 +6218,20 @@ fn found_nothing(probe: &Value, mode: &str) {
         probe["stream"], "connected",
         "{mode}: a run reached agent-browser's own port: {probe}"
     );
+}
+
+#[test]
+fn the_required_switch_fails_a_real_browser_test_that_would_be_skipped() {
+    let failed = std::panic::catch_unwind(|| {
+        real_browser_skip("no agent-browser on the PATH", Some("required"));
+    });
+    assert!(failed.is_err(), "a skip under `required` did not fail");
+}
+
+#[test]
+fn without_the_required_switch_a_missing_real_browser_is_skipped() {
+    real_browser_skip("no agent-browser on the PATH", None);
+    real_browser_skip("no agent-browser on the PATH", Some(""));
 }
 
 #[test]
