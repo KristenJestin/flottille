@@ -135,6 +135,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("vault.from_file", Drive),
     ("vault.asks", Read),
     ("vault.ask_dismiss", Drive),
+    ("vault.ask_accept", Drive),
     ("remote.machines", Read),
     ("remote.members", Read),
     ("remote.launches", Read),

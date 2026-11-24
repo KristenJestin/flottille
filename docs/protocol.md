@@ -225,6 +225,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.from_file` | drive |
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
+| `vault.ask_accept` | drive |
 | `remote.machines` | read |
 | `remote.members` | read |
 | `remote.launches` | read |
@@ -1349,7 +1350,9 @@ pictures decoded and written off the runtime's threads.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). The user's
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). Beside
+  them, `"starts": {<project>: <machine>}`: the machine the user chose a shared project's sessions
+  start on, this machine by its own name (#1266; `docs/design.md` §10, the project page). The user's
   arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
   arrangement writes (a fold or a lead never does, so a window that only folds a project cannot
   erase what another made): `{"order": [<name>], "groups": [{"id", "name", "open", "projects":
@@ -1418,14 +1421,22 @@ plain `http` to another machine is refused, and so is an entry an open request w
 The requests agents made for an entry (`docs/vault.md`, "Asking the user for an entry"):
 
 - `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
-  "url", "host", "username", "for", "every", "takes_username", "joined"}]}`, the open requests,
+  "url", "host", "username", "for", "every", "takes_username", "edit", "joined"}]}`, the open requests,
   oldest first; `ask` is the number of its `vault.asked` event, `project` the asking agent's,
   `every` whether the entry is every project's, `description`, `url`, `username` and `for` what
   prefills the form of a new entry (`null` when not given), `host` where the secret goes as the
   daemon read `url`, `joined` the agents whose ask joined it. The
-  entry is set with `vault.set`, which answers the open requests for its name.
+  entry is set with `vault.set`, which answers the open requests for its name. An agent's
+  proposed edit of an entry that exists (`docs/vault.md`, "Proposing an edit of an entry") is one
+  of them, its `edit` each field changed (`url`, `username`, `description`, `project`, `for`) to
+  `{"before", "after"}`, and the other fields the entry as the proposal leaves it; `edit` is
+  `null` for a new entry.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
   `the user dismissed the request …`; `not-found` when no such request is open.
+- `vault.ask_accept {ask}` applies a proposed edit as `vault.set` would save the entry with it,
+  its secret kept and every check of that Save made (a refusal leaves the request open), answers
+  the entry as `vault.set` does, and hands the agent `the user accepted your proposed edit …`;
+  refused for a request of a new entry.
 
 ### The remote methods
 

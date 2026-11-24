@@ -11,6 +11,10 @@
 //! their path under `/tmp/.X11-unix` stay open to Landlock: a rule on `/tmp` would take from a
 //! program what it makes there, and the private mount namespace empties the folder instead
 //! (`mounts.rs`).
+//!
+//! The connections' browsers' profiles (`browsers.rs`) are kept out the same way: the namespace
+//! empties their folder, and Landlock denies it only where there is no namespace, for the same
+//! reason; the server of a connection and its login are given back their own folder.
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -124,7 +128,7 @@ fn allowed(dir: &Path, denied: &[PathBuf], out: &mut Vec<CString>) {
 /// The command runs kept out of the user's runtime folders where the kernel has Landlock (its
 /// second ABI or later); elsewhere it runs as before (`docs/vault.md` says the gap).
 pub fn confined(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    confine(command, &[], false)
+    confine(command, &[], false, None)
 }
 
 /// [`confined`], `open` (the display folder the daemon made for this command alone) left within
@@ -135,7 +139,7 @@ pub fn confined_but<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
-    confine(command, open.as_slice(), false)
+    confine(command, open.as_slice(), false, None)
 }
 
 /// [`confined_but`], each folder of `open` left within its reach: a connection's browser gets its
@@ -144,23 +148,37 @@ pub fn confined_given<'a>(
     command: &'a mut tokio::process::Command,
     open: &[&crate::display::Folder],
 ) -> &'a mut tokio::process::Command {
-    confine(command, open, false)
+    confine(command, open, false, None)
+}
+
+/// [`confined_given`], given back the folder of one connection's browser too, its profile in it,
+/// which every other confined command is kept out of. A [`crate::browsers::Folder`] and no path:
+/// only the daemon's own folder is ever an exception. For the connection's server and its login.
+pub fn confined_browser<'a>(
+    command: &'a mut tokio::process::Command,
+    open: &[&crate::display::Folder],
+    browser: &crate::browsers::Folder,
+) -> &'a mut tokio::process::Command {
+    confine(command, open, false, Some(browser.path()))
 }
 
 /// [`confined`], lent the user's SSH agent: the right to connect to the socket found at the
 /// daemon's start, and nothing else of the folder it is in. Never a path a variable or a
 /// request names. For the daemon's own fetch of an SSH remote (`git::remote`).
 pub fn confined_lent(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    confine(command, &[], true)
+    confine(command, &[], true, None)
 }
 
 fn confine<'a>(
     command: &'a mut tokio::process::Command,
     open: &[&crate::display::Folder],
     lent: bool,
+    browser: Option<&Path>,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
+    // The browsers' profiles (`browsers.rs`), emptied in the namespace with the runtime folders.
+    let browsers = crate::browsers::base().filter(|base| base.is_dir());
     // The private mount namespace first: the runtime folders and, unless it is given X11,
     // X11's socket folder emptied, with what the daemon gives the command put back.
     let given_x11 = open.iter().any(|folder| folder.x11());
@@ -170,10 +188,12 @@ fn confine<'a>(
                 .iter()
                 .cloned()
                 .chain(x11_folder().filter(|_| !given_x11))
+                .chain(browsers.map(Path::to_owned))
                 .collect();
             let kept: Vec<PathBuf> = open
                 .iter()
                 .filter_map(|folder| folder.path().canonicalize().ok())
+                .chain(browser.map(Path::to_owned))
                 .chain(
                     crate::ssh_agent::socket()
                         .filter(|_| lent)
@@ -193,15 +213,30 @@ fn confine<'a>(
                 .get_current_dir()
                 .map(Path::to_owned)
                 .or_else(|| std::env::current_dir().ok());
+            // The folders on the way to the browsers' kept where they are too: renamed, the
+            // browsers' would be at a path no namespace empties.
+            let mut pinned = crate::pushed::pinned();
+            if browsers.is_some() {
+                pinned.extend(crate::browsers::pinned().iter().cloned());
+            }
+            pinned.sort();
+            pinned.dedup();
+            pinned.sort_by_key(|folder| folder.components().count());
             crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())?
-                .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())?
+                .protecting(&pinned, &crate::pushed::read_only())?
                 .giving(crate::ssh_owned::copies())
         })
         .flatten();
+    // Without the namespace, Landlock denies the browsers' folder itself. Only then: Landlock
+    // grants and never takes away, so the folders on the way to a denied one lose the right to
+    // make or remove an entry in them, the home among them.
+    let hidden = namespace.is_some();
     if let Some(mut plan) = namespace {
         // SAFETY: `Plan::enter` makes system calls alone on what the plan allocated before.
         unsafe { command.pre_exec(move || plan.enter()) };
     }
+    let browsers = browsers.filter(|_| !hidden);
+    denied.extend(browsers.map(Path::to_owned));
     let rights = rights(abi);
     let connecting = rights & RESOLVE_UNIX != 0;
     // The user's SSH agent's socket outside the runtime folders: denied by its own path, and each
@@ -232,6 +267,12 @@ fn confine<'a>(
     }
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
+    // The connection's own browser folder given back, with every right, where it is denied.
+    paths.extend(
+        browser
+            .filter(|_| browsers.is_some())
+            .and_then(|folder| CString::new(folder.as_os_str().as_bytes()).ok()),
+    );
     let open: Vec<CString> = open
         .iter()
         .filter_map(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok())

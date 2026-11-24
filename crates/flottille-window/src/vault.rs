@@ -437,6 +437,24 @@ impl VaultSection {
         self.connection = connection;
     }
 
+    /// "Edit" from an agent's proposed edit (`vault_ask.rs`): the entry's own form of an edit, on
+    /// `entry` as the proposal leaves it, its secret left empty to keep it, `why` under what it
+    /// is for and the `host` its URL sends the secret to. The user changes what they want and
+    /// saves, or closes it and nothing changes.
+    pub fn edit_proposed(
+        &mut self,
+        entry: &VaultEntry,
+        why: String,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(Some(entry), window, cx);
+        self.bound = entry.bound.clone();
+        self.why = Some(why);
+        self.host = host.zip(entry.url.clone());
+    }
+
     /// "New entry…" on an agent's request to write a connection that names `entry`, not made yet:
     /// its name and, as its address, the `host` the request sends it to; the secret is typed here.
     pub fn add_for_request(

@@ -268,6 +268,8 @@ pub struct Folds {
     pub machines: HashMap<String, bool>,
     /// Each project of a machine's section, by [`machine_key`]: whether it is unfolded.
     pub on_machines: HashMap<String, bool>,
+    /// Each shared project, by name: the machine the user chose its sessions start on (#1266).
+    pub starts: HashMap<String, String>,
 }
 
 /// What the state keeps a project of a machine's section under.
@@ -295,6 +297,14 @@ impl Folds {
             by_machine: state["sidebar"]["by_machine"].as_bool().unwrap_or(false),
             machines: flags("machines"),
             on_machines: flags("on_machines"),
+            starts: state["sidebar"]["starts"]
+                .as_object()
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(name, on)| Some((name.clone(), on.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -311,6 +321,9 @@ impl Folds {
         }
         if !self.on_machines.is_empty() {
             json["on_machines"] = json!(self.on_machines);
+        }
+        if !self.starts.is_empty() {
+            json["starts"] = json!(self.starts);
         }
         json
     }

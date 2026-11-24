@@ -215,6 +215,51 @@ an entry to the vault, not a request with rules of its own.
 The secret goes from the form's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.
 
+## Proposing an edit of an entry
+
+An entry may be almost right: its URL points to a page with no login form, its username is wrong,
+it is bound to the wrong project. The agent does not tell the user, in words, to retype it: it
+proposes the edit, which the user accepts, edits or dismisses. It is the request of an asked entry,
+with the same card, the same place and the same answer; only what the card says and its buttons
+differ.
+
+- **`vault {action: "propose", name, why, url?, username?, description?, project?, for?}`.**
+  `name` is an entry the agent's project sees (another project's is no entry for it); each field
+  given is its new value, an empty text clearing it: `url`, read as an ask reads it (refused when it
+  is no `https` address, or `http` on this machine), `username`, `description`, `project` (`this`,
+  the agent's project alone, or `every`) and `for` (`worklog`, or `connection:<name>` for a
+  connection the user declared) for an entry bound to no use yet: an entry keeps its one use, and
+  the refusal does not name it. A proposal that changes nothing is refused, and so is a second one
+  for an entry while one waits.
+- **Never the secret.** The schema has no field for it and an argument it does not know is
+  refused; Accept rewrites the metadata only, as an edit that keeps the secret does: the keyring
+  item is never written, replaced or deleted, and read only to mask a new username's Basic form.
+- **Always held for the user**, in every mode, Full included: no rule applies it. The call is
+  answered at once (`… is held for the user, who accepts, edits or dismisses it`), and the answer
+  comes later as a delivery.
+- **Its card**, in **Waiting for you** with the asked entries' (and the inbox, the bell, the
+  session's "waits for you" mark, the conversation's quiet line `proposed an edit of the vault
+  entry <name> · waiting for you`, then `… · accepted`, `… · saved` or `… · dismissed`): **Proposes
+  a vault edit**, the entry's name, each field changed on a line of its own as before → after
+  (`URL: https://id.example.invalid/realms/dev/ → https://id.example.invalid/realms/dev/account`),
+  the host a new URL sends the secret to (**Goes to**, the daemon's reading), and the agent's
+  reason. Its buttons: **Dismiss**, **Edit** and **Accept**, all disabled while Accept or Dismiss
+  runs. Accept applies it in one action; Edit opens the entry's own form of an edit (`Edit
+  <name>`, the secret left empty to keep it) prefilled with the proposal and the agent's reason,
+  where the user changes what they want and saves, or closes it and nothing changes; Dismiss
+  changes nothing.
+- **Checked as a hand edit.** Accept is the user's own Save of the entry as it is then with the
+  fields proposed, in the daemon: every check of that Save applies (a login's entry on plain
+  `http` to another machine, an address login cannot read, a project the use refuses), its refusal
+  is said in a toast and the request stays open, for Edit or Dismiss. An entry removed meanwhile
+  is not made anew: it would have no secret.
+- **Answered as an asked entry is**: the agent whose project sees the entry is handed
+  `the user accepted your proposed edit of the vault entry <name>`, or, saved from its form or any
+  other way, `the user saved the vault entry <name> from its form after your proposed edit`; on
+  Dismiss, `the user dismissed your proposed edit of the vault entry <name>: nothing of it
+  changed`. Like the card of an asked entry, it has no command of its own: the user's
+  `flottille vault edit` saves the entry, which answers it.
+
 ## How a secret is used
 
 Through Flottille's own tools: a tool that needs a secret takes the entry's **name**, and the
@@ -374,6 +419,27 @@ push the gate let through, and its checks' dry run, are the exception (below):
   has it) say so. The daemon probes it once, by a child that makes one: a probe that concludes
   nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
   process still starts in its namespace, or fails to start.
+
+**The browsers' profiles stay out of every run.** A connection's browser keeps its profile (its
+cookies, the sign-ins the user made by hand or through a vault login) in
+`$XDG_STATE_HOME/flottille/browsers/<connection>/profile` (`docs/extensions.md`, "Adapters").
+Chrome without a session bus encrypts its cookies with a key every Chrome knows, so whoever reads
+the file takes the sign-in. The daemon makes `browsers/` at its start (mode 0700), and every
+process it confines is kept out of it: the private mount namespace empties it as it empties the
+runtime folders, and only the connection's own folder is put back, for its server and its login
+(and its reload of the page), the folder the daemon made for that connection, never one a
+variable or a request names. The folders on the way to `browsers/` that the user may change
+(the state folder, the home…) are kept where they are in the namespace, as the ones on the way to
+`~/.ssh` (below): a run that renamed one would have the next run, whose namespace empties the
+path found at the daemon's start, open the profiles under the new name; the rename fails. It is made once and never made again while a browser may run (the
+inode Landlock and the mount hold, #1040), and removed with its connection, once the browser is
+closed. The gate holds `browsers/` for a login's place, as Flottille's keys (`docs/tools.md`,
+"The gate"), so a line that names a path in it is refused in every mode, also where the kernel
+gives no namespace. Where it gives none, Landlock denies the folder itself (its second ABI or
+later) and gives the connection's server and login their own folder back. Only then, because a
+Landlock rule grants and never takes away: the folders on the way to a denied one (the home
+among them) get no rule of their own, so a confined process cannot make, remove or rename an
+entry directly in them, nor write a file made there after it started (below, "The gaps").
 
 **A run in Full is the exception, and nothing is held back from it** (`docs/tools.md`, "In
 Full, a run is the user's own"): it has the daemon's environment, no namespace and no Landlock,
@@ -736,6 +802,13 @@ The gaps, where the platform does not allow more:
   cannot list it nor read the login's token or agent-browser's configuration, and agent-browser's
   daemon's socket is in a folder of a random name it cannot guess, but it can connect to the
   login's socket, whose name it can guess and which refuses a request without the token;
+- where the kernel refuses user namespaces, Landlock denies the browsers' profiles
+  (`$XDG_STATE_HOME/flottille/browsers`) itself, and the folders on the way to it, the home
+  among them, lose the right to make, remove or rename an entry directly in them, for every
+  confined process: a program that writes a new file at the top of the home (a history file, a
+  lock beside `~/.gitconfig`) fails there. Default taken, to confirm: the sign-ins are kept out
+  rather than the top of the home left open. Without Landlock either (below its second ABI), a
+  run that does not name the path reaches the profiles: only the gate keeps them out;
 - **a browser of a connection is in the runs' network where it cannot have its own** ("The
   browser's network", below): agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`,
   so Chrome's DevTools listens on the loopback, on a port of its choice, with no token, and
