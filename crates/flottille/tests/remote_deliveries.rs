@@ -764,3 +764,114 @@ fn plain_turn_ends_kept_for_a_machine_never_push_out_a_report() {
     // The one it was told of before the machine went off, and the latest after.
     assert_eq!(prompts_with(&pc, PLAIN_END), 2, "{:#?}", pc.prompts());
 }
+
+/// A secret only pc knows, in a secret file of its project's folder: the place of its root.
+pub(crate) const PC_SECRET: &str = "pc-only-q8v3m1x7k2";
+
+/// `PC_SECRET` written in the `.env` of pc's project's folder.
+pub(crate) fn with_pc_secret(pc: &Machine) {
+    std::fs::write(
+        pc.folder().join(".env"),
+        format!("EXPORT_KEY={PC_SECRET}\n"),
+    )
+    .unwrap();
+}
+
+/// How many deliveries `machine` stored, and prompts its agents were sent, holding `text`.
+pub(crate) fn stored_or_prompted(machine: &Machine, text: &str) -> usize {
+    let store = rusqlite::Connection::open(machine.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE instr(body, ?1) > 0",
+            [text],
+            |row| row.get::<_, usize>(0),
+        )
+        .unwrap();
+    store + prompts_with(machine, text)
+}
+
+#[test]
+fn a_report_from_a_child_on_another_machine_is_masked_with_the_caller_s_env() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "report", "arguments": {
+                "text": format!("The export tests sign with {PC_SECRET} now.")
+            }}}
+        ]}]),
+    );
+    let (_child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    with_pc_secret(&pc);
+    prompted(&server, "Write the tests of the export.");
+
+    release(&server);
+    prompted(&pc, "The export tests sign with");
+
+    assert!(
+        prompts_with(&pc, "sign with [masked] now.") > 0,
+        "{:#?}",
+        pc.prompts()
+    );
+    assert_eq!(stored_or_prompted(&pc, PC_SECRET), 0, "{:#?}", pc.prompts());
+}
+
+#[test]
+fn a_secret_cut_in_half_in_a_delivery_from_another_machine_is_masked() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    with_pc_secret(&pc);
+    let parent = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = server.stand_in();
+    let deliver = |id: &str, body: String| {
+        MachineMessage::Deliver(Box::new(Deliver {
+            id: id.into(),
+            launch: launch.clone(),
+            agent: parent.clone(),
+            kind: "child-question".into(),
+            body,
+            urgency: "urgent".into(),
+            ended: false,
+        }))
+    };
+    let half = &PC_SECRET[..12];
+    // Cut by the other machine as `across::fitted` cuts a long delivery, saying so.
+    let fitted = format!(
+        "First question, cut: x{half}\n\n[cut: 900 more characters; session_read \
+         {{\"session\": \"{child}\"}} on server reads the rest]"
+    );
+    // Cut at 64,000 characters without a word, as the answer of a request is.
+    let head = "Second question, cut: ";
+    let unmarked = format!(
+        "{head}{}{half}",
+        "x".repeat(64_000 - head.len() - half.len())
+    );
+    assert_eq!(unmarked.chars().count(), 64_000);
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![deliver("d1", fitted), deliver("d2", unmarked)],
+    );
+
+    for answer in &answers {
+        assert!(answer.is_ok(), "{answer:?}");
+    }
+    prompted(&pc, "First question, cut: x[masked]");
+    prompted(&pc, "Second question, cut: ");
+    assert!(prompts_with(&pc, "x[masked]\\n\\n[cut: 900 more characters") > 0);
+    assert_eq!(
+        stored_or_prompted(&pc, &PC_SECRET[..6]),
+        0,
+        "{:#?}",
+        pc.prompts()
+    );
+}
