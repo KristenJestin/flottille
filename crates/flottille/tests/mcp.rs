@@ -488,8 +488,8 @@ fn a_launch_lists_its_rules_and_reads_its_arguments_on_demand() {
     let description = launch["description"].as_str().unwrap();
     for said in [
         "{\"kind\": \"child\"",
-        "uncommitted changes go with it",
-        "always held for the user",
+        "a copy of your place with your uncommitted changes",
+        "held for the user",
         "the repository's convention",
     ] {
         assert!(description.contains(said), "{said}: {description}");
