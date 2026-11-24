@@ -13,6 +13,7 @@ mod appearance;
 mod approval_command;
 mod approvals;
 mod bridge;
+mod browsers;
 mod changes_command;
 mod chat;
 mod children;
