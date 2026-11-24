@@ -856,8 +856,10 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   machine's list for this: each live root session's title, project, state and last exchange, never
   its conversation, the copy replaced whenever that machine lists again, kept across a restart.
   A machine lists only the sessions of the projects it knows (the window of that machine shows
-  those and no other): a session of a project whose file is gone is not sent, since the machine
-  would answer that it has no such project (`docs/projects.md`, "Removing a project").
+  those and no other): a session of a project whose file is gone, or whose file cannot be used (a
+  typo), is not sent until the file is back, since the machine would answer that it has no such
+  project (`docs/projects.md`, "Removing a project"). A folder of project files that cannot be
+  read at all says nothing of any project: then every session is sent.
 - **Closing such a session is allowed.** It leaves the window's list at once. This machine's
   daemon keeps the close, the user's `agent.stop` signed by their device, stored before it is sent
   like a delivery ("Deliveries across machines"), and sends it once when that machine links again
