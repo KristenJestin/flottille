@@ -378,7 +378,8 @@ pub struct Sidebar {
     asked: HashSet<String>,
     /// What the daemon refused of what was asked from a row.
     refused: Option<SharedString>,
-    /// Whether the daemon has not told yet what the tree shows: its rows are skeletons until then.
+    /// Whether the daemon has not told yet what the tree shows: a skeleton stands in until then,
+    /// but only while there is no row to show.
     loading: bool,
     /// What the foot says of an update of Flottille, when there is one to act on.
     version_line: Option<SharedString>,
@@ -605,6 +606,12 @@ impl Sidebar {
     /// What the daemon refused of what was asked from a row.
     pub fn refused(&self) -> Option<&str> {
         self.refused.as_deref()
+    }
+
+    /// Whether the sidebar has a row to show, from any machine: a skeleton stands for what is not
+    /// there yet, never beside what is.
+    fn has_rows(&self) -> bool {
+        !self.projects.is_empty() || !self.sections.is_empty()
     }
 
     /// The daemon answered (or cannot be reached): the tree is not waiting for it any more.
@@ -969,7 +976,7 @@ impl Render for Sidebar {
                     )
                     .child(presence(
                         "sidebar-loading",
-                        self.loading,
+                        self.loading && !self.has_rows(),
                         crate::loading::sidebar(),
                     ))
                     .child(projects)
