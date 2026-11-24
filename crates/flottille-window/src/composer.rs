@@ -306,6 +306,11 @@ impl Composer {
         self.keeping.sent()
     }
 
+    /// How many writes of the draft the daemon has not answered yet.
+    pub fn drafts_unanswered(&self) -> usize {
+        self.keeping.unanswered()
+    }
+
     fn draft_now(&self, cx: &App) -> Draft {
         let (text, pictures) = self.attached.draft(cx);
         Draft { text, pictures }

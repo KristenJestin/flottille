@@ -2478,6 +2478,21 @@ impl Shell {
             .unwrap_or_default()
     }
 
+    /// The pull request the window read of the workspace `workspace` of `project` on `machine`
+    /// (`None`: this one).
+    pub fn pull_request_of(
+        &self,
+        machine: Option<&str>,
+        project: &str,
+        workspace: &str,
+    ) -> Option<&PullRequest> {
+        self.pulls.get(&(
+            machine.map(str::to_owned),
+            project.to_owned(),
+            workspace.to_owned(),
+        ))
+    }
+
     /// What the window shows now, as the daemon last gave it.
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot

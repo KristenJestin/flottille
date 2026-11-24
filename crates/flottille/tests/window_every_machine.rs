@@ -1970,6 +1970,50 @@ fn accepting_a_review_opened_from_another_machine_s_toast_reaches_that_machine(
     });
 }
 
+/// A connection `notes` of `machine` whose header carries the vault entry `entry`, to a fake
+/// server that asks for a sign-in: it refuses what it is given. The server, stopped once dropped.
+fn a_server_refusing_its_header(machine: &Machine, entry: &str) -> common::Spawned {
+    let user = &machine.user;
+    let script = user.path("notes-script.json");
+    let announced = json!({
+        "server": {"name": "notes", "version": "1.0.0"},
+        "tools": [{"name": "search", "description": "Finds notes by words.",
+            "inputSchema": {"type": "object", "properties": {}}}],
+        "oauth": {"tokens_file": user.path("notes-tokens")}
+    });
+    std::fs::write(&script, announced.to_string()).unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    let port_file = user.path("notes-port");
+    let spawned = common::Spawned::new({
+        let mut command = std::process::Command::new(fake);
+        command.args([
+            "--script",
+            script.to_str().unwrap(),
+            "--http",
+            port_file.to_str().unwrap(),
+        ]);
+        command
+    });
+    eventually("the server listens", || {
+        std::fs::read_to_string(&port_file).is_ok_and(|port| !port.is_empty())
+    });
+    let port = std::fs::read_to_string(&port_file).unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.",
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "headers": {"Authorization": {"vault": entry}}}),
+    )
+    .unwrap();
+    spawned
+}
+
 #[gpui_kit::test]
 fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut TestAppContext) {
     let (_hub, pc, server, _here, _there) = two_machines();
@@ -1980,21 +2024,21 @@ fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut 
             json!({"name": "notes-token", "secret": "an-invented-test-value"}),
         )
         .unwrap();
+    // The server's connection sends the entry to a server that refuses it: its review names the
+    // entry, with Edit entry.
+    let _notes = a_server_refusing_its_header(&server, "notes-token");
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     let page = the_server_s_settings(&shell, cx);
-    let vault = page.read_with(cx, |page, _| page.vault().clone());
-    vault.update(cx, |vault, cx| vault.read(cx));
-    until(&shell, cx, "the server's vault is listed", |cx| {
-        vault.read_with(cx, |vault, _| {
-            vault
-                .entries()
-                .is_some_and(|entries| entries.iter().any(|e| e.name == "notes-token"))
-        })
+    let (vault, section) = page.read_with(cx, |page, _| {
+        (page.vault().clone(), page.connections().clone())
     });
-
-    // The review's Edit entry opens the server's vault on the entry (its section's own vault).
-    cx.update(|window, cx| vault.update(cx, |vault, cx| vault.replace("notes-token", window, cx)));
+    section.update(cx, |section, cx| section.open_review("notes", cx));
+    until(&shell, cx, "the review names the entry", |cx| {
+        present(cx, "connection-review-edit-entry")
+    });
+    settle(&shell, cx);
+    click(cx, "connection-review-edit-entry");
     until(&shell, cx, "the entry's dialog", |cx| {
         vault.read_with(cx, |vault, _| vault.is_open())
     });
@@ -2216,7 +2260,7 @@ fn a_connection_request_s_new_entry_and_review_stay_on_its_machine(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn another_machine_s_pull_request_stays_on_its_row_after_a_refresh(cx: &mut TestAppContext) {
+fn another_machine_s_pull_request_is_kept_after_a_refresh(cx: &mut TestAppContext) {
     let pc_user = fake_user();
     pc_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": REPLY}]}]}));
     let server_user = fake_user().with_fake_gh();
@@ -2224,6 +2268,7 @@ fn another_machine_s_pull_request_stays_on_its_row_after_a_refresh(cx: &mut Test
     let (_hub, pc, server) = pc_and_server_on(Machine::of(pc_user), server_user);
     project(&pc.user, "app");
     project(&server.user, "harbor");
+    session(&pc.user, "app", "Tidy the readme");
     // A workspace of the server's alone, whose branch has a pull request.
     let folder = server.user.path("work/harbor");
     server.user.git(
@@ -2270,33 +2315,50 @@ fn another_machine_s_pull_request_stays_on_its_row_after_a_refresh(cx: &mut Test
         )
         .unwrap();
     let there = started["agent"]["id"].as_str().unwrap().to_owned();
-    let row = elsewhere_id("server", &there);
-    let pull = gpui_kit::ElementId::Name(format!("session-pull-{row}").into());
+    eventually("the server's session answered", || {
+        let shown = server
+            .user
+            .call("agent.show", json!({"agent": there, "after": 0}))
+            .unwrap();
+        shown.to_string().contains(REPLY)
+    });
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
 
+    until(&shell, cx, "the server's session is listed", |cx| {
+        present(cx, row_there(&there))
+    });
     // The server's page of harbor reads its workspaces' pull requests.
     shell.update_in(cx, |shell, window, cx| {
         shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
     });
-    until(
-        &shell,
-        cx,
-        "the server's pull request is on its row",
-        |cx| present(cx, pull.clone()),
-    );
+    until(&shell, cx, "the server's page of harbor is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    // Its rows have no workspace to show it on (the machines' lists do not say it): the window
+    // keeps it for them all the same.
+    let kept = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, _| {
+            s.pull_request_of(Some("server"), "harbor", "login")
+                .map(|pull| pull.number)
+        })
+    };
+    until(&shell, cx, "the server's pull request is read", |cx| {
+        kept(&shell, cx).is_some()
+    });
     settle(&shell, cx);
 
     // This machine's list is read again: the server's workspace is not in it.
     let before = snapshots(&shell, cx);
-    session(&pc.user, "app", "Tidy the readme");
+    session(&pc.user, "app", "Count the files");
     until(&shell, cx, "this machine's list is read again", |cx| {
         snapshots(&shell, cx) > before
     });
     settle(&shell, cx);
-    assert!(
-        present(cx, pull),
-        "the server's pull request left its row at the refresh"
+    assert_eq!(
+        kept(&shell, cx),
+        Some(12),
+        "the server's pull request was dropped at the refresh"
     );
 }
 
@@ -2304,6 +2366,9 @@ fn another_machine_s_pull_request_stays_on_its_row_after_a_refresh(cx: &mut Test
 fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
     cx: &mut TestAppContext,
 ) {
+    // The window keeps every draft on this machine's daemon (`docs/remote.md`): the server's
+    // page writes it through its own pages, and its answer comes back to the composer that typed
+    // it, not to this machine's composer of the same project.
     let (_hub, pc, _server, here, _there) = two_machines();
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
@@ -2314,8 +2379,9 @@ fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
         present(cx, "composer-field")
             && shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
-    until(&shell, cx, "the server's draft of app is read", |_| {
-        the_server_was_asked(&relay, "draft.get")
+    let composer = shell.read_with(cx, |s, _| s.composer_of("app").cloned().unwrap());
+    until(&shell, cx, "the server's draft of app is read", |cx| {
+        composer.read_with(cx, |c, _| c.draft_was_read())
     });
     settle(&shell, cx);
 
@@ -2324,18 +2390,18 @@ fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
     cx.simulate_input("Plan the release");
     click(cx, session_id(&here));
     run_for(Duration::from_secs(1), cx);
-    until(&shell, cx, "the draft is written somewhere", |_| {
-        the_server_was_asked(&relay, "draft.set")
-            || pc
-                .user
-                .call("draft.get", json!({"kind": "project", "target": "app"}))
-                .is_ok_and(|draft| draft.to_string().contains("Plan the release"))
+    until(&shell, cx, "the draft is written", |cx| {
+        composer.read_with(cx, |c, _| c.drafts_sent()) > 0
     });
-    let written = relay
-        .asked
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(method, params)| method == "draft.set" && params["text"] == "Plan the release");
-    assert!(written, "the server's draft went to this machine");
+    eventually("this machine's daemon keeps it", || {
+        pc.user
+            .call("draft.get", json!({"kind": "project", "target": "app"}))
+            .is_ok_and(|draft| draft.to_string().contains("Plan the release"))
+    });
+    until(
+        &shell,
+        cx,
+        "its answer reaches the composer that typed it",
+        |cx| composer.read_with(cx, |c, _| c.drafts_unanswered()) == 0,
+    );
 }
