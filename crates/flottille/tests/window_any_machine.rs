@@ -21,7 +21,7 @@ use flottille_window::shell::Selection;
 use flottille_window::tree::project_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::seen::{colour, seen};
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, Hsla, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -1101,4 +1101,74 @@ fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppCo
         "it folds before it is gone: {drawn:?}"
     );
     assert!(!present(cx, "composer-machine-off"));
+}
+
+/// What of the elements under the settings' fixed sentence is drawn over it: the scrolling page
+/// starts below the sentence, and nothing of what scrolls, cut to the page, reaches into it.
+fn drawn_over_the_own_line(cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|window, _| {
+        let own = window.find("settings-own").bounds();
+        let page = window.find("settings-page").bounds();
+        let mut over = Vec::new();
+        if page.origin.y < own.bottom() {
+            over.push(format!(
+                "the page starts at {:?}, the sentence ends at {:?}",
+                page.origin.y,
+                own.bottom()
+            ));
+        }
+        for element in window.elements() {
+            if !element
+                .path()
+                .iter()
+                .any(|id| *id == "settings-page".into())
+            {
+                continue;
+            }
+            let drawn = element.bounds().intersect(&page);
+            if drawn.size.width > px(0.) && drawn.size.height > px(0.) && drawn.intersects(&own) {
+                over.push(format!("{:?} is drawn at {drawn:?}", element.path().last()));
+            }
+        }
+        over
+    })
+}
+
+#[gpui_kit::test]
+fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    // Short, so that every tab scrolls.
+    cx.simulate_resize(size(px(1000.), px(520.)));
+    settings(&shell, "general", cx);
+    settings_of(&shell, "server", cx);
+    for shade in ["light", "dark"] {
+        click(&shell, "settings-tabs-general", cx);
+        click(&shell, &format!("appearance-shade-{shade}"), cx);
+        for tab in [
+            "agents",
+            "approvals",
+            "features",
+            "vault",
+            "machines",
+            "general",
+        ] {
+            click(&shell, &format!("settings-tabs-{tab}"), cx);
+            settle(&shell, cx);
+            let at = bounds_of(cx, "settings-page").expect("the page").center();
+            for turn in 0..8 {
+                assert_eq!(
+                    drawn_over_the_own_line(cx),
+                    Vec::<String>::new(),
+                    "{tab}, {shade}, after {turn} turns of the wheel"
+                );
+                cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                    position: at,
+                    delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
+                    ..Default::default()
+                });
+                settle(&shell, cx);
+            }
+        }
+    }
 }
