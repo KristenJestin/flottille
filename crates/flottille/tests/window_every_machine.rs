@@ -1858,3 +1858,206 @@ fn a_connection_request_of_a_removed_machine_closes(cx: &mut TestAppContext) {
         !dialog.read_with(cx, |d, _| d.is_open())
     });
 }
+
+/// The Settings of the server, in front: its page as the window holds it.
+fn the_server_s_settings(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::settings::SettingsPage> {
+    click(cx, "settings");
+    step(shell, cx);
+    settings_of(shell, cx, "server");
+    until(shell, cx, "the server's settings are shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(shell, cx);
+    shell.read_with(cx, |s, cx| {
+        s.main().read(cx).settings_page().cloned().unwrap()
+    })
+}
+
+/// Whether the server was asked `method`, without forgetting what it was asked.
+fn the_server_was_asked(relay: &Relay, method: &str) -> bool {
+    relay.asked.lock().unwrap().iter().any(|(m, _)| m == method)
+}
+
+/// A connection of the server that waits for its review: its server starts (a fake one that
+/// announces one action), so the review has something to accept.
+fn a_connection_to_review(server: &Machine, name: &str) {
+    server
+        .user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+    let script = server.user.path(&format!("{name}-script.json"));
+    let announced = json!({
+        "server": {"name": name, "version": "1.0.0"},
+        "tools": [{"name": "search", "description": "Finds notes by words.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": true}}]
+    });
+    std::fs::write(&script, announced.to_string()).unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    assert!(fake.exists(), "`cargo build -p flottille-fake-mcp` first");
+    server
+        .user
+        .call(
+            "connection.add",
+            json!({"name": name, "about": "The notes of the user.",
+                "command": [fake.display().to_string(), "--script", script.display().to_string()]}),
+        )
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn accepting_a_review_opened_from_another_machine_s_toast_reaches_that_machine(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, here, _there) = two_machines();
+    a_connection_to_review(&server, "almanac");
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    let page = the_server_s_settings(&shell, cx);
+    let section = page.read_with(cx, |page, _| page.connections().clone());
+
+    // The server's toast's Review opens its review, read there.
+    section.update(cx, |section, cx| section.open_review("almanac", cx));
+    until(&shell, cx, "the server's review is ready", |cx| {
+        present(cx, "accept-connection")
+    });
+    // This machine is brought in front before the user accepts: the dialog stays the server's.
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine is in front", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).is_none()
+    });
+    settle(&shell, cx);
+    assert!(present(cx, "accept-connection"), "the review is still open");
+    relay.take();
+    click(cx, "accept-connection");
+    until(&shell, cx, "the accept is sent somewhere", |cx| {
+        the_server_was_asked(&relay, "connection.accept") || present(cx, "connection-accept-error")
+    });
+    assert!(
+        the_server_was_asked(&relay, "connection.accept"),
+        "the accept went to the machine in front"
+    );
+    eventually("the server's connection is accepted", || {
+        let listed = server.user.call("connection.list", json!({})).unwrap();
+        listed["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "almanac" && c["state"] != "awaiting review")
+    });
+}
+
+#[gpui_kit::test]
+fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut TestAppContext) {
+    let (_hub, pc, server, here, _there) = two_machines();
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "notes-token", "secret": "an-invented-test-value"}),
+        )
+        .unwrap();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    let page = the_server_s_settings(&shell, cx);
+    let vault = page.read_with(cx, |page, _| page.vault().clone());
+    vault.update(cx, |vault, cx| vault.read(cx));
+    until(&shell, cx, "the server's vault is listed", |cx| {
+        vault.read_with(cx, |vault, _| {
+            vault
+                .entries()
+                .is_some_and(|entries| entries.iter().any(|e| e.name == "notes-token"))
+        })
+    });
+
+    // The review's Edit entry opens the server's vault on the entry (its section's own vault).
+    cx.update(|window, cx| vault.update(cx, |vault, cx| vault.replace("notes-token", window, cx)));
+    until(&shell, cx, "the entry's dialog", |cx| {
+        vault.read_with(cx, |vault, _| vault.is_open())
+    });
+    click(cx, session_id(&here));
+    until(&shell, cx, "this machine is in front", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).is_none()
+    });
+    settle(&shell, cx);
+    relay.take();
+    let field = vault.read_with(cx, |vault, _| vault.secret_field().unwrap().clone());
+    cx.update(|window, cx| {
+        field.update(cx, |field, cx| {
+            field.set_value("another-invented-value", window, cx)
+        })
+    });
+    cx.update(|window, cx| vault.update(cx, |vault, cx| vault.save(window, cx)));
+    until(&shell, cx, "the entry is written somewhere", |cx| {
+        the_server_was_asked(&relay, "vault.set") || vault.read_with(cx, |v, _| !v.is_open())
+    });
+    assert!(
+        the_server_was_asked(&relay, "vault.set"),
+        "the entry went to the machine in front"
+    );
+}
+
+#[gpui_kit::test]
+fn a_dialog_opened_while_another_machine_is_reached_sends_to_its_own_machine(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    click(cx, "settings");
+    step(&shell, cx);
+    click(cx, "settings-tabs-vault");
+    settle(&shell, cx);
+    let vault = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).settings_page().cloned().unwrap();
+        page.read(cx).vault().clone()
+    });
+    until(&shell, cx, "the server's session is listed", |cx| {
+        present(cx, row_there(&there))
+    });
+
+    // The server's session is asked, its key still read; this machine's Add entry is opened
+    // meanwhile, and saved once the server is in front.
+    let server_agent = there.clone();
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_elsewhere("server".to_owned(), server_agent, window, cx);
+        vault.update(cx, |vault, cx| vault.add(window, cx));
+    });
+    until(&shell, cx, "the server is in front", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    assert!(vault.read_with(cx, |vault, _| vault.is_open()));
+    relay.take();
+    let (name, secret) = vault.read_with(cx, |vault, _| {
+        (
+            vault.name_field().unwrap().clone(),
+            vault.secret_field().unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        name.update(cx, |field, cx| field.set_value("pc-token", window, cx));
+        secret.update(cx, |field, cx| {
+            field.set_value("an-invented-test-value", window, cx)
+        });
+    });
+    cx.update(|window, cx| vault.update(cx, |vault, cx| vault.save(window, cx)));
+    until(&shell, cx, "the entry is written somewhere", |cx| {
+        the_server_was_asked(&relay, "vault.set") || vault.read_with(cx, |v, _| !v.is_open())
+    });
+    assert!(
+        !the_server_was_asked(&relay, "vault.set"),
+        "this machine's entry went to the server"
+    );
+    eventually("this machine's vault has the entry", || {
+        let listed = pc.user.call("vault.list", json!({})).unwrap();
+        listed.to_string().contains("pc-token")
+    });
+}
