@@ -83,8 +83,7 @@ it is needed, as a skill is read with `skill_read`.
   object argument without declared fields holds, one example) and the sentence `Its guide, each action and each argument: {"action":
   "guide"}, or with your first call.`; the schema whole but for the sentence of each argument
   (names, types, enums, `required` and bounds stay), with `guide` added to its actions.
-  `agent_launch` has no `action`, and its `required` arguments are the call's: it says `Each
-  argument's sentence: its guide, with your first call.` and lists, besides its kinds and its
+  `agent_launch` has no `action`, and its `required` arguments are the call's: it says `Its arguments' guide comes with your first call.` and lists, besides its kinds and its
   examples, the rules a first call needs (what `machine` sends, that `project` is held for the
   user, that a new workspace's branch follows the repository's convention).
 - **The guide** is the family's whole text: its full description, then one line per argument,

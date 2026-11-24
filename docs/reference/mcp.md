@@ -220,7 +220,7 @@ and the 2026 practice around it:
    | After #264 (the texts cut from #224 on restored; the two guards) | 27 | 30,866 |
    | Before #1292 (30 tools; with `routine`, #1289, 62,480: over the guard) | 30 | 59,565 |
    | After #1292 (five families read on demand, repeats said once; `routine` counted whole) | 30 + 1 | 55,557 + 2,915 = 58,472 |
-   | After #1292, round 3 (`workspace`'s `machine` argument, #1371, +190; `agent_launch` read on demand too; `vault` and `routine` whole counted) | 30 + 1 | 58,285 |
+   | After #1292, round 3 (`workspace`'s `machine` argument, #1371, +190; `agent_launch` read on demand too; `vault` and `routine` whole counted) | 30 + 1 | 57,999 |
 
    By role before #1292: a root 59,565, a child 50,331, a child at the depth limit 41,958; after
    it 55,557, 47,668 and 39,295 (the size test's count: the definitions as listed, title and
