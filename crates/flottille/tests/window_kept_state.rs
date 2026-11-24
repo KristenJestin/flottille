@@ -927,7 +927,8 @@ fn a_second_window_opening_keeps_the_projects_folds(
         state["leads"][&lead] == false && state["projects"]["other"] == false
     });
 
-    let (closed, asked) = (Arc::new(AtomicBool::new(true)), Arc::default());
+    let closed = Arc::new(AtomicBool::new(true));
+    let asked = Arc::new(AtomicBool::new(false));
     let connect = rows_held(Arc::new(user.connector()), closed.clone(), asked.clone());
     let (second_shell, second_cx) = window_via(&user, connect, second);
     until(
