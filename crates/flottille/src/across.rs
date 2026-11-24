@@ -1645,6 +1645,8 @@ fn stop_started(daemon: &Arc<Daemon>, launch: &Launch, name: &str, failed: bool)
 /// refused for want of room: a stop is never lost. It replaces what it makes useless, the calls
 /// kept for that launch (a message, a following, an earlier stop), so that one stop of a launch
 /// is kept at most, and the queue grows by no more than the launches it ends.
+/// A message kept for that launch and not yet sent is forgotten without a `remote.delivery_dropped`
+/// event: its caller ended, nobody is left to be told it did not go.
 fn keep_stop(
     daemon: &Arc<Daemon>,
     launch: &Launch,
@@ -1742,7 +1744,15 @@ pub(crate) async fn losses_there(
     let state = answer["state"]
         .as_str()
         .filter(|state| matches!(*state, "clean" | "uncommitted" | "unpushed" | "unknown"))?;
-    let known = Secrets::new(&std::env::vars_os().collect(), &[]);
+    // Masked of the secrets of the pilot's place, as every answer a tool of its own gets (`here`).
+    let secrets = daemon
+        .read(|store| store.agent(&launch.caller))
+        .ok()
+        .flatten()
+        .and_then(|pilot| crate::mcp::grant_of(daemon, &pilot).ok())
+        .map(|grant| grant.place.secret_values())
+        .unwrap_or_default();
+    let known = Secrets::new(&std::env::vars_os().collect(), &secrets);
     let losses = answer["losses"]
         .as_array()?
         .iter()
