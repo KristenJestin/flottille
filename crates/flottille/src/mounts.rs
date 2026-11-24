@@ -193,38 +193,40 @@ pub fn sandbox() -> serde_json::Value {
 fn refused_call() -> Option<&'static str> {
     let none = std::ptr::null::<u8>();
     // Each with arguments it refuses at once: only a call the system does not answer fails
-    // with `ENOSYS`.
-    // SAFETY: invalid descriptors, an empty C string and no structure: nothing is touched.
-    let calls = unsafe {
-        [
-            (
-                "openat2",
-                libc::syscall(libc::SYS_openat2, -1, c"".as_ptr(), none, 0),
-            ),
-            (
-                "open_tree",
-                libc::syscall(libc::SYS_open_tree, -1, c"".as_ptr(), 0),
-            ),
-            (
-                "mount_setattr",
-                libc::syscall(libc::SYS_mount_setattr, -1, c"".as_ptr(), 0, none, 0),
-            ),
-            (
-                "move_mount",
-                libc::syscall(libc::SYS_move_mount, -1, c"".as_ptr(), -1, c"".as_ptr(), 0),
-            ),
-        ]
-        .map(|(name, result)| {
-            (
-                name,
-                result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS),
-            )
-        })
+    // with `ENOSYS`. Its error is read right after it, before another call sets its own.
+    let refused = |result: libc::c_long| {
+        result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
     };
-    calls
-        .into_iter()
-        .find(|(_, refused)| *refused)
-        .map(|(name, _)| name)
+    // SAFETY: invalid descriptors, an empty C string and no structure: nothing is touched.
+    unsafe {
+        if refused(libc::syscall(libc::SYS_openat2, -1, c"".as_ptr(), none, 0)) {
+            return Some("openat2");
+        }
+        if refused(libc::syscall(libc::SYS_open_tree, -1, c"".as_ptr(), 0)) {
+            return Some("open_tree");
+        }
+        if refused(libc::syscall(
+            libc::SYS_mount_setattr,
+            -1,
+            c"".as_ptr(),
+            0,
+            none,
+            0,
+        )) {
+            return Some("mount_setattr");
+        }
+        if refused(libc::syscall(
+            libc::SYS_move_mount,
+            -1,
+            c"".as_ptr(),
+            -1,
+            c"".as_ptr(),
+            0,
+        )) {
+            return Some("move_mount");
+        }
+    }
+    None
 }
 
 /// Why every command Flottille confines is refused its start, if it is: Landlock is there (its
