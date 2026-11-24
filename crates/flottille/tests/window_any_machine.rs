@@ -30,7 +30,7 @@ const WAIT: Duration = Duration::from_secs(60);
 
 /// A user whose agents are the fake agent, Claude enabled and signed in (its login file only
 /// there, never read).
-fn runner() -> User {
+pub fn runner() -> User {
     let user = User::with_fake_agent()
         .with_env("FLOTTILLE_TEST_OFFER_MS", "300")
         .with_env("ANTHROPIC_API_KEY", "")
@@ -56,7 +56,7 @@ fn repository(user: &User, at: &str) -> std::path::PathBuf {
 }
 
 /// The project `name` of `user`'s machine, its repository at `home/code/<name>`.
-fn project(user: &User, name: &str) {
+pub fn project(user: &User, name: &str) {
     let folder = repository(user, &format!("code/{name}"));
     user.call("project.add", json!({"folder": folder, "name": name}))
         .unwrap();
@@ -78,7 +78,7 @@ fn pc_and_server() -> (TestHub, Machine, Machine) {
     (hub, pc, server)
 }
 
-fn window<'a>(
+pub fn window<'a>(
     machine: &Machine,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
@@ -106,7 +106,7 @@ fn window<'a>(
 }
 
 /// One step of the window as the platform would run it.
-fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+pub fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
     cx.executor().advance_clock(Duration::from_millis(16));
     cx.run_until_parked();
@@ -114,7 +114,7 @@ fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn until(
+pub fn until(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
     what: &str,
@@ -131,7 +131,7 @@ fn until(
     }
 }
 
-fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+pub fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     for _ in 0..40 {
         step(shell, cx);
     }
@@ -144,13 +144,13 @@ fn click_without_settling(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestCo
     cx.update(|window, cx| window.render_frame(cx));
 }
 
-fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+pub fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(shell, cx);
 }
 
-fn present(cx: &mut VisualTestContext, id: &str) -> bool {
+pub fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     let id = id.to_owned();
     cx.update(|window, _| window.try_find(id).is_some())
 }
