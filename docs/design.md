@@ -1109,8 +1109,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   machine of the user together (a session of another machine carries that machine's name on its
   second line, `server`, greyed with `server offline since 22:14` while it is off,
   `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
-  Add project choosing which, a page of another machine naming it once in its path line, `server /
-  Settings / Agents`, `docs/remote.md`, "Built (#1182)"). **Each project row says where it lives**: with
+  Add project choosing which, without anything else switching: the list stays this machine's, each
+  machine has its own connections, kept open, and a page of another machine reads that machine
+  only, `docs/remote.md`, "Built (#1271)"). **Each project row says where it lives**: with
   another machine paired, a mark after its name for every machine that has it (at the end of the row,
   before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
   included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
