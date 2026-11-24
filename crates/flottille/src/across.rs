@@ -1124,12 +1124,20 @@ fn delivered(
             .into()),
         };
     }
+    // An agent removed since is no one to deliver to: dropped, not kept in the queue.
+    let agent = agent_here(daemon, &deliver.agent)?.ok_or_else(|| {
+        format!(
+            "there is no agent {} on this machine",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+    })?;
+    let body = delivered_body(daemon, &agent, &deliver.body);
     deliveries::deliver(
         daemon,
         &deliver.agent,
         &deliver.kind,
         Some(id),
-        &deliver.body,
+        &body,
         &deliver.urgency,
     )
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
@@ -1392,6 +1400,9 @@ fn called(
             if agent.state.is_final() {
                 return Err(format!("{} has {}", named(&agent), agent.state.as_str()).into());
             }
+            // What another machine wrote, masked of the secrets of the place of whom it is
+            // written to, as every delivery from afar is.
+            let text = &masked_for(daemon, &agent, text, false);
             match child {
                 true => deliveries::deliver(
                     daemon,
@@ -1924,16 +1935,22 @@ fn answered_request(
                 && request.state == approval::RequestState::Pending
                 && crate::tree::root_of(daemon, &request.agent) == child
         });
-    if held.is_none() {
+    let Some(held) = held else {
         return Err(format!(
             "request #{number} is not held by agent {} of {name}: it answers only the pending \
              requests that reached it as [flottille:child-asks]",
             launch.caller
         )
         .into());
-    }
+    };
     let by = format!("agent {} of {name}", launch.caller);
     if deny {
+        // The agent that asked reads it: masked of the secrets of its place too, before the
+        // denial is recorded (a store that cannot be read is sent again, a denial recorded is not).
+        let why = match agent_here(daemon, &held.agent)? {
+            Some(asker) => masked_for(daemon, &asker, &why, false),
+            None => why,
+        };
         let decided = daemon
             .write(|store| {
                 Ok(
@@ -2814,7 +2831,7 @@ fn answered(sent: Result<Value, LinkError>, aim: &Aim, place: &Place) -> Outcome
 /// (`docs/remote.md`): masked of this machine's secrets, and cut at the limit of its kind, as a
 /// local one is.
 fn here(outcome: Outcome, place: &Place) -> Outcome {
-    let known = Secrets::new(&std::env::vars_os().collect(), &place.secret_values());
+    let known = known_in(place);
     let shown = |text: String, limit| masked_and_cut(&text, &known, limit);
     match outcome {
         Outcome::Done(text) => Outcome::Done(shown(text, RESULT_LIMIT)),
@@ -2825,18 +2842,68 @@ fn here(outcome: Outcome, place: &Place) -> Outcome {
     }
 }
 
+/// The secrets of this machine a text of another machine is masked of for an agent in `place`:
+/// the daemon's, the vault's and those of the place's secret files (`mcp::masked`).
+fn known_in(place: &Place) -> Secrets {
+    Secrets::new(&std::env::vars_os().collect(), &place.secret_values())
+}
+
+/// The secrets of this machine a text of another machine is masked of for `agent`: those of its
+/// place (`known_in`). A place that cannot be read any more (a workspace or a project removed
+/// meanwhile) is no reason to keep the text waiting, nor to show it whole: it is the folder the
+/// agent was given, as far as it still is, and the daemon's and the vault's secrets, that mask it.
+pub(crate) fn known_for(daemon: &Daemon, agent: &Agent) -> Secrets {
+    let place = match crate::mcp::grant_of(daemon, agent) {
+        Ok(grant) => grant.place,
+        Err(_) => Place {
+            project: agent.project.clone(),
+            workspace: agent.workspace.clone(),
+            root: agent.folder.clone(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        },
+    };
+    known_in(&place)
+}
+
+/// `text`, said by another machine to `agent` of this one, masked of the secrets of the agent's
+/// place before anything stores or shows it. With `cut_end`, its end is taken for a cut
+/// (`cuts_masked`).
+pub(crate) fn masked_for(daemon: &Daemon, agent: &Agent, text: &str, cut_end: bool) -> String {
+    cuts_masked(text, &known_for(daemon, agent), cut_end)
+}
+
+/// The agent of this machine named `id`; `None` when there is none. Refused for now only when
+/// the store cannot be read.
+fn agent_here(daemon: &Daemon, id: &str) -> Result<Option<Agent>, Refused> {
+    daemon
+        .read(|store| store.agent(id))
+        .map_err(|error| Refused::Now(error.to_string()))
+}
+
+/// `body`, a delivery of another machine for `agent` of this one, as it is stored: masked as an
+/// answer of that machine is (`here`), of the secrets of the agent's place too, before anything
+/// stores or shows it. A body of `LONGEST` characters may end where that machine cut it without
+/// saying (`answer_back`): its end is taken for a cut.
+fn delivered_body(daemon: &Daemon, agent: &Agent, body: &str) -> String {
+    masked_for(daemon, agent, body, body.chars().count() == LONGEST)
+}
+
 /// `text` masked, then cut at `limit` saying so; and wherever the other machine cut it, the
 /// halves of a secret its cut split masked too: masking by the whole value cannot find them.
 /// Masked whole before this machine cuts it, no secret is split by its own cut.
 fn masked_and_cut(text: &str, known: &Secrets, limit: usize) -> String {
-    crate::mcp::cut(&cuts_masked(text, known), limit)
+    crate::mcp::cut(&cuts_masked(text, known, false), limit)
 }
 
 /// `text` masked whole, then, around each cut the other machine made in it, the end of the piece
 /// a cut closes masked when it starts a secret, and the start of the piece a cut opens in the
 /// middle of the text masked when it ends one. Masked whole first, nothing the other machine
-/// wrote, a marker or what looks like one, is shown unmasked.
-fn cuts_masked(text: &str, known: &Secrets) -> String {
+/// wrote, a marker or what looks like one, is shown unmasked. With `cut_end`, the end of `text` is
+/// taken for a cut too.
+fn cuts_masked(text: &str, known: &Secrets, cut_end: bool) -> String {
     let masked = known.mask(text);
     let piece = |piece: &str, opened: bool, closed: bool| {
         let mut piece = piece.to_owned();
@@ -2858,14 +2925,15 @@ fn cuts_masked(text: &str, known: &Secrets) -> String {
         shown.push_str(&masked[span.clone()]);
         (from, opened) = (span.end, goes_on);
     }
-    shown.push_str(&piece(&masked[from..], opened, false));
+    shown.push_str(&piece(&masked[from..], opened, cut_end));
     shown
 }
 
 /// Every cut a daemon makes in the answer of a tool, found in `text`, in order: where it is, and
 /// whether what follows goes on from the middle of the text cut. They are the end of a text
-/// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the middle of a long
-/// result `results::shorten` left out (its marker, exactly as it writes it, on a line of its
+/// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the end of a delivery
+/// `fitted` cut (its marker, exactly as it writes it, nothing after it goes on); the middle of a
+/// long result `results::shorten` left out (its marker, exactly as it writes it, on a line of its
 /// own); and, in a result cut so, each new line: one may split a line longer than
 /// `results::LINE_CHARS`, and masking may have shortened that line below it.
 fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
@@ -2876,6 +2944,11 @@ fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
         let close = " chars\u{203a}";
         if digits > 0 && rest[digits..].starts_with(close) {
             cuts.push((at..at + open.len() + digits + close.len(), false));
+        }
+    }
+    for (at, _) in text.match_indices(FITTED) {
+        if let Some(length) = fitted_cut(&text[at..]) {
+            cuts.push((at..at + length, false));
         }
     }
     for (at, _) in text.match_indices('[') {
@@ -2907,6 +2980,26 @@ fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
     }
     cuts.sort_by_key(|(span, _)| span.start);
     cuts
+}
+
+/// How the marker of `fitted` starts.
+const FITTED: &str = "\n\n[cut: ";
+
+/// The length of the marker of `fitted` that `text` starts with, written exactly so, up to the
+/// end of its line: `\n\n[cut: N more characters; session_read {"session": "…"} on … reads the
+/// rest]`. Each is looked at up to the next new line, which starts the next one: linear.
+fn fitted_cut(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix(FITTED)?;
+    let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    if digits.len() == rest.len() {
+        return None;
+    }
+    let rest = digits.strip_prefix(" more characters; session_read {\"session\": \"")?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let rest = rest.strip_prefix("\"} on ")?;
+    let line = rest.split('\n').next().unwrap_or_default();
+    let machine = line.strip_suffix(" reads the rest]")?;
+    (!machine.is_empty()).then(|| text.len() - rest.len() + line.len())
 }
 
 /// The length of the marker of `results::shorten` that `text` starts with, written exactly so:
@@ -3000,6 +3093,18 @@ fn delivered_answer(
     {
         return Ok(json!({}));
     }
+    let waits_for_no_answer = || {
+        format!(
+            "agent {} of this machine waits for no answer of request #{number} of {name}",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+    };
+    // An agent that is not here waits for nothing: refused for good, as any other answer to no
+    // wait is, before anything of its place is read.
+    let Some(agent) = agent_here(daemon, &deliver.agent)? else {
+        return Err(waits_for_no_answer().into());
+    };
+    let body = delivered_body(daemon, &agent, &deliver.body);
     // Looked at before what is awaited: a call answered meanwhile has recorded its wait.
     let calling = remote.calling.any(machine, &deliver.agent);
     let awaited = daemon
@@ -3013,10 +3118,7 @@ fn delivered_answer(
     // first is sent again. Any other is refused for good, so that it holds back nothing kept
     // behind it on its machine.
     if !awaited {
-        let agent = deliver.agent.chars().take(64).collect::<String>();
-        let why = format!(
-            "agent {agent} of this machine waits for no answer of request #{number} of {name}"
-        );
+        let why = waits_for_no_answer();
         return Err(if calling {
             Refused::Now(format!("{why} yet"))
         } else {
@@ -3028,7 +3130,7 @@ fn delivered_answer(
         &deliver.agent,
         "approval",
         Some(id),
-        &deliver.body,
+        &body,
         approval::URGENT,
     )
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
@@ -3218,13 +3320,75 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_cut_in_half_by_the_cut_of_a_delivery_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = known_in(&place_with_secret(dir.path()));
+        let long = "x".repeat(LONGEST + 100);
+        let kept = fitted(&long, "ab12", "server").find(FITTED).unwrap();
+        // Of the same number of digits as `long`'s length, the body is cut at the same place.
+        let body = format!("{}{SECRET}{}", &long[..kept - 8], &long[..200]);
+        let cut = fitted(&body, "ab12", "server");
+        assert!(cut.contains(&SECRET[..8]), "the secret is not cut in half");
+
+        let shown = cuts_masked(&cut, &known, false);
+        assert!(
+            shown.contains("x[masked]\n\n[cut: "),
+            "{}",
+            &shown[kept - 20..]
+        );
+        holds_no_piece_of_the_secret(&shown);
+        // Cut at `LONGEST` characters without a marker.
+        let unmarked = format!("{}{}", &long[..LONGEST - 8], &SECRET[..8]);
+        let shown = cuts_masked(&unmarked, &known, true);
+        assert!(
+            shown.ends_with("x[masked]"),
+            "{}",
+            &shown[shown.len() - 20..]
+        );
+    }
+
+    #[test]
+    fn a_secret_inside_a_fake_or_unclosed_delivery_cut_marker_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = known_in(&place_with_secret(dir.path()));
+        for text in [
+            format!(
+                "a\n\n[cut: 9 more characters; session_read {{\"session\": \"{SECRET}\"}} on pc \
+                 reads the rest]"
+            ),
+            format!(
+                "a\n\n[cut: 9 more characters; session_read {{\"session\": \"ab\"}} on {SECRET}"
+            ),
+            format!("a\n\n[cut: 9 more characters; {SECRET} reads the rest]"),
+        ] {
+            let shown = cuts_masked(&text, &known, false);
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_delivery_of_many_cut_markers_is_masked_in_linear_time() {
+        let marker = "\n\n[cut: 9 more characters; session_read {\"session\": \"ab\"} on pc";
+        let text = format!("{} reads the rest]", marker.repeat(20_000));
+        let started = std::time::Instant::now();
+        let known = Secrets::new(&Default::default(), &["a-value-of-the-caller".to_owned()]);
+        let shown = cuts_masked(&text, &known, true);
+        assert!(shown.ends_with("reads the rest]"), "{}", &shown[..80]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn an_answer_of_many_lines_after_a_cut_marker_is_masked_in_linear_time() {
         let marker = "[5 characters left out (lines 2-3 of 4): read them with run_status \
                       {\"run\": \"res_1\", \"start\": 2}]";
         let text = format!("head\n{marker}\n{}tail", "\n".repeat(100_000));
         let started = std::time::Instant::now();
         let known = Secrets::new(&Default::default(), &["a-value-of-the-caller".to_owned()]);
-        let shown = cuts_masked(&text, &known);
+        let shown = cuts_masked(&text, &known, false);
         assert!(shown.ends_with("tail"), "{}", &shown[..80]);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),

@@ -1303,6 +1303,17 @@ its question cards say `· on server` after their time.
   answer (`{"later": why}`): the sender keeps it, in its place, and sends it again on the next
   link, the next message kept, or 30 seconds later. Only a refusal is final: the message is then
   dropped.
+- **A delivery from another machine is masked as its answers are** (a report, a question, a led
+  session's turn, the answer to an approval): on the machine that takes it, before it is stored or
+  shown, of that machine's secrets and of those of the secret files of the place of the agent it
+  is for, the whole first, then both halves of a secret a cut of the other machine split (its
+  `[cut: N more characters; …]` marker, and the end of a body of 64,000 characters, where the
+  answer to a request is cut without a marker). So is every other text of another machine an
+  agent here is shown: a message of its parent or pilot (`agent_send`, `session_send`), the reason
+  of a denial, the brief of a session started for it. A place that cannot be read any more (its
+  workspace or project was removed) holds nothing back: the text is masked of the daemon's, the
+  vault's and what is left of the place's secrets, and delivered; a delivery for an agent that is
+  not here is refused for good. Only a store that cannot be read is refused for now and sent again.
 
 ### Where a question goes when the parent is off
 
