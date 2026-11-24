@@ -747,9 +747,8 @@ fn reviews_of(machine: &Machine, session: &str) -> Vec<Value> {
 
 /// The MCP session of the pilot of a review on `machine`, as its fake agent was given it.
 fn pilot_there(machine: &Machine) -> Mcp {
-    let mut found = None;
-    eventually("the pilot's session", || {
-        found = machine
+    let find = || {
+        machine
             .user
             .received_requests("session/new")
             .into_iter()
@@ -757,9 +756,10 @@ fn pilot_there(machine: &Machine) -> Mcp {
                 opened["params"]["_meta"]["claudeCode"]["options"]["systemPrompt"]["prompt"][2]
                     .as_str()
                     .is_some_and(|prompt| prompt.contains("You are the pilot of a review"))
-            });
-        found.is_some()
-    });
+            })
+    };
+    eventually("the pilot's session", || find().is_some());
+    let found = find();
     let server = found.unwrap()["params"]["mcpServers"][0].clone();
     Mcp::initialize(
         server["url"].as_str().unwrap(),
