@@ -249,11 +249,12 @@ fn removing_a_project_whose_configuration_is_gone_from_the_window(cx: &mut TestA
     cx.update(|window, cx| window.click("project-removal-action", cx));
     said(&shell, "The project app was removed", cx);
 
-    assert!(
-        !present(cx, project_id("app")),
-        "the row folded away with its session"
+    assert!(!present(cx, project_id("app")), "the row folded away");
+    assert_eq!(
+        user.call("agent.show", json!({"agent": session})).unwrap()["agent"]["state"],
+        "ended",
+        "its session was ended (it moves to the Ended group)"
     );
-    assert!(!present(cx, session_id(&session)));
     assert!(present(cx, project_id("other")));
     let listed: Value = user.call("project.list", json!({})).unwrap();
     assert_eq!(listed["unconfigured"], json!([]), "{listed}");
