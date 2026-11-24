@@ -44,6 +44,10 @@ pub enum Change {
         name: String,
     },
     RemoveGroup(String),
+    RenameGroup {
+        id: String,
+        name: String,
+    },
     MoveProject {
         present: Vec<String>,
         key: String,
@@ -241,6 +245,7 @@ impl Arrangement {
         match change {
             Change::AddGroup { id, name } => self.add_group(id, name),
             Change::RemoveGroup(id) => self.remove_group(id),
+            Change::RenameGroup { id, name } => self.rename_group(id, name),
             Change::MoveProject {
                 present,
                 key,
@@ -289,11 +294,13 @@ impl Arrangement {
         self.order.extend(group.projects);
     }
 
-    /// Whether a name is already a group's, whatever the case (beyond ASCII too).
-    pub fn names(&self, name: &str) -> bool {
+    /// Whether a name is already a group's, whatever the case (beyond ASCII too), the group
+    /// `besides` left out: it may take its own name again, in another case.
+    pub fn names(&self, name: &str, besides: Option<&str>) -> bool {
         let name = name.trim().to_lowercase();
         self.groups
             .iter()
+            .filter(|group| Some(group.id.as_str()) != besides)
             .any(|group| group.name.to_lowercase() == name)
     }
 }

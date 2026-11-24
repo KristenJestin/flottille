@@ -1137,7 +1137,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   count, made at the end of the groups and unfolded, which comes before the projects outside any
   group. Projects are dragged into it (onto its heading: first place) and out of it, and groups
   are dragged among themselves by their heading; a folded group says nothing of its rows but its
-  count (the strongest mark of its rows beside it comes with #1265). A group that is made unfolds
+  count and, before its name, the strongest mark of its projects (the one a folded project shows),
+  which fades in as the group folds and fades out as it opens or as the mark goes. Each heading has
+  a "⋯" menu of its own, at its right (a press on it neither drags nor folds the group): **Rename…**,
+  the New group dialog holding the group's name (its own name, in another case, is its to take;
+  another group's is refused as when making one), and **Remove**, which sends its projects back to
+  the list, at the end, none removed: no dialog asks, since nothing is lost but the group, which the
+  toast "Group removed" says with how many projects are back in the list. The heading folds away
+  with its gap, its menu and mark as they were drawn last. A group that is made unfolds
   and fades in, with its space; the rows that go into it from the list slide there, and when the
   stored arrangement reaches a window after its first rows they slide into their groups rather
   than jump. A project that is new, or newly seen on a machine, is at the end of the list, outside
