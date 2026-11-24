@@ -1616,6 +1616,26 @@ mod tests {
     use super::*;
     use flottille_core::workspace::{Base, Workspace, Worktree};
 
+    #[test]
+    fn a_refusal_before_waiting_is_never_answered_as_waiting() {
+        // The user there answered between the caller's two writes: its answer came first.
+        for (decided, said) in [
+            ("refused", "was refused by the user there"),
+            ("started", "was approved by the user there"),
+        ] {
+            let placed = json!({"session": "0123456789ab", "workspace": "w", "branch": "b",
+                "request": 4, "decided": decided});
+
+            let answer = answer_to_caller("led", "Docs", "server", "first", &placed);
+
+            assert!(!answer.contains("Waiting"), "{answer}");
+            assert!(
+                answer.starts_with(&format!("Request #4 on server (agent_launch) {said}")),
+                "{answer}"
+            );
+        }
+    }
+
     /// Runs `git` in `dir`, in a home and a configuration of its own.
     async fn git(dir: &std::path::Path, args: &[&str]) {
         let nowhere = std::ffi::OsStr::new("/dev/null");

@@ -2184,3 +2184,190 @@ fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
         "the failure came before the answer:\n{all}"
     );
 }
+
+/// The name of the one launch `pc` recorded on another machine, and the id the user's answer
+/// there was sent under, once it came.
+fn answered_launch(pc: &Machine) -> (String, String) {
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let launch: String = store
+        .query_row("SELECT launch FROM launches WHERE way = 'out'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let stored: String = store
+        .query_row(
+            "SELECT id FROM deliveries WHERE id LIKE 'decided-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let id = stored
+        .strip_prefix(&format!("decided-{launch}-"))
+        .unwrap()
+        .to_owned();
+    (launch, id)
+}
+
+#[test]
+fn a_second_answer_after_a_refusal_is_taken_only_as_the_one_stored() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused once");
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+    prompt_with(&pc, "was refused by the user. Nothing was done.");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    let (launch, stored) = answered_launch(&pc);
+    let key = server.stand_in();
+    let answer = |id: &str, body: &str, ended: bool| {
+        MachineMessage::Deliver(Box::new(flottille_link::Deliver {
+            id: id.into(),
+            launch: launch.clone(),
+            agent: root.clone(),
+            kind: "approval".into(),
+            body: body.into(),
+            urgency: "urgent".into(),
+            ended,
+        }))
+    };
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![
+            // Another answer to the refused launch: a caller would read it approved.
+            answer(
+                "another",
+                &format!(
+                    "Request #{number} on server (agent_launch) was approved by the user, and \
+                     Flottille has now done it. Its result:\n\nStarted a session led by you, \
+                     approved after all."
+                ),
+                false,
+            ),
+            // The refusal sent again, by a machine that did not hear it was taken.
+            answer(
+                &stored,
+                &format!(
+                    "Request #{number} on server (agent_launch) was refused by the user. Nothing \
+                     was done."
+                ),
+                true,
+            ),
+        ],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("answered already"), "{refused}");
+    assert!(answers[1].is_ok(), "{:?}", answers[1]);
+    a_while();
+    assert!(
+        !pc.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("approved after all")),
+        "a second answer reached the caller"
+    );
+    assert_eq!(launches_out(&pc), vec!["refused"]);
+}
+
+/// `server`'s daemon stopped, `change` made to its store, and started again.
+fn changed_while_stopped(server: &Machine, change: &str) {
+    let stopped = server.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", server.log());
+    {
+        let store =
+            rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+        store.execute_batch(change).unwrap();
+    }
+    server.user.status();
+}
+
+#[test]
+fn a_held_launch_with_no_agent_tells_its_caller_once_answered() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "No agent");
+    changed_while_stopped(
+        &server,
+        "UPDATE launches SET agent = NULL WHERE way = 'in';",
+    );
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("was approved by the user, but nothing was done"),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    assert!(rows_under_pilots(&pc).is_empty());
+}
+
+#[test]
+fn a_restart_there_during_the_setup_of_an_allowed_launch_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Cut by a restart");
+
+    // Allowed, settled started, its setup going on: the daemon stopped before it told anyone.
+    changed_while_stopped(
+        &server,
+        &format!(
+            "UPDATE approval_requests SET state = 'allowed', decision = 'once', decided_at = 1 \
+             WHERE number = {number}; UPDATE launches SET state = 'started' WHERE way = 'in';"
+        ),
+    );
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("was approved by the user, but nothing was done"),
+        "{told}"
+    );
+    assert!(told.contains("Flottille stopped"), "{told}");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    eventually("its workspace removed there", || {
+        workspaces(&server).is_empty()
+    });
+}
+
+#[test]
+fn a_held_launch_with_no_request_number_never_says_request_0_when_it_ends() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    held_launch(&pc, &server, &mcp, "No number");
+    changed_while_stopped(
+        &server,
+        "UPDATE launches SET request = NULL WHERE way = 'in';",
+    );
+    let session = titled(&server, "No number");
+
+    server
+        .user
+        .call("agent.stop", json!({"agent": session["id"]}))
+        .unwrap();
+
+    let told = prompt_with(
+        &pc,
+        "its session there ended before the user of server decided",
+    );
+    assert!(!told.contains("Request #0"), "{told}");
+    assert!(told.contains("No number"), "{told}");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+}
