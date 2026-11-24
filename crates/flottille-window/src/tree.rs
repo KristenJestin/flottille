@@ -2454,6 +2454,26 @@ impl SessionRow {
     /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
     /// under it, out of sight, and the name is cut with an ellipsis. The whole is in a tooltip.
     fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // The line is swapped for another when the row's machine tag comes (its pilot's machine
+        // lists it after it was drawn), goes, or changes: the new one fades in, as the kit's
+        // `changing` fades words.
+        let kind = match (&self.elsewhere, &self.tag) {
+            (Some(there), _) if !there.listed => format!("machine {}", there.machine),
+            (_, Some(tag)) => format!("tag {tag}"),
+            _ => "place".to_owned(),
+        };
+        let swap = changed(
+            &ElementId::Name(format!("session-line-swap-{}", self.id).into()),
+            &SharedString::from(kind),
+            window,
+            cx,
+        );
+        let line = self.line_of(window, cx);
+        div().min_w_0().opacity(swap).child(line).into_any_element()
+    }
+
+    /// The line itself, [`SessionRow::second_line`] without its fade.
+    fn line_of(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
         let (name, icon, said) = match &self.place {
             None => ("main".to_owned(), Icon::Folder, "Project folder"),
