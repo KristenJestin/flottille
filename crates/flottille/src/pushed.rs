@@ -136,6 +136,8 @@ struct Setting {
     named: PathBuf,
     /// The file it led to then, its links followed.
     file: PathBuf,
+    /// Why no folder was kept for it at the start, which a relink is refused with.
+    unkept: Option<String>,
 }
 
 /// A setting whose links were moved since the daemon's start, to a file [`settle`] judged sound.
@@ -183,10 +185,19 @@ pub fn find(make: bool) {
             .into_iter()
             .filter_map(|named| {
                 let file = leads(&named)?;
-                Some(Setting { named, file })
+                Some(Setting {
+                    named,
+                    file,
+                    unkept: None,
+                })
             })
             .collect();
-        let shared = shared_folders(&account, home.as_deref(), &|name| std::env::var_os(name));
+        let shared = shared_folders(
+            &account,
+            home.as_deref(),
+            &|name| std::env::var_os(name),
+            &[],
+        );
         let mut kept: Vec<PathBuf> = settings
             .iter()
             .flat_map(|setting| keep_for(setting, &shared).unwrap_or_default())
@@ -685,6 +696,7 @@ fn shared_folders(
     account: &Path,
     home: Option<&Path>,
     var: &dyn Fn(&str) -> Option<OsString>,
+    _work: &[PathBuf],
 ) -> Shared {
     let real = |path: PathBuf| path.canonicalize().unwrap_or(path);
     let base = |name: &str, fallback: &str| {
@@ -1756,6 +1768,7 @@ mod tests {
             found.settings.push(Setting {
                 named: link.to_path_buf(),
                 file: leads(link).unwrap(),
+                unkept: None,
             });
         }
         for folder in kept {
@@ -1798,7 +1811,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         std::fs::create_dir_all(home.join("gitlink")).unwrap();
-        let shared = shared_folders(&home, Some(&home), &no_vars);
+        let shared = shared_folders(&home, Some(&home), &no_vars, &[]);
 
         assert!(keepable(&home.join("gitlink"), &shared));
         assert!(!keepable(&home, &shared), "the home itself");
@@ -1815,7 +1828,7 @@ mod tests {
         std::os::unix::fs::symlink(home.join("settings"), home.join("settings-link")).unwrap();
 
         // Unset: git reads `~/.config/git/config`, and `~/.config` is every program's.
-        let unset = shared_folders(&home, Some(&home), &no_vars);
+        let unset = shared_folders(&home, Some(&home), &no_vars, &[]);
         assert!(!keepable(&home.join(".config"), &unset));
         assert!(keepable(&home.join(".config/git"), &unset));
 
@@ -1826,14 +1839,14 @@ mod tests {
         };
         assert!(!keepable(
             &home.join(".config"),
-            &shared_folders(&home, Some(&home), &slash)
+            &shared_folders(&home, Some(&home), &slash, &[])
         ));
         let linked = |name: &str| {
             (name == "XDG_CONFIG_HOME").then(|| home.join("settings-link").into_os_string())
         };
         assert!(!keepable(
             &home.join("settings"),
-            &shared_folders(&home, Some(&home), &linked)
+            &shared_folders(&home, Some(&home), &linked, &[])
         ));
     }
 
@@ -1841,7 +1854,7 @@ mod tests {
     fn a_link_in_a_shared_folder_of_the_home_is_refused_not_kept() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
-        let shared = shared_folders(&home, Some(&home), &no_vars);
+        let shared = shared_folders(&home, Some(&home), &no_vars, &[]);
         let a = version(&home, "a");
         for name in [
             ".local",
@@ -1862,6 +1875,7 @@ mod tests {
             let setting = Setting {
                 named: link.clone(),
                 file: a.clone(),
+                unkept: None,
             };
             assert_eq!(
                 keep_for(&setting, &shared).unwrap(),
@@ -1875,39 +1889,123 @@ mod tests {
         assert!(keepable(&own, &shared));
     }
 
-    #[test]
-    fn the_folder_above_the_old_target_is_kept_at_the_start() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().canonicalize().unwrap();
-        let shared = shared_folders(&home, Some(&home), &no_vars);
-        // A manager that keeps `versions/<n>/git/config` and a link to it from a folder of its own.
-        let old = home.join("dots/versions/a/git/config");
+    /// A settings file `old` (made), its link at `home/gitlink/config`.
+    fn linked(home: &Path, old: &Path) -> Setting {
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, "").unwrap();
+        std::fs::write(old, "").unwrap();
         std::fs::create_dir_all(home.join("gitlink")).unwrap();
         let link = home.join("gitlink/config");
-        std::os::unix::fs::symlink(&old, &link).unwrap();
-        let setting = Setting {
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(old, &link).unwrap();
+        Setting {
             named: link,
-            file: old.clone(),
-        };
+            file: old.to_owned(),
+            unkept: None,
+        }
+    }
+
+    #[test]
+    fn the_nearest_folder_holding_the_versions_is_kept_at_the_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let shared = shared_folders(&home, Some(&home), &no_vars, &[]);
+        // A manager that keeps `versions/<n>/git-config` and a link to it from a folder of its
+        // own: the folder of the versions, not the dotfiles' whole folder above it.
+        let setting = linked(&home, &home.join("dots/versions/a/git-config"));
         let mut kept = keep_for(&setting, &shared).unwrap();
         kept.sort();
-        assert_eq!(kept, [home.join("dots"), home.join("gitlink")]);
+        assert_eq!(kept, [home.join("dots/versions"), home.join("gitlink")]);
 
         // Below a folder of projects, only the dotfiles' own: the projects folder is every project's.
-        let old = home.join("projects/dotfiles/a/config");
-        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, "").unwrap();
-        std::fs::remove_file(home.join("gitlink/config")).unwrap();
-        std::os::unix::fs::symlink(&old, home.join("gitlink/config")).unwrap();
-        let setting = Setting {
-            named: home.join("gitlink/config"),
-            file: old,
-        };
+        let setting = linked(&home, &home.join("projects/dotfiles/a/config"));
         let mut kept = keep_for(&setting, &shared).unwrap();
         kept.sort();
         assert_eq!(kept, [home.join("gitlink"), home.join("projects/dotfiles")]);
+    }
+
+    #[test]
+    fn a_projects_folder_holding_the_dotfiles_is_never_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        // A folder of projects no name list knows, holding a project of the daemon's and the
+        // dotfiles' versions directly.
+        let app = home.join("Projects/app");
+        std::fs::create_dir_all(&app).unwrap();
+        let shared = shared_folders(&home, Some(&home), &no_vars, std::slice::from_ref(&app));
+        assert!(!keepable(&home.join("Projects"), &shared));
+        assert!(!keepable(&app, &shared));
+        assert!(!keepable(&app.join("src"), &shared));
+
+        let setting = linked(&home, &home.join("Projects/a/config"));
+        let why = keep_for(&setting, &shared).unwrap_err();
+        assert!(
+            why.contains(&home.join("Projects").display().to_string()),
+            "{why}"
+        );
+        assert!(why.contains("project"), "{why}");
+
+        // One folder deeper, the dotfiles' own folder is kept, never the projects folder.
+        let setting = linked(&home, &home.join("Projects/dotfiles/a/config"));
+        let mut kept = keep_for(&setting, &shared).unwrap();
+        kept.sort();
+        assert_eq!(kept, [home.join("Projects/dotfiles"), home.join("gitlink")]);
+    }
+
+    #[test]
+    fn a_dotfiles_repository_that_is_a_project_is_never_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let dotfiles = home.join("dotfiles");
+        let old = dotfiles.join("a/config");
+        let setting = linked(&home, &old);
+        // The dotfiles' repository is a project's folder; or a workspace of one is in it.
+        for work in [dotfiles.clone(), dotfiles.join("work/feature")] {
+            std::fs::create_dir_all(&work).unwrap();
+            let shared = shared_folders(&home, Some(&home), &no_vars, std::slice::from_ref(&work));
+            let why = keep_for(&setting, &shared).unwrap_err();
+            assert!(why.contains(&dotfiles.display().to_string()), "{why}");
+            assert!(why.contains("project"), "{why}");
+        }
+
+        // Nothing kept, a relink is refused saying why.
+        let shared = shared_folders(
+            &home,
+            Some(&home),
+            &no_vars,
+            std::slice::from_ref(&dotfiles),
+        );
+        let mut found = found_now(&home);
+        let why = keep_for(&setting, &shared).unwrap_err();
+        found.settings.push(Setting {
+            unkept: Some(why.clone()),
+            ..setting
+        });
+        let b = dotfiles.join("b/config");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&b, "").unwrap();
+        relink(&home.join("gitlink/config"), &b);
+        let refused = settle(&found, &found.settings[0]).unwrap_err();
+        assert!(refused.contains(&why), "{refused}");
+        assert!(refused.contains("flottille daemon stop"), "{refused}");
+    }
+
+    #[test]
+    fn a_kept_folder_whose_identity_was_never_read_is_not_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        let kept = home.join("gitlink");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        // Kept, but never made read-only: no identity recorded for either folder.
+        let mut found = found_settings(&home, &[&link], &[]);
+        found.kept.extend([kept.clone(), home.join("dots")]);
+
+        let b = version(&home, "b");
+        relink(&link, &b);
+
+        assert!(settle(&found, &found.settings[0]).is_err());
     }
 
     #[test]
