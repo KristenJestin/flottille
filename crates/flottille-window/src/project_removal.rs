@@ -11,14 +11,13 @@ use gpui_design_system::{
     presence, space, toast,
 };
 use gpui_kit::{
-    AnyElement, App, Context, ElementId, IntoElement, ParentElement, Render, Styled, WeakEntity,
-    Window, div, px,
+    AnyElement, App, Context, ElementId, IntoElement, ParentElement, Render, Styled, Window, div,
+    px,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::perform_later;
-use crate::shell::Shell;
 
 /// What `project.removal` says the removal would do.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -94,7 +93,7 @@ impl Removal {
 }
 
 pub struct ProjectRemoval {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     open: bool,
     /// How many reads were asked: an answer to an older one is dropped.
@@ -106,7 +105,7 @@ pub struct ProjectRemoval {
 }
 
 impl ProjectRemoval {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,

@@ -15,14 +15,13 @@ use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::{perform_later, section_blocks, stack};
 use crate::project::{only_at_root, repository_label};
-use crate::shell::Shell;
 
 /// What the section says they are for.
 pub const SENTENCE: &str = "Command lines run before an agent commits in a repository: before \
@@ -170,7 +169,7 @@ impl RepositoryChecks {
 }
 
 pub struct CommitChecks {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     /// None until the daemon answered the first read.
     repositories: Option<Vec<RepositoryChecks>>,
@@ -180,7 +179,7 @@ pub struct CommitChecks {
 }
 
 impl CommitChecks {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,
