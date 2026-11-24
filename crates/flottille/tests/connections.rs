@@ -7946,13 +7946,19 @@ fn a_connection_variable_cannot_choose_the_landlock_exception() {
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
     assert!(said.contains("failed"), "{said}");
-    // The loads of the page ran with the variable, and could read nothing of the folder it names.
+    // The display's variables are set after the connection's own: the loads of the page ran with
+    // the folder the daemon made, never with the one the variable names, and read nothing of it.
     let opened = logged(&user, "browser", "open");
     assert_eq!(opened.len(), 2, "{opened:?}");
     for line in &opened {
         let seen = &line["display"];
-        assert_eq!(seen["XDG_RUNTIME_DIR"], runtime.to_str().unwrap(), "{seen}");
-        assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
+        let folder = seen["XDG_RUNTIME_DIR"].as_str().unwrap();
+        assert_ne!(folder, runtime.to_str().unwrap(), "{seen}");
+        assert!(
+            folder.starts_with(user.path("runtime/flottille/display").to_str().unwrap()),
+            "{seen}"
+        );
+        assert_eq!(seen["runtime_files"], json!(["wayland-test"]), "{seen}");
     }
 }
 
