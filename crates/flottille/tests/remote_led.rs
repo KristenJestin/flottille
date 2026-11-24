@@ -797,7 +797,7 @@ fn the_findings_of_a_review_there_are_told_to_the_pilot_here() {
     let reported = pilot.call(
         "review",
         json!({"action": "report", "summary": "Read the export.", "findings": [
-            {"severity": "high", "confidence": "confirmed", "file": "b.txt", "lines": "1",
+            {"severity": "high", "confidence": "confirmed", "file": "a.txt", "lines": "1",
                 "concerns": "code", "text": "The export drops the last line.",
                 "case": "export a file of two lines"}
         ]}),
