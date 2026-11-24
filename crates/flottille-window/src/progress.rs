@@ -26,7 +26,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
     Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Task,
-    TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    TestSupportExt as _, Window, div, px, relative,
 };
 use serde_json::Value;
 
@@ -34,7 +34,7 @@ use crate::actions::Command;
 use crate::commands::perform_later;
 use crate::glyphs;
 use crate::model::Snapshot;
-use crate::shell::{Selection, Shell};
+use crate::shell::Selection;
 use crate::state::AgentState;
 
 /// How long the `item.*` events must stop before the progress is read again: a round says many
@@ -330,7 +330,7 @@ pub fn workspaces_of(snapshot: &Snapshot, project: &str) -> Vec<String> {
 }
 
 pub struct ProgressPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     asked: u64,
     listed_at: u64,
@@ -357,7 +357,7 @@ pub struct ProgressPage {
 }
 
 impl ProgressPage {
-    pub fn new(shell: WeakEntity<Shell>, project: String, _: &mut Context<Self>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String, _: &mut Context<Self>) -> Self {
         Self {
             shell,
             project,

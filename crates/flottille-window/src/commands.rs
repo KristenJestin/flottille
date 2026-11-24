@@ -43,12 +43,77 @@ impl CommandInfo {
     }
 }
 
-/// Asks the daemon through the shell, once the update running now is over: the shell hands its
-/// answers to these views while it is itself being updated, and a view cannot update it then.
-pub(crate) fn perform_later(shell: &WeakEntity<Shell>, command: Command, cx: &mut App) {
-    let shell = shell.clone();
+/// Sends `command` the way the entity was given when it was made (`asks`: its machine's actions,
+/// #1271), or, given none, through the shell.
+pub(crate) fn ask(
+    shell: &WeakEntity<Shell>,
+    asks: &Option<crate::actions::Actions>,
+    command: Command,
+    cx: &mut App,
+) {
+    match asks {
+        Some(asks) => asks.send(command),
+        None => {
+            shell.update(cx, |shell, _| shell.perform(command)).ok();
+        }
+    }
+}
+
+/// The shell, as the pages of one machine (`None`: this one) ask it: what they send goes to
+/// that machine, whichever is in front when they send it. A section, a dialog, a toast's action
+/// or a timer of a machine's pages holds it from the moment it is made, so nothing they do later
+/// is addressed by the machine shown then (#1271).
+#[derive(Clone)]
+pub struct ShellOf {
+    shell: WeakEntity<Shell>,
+    machine: Option<String>,
+}
+
+impl ShellOf {
+    /// The shell as the pages of `machine` (`None`: this one) ask it.
+    pub fn on(shell: WeakEntity<Shell>, machine: Option<String>) -> Self {
+        Self { shell, machine }
+    }
+
+    /// The machine these pages are of (`None`: this one).
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+
+    /// Asks the daemon of its machine now: from a click, a timer or a dialog, never while the
+    /// shell is being updated ([`perform_later`] then).
+    pub(crate) fn perform(&self, command: Command, cx: &mut App) {
+        let machine = self.machine.as_deref();
+        self.shell
+            .update(cx, |shell, _| shell.perform_on(machine, command))
+            .ok();
+    }
+}
+
+/// This machine's pages: a section made outside any machine's pages (a test's) is this one's.
+impl From<WeakEntity<Shell>> for ShellOf {
+    fn from(shell: WeakEntity<Shell>) -> Self {
+        Self::on(shell, None)
+    }
+}
+
+impl std::ops::Deref for ShellOf {
+    type Target = WeakEntity<Shell>;
+
+    fn deref(&self) -> &WeakEntity<Shell> {
+        &self.shell
+    }
+}
+
+/// Asks the daemon of the machine `shell` is of, once the update running now is over: the shell
+/// hands its answers to these views while it is itself being updated, and a view cannot update it
+/// then.
+pub(crate) fn perform_later(shell: &ShellOf, command: Command, cx: &mut App) {
+    let (shell, machine) = (shell.shell.clone(), shell.machine.clone());
     cx.defer(move |cx| {
-        shell.update(cx, |shell, _| shell.perform(command)).ok();
+        shell
+            .update(cx, |shell, _| shell.perform_on(machine.as_deref(), command))
+            .ok();
     });
 }
 
@@ -214,7 +279,7 @@ enum Writing {
 }
 
 pub struct CommandsSection {
-    shell: WeakEntity<Shell>,
+    shell: ShellOf,
     project: String,
     listed: Option<Vec<CommandInfo>>,
     /// The rows as drawn: a removed command folds away before it is gone.
@@ -241,7 +306,7 @@ pub struct CommandsSection {
 }
 
 impl CommandsSection {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: ShellOf, project: String) -> Self {
         Self {
             shell,
             project,

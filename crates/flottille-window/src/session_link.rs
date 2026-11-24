@@ -17,13 +17,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flottille_protocol::Event;
-use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::{VaultAsk, one_line};
 use crate::leaves::LeaveRow;
-use crate::link::{Conn, Connect, Update, quiet_wait};
+use crate::link::{Conn, Connect, Update, Updates, quiet_wait};
 use crate::model::OpenQuestion;
 use crate::runs::{CommandOutput, CommandRow};
 use crate::subscriptions::SubscriptionRow;
@@ -581,7 +580,7 @@ const HEALTHY: Duration = Duration::from_secs(10);
 /// conversation.
 pub fn spawn(
     connect: Connect,
-    updates: UnboundedSender<Update>,
+    updates: impl Into<Updates>,
     root: String,
     shown: String,
     place: Where,
@@ -593,7 +592,7 @@ pub fn spawn(
     let watched = Arc::new(Mutex::new(None));
     let link = Link {
         connect,
-        updates,
+        updates: updates.into(),
         token,
         root,
         shown,
@@ -617,7 +616,7 @@ pub fn spawn(
 
 struct Link {
     connect: Connect,
-    updates: UnboundedSender<Update>,
+    updates: Updates,
     token: u64,
     root: String,
     shown: String,
