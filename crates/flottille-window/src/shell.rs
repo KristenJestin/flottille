@@ -1734,9 +1734,9 @@ impl Shell {
         &self.group_form
     }
 
-    /// Whether a group has this name already.
-    pub fn group_named(&self, name: &str) -> bool {
-        self.arrangement.names(name)
+    /// Whether a group has this name already, the group `besides` left out.
+    pub fn group_named(&self, name: &str, besides: Option<&str>) -> bool {
+        self.arrangement.names(name, besides)
     }
 
     /// The projects' list as the user arranged it, for the projects the window holds.
@@ -1775,9 +1775,49 @@ impl Shell {
         self.arrange(Change::add_group(name), cx);
     }
 
-    /// A group removed: its projects go back to the list, at the end, none removed.
+    /// "Rename…" in a group's menu: the New group dialog, its field holding the name it has.
+    pub fn ask_rename_group(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .arrangement
+            .groups
+            .iter()
+            .find(|group| group.id == id)
+            .map(|group| group.name.clone())
+        else {
+            return;
+        };
+        self.group_form
+            .update(cx, |form, cx| form.open_rename(id, &name, window, cx));
+    }
+
+    /// A group given another name, from the dialog.
+    pub fn rename_group(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        let (id, name) = (id.to_owned(), name.trim().to_owned());
+        self.arrange(Change::RenameGroup { id, name }, cx);
+    }
+
+    /// A group removed: its projects go back to the list, at the end, none removed, which a
+    /// toast says.
     pub fn remove_group(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(held) = self
+            .listing()
+            .groups
+            .into_iter()
+            .find(|group| group.id == id)
+            .map(|group| group.projects.len())
+        else {
+            return;
+        };
         self.arrange(Change::RemoveGroup(id.to_owned()), cx);
+        let said = gpui_design_system::Toast::success("Group removed");
+        gpui_design_system::toast(
+            match held {
+                0 => said,
+                1 => said.detail("Its project is back in the list."),
+                held => said.detail(format!("Its {held} projects are back in the list.")),
+            },
+            cx,
+        );
     }
 
     /// A project row dragged to `index` among the rows of `group` (`None`: outside any group).
@@ -1827,6 +1867,7 @@ impl Shell {
         &self,
         present: &[String],
         nodes: &HashMap<String, Entity<ProjectNode>>,
+        cx: &App,
     ) -> Arranged {
         let layout = self.arrangement.listed(present);
         let rows = |keys: &[String]| -> Vec<Entity<ProjectNode>> {
@@ -1838,11 +1879,17 @@ impl Shell {
             groups: layout
                 .groups
                 .iter()
-                .map(|group| ArrangedGroup {
-                    id: group.id.clone(),
-                    name: group.name.clone(),
-                    open: group.open,
-                    rows: rows(&group.projects),
+                .map(|group| {
+                    let rows = rows(&group.projects);
+                    ArrangedGroup {
+                        id: group.id.clone(),
+                        name: group.name.clone(),
+                        open: group.open,
+                        mark: AgentState::strongest(
+                            rows.iter().filter_map(|row| row.read(cx).held()),
+                        ),
+                        rows,
+                    }
                 })
                 .collect(),
             loose: rows(&layout.loose),
@@ -1852,7 +1899,7 @@ impl Shell {
     /// The list draws the arrangement.
     fn show_arrangement(&mut self, cx: &mut Context<Self>) {
         let present = self.project_names();
-        let arranged = self.arranged_rows(&present, &self.projects);
+        let arranged = self.arranged_rows(&present, &self.projects, cx);
         if self.sidebar.read(cx).arranged() != &arranged {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_arranged(arranged, cx));
@@ -4913,7 +4960,7 @@ impl Shell {
             });
         }
         let names: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
-        let arranged = self.arranged_rows(&names, &self.projects);
+        let arranged = self.arranged_rows(&names, &self.projects, cx);
         self.sidebar_changed(cx);
         // GPUI Fast takes any update for a change: touch the list only when it did.
         if !grouped && self.sidebar.read(cx).projects() != project_nodes {
