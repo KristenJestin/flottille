@@ -1736,7 +1736,7 @@ impl Store {
     }
 
     /// The ended or failed roots whose session is kept to be resumed: those the sweep forgets in
-    /// time.
+    /// time. A child of another machine's agent kept by a release of before is among them.
     pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state IN ('ended', 'failed') \

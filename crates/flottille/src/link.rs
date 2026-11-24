@@ -158,7 +158,7 @@ pub struct Remote {
     /// coming in is not judged after a write to the disk.
     writing: Mutex<()>,
     /// The control session to the hub.
-    control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
+    pub(crate) control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
     /// `None` once the hub's list was taken, or the hub could not give one at start; since when
     /// the daemon waits for one, at start and after the session to the hub was lost (a machine
     /// that wakes from a suspend). Meanwhile, `first_list` at most, no link is accepted or

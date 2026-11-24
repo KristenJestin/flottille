@@ -17,7 +17,7 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   back as if that machine's daemon were here. A path typed is that machine's
   (`flottille --machine server project add ~/code/app`). A machine that is off is refused at once,
   `flottille: server is offline since 22:14`; nothing is kept for it. `flottille daemon`,
-  `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide` and `read-page` are this
+  `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide`, `read-page` and `browser-network` are this
   machine's own and refuse the flag; they ignore the variable, which a shell may have exported for
   the commands it aims, and the daemon a command starts never reads it. `vault share` is this
   machine's too, and takes the flag as the machine the entry is shared with.
@@ -26,7 +26,7 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   The examples below write `flottille`.
 - The examples below use invented projects and paths.
 - **Each command has its place in the window**, except the few a script alone has a use for
-  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `mcp`): the
+  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `browser-network`, `mcp`): the
   screen, dialog or menu entry that calls the same daemon method. The table is
   `crates/flottille/tests/window_parity.rs`, and the test `every_cli_command_has_its_place_in_the_window`
   refuses a command heading of this file that is in neither list.
@@ -60,7 +60,9 @@ the lock taken and refuses to start.
 
 ### `flottille daemon stop`
 
-Stops the running daemon, and its agents with it. A daemon that does not answer within 30
+Stops the running daemon, and its agents with it. The next command starts another, which reads
+the user's files again: that is the restart a refusal of a push names (`docs/vault.md`, "The
+gaps"); there is no `flottille daemon restart`. A daemon that does not answer within 30
 seconds, or does not end in the time its agents take to stop, is ended: it and the processes it
 ran are killed (a helper they left detached in a session of its own is spared), and the command
 says it had to (`docs/reference/daemon.md`).
@@ -128,7 +130,9 @@ nothing is wrong), the warnings also being in `"warnings"`.
 The sandbox's state is the daemon's, asked of it; doctor starts no daemon (one that will not start
 is what it may be run to find out about). `--json` adds `"sandbox"`, as `daemon.status` gives it
 (`docs/protocol.md`), and each gap it says (no private mount namespace, or a probe of it that
-concluded nothing, the SSH agent lent to no push and why, with how to fix it) is a warning. With no daemon running, doctor's own process probes what one would find, and
+concluded nothing, the SSH agent lent to no push and why, with how to fix it, a connection's
+browser that cannot run in a network of its own and what to install) is a warning; `"browser_network"`
+says whether it can (`docs/vault.md`, "The browser's network"). With no daemon running, doctor's own process probes what one would find, and
 `"sandbox"` says so: `"probed": "no daemon running: probed by doctor"`.
 
 ```
@@ -958,9 +962,11 @@ Shared jira with server: its keyring holds it now.
 Not a command for the user: the credential plugin agent-browser starts during a `login` of its
 connection's adapter (`docs/extensions.md`, "Adapters"), named in the configuration Flottille
 writes for it. It reads one `agent-browser.plugin.v1` request on its standard input, asks the
-daemon's login that runs, at `<socket>`, with the one-time token of that run
-(`FLOTTILLE_VAULT_TOKEN`), and writes the answer on its standard output. Without that token, it
-is refused before anything is asked. Hidden from `--help`.
+daemon's login that runs, at `<socket>`, with the one-time token of that run (the file
+`vault.token` beside the socket, in the connection's vault folder under the runtime folder,
+out of every run's reach), and writes the answer on its standard output; why it failed is
+also written beside the socket, in `vault.why`, for the login to say. Without that token, it is
+refused before anything is asked. Hidden from `--help`.
 
 ## Workspaces
 
@@ -1701,6 +1707,12 @@ Not for you either: the program the daemon starts to read a page for the `web` t
 `--help`. It reads the page on its standard input and writes its text, title and links as JSON,
 under the limits of memory and time the daemon set, so that a page that blows it up never takes
 the daemon with it (`docs/tools.md`, "The web").
+
+### `flottille browser-network`
+
+Not for you either: the process the daemon starts in a network namespace it makes for a
+connection's browser, hidden from `--help`. It holds the namespace, which passt's `pasta` gives a
+way out, until the daemon ends it with the browser (`docs/vault.md`, "The browser's network").
 
 ### `flottille mcp`
 
