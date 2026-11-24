@@ -1708,6 +1708,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
 Flottille's own features beyond its core (the Auto judge, the compaction, the agent's own handoff
 included, built in today (§7.1, §5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
 nothing built, in [`extensions.md`](extensions.md).
+The memory of the work (what was done in a project, when and why), one of them, is proposed in
+[`memory.md`](memory.md).
 
 ## 14. Defaults taken, to confirm
 
