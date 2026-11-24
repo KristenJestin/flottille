@@ -12,6 +12,13 @@
 //! that include a file not protected since the start, a file protected at the start that is no
 //! longer the one at its path, another mount of the same files, a kernel that gives no namespace.
 //! Nothing here protects by reading the configuration: reading it only decides whether to lend.
+//!
+//! A run in Full is confined in no way (`docs/tools.md`, "In Full, a run is the user's own"): it
+//! writes `~/.ssh` and the git settings as the user does, and what it writes outlives it. A
+//! later push in Ask or Auto still reads them as here, each time: what `ssh`'s configuration
+//! runs is refused, the credential helpers are those found at the start, the hooks, the
+//! transports, the `ssh` command and the programs a transport names are the daemon's own, and a
+//! program of `~/.ssh` the user's `ssh` command names runs only as it was at the start.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::MetadataExt;
@@ -113,6 +120,8 @@ struct Found {
     /// Whether the daemon found it, and made `~/.ssh` (not `flottille doctor`, which probes
     /// what a daemon would find: one would make a missing `~/.ssh`).
     made: bool,
+    /// When: what a run in Full, which writes `~/.ssh` as the user does, changed is after it.
+    started: std::time::SystemTime,
 }
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
@@ -171,6 +180,7 @@ pub fn find(make: bool) {
             read_only,
             pinned,
             made: make,
+            started: std::time::SystemTime::now(),
         })
     });
 }
@@ -449,7 +459,7 @@ impl Read {
 }
 
 /// Whether the link at `path` leads to a file of `ssh_folder` with no other link on the way,
-/// which no command can change.
+/// which no confined command can change.
 fn inside(path: &Path, ssh_folder: &Path) -> bool {
     let Ok(target) = std::fs::read_link(path) else {
         return false;
@@ -470,7 +480,7 @@ fn changed(found: &Found, path: &Path) -> Option<String> {
         true => None,
         false => Some(format!(
             "{} is not the one the daemon found at its start (removed, or replaced): restart the \
-             daemon",
+             daemon, or work in Full",
             path.display()
         )),
     }
@@ -899,7 +909,11 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
 /// its folder or its branch), read from the files found at the daemon's start alone, in the
 /// order git reads them: what a push the gate let through is given of them, since it runs from a
 /// folder of the daemon's (`push_folder`), where git would read them otherwise. A file that is
-/// gone is none, as git reads it.
+/// gone is none, as git reads it. **An included file that was not there at the daemon's start
+/// (nor the same file) is left out**, with what it says, and so is a `hasconfig` include of such a
+/// file: the push is lent the user's sign-in, and a file a run in Full may have made since could
+/// say `http.proxy`, `http.sslVerify=false` or `http.sslCAInfo` for it. A top file of the
+/// settings is the user's own to change, as `~/.gitconfig` is for a dotfiles update.
 pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, String> {
     let mut settings = Vec::new();
     for file in found()
@@ -930,7 +944,29 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
                 read.stderr.trim()
             ));
         }
-        settings.extend(given(&read.stdout));
+        let start = found();
+        let protected = |path: &Path| {
+            start.is_some_and(|found| {
+                path.canonicalize().is_ok_and(|real| {
+                    found.read_only.iter().any(|(p, _)| *p == real)
+                        && changed(found, &real).is_none()
+                })
+            })
+        };
+        let top = |path: &Path| {
+            start.is_some_and(|found| {
+                path.canonicalize()
+                    .is_ok_and(|real| found.git.contains(&real))
+            }) || protected(path)
+        };
+        let home = start.and_then(|found| found.home.as_deref());
+        settings.extend(given(&read.stdout, &top, &|value| {
+            let value = match value.strip_prefix("~/") {
+                Some(rest) => home.map(|home| home.join(rest)).unwrap_or_default(),
+                None => PathBuf::from(value),
+            };
+            protected(&value)
+        }));
     }
     Ok(settings)
 }
@@ -941,10 +977,20 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
 /// the URLs of the push's own remotes, which git knows only once it reads them all: it is given
 /// as it is, its file named by its full path (a setting given to a command names no file
 /// relative to another), for git to include where it applies.
-fn given(listed: &str) -> Vec<(String, String)> {
+fn given(
+    listed: &str,
+    from_trusted_file: &dyn Fn(&Path) -> bool,
+    include_trusted: &dyn Fn(&str) -> bool,
+) -> Vec<(String, String)> {
     let mut parts = listed.split('\0');
     let mut given = Vec::new();
     while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+        if origin
+            .strip_prefix("file:")
+            .is_some_and(|file| !from_trusted_file(Path::new(file)))
+        {
+            continue;
+        }
         let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
         if key == "include.path" {
             continue;
@@ -963,6 +1009,9 @@ fn given(listed: &str) -> Vec<(String, String)> {
                     .into_owned(),
                 (None, _) => continue,
             };
+            if !include_trusted(&path) {
+                continue;
+            }
             given.push((key.to_owned(), path));
             continue;
         }
@@ -1033,6 +1082,27 @@ fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
         .as_ref()
         .and_then(|path| path.canonicalize().ok())
         .is_some_and(|real| real.ancestors().all(root));
+    // `~/.ssh` is read-only to a confined run, not to a run in Full (`docs/tools.md`): a
+    // program there is run only as it was at the daemon's start, its status (`ctime`, which no
+    // one sets back) older, through a link or not.
+    if in_ssh
+        && !rooted
+        && let (Some(path), Some(found)) = (&path, found)
+    {
+        let older = |meta: std::io::Result<std::fs::Metadata>| {
+            meta.is_ok_and(|meta| {
+                let changed = std::time::UNIX_EPOCH
+                    + std::time::Duration::new(meta.ctime() as u64, meta.ctime_nsec() as u32);
+                changed <= found.started
+            })
+        };
+        if !older(std::fs::symlink_metadata(path)) || !older(std::fs::metadata(path)) {
+            return Err(format!(
+                "runs {program}, which was made or changed since the daemon's start (a run in \
+                 Full writes ~/.ssh): restart the daemon to have it run"
+            ));
+        }
+    }
     match in_ssh || rooted {
         true => Ok(format!("{program} {}{rest}", crate::git::SSH_OPTIONS).into()),
         false => Err(format!(
@@ -1059,7 +1129,7 @@ mod tests {
         .join("\0");
 
         assert_eq!(
-            given(&listed),
+            given(&listed, &|_| true, &|_| true),
             [
                 (
                     "includeif.hasconfig:remote.*.url:git@forge.invalid:**.path".to_owned(),
@@ -1071,6 +1141,35 @@ mod tests {
                 ),
                 ("user.name".to_owned(), "Work".to_owned()),
                 ("core.askpass".to_owned(), "true".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_settings_of_a_file_made_after_the_start_are_not_given() {
+        let listed = [
+            "file:/home/u/.gitconfig\0user.name\nKris",
+            "file:/home/u/later.gitconfig\0http.proxy\nhttp://127.0.0.1:9",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:https://a.invalid/**.path\nlater.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:https://b.invalid/**.path\nthen.gitconfig",
+            "",
+        ]
+        .join("\0");
+
+        let kept = given(
+            &listed,
+            &|file| file == Path::new("/home/u/.gitconfig"),
+            &|include| include == "/home/u/then.gitconfig",
+        );
+
+        assert_eq!(
+            kept,
+            [
+                ("user.name".to_owned(), "Kris".to_owned()),
+                (
+                    "includeif.hasconfig:remote.*.url:https://b.invalid/**.path".to_owned(),
+                    "/home/u/then.gitconfig".to_owned()
+                ),
             ]
         );
     }
@@ -1163,19 +1262,70 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_user_s_ssh_command_runs_nothing_a_run_can_change() {
-        let temp = tempfile::tempdir().unwrap();
-        let found = Found {
-            account: temp.path().to_owned(),
-            home: Some(temp.path().to_owned()),
-            ssh: temp.path().join(".ssh"),
+    /// What a daemon starting now finds in the home `home`.
+    fn found_now(home: &Path) -> Found {
+        Found {
+            account: home.to_owned(),
+            home: Some(home.to_owned()),
+            ssh: home.join(".ssh"),
             git: Vec::new(),
             read_only: Vec::new(),
             pinned: Vec::new(),
             made: false,
-        };
+            started: std::time::SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn a_program_of_ssh_a_run_in_full_may_have_written_is_not_run() {
+        let temp = tempfile::tempdir().unwrap();
         let wrapper = temp.path().join(".ssh/wrap");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let found = found_now(temp.path());
+        assert!(checked("~/.ssh/wrap", Some(&found)).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Changed in place since the daemon's start, as a run in Full may (`~/.ssh` is read-only
+        // to a confined run alone), or made since.
+        std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
+        let made = temp.path().join(".ssh/made");
+        std::fs::write(&made, "").unwrap();
+
+        for refused in ["~/.ssh/wrap", "~/.ssh/made", "~/.ssh/missing"] {
+            let why = checked(refused, Some(&found)).unwrap_err();
+            assert!(why.contains("since the daemon's start"), "{refused}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_replaced_settings_file_says_to_restart_the_daemon_or_work_in_full() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join(".gitconfig");
+        std::fs::write(&settings, "").unwrap();
+        let mut found = found_now(temp.path());
+        found
+            .read_only
+            .push((settings.clone(), identity(&settings).unwrap()));
+        assert!(changed(&found, &settings).is_none());
+
+        // As `git config --global` in Full does: a new file renamed over the old.
+        let new = temp.path().join(".gitconfig.lock");
+        std::fs::write(&new, "[user]\n").unwrap();
+        std::fs::rename(&new, &settings).unwrap();
+
+        let why = changed(&found, &settings).unwrap();
+        assert!(why.contains("restart the daemon, or work in Full"), "{why}");
+    }
+
+    #[test]
+    fn the_user_s_ssh_command_runs_nothing_a_run_can_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let wrapper = temp.path().join(".ssh/wrap");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, "").unwrap();
+        let found = found_now(temp.path());
         assert!(checked("ssh -i ~/.ssh/work -o IdentitiesOnly=yes", Some(&found)).is_ok());
         // Its first options, which win over any later: no shared connection, no forwarding.
         assert_eq!(

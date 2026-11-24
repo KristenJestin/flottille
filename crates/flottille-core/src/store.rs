@@ -2893,14 +2893,7 @@ impl Store {
     /// `most` of that machine's are kept already.
     pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
         if self.agent(&agent.id)?.is_none() {
-            let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
-            let kept: i64 = self.connection.query_row(
-                "SELECT count(*) FROM agents WHERE instr(id, '@') > 0 \
-                 AND substr(id, instr(id, '@') + 1) = ?1",
-                params![machine],
-                |row| row.get(0),
-            )?;
-            if kept as usize >= most {
+            if !self.stand_in_fits(&agent.id, most)? {
                 return Ok(None);
             }
             self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
@@ -2921,6 +2914,29 @@ impl Store {
         Ok(Some(
             self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()),
         ))
+    }
+
+    /// Whether the stand-in `id` may count in the cap `most` of its machine, as it does once it
+    /// leads a session: its machine's other stand-ins that count leave it room.
+    pub fn stand_in_fits(&self, id: &str, most: usize) -> Result<bool> {
+        Ok(self.counted_stand_ins(id)? < most as i64)
+    }
+
+    /// How many of the stand-ins of the machine of `id` count in its cap, `id` itself not counted.
+    /// The pilot of sessions that all ended is kept for them only, never forgotten while they
+    /// are: it launches nothing more, and counts no more.
+    fn counted_stand_ins(&self, id: &str) -> Result<i64> {
+        let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM agents AS s WHERE instr(s.id, '@') > 0 \
+             AND substr(s.id, instr(s.id, '@') + 1) = ?1 AND s.id != ?2 \
+             AND NOT (EXISTS (SELECT 1 FROM agents WHERE launched_by = s.id \
+             OR detached_from = s.id) AND NOT EXISTS (SELECT 1 FROM agents \
+             WHERE (launched_by = s.id OR detached_from = s.id) \
+             AND state NOT IN ('ended', 'failed')))",
+            params![machine, id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
@@ -2945,9 +2961,13 @@ impl Store {
         let mut forgotten = 0;
         for (id, at) in stand_ins {
             let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+            // One that leads a session here, or led it before it was detached, is kept with it.
             if at < idle_before || left(machine) {
-                forgotten +=
-                    transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+                forgotten += transaction.execute(
+                    "DELETE FROM agents WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM agents \
+                     WHERE launched_by = ?1 OR detached_from = ?1)",
+                    params![id],
+                )?;
             }
         }
         let awaited: Vec<(String, i64, u64)> = {
@@ -3553,6 +3573,29 @@ impl Store {
             Ok((launch, heard))
         })
         .collect()
+    }
+
+    /// The led session of the launch `launch` (`way`, with the machine of key `machine`) was
+    /// detached by the user: it is theirs, as a session handed over is, and its caller reaches it
+    /// no more as the session it started.
+    pub fn hand_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET kind = 'handed' WHERE way = ?1 AND machine = ?2 AND launch = ?3 \
+             AND kind = 'led'",
+            params![way, machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the pilot of another machine of the led session of the launch `launch` still
+    /// follows it here: `on`, `paused` or `ended`, as that pilot's machine said it.
+    pub fn follow_launch(&mut self, machine: &str, launch: &str, following: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET asked = json_set(asked, '$.following', ?3) WHERE way = 'in' \
+             AND machine = ?1 AND launch = ?2",
+            params![machine, launch, following],
+        )?;
+        Ok(())
     }
 
     /// Ends the launch `out` `launch` to `machine`: the session it started there ended, and counts
@@ -9582,6 +9625,130 @@ mod tests {
         assert!(store.leaves_of(&local.id).unwrap().is_empty());
         assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
         assert!(store.agent(&local.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stand_in_that_leads_a_session_is_kept_while_it_does() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
+        store.keep_stand_in(&a_stand_in("c1", "aa"), 3).unwrap();
+        let mut led = an_agent();
+        led.launched_by = Some("c0@aa".into());
+        led.led = true;
+        store
+            .create_agent(&led, ("agent.created", json!({})))
+            .unwrap();
+
+        // Idle for long, or its machine gone: the pilot of a session stays, the other goes.
+        assert_eq!(store.forget_stand_ins(Some(&[]), now_ms() + 1).unwrap(), 1);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+        assert!(store.agent("c1@aa").unwrap().is_none());
+
+        // Detached, the session still names it.
+        store
+            .change_agent(
+                &led.id,
+                AgentChange {
+                    detached_from: Some("c0@aa".into()),
+                    ..AgentChange::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.forget_stand_ins(Some(&[]), now_ms() + 1).unwrap(), 0);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_pilot_of_an_ended_session_leaves_the_cap_of_its_machine() {
+        let mut store = Store::open_in_memory().unwrap();
+        // 65 pilots in turn, each session it led ended before the next one comes.
+        for n in 0..65 {
+            let pilot = format!("c{n}@aa");
+            assert!(
+                store
+                    .keep_stand_in(&a_stand_in(&format!("c{n}"), "aa"), 64)
+                    .unwrap()
+                    .is_some(),
+                "pilot {n} is refused"
+            );
+            let mut led = an_agent();
+            led.id = format!("led{n}");
+            led.launched_by = Some(pilot);
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+            store
+                .change_agent(
+                    &led.id,
+                    AgentChange {
+                        state: Some(AgentState::Ended),
+                        ..AgentChange::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        // A live session's pilot still counts: 64 of them fill the cap.
+        let mut store = Store::open_in_memory().unwrap();
+        for n in 0..64 {
+            store
+                .keep_stand_in(&a_stand_in(&format!("c{n}"), "aa"), 64)
+                .unwrap();
+            let mut led = an_agent();
+            led.id = format!("led{n}");
+            led.launched_by = Some(format!("c{n}@aa"));
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+        }
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c64", "aa"), 64)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_ended_pilot_starts_counting_again_only_where_the_cap_has_room() {
+        let mut store = Store::open_in_memory().unwrap();
+        let lead = |store: &mut Store, name: &str, ended: bool| {
+            store.keep_stand_in(&a_stand_in(name, "aa"), 64).unwrap();
+            let mut led = an_agent();
+            led.id = format!("led-{name}");
+            led.launched_by = Some(format!("{name}@aa"));
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+            if ended {
+                store
+                    .change_agent(
+                        &led.id,
+                        AgentChange {
+                            state: Some(AgentState::Ended),
+                            ..AgentChange::default()
+                        },
+                        None,
+                    )
+                    .unwrap();
+            }
+        };
+        // One pilot whose only session ended (it counts no more), then 64 with a live one.
+        lead(&mut store, "old", true);
+        for n in 0..64 {
+            lead(&mut store, &format!("c{n}"), false);
+        }
+        assert!(
+            !store.stand_in_fits("old@aa", 64).unwrap(),
+            "the ended pilot takes a place the cap does not have"
+        );
+        // A live pilot has its place already, and a machine with room takes the ended one.
+        assert!(store.stand_in_fits("c0@aa", 64).unwrap());
+        assert!(store.stand_in_fits("old@aa", 65).unwrap());
     }
 
     #[test]

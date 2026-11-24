@@ -2,8 +2,9 @@
 
 Agents sometimes need a secret the user holds: a tracker's API token to log time, the login of a
 test account, a deploy key. Pasted in a conversation, it would be stored and shown. The vault keeps
-it instead, where the operating system keeps secrets, and lets agents **use it without ever seeing
-it**.
+it instead, where the operating system keeps secrets. In Ask and Auto, agents **use it through
+Flottille's tools without seeing it**. In Full, a command an agent runs is the user's own and can
+read it (see below).
 
 ## Where the secrets are
 
@@ -370,7 +371,18 @@ push the gate let through, and its checks' dry run, are the exception (below):
   nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
   process still starts in its namespace, or fails to start.
 
-**The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
+**A run in Full is the exception, and nothing is held back from it** (`docs/tools.md`, "In
+Full, a run is the user's own"): it has the daemon's environment, no namespace and no Landlock,
+as a command in the user's terminal. **In Full, the vault and the device key are reachable by
+what the agent runs**: the vault's items over the session bus, in the keyring, with the user's
+rights; Flottille's state folder, the connections' vault sockets and the key that signs this
+machine's requests to the others (`docs/remote.md`) by their path. The vault's promise holds in
+every mode for Flottille itself (no method, tool, event or log returns a secret, and the gate
+still refuses `secret-tool` and the other keyring programs named on a line), not for code run in
+Full: Flottille says so where Full is chosen and to the agent. A Full that keeps the vault out (a
+filtered bus, the vault encrypted at rest) is not built.
+
+**The SSH agent stays out of every run but one in Full.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
 by its path: inside the runtime folder it is denied with it; outside it (`/tmp/ssh-…/agent.…`, a
 password manager's under the home), from Landlock's ninth ABI, the folders on the way to it are
@@ -424,7 +436,8 @@ that reaches a remote also gets:
   no agent and no session bus: its credential helper runs confined (below, "The gaps").
 
 **A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
-line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
+line, no wrapper) the user, the judge or a rule let through in Ask or Auto (in Full, a push is a
+plain run of the user's own, above), and the dry run the
 project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
 the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
 helper and the forge command line's sign-in are theirs. A push that goes to paths alone (a remote
@@ -661,6 +674,31 @@ reachable.
 
 The gaps, where the platform does not allow more:
 
+- **what a run in Full wrote outlives it**: `~/.ssh`, the user's git settings and every file of
+  theirs are its to write, as the user's own, and a later push in Ask or Auto reads them. What
+  such a push runs from them is judged at each push, never trusted by where it is: a program
+  `ssh`'s configuration runs is refused; the credential helpers are those found at the daemon's
+  start; the hooks (`core.hooksPath=/dev/null`), the transports (`GIT_ALLOW_PROTOCOL` wins over a
+  `protocol.*.allow`), the `ssh` command and the programs a transport names are the daemon's own;
+  and a program of `~/.ssh` the user's `core.sshCommand` names runs only when it was neither made
+  nor changed (its change time) since the daemon's start, else the push says so and a restart of
+  the daemon trusts it again. What is not judged is data: a key, a `known_hosts`, a setting that
+  runs nothing (a push's remote URL is the user's to change, "Where the remote leads");
+- **the change-time rule on `core.sshCommand`'s program is best effort**, not a boundary: it
+  races with a run in Full at the same time (a change made, then the push, within the clock's
+  grain, or after the push has read it); it judges that one program, and not the other files it
+  reads or runs (a script the wrapper calls, a library, its own configuration); a restart of the
+  daemon trusts whatever is there then, a changed wrapper included; and a clock set back can
+  make a later change look older. It is kept because it costs a user nothing but a restart after
+  they edit their own wrapper, and refuses what a run in Full plants in the common way;
+- **the settings of a lent HTTPS push** are the user's, read from the files found at the daemon's
+  start: an included file that was not there then (or is another file at its path now) is left
+  out of what the push is given, with a `hasconfig` include of one, so that a file made since
+  (by a run in Full, a dotfiles update) cannot set `http.proxy`, `http.sslVerify` or
+  `http.sslCAInfo` for it, and the user's settings of such a file apply from the next restart of
+  the daemon. A file that was there is trusted as it is, even when written in place since, and so
+  is the settings file itself, which the user changes as they like: neither is judged for what
+  it says;
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
   cannot be opened, but a process that guesses the bus's path could still connect to it: the

@@ -413,6 +413,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             })?;
             // A tree has one mode, its root's.
             let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
+            let was = agent.gate_mode;
             // A switch to Full the user signed from a device is kept, for a launch on another
             // machine to start in Full there; any other switch forgets it.
             let signed = match mode {
@@ -436,6 +437,17 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Ok(((), event))
             })?;
             let agent = find(daemon, &agent.id)?;
+            match (was, mode) {
+                (GateMode::Full, GateMode::Full) => {}
+                (_, GateMode::Full) => crate::project_map::tell_switched_to_full(daemon, &agent),
+                (GateMode::Full, GateMode::Ask) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Ask")
+                }
+                (GateMode::Full, GateMode::Auto) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Auto")
+                }
+                _ => {}
+            }
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.options" => {
@@ -965,7 +977,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
 /// checked.
 pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     crate::projects::refuse_removing(daemon, &project.name)?;
-    let (place, folder, repositories) = match &new.workspace {
+    let (place, folder, repositories, branch) = match &new.workspace {
         // An extension's agent that reads a place of the extension's own (a pull request's copy).
         None if new.launched.as_ref().is_some_and(|l| l.at.is_some()) => {
             let at = new.launched.as_ref().and_then(|l| l.at.clone()).unwrap();
@@ -973,6 +985,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                 "the copy of a pull request".to_owned(),
                 at.clone(),
                 vec![(".".to_owned(), at.clone(), at)],
+                String::new(),
             )
         }
         None => {
@@ -987,7 +1000,12 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     (r.path.clone(), folder.clone(), folder)
                 })
                 .collect();
-            ("main".to_owned(), project.folder.clone(), repositories)
+            (
+                "main".to_owned(),
+                project.folder.clone(),
+                repositories,
+                String::new(),
+            )
         }
         Some(name) => {
             let workspace = daemon
@@ -1025,7 +1043,13 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     (r.path.clone(), workspace.folder_of(&r.path), original)
                 })
                 .collect();
-            (format!("workspace {name}"), workspace.folder, repositories)
+            let branch = workspace.branch.clone();
+            (
+                format!("workspace {name}"),
+                workspace.folder,
+                repositories,
+                branch,
+            )
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
@@ -1097,8 +1121,19 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
         &files,
     );
-    if let Some(launched) = &new.launched {
-        instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+    match &new.launched {
+        Some(launched) => {
+            instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+        }
+        // Masked as the rest of the session's part: the project's file is the user's to write.
+        None => instructions.push_str(&format!(
+            "\n\n{}",
+            flottille_core::secrets::mask(
+                &crate::project_map::map(project, &place, &folder, &branch),
+                &std::env::vars_os().collect(),
+            )
+            .trim_end()
+        )),
     }
     let agent = Agent {
         id: match new.id {

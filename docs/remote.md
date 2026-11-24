@@ -1701,7 +1701,7 @@ One monorepo. The crates and folders this milestone adds:
 | `crates/flottille-hub` | The hub's binary (control plane only), its `Dockerfile` and a compose example. |
 | `crates/flottille-mobile` | The mobile core, a UniFFI library. |
 | `apps/android/` | The Android app (Gradle). |
-| `site/` | The showcase site, coming. |
+| `site/` | The showcase site, coming, and what is published on the repository's GitHub Pages: Flottille's OAuth client metadata document (`site/oauth/client.json`, `reference/mcp-authorization.md`, §2). |
 
 **CI by paths**: the Rust suite does not run for a change of `apps/android/` or `site/` alone, nor the
 Android build for a change the core crates do not see; one job that always runs reports the result,
@@ -1730,6 +1730,12 @@ on a real phone, by hand, and reported.
   could read a key a client keeps in an unlocked keyring. A device key read that way can sign what
   its role allows. Roles bound what a device may do; a phone that asks for its unlock before a base
   answer comes later.
+- **A tree in Full can sign as this device.** A command an agent runs in Full is held back from
+  nothing (`docs/tools.md`, "In Full, a run is the user's own"): it reaches the keyring, and in it
+  the `Flottille: device` key that signs the user's requests to every machine, and Flottille's
+  state folder. Code it runs can sign what this device's role allows, a switch to Full among
+  them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
+  do not hold against code run in Full, which can sign a new one at any time.
 - **Configuration is not synced**: a project is registered by hand on each machine.
 - **No session moves** between machines; no conversation travels.
 - **Files other than pictures** do not travel yet; submodules and Git LFS objects are not sent by a
@@ -1949,9 +1955,34 @@ on a real phone, by hand, and reported.
 - What crosses machines (#817): a child's report, question, failure, idle and stuck notices, the
   notice that its process died and it goes on (`child-replaced`), and a led session's
   `session-turn-ended` (at each end of a turn, and when it ends or fails
-  unless its pilot ended it), and since #818 a child's held request (`child-asks`) and what a led
-  session asked the user while its pilot's machine was off (`session-meanwhile`). Not yet:
-  `led-integrated`, whose check reads the forge and the base on the session's machine.
+  unless it ended with its pilot, its body the local wake's), and since #818 a child's held request (`child-asks`) and what a led
+  session asked the user while its pilot's machine was off (`session-meanwhile`), and since #1272
+  `led-integrated` (checked on the session's machine, against its forge and its base) and
+  `detached`.
+- **A session led from another machine is a led session** (#1272). The machine that runs it
+  records its pilot as the caller stood in for there (`launched_by` and `led_by`
+  `<caller>@<machine's key>`, `led`), kept while it leads a session there or did before it was
+  detached; a handed session records the caller the same way, not `led`. Such a stand-in counts
+  in the cap of 64 of its machine no more once every session that names it has ended, and one
+  that did not count takes a place again, with its next launch, only where the cap has room. Its first
+  message says where a question goes as a local one's, and, on a line of the same paragraph (which the window
+  does not show) `While pc is not linked to this machine, ask reaches the user's inbox instead.`;
+  the launch's answer says what a local one's says, with the place and its return, and a held launch says what follows once the user allows it
+  there. Its pilot follows it on its own machine, a subscription of the source `session`
+  naming the machine (`forge show`, `subscription.list`, the window's rail): `forge unsubscribe`
+  or the user's Cancel tell that machine, kept until it takes it, and its questions go to the user
+  there; the following pauses after fifty `session_send` of the pilot with no message of the user
+  to the pilot, and resumes when the user writes to the pilot or resumes it. The user detaches it
+  there as on one machine: its pilot is told (`detached`; the pilot of a handed session, which
+  follows nothing, is told nothing), its following ends and the launch is
+  the user's on both machines (no longer a row under its pilot, reached with a leave as any
+  session of another machine). A real end of the pilot ends it there (`its pilot ended`), the stop
+  kept until that machine takes it; `agent.ending` and the window's End confirmation list it,
+  with its machine. A `following` or a `pilot-ended` stop is taken only from the machine of the
+  launch's caller, never for a handed launch; a `following` only for a led one, its state `on`,
+  `paused` or `ended`. The light list does not name a pilot of another machine (its
+  `pilot` is a session of the same list): drawing it under its pilot on every window is the
+  window's part.
 - Where a question goes when the parent is off (#818): a parent of another machine that forwards
   a request of its child gives it to the user of the child's machine, never to its own parent on
   its machine (the request lives where the call was held). A request goes to the user when the
@@ -1977,7 +2008,9 @@ on a real phone, by hand, and reported.
 - At most 100 messages wait for one machine: one more `agent_send` or `session_send` is refused at
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
   an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
-  the receiver would.
+  the receiver would; a review's result to a pilot of another machine is cut instead, the cut
+  said with the `session_read` that reads the rest there. The kinds a machine takes are the
+  session's own and a review's (`review`), no other extension's name.
 - A led session's plain end of a turn (it neither asked nor reported) is kept once per session
   for the machine that took none: the next replaces the one still waiting, so that the turns of a
   session that runs while its pilot's machine is off never fill the 100 and push out a report or

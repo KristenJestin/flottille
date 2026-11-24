@@ -525,6 +525,48 @@ fn a_delivery_for_an_unrelated_agent_or_another_launch_is_refused() {
 }
 
 #[test]
+fn a_delivery_named_after_an_extension_other_than_review_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (_child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let parent = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = server.stand_in();
+    let deliver = |id: &str, kind: &str, body: &str| {
+        MachineMessage::Deliver(Box::new(Deliver {
+            id: id.into(),
+            launch: launch.clone(),
+            agent: parent.clone(),
+            kind: kind.into(),
+            body: body.into(),
+            urgency: "between-turns".into(),
+            ended: false,
+        }))
+    };
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![
+            // Only a review's result is ever sent across: another extension's name is no kind.
+            deliver("d1", "autosubscriptions", "Comments woke you."),
+            deliver("d2", "review", "The review of the export found nothing."),
+        ],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("no delivery of kind"), "{refused}");
+    assert!(answers[1].is_ok(), "{:?}", answers[1]);
+    prompted(&pc, "The review of the export found nothing.");
+    assert_eq!(prompts_with(&pc, "Comments woke you."), 0);
+}
+
+#[test]
 fn a_call_from_a_third_machine_for_a_launch_it_did_not_make_is_refused() {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let laptop = Machine::of(server_user(None));

@@ -151,12 +151,15 @@ composer, lists the project's commands, filtered as the user types; picking one 
 into `/name `, for the user to add what it is about, and Enter sends it. The commands are edited in
 the project's Settings, section Commands.
 
-**The environment.** An agent's runs get their environment without forge tokens, forge sign-in,
-SSH agent nor session bus, and with their pushes walled (`url.<nowhere>.pushInsteadOf`), so a
-script cannot push behind the gate (`docs/tools.md`). `git push` is a call to judge, and a forced
+**The environment.** In Ask and Auto, an agent's runs get their environment without forge
+tokens, forge sign-in, SSH agent nor session bus, and with their pushes walled
+(`url.<nowhere>.pushInsteadOf`), so a script cannot push behind the gate (`docs/tools.md`). In
+Full, none of this holds: a run is the user's own, as in their terminal, with their whole
+environment, no sandbox and nothing held back (`docs/tools.md`, "In Full, a run is the user's
+own"), and a push in Full is such a run. `git push` is a call to judge, and a forced
 one (even with a lease) is base. The gate judges; once a push goes, it runs as if the user had
-typed it: a run that is itself a `git push` (its own line, no wrapper) the user, the judge, a rule
-or Full mode let through runs **outside the sandbox**, with no Landlock and the daemon's own
+typed it: a run that is itself a `git push` (its own line, no wrapper) the user, the judge or a
+rule let through in Ask or Auto runs **outside the sandbox**, with no Landlock and the daemon's own
 environment, in the run's folder. It signs in the way the user's git does, whatever the remote
 (HTTPS or SSH) and the forge: their credential helper (`gh auth git-credential`, `libsecret`, Git
 Credential Manager), keyring or SSH agent. One thing is kept: no hook (below). The project's and
@@ -185,12 +188,13 @@ sandbox, as the push the gate let through, would read the repository's settings,
 writes, with the user's sign-in and no judge: the push is lifted because the gate read it, a fetch
 is not judged.
 
-**No hook.** Every line an agent runs gets `core.hooksPath=/dev/null`, given through
+**No hook.** In Ask and Auto, every line an agent runs gets `core.hooksPath=/dev/null`, given through
 `GIT_CONFIG_COUNT` in its environment so that the agent's line is unchanged: the hooks are files of
 the repository or of its configured hooks folder, which the agent writes. The repository's own
 hooks (a commit message check) do not run for an agent's commits. What they check comes back as
 the repository's **commit checks**, the user's own lines, run before the agent's `git commit`
 without a shell (`docs/projects.md`, "Commit checks"); the hooks are only read to propose them.
+In Full, a line runs with the user's own git settings and hooks, as in their terminal.
 
 **Where the remote leads.** The remote is the user's to change, in their own clone, and a
 workspace holds nothing of where it led when it was made: a push goes where the repository's

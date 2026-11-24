@@ -132,7 +132,11 @@ has neither. A place needs its animations and its test as any window change does
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,
   no skill, no plugin and no MCP server but Flottille's. A change that lets an agent run a shell,
   start its own sub-agents or reach anything the gate does not see is a defect, whatever it
-  enables.
+  enables. **Full is the user's own terminal:** in a session the user put in Full, a command the
+  agent runs is confined in no way and nothing is held back from it (their keys, SSH agent,
+  sign-ins and keyring, Flottille's vault and device key included), and Flottille says so. Bare
+  mode holds, the sandbox does not: the agent still has only Flottille's tools, `run` stays the
+  only way, and the gate still refuses shell syntax and a launcher on a line.
 - **No tool call waits for a human.** A call held for approval is answered at once; the result
   comes later as a delivery.
 - **Commands run without a shell**, always: shell syntax is refused, never quoted around.
@@ -143,7 +147,10 @@ has neither. A place needs its animations and its test as any window change does
   the OS keyring, never in a file of Flottille's nor the store. A secret is write-only: no method,
   client, tool, event, log or error ever returns it, agents see the entries' metadata only, a tool
   that needs one is given the entry's name and the daemon uses the secret itself, and every value
-  is masked. Tests use the in-memory keyring their configuration chooses, never the real one.
+  is masked. A command an agent runs in Full reaches the keyring as the user does, the vault and
+  the device key included (`docs/vault.md`): what Flottille returns stays write-only, what code
+  run in Full reads does not. Tests use the in-memory keyring their configuration chooses, never
+  the real one.
 - Flottille runs the agent CLIs the user installed and signed in to. It provides no login of its
   own.
 

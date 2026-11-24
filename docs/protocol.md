@@ -2423,9 +2423,12 @@ whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `us
 `{"agent"}`. Reads, changing nothing, what ending the session of `agent` ends besides it: the
 sessions it leads and theirs in turn, in its project and in others, those that have not ended
 (`docs/tools.md`, "The pilot ends"). Answers `{"agent", "sessions": [{"id", "title", "project",
-"workspace", "state", "losses"}]}`, `workspace` `null` in the project's folder, `state` what its
+"workspace", "state", "losses", "machine"?}]}`, `workspace` `null` in the project's folder, `state` what its
 workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
-`unpushed` or `unknown`), `losses` each as a sentence. The window reads it for its confirmation.
+`unpushed` or `unknown`), `losses` each as a sentence. A session it leads on another machine,
+which ends there with it, is listed too, with `machine` its name, `project` its project there and
+`state` `unknown`: what its workspace holds is not read from here. The window reads it for its
+confirmation, each session on another machine said with its machine.
 
 #### `agent.detach`
 

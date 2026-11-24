@@ -1591,7 +1591,7 @@ fn the_review_lists_one_row_per_action(cx: &mut TestAppContext) {
     assert!(height(cx, &eval) > folded, "the row grew to hold its text");
     // The four choices, each with its sentence, the one it has chosen.
     for (key, sentence) in [
-        ("off", "Agents never see it."),
+        ("off", "Hidden from agents."),
         ("passes", "It runs in every mode, without asking."),
         ("judged", "The judge decides in Auto; you are asked in Ask."),
         ("asked", "It always comes to you, never to the judge."),

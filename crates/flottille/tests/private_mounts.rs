@@ -14,7 +14,8 @@ use common::{User, landlock_abi, user_namespaces};
 use serde_json::{Value, json};
 
 /// A project `app` over a throwaway repository, its workspace `w`, and the session of a root
-/// agent working there in Full, so that nothing is held: its session, the workspace's folder.
+/// agent working there in Auto, its judge allowing every call: a run in Full is the user's own,
+/// unconfined (`docs/tools.md`). Its session, the workspace's folder.
 fn session(user: &User) -> (Mcp, PathBuf) {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -45,7 +46,7 @@ fn session(user: &User) -> (Mcp, PathBuf) {
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap();
     let (url, authorization) = server_of(user, opened);
-    let output = user.run(&["agent", "mode", id, "full"]);
+    let output = user.run(&["agent", "mode", id, "auto"]);
     assert!(
         output.status.success(),
         "{}",
