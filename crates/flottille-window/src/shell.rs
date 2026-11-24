@@ -1571,7 +1571,10 @@ impl Shell {
         let machine = self.pages_machine();
         let made = !self.forms.contains_key(name);
         let forms = self.forms.entry(name.clone()).or_insert_with(|| {
-            let (a, b) = (this.clone(), crate::commands::ShellOf::on(this, machine));
+            let (a, b) = (
+                crate::commands::ShellOf::on(this.clone(), machine.clone()),
+                crate::commands::ShellOf::on(this, machine),
+            );
             (
                 cx.new(|cx| Composer::new(a, name.clone(), window, cx)),
                 cx.new(|cx| NewWorkspace::new(b, name.clone(), window, cx)),
