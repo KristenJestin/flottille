@@ -709,3 +709,47 @@ fn a_pilot_ended_while_the_machine_is_off_ends_them_when_it_is_back() {
         server.agent(&child)
     );
 }
+
+#[test]
+fn every_machine_is_told_the_pilot_of_another_machine_of_a_led_session() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    // Server tells the machines it links to the pilot of its session, by its machine's name and
+    // its id there: never in the list's `pilot`, which every machine takes as it did.
+    let told = || {
+        pc.user.call("remote.sessions", json!({})).unwrap()["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|machine| machine["name"] == "server")
+            .flat_map(|machine| machine["sessions"].as_array().cloned().unwrap_or_default())
+            .find(|listed| listed["id"] == session.as_str())
+    };
+    eventually("pc is told the pilot of server's session", || {
+        told().is_some_and(|listed| !listed["pilot_elsewhere"].is_null())
+    });
+    let listed = told().unwrap();
+    assert_eq!(
+        listed["pilot_elsewhere"],
+        json!({"machine": "pc", "agent": root}),
+        "{listed:#}"
+    );
+    assert!(listed["pilot"].is_null(), "{listed:#}");
+    // Server says it of its own list too, as its window reads it while another machine is in
+    // front.
+    let this = server.user.call("remote.sessions", json!({})).unwrap()["this"].clone();
+    let own = this
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == session.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{this:#}"));
+    assert_eq!(
+        own["pilot_elsewhere"],
+        json!({"machine": "pc", "agent": root}),
+        "{own:#}"
+    );
+}
