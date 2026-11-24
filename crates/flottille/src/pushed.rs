@@ -588,10 +588,12 @@ fn recorded(found: &Found, path: &Path) -> Option<(u64, u64)> {
 
 /// Why `path`, made read-only at the daemon's start, may no longer be what a command sees
 /// read-only: gone, or another file at its path since, which a command started before it still
-/// sees writable.
+/// sees writable; or reached through a link now, which a command started since does not follow
+/// to make it read-only (`mounts::Plan::enter`).
 fn changed(found: &Found, path: &Path) -> Option<String> {
     let start = recorded(found, path)?;
-    match identity(path) == Some(start) {
+    let same = identity(path) == Some(start) && path.canonicalize().is_ok_and(|real| real == path);
+    match same {
         true => None,
         false => Some(format!(
             "{} is not the one the daemon found at its start (removed, or replaced), and a file a \
@@ -759,11 +761,14 @@ fn shared_folders(
 /// run re-points one, and **the folder that holds the versions**: the one above the folder of the
 /// file it leads to (`versions/` of `versions/<n>/git-config`), the nearest that holds the versions
 /// a dotfiles manager makes beside the one in use, so a new one is under a folder no run could
-/// write since the daemon's start. Not one above it: the less is read-only to the runs, the less
-/// is taken from them. Nothing is kept for settings with a link no folder can hold. Where the
-/// folder of the versions cannot be kept ([`keepable`]: the home, a shared folder, a project's or
-/// its workspaces', or one holding them), nothing is kept and the error says why, which a relink
-/// is refused with; a file root's alone needs no folder kept.
+/// write since the daemon's start; and the one above that (`dots/` of `dots/versions/`) when it
+/// can be kept, where a manager stages a version before moving it in: a version a run made there,
+/// and still holds open, would be moved in as the manager's. Not one higher: the less is
+/// read-only to the runs, the less is taken from them. Where the folder above cannot be kept, the
+/// folder of the versions is the manager's own. Nothing is kept for settings with a link no
+/// folder can hold. Where the folder of the versions cannot be kept ([`keepable`]: the home, a
+/// shared folder, a project's or its workspaces', or one holding them), nothing is kept and the
+/// error says why, which a relink is refused with; a file root's alone needs no folder kept.
 fn keep_for(setting: &Setting, shared: &Shared) -> Result<Vec<PathBuf>, String> {
     let links = links_on_the_way(&setting.named)?;
     // A link in a folder that cannot be kept (the home, a shared folder) is one a run can replace:
@@ -782,7 +787,15 @@ fn keep_for(setting: &Setting, shared: &Shared) -> Result<Vec<PathBuf>, String> 
         .collect();
     match setting.file.parent().and_then(Path::parent) {
         Some(versions) if root_only(versions) => {}
-        Some(versions) if keepable(versions, shared) => kept.push(versions.to_owned()),
+        // The folder above too where it can be kept: the manager's own, where it may stage a
+        // version before moving it in among the others, so that no run made the file it moves.
+        Some(versions) if keepable(versions, shared) => kept.push(
+            versions
+                .parent()
+                .filter(|above| keepable(above, shared))
+                .unwrap_or(versions)
+                .to_owned(),
+        ),
         versions => {
             return Err(format!(
                 "{} holds the versions of {}, and it cannot be kept read-only: it is the home, a \
@@ -847,7 +860,9 @@ fn linked_elsewhere(file: &Path) -> Option<String> {
 /// which rule, until the daemon restarts.
 ///
 /// What remains: the folders are kept for a file a link led to at the daemon's start; a manager
-/// that makes its versions elsewhere is refused, not trusted.
+/// that makes its versions elsewhere is refused, not trusted; one that stages a version outside
+/// the folders kept (`keep_for`), where a run writes, and then moves it in, is trusted: the file
+/// is under a kept folder, and nothing tells a file moved in from one made there.
 fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
     let named = &setting.named;
     let current = found
@@ -1947,11 +1962,11 @@ mod tests {
         let home = temp.path().canonicalize().unwrap();
         let shared = shared_folders(&home, Some(&home), &no_vars, &[]);
         // A manager that keeps `versions/<n>/git-config` and a link to it from a folder of its
-        // own: the folder of the versions, not the dotfiles' whole folder above it.
+        // own: the dotfiles' folder above the versions, where it may stage the next one.
         let setting = linked(&home, &home.join("dots/versions/a/git-config"));
         let mut kept = keep_for(&setting, &shared).unwrap();
         kept.sort();
-        assert_eq!(kept, [home.join("dots/versions"), home.join("gitlink")]);
+        assert_eq!(kept, [home.join("dots"), home.join("gitlink")]);
 
         // Below a folder of projects, only the dotfiles' own: the projects folder is every project's.
         let setting = linked(&home, &home.join("projects/dotfiles/a/config"));
@@ -2024,6 +2039,28 @@ mod tests {
         let refused = settle(&found, &found.settings[0]).unwrap_err();
         assert!(refused.contains(&why), "{refused}");
         assert!(refused.contains("flottille daemon stop"), "{refused}");
+    }
+
+    #[test]
+    fn a_read_only_path_reached_through_a_link_now_is_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let file = home.join("inc/extra");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+        let mut found = found_now(&home);
+        found
+            .read_only
+            .push((file.clone(), identity(&file).unwrap()));
+        assert!(changed(&found, &file).is_none());
+
+        // The same file, its folder moved and a link left at its place: a command started since
+        // does not make it read-only.
+        std::fs::rename(home.join("inc"), home.join("moved")).unwrap();
+        std::os::unix::fs::symlink(home.join("moved"), home.join("inc")).unwrap();
+
+        assert_eq!(identity(&file), recorded(&found, &file));
+        assert!(changed(&found, &file).is_some());
     }
 
     #[test]

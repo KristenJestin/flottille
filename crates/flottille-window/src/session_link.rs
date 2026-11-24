@@ -213,6 +213,8 @@ pub struct Request {
     pub created_at: u64,
     /// `deny`, `once` once decided, `cancelled` when nobody answered it.
     pub decision: Option<String>,
+    /// A held launch's files to share before it is allowed (its `needs`).
+    pub needs: Option<crate::waiting::Needs>,
 }
 
 impl Request {
@@ -256,6 +258,7 @@ impl Request {
                 Some("cancelled") => Some("cancelled".into()),
                 _ => request["decision"].as_str().map(str::to_owned),
             },
+            needs: crate::waiting::Needs::of(&request["call"]["needs"]),
         }
     }
 

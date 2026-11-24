@@ -299,6 +299,32 @@ impl User {
             .with_env("FLOTTILLE_FAKE_AGENT_DIR", dir.to_str().unwrap())
     }
 
+    /// This user with the fake MCP server (`fake_mcp`) as `agent-browser` in its folder `bin`, first in its
+    /// `PATH`: the one program a browser connection's command may name, by its name or by the
+    /// path of the file the daemon's `PATH` finds.
+    pub fn with_fake_agent_browser(self, fake_mcp: &Path) -> User {
+        self.with_agent_browser(fake_mcp)
+    }
+
+    /// This user with `program` as `agent-browser` in its folder `bin`, first in its `PATH`, as
+    /// an install puts the program on the `PATH` a user's daemon starts with: the connection
+    /// names it `agent-browser`, which is the one name the daemon's `PATH` finds there.
+    pub fn with_agent_browser(self, program: &Path) -> User {
+        std::fs::create_dir_all(self.path("bin")).unwrap();
+        std::os::unix::fs::symlink(program, self.path("bin/agent-browser")).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        self.with_env("PATH", &path)
+    }
+
     /// A user with three providers, Claude, OpenCode and Codex, the first two enabled, each
     /// standing on a fake ACP agent of its own: the per-provider test overrides name a link to the
     /// fake agent in the folders `fake-claude`, `fake-opencode` and `fake-codex`, which the fake

@@ -11,6 +11,8 @@ mod guard;
 #[path = "../remote/mod.rs"]
 mod remote;
 
+#[path = "../window_allow_files.rs"]
+mod window_allow_files;
 #[path = "../window_any_machine.rs"]
 mod window_any_machine;
 #[path = "../window_appearance.rs"]
@@ -97,6 +99,8 @@ mod window_sign_in;
 mod window_switcher;
 #[path = "../window_tunnels.rs"]
 mod window_tunnels;
+#[path = "../window_unconfigured.rs"]
+mod window_unconfigured;
 #[path = "../window_update.rs"]
 mod window_update;
 #[path = "../window_vault.rs"]

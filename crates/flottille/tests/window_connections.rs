@@ -37,7 +37,7 @@ fn fake_mcp() -> PathBuf {
 }
 
 fn user() -> User {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_agent_browser(&fake_mcp());
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -71,9 +71,15 @@ fn write_script(user: &User, name: &str, script: &Value) {
     std::fs::write(script_file(user, name), script.to_string()).unwrap();
 }
 
+/// The command of the fake server of the connection `name`: for `browser`, the fake run as
+/// `agent-browser`, the only program a browser connection's command may name.
 fn command_of(user: &User, name: &str) -> Vec<String> {
+    let program = match name {
+        "browser" => user.path("bin/agent-browser"),
+        _ => fake_mcp(),
+    };
     vec![
-        fake_mcp().display().to_string(),
+        program.display().to_string(),
         "--script".into(),
         script_file(user, name).display().to_string(),
         "--log".into(),
@@ -2644,6 +2650,10 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         "{changed}"
     );
     assert!(changed.contains("--config"), "{changed}");
+    // Folded again: what it changed grows with each lock it names, and pushes the rows below out
+    // of view.
+    click(cx, "connection-review-adapter-changes");
+    assert_eq!(height(cx, "connection-review-adapter-changes-body"), 0.);
 
     // Its own logins cannot be turned on: the pill is disabled, and the unfolded row says why.
     click(cx, "connection-review-unchanged");
@@ -2669,6 +2679,9 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         !present(cx, &format!("{locked}-pick")),
         "no box to tick it with"
     );
+    // Folded again: the reason, which says every lock of the adapter, is long.
+    click(cx, &format!("{locked}-row"));
+    assert!(!present(cx, &format!("{locked}-locked")));
     // Eval is off at its first pin, and the user's to turn on: its row has all four choices.
     let eval = row_of(cx, "agent_browser_eval");
     click(cx, &format!("{eval}-row"));

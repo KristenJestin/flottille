@@ -361,7 +361,10 @@ project its setup copies, and **bound to that file** (`"for": "file:<project>/<p
 serves no tool and no other use; it is then shared as any other, its binding kept. The other
 machine makes the file from an entry only when it is bound to that very file and was shared from
 the launch's machine: an entry of its own, or another machine's, whatever its name, is never
-written into a file. **A machine renamed leaves the copies it shared under its old name matching
+written into a file. **The window shares an entry for a file only when it is the file's own**:
+named `<project>-<path>` and bound to that file. An entry of that name made by hand, or bound to
+another use, is never shared in its place: the window asks `vault.from_file`, which refuses it, and
+a launch's `needs` that names another entry for a file is refused before anything is shared. **A machine renamed leaves the copies it shared under its old name matching
 nothing**: a launch from the new name finds no entry shared from it, so the file is asked for again
 (fail closed); share the entry again from the renamed machine. A name already taken is refused: by another entry (`a/b` and `a-b` both name
 `app-a-b`: the second file is refused, naming the first), and by the same file's entry unless the
@@ -683,11 +686,14 @@ files is reached through a link (a dotfiles manager's), the folder that holds ea
 is read-only too when it is a folder of its own below the home (`~/.config/git`), and so is the
 folder that holds the versions: the one above the folder of the file the link leads to
 (`~/dots/versions` for `~/dots/versions/a/git-config`), the nearest that holds the versions a
-dotfiles manager makes later beside it, never one higher: no run re-points the link, or writes a
-version made after the start. A kept folder is read-only with everything below it, the folders
+dotfiles manager makes later beside it, and the one above that (`~/dots`) when it can be kept, the
+manager's own folder, where it may stage a version before moving it in among the others; never
+one higher: no run re-points the link, writes a version made after the start, or makes (and holds
+open) the file a manager then moves in as its own. A kept folder is read-only with everything below it, the folders
 kept in place below it included. Not kept, a link there being refused when its settings are
-relinked (below), and nothing kept at all when it is the folder of the versions (a relink is then
-refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
+relinked (below), nothing kept above the folder of the versions when it is the one above it (that
+folder is then the manager's own), and nothing kept at all when it is the folder of the versions
+(a relink is then refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
 (their folders as the projects' files and the store say at the daemon's start, whatever their
 name, and the default folder of the workspaces), the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
 `~/.local`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the same way), the folders
@@ -700,7 +706,12 @@ the way is renamed to put another file at the path. `~/.ssh` is the account's (t
 user database, which `ssh` reads `~` as, whatever `HOME` says); the daemon makes it at its start
 (`0700`, as `ssh` would) when it is missing, since a folder that is not there could not be kept
 read-only. A command started at any time has them read-only from its start, and nothing it runs
-can unmount them (above).
+can unmount them (above). Each path is opened once, following no link on its way (one put there
+since the start is not followed, and the path is then not protected: the push judges it), and
+made read-only through that one descriptor, with every mount below it. Where Landlock is there and
+the system refuses one of the calls that does it (a seccomp filter written for an older kernel),
+every command Flottille confines is refused its start, saying so (and `flottille doctor` says it),
+rather than started with a mount below a read-only one left writable.
 
 What that cannot hold is not protected file by file: the user's SSH agent is then **lent to no
 push**, no `SSH_AUTH_SOCK` and no `ssh` among the transports allowed (a push over SSH fails, saying
@@ -831,11 +842,29 @@ The gaps, where the platform does not allow more:
   `~/.local/share/fonts`**, since Chrome's `XDG_*` folders are the vault folder's: it may look
   plainer than the user's other windows, and a certificate authority the user added to their own
   certificate database (`~/.pki/nssdb`, `$XDG_DATA_HOME/pki/nssdb`) may not be trusted by it;
+- **another mount of the same files reaches the profiles.** The private mount namespace empties
+  `browsers/` at its path, and Landlock, where the kernel gives no namespace, denies that folder's
+  inode as it is reached there: the same files reached through another mount (an ostree
+  `/sysroot`, a Btrfs top level mounted elsewhere, a bind mount of the home) are neither emptied
+  nor denied, so a run that knows the other path reads the profile, the sign-ins' cookies with it;
+- **what the browser's server reads and writes is kept from the profile by its actions, not by
+  its paths.** The server reaches the profile, so an action that reads or writes a file by a path
+  the agent gives would follow a link a run planted to it; the adapter keeps those actions off or
+  refuses their path, any `url` argument is a web address, never a `file:` one, and an action
+  that runs other commands (`batch`, `flow_run`, `chat`) is off, as are `install` (root, through
+  sudo) and `upgrade` (out of the version the adapter was checked on; `docs/extensions.md`, "Adapters"): the
+  cookies, storage, saved state and a request's headers are no action's answer. What the user
+  turns on still reaches them: `eval` reads the page's storage and the part of `document.cookie`
+  that is not `HttpOnly`, and a HAR or a trace is written to agent-browser's own folder under the
+  home, which runs read and write: it holds the page's traffic, its cookies among it. Those
+  actions are off at every pin alike, a re-pin that switches the server's tools included, never
+  judged;
 - **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
   can write what is the user's under the home: agent-browser itself where the user installed it
   there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
   `~/.agent-browser/browsers/`. A run that replaced that Chrome, or agent-browser, has its own
-  program run as the browser the login fills. Chrome's certificate database is in the vault folder
+  program run as the browser the login fills, and with the connection's profile and the sign-ins
+  it keeps. Chrome's certificate database is in the vault folder
   (`data/pki/nssdb`, above); a Chrome that still reads the older `~/.pki/nssdb`, where one is, would
   trust a certificate authority a run wrote there. Flottille does not
   check them: the owner is the user either way, and a hash recorded at first use could be taken
@@ -908,10 +937,16 @@ The gaps, where the platform does not allow more:
   relative include, which is a file of the new version folder) is refused as before, until a
   restart; the folders kept are those of the settings the daemon found, so a link that did not
   exist at the start is not kept; and a version made directly in one of the folders listed above
-  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that puts the
-  file deeper in its versions (`versions/<n>/git/config`) has `versions/<n>` kept, so a relink to
-  another version is refused, not trusted; and a project added after the daemon's start in a kept
-  folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
+  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that stages a
+  version outside the folders kept (in `~/.cache`, or beside its own folder in the home, where a
+  run writes) and then moves it in among its versions is trusted, not refused: the file is then
+  under a kept folder with one name, and nothing tells a file moved in from one made there, so a
+  run that made it first, and holds it open, writes what the push reads. A manager staging in its
+  own folder (`~/dots/staging` beside `~/dots/versions`) is covered: that folder is kept. A
+  manager that puts the file deeper in its versions (`versions/<n>/git/config`) has `versions`
+  kept, the folder above `versions/<n>`, so a relink to another version is accepted, and a version
+  it stages beside `versions` is one moved in from a folder a run writes (above); and a project
+  added after the daemon's start in a kept folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
   older Flottille left behind, outside its session and without its marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before

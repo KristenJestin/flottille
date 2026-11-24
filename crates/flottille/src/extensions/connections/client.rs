@@ -610,6 +610,14 @@ async fn start_with(
     let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
+            // Before anything runs: with the adapter's options, or on a first start whose
+            // command names its program, since the server that answers is then the adapter's.
+            if let Some(why) = adapter
+                .or_else(|| super::adapters::named_by(words))
+                .and_then(|adapter| adapter.command_refused(words, &declaration.env))
+            {
+                return Err(why);
+            }
             let folder = super::adapters::folder(daemon, &declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
@@ -1222,6 +1230,13 @@ pub async fn call(
                 *server.failing.lock().unwrap() = Some(why.clone());
                 drop(turn);
                 super::changed_event(daemon, name, Some(&why));
+                // Flottille's own refusal, before anything ran: no word of the server's.
+                if super::adapters::is_start_refusal(&why) {
+                    return Outcome::Failed(format!(
+                        "the connection {name} did not start: Flottille refused to start it, \
+                         its server ran nothing. {why}"
+                    ));
+                }
                 return failed_framed(
                     &format!(
                         "the connection {name} did not start; what follows may be its server's own words"

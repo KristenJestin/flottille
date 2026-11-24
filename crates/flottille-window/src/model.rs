@@ -12,6 +12,10 @@ use serde_json::Value;
 pub struct Snapshot {
     /// By name.
     pub projects: Vec<Project>,
+    /// The projects whose settings file is gone but which still hold live sessions or workspaces
+    /// (`project.list`, `unconfigured`): this machine's alone, by name. They are in no list of
+    /// projects: the sidebar shows them, to be removed.
+    pub unconfigured: Vec<Unconfigured>,
     pub sessions: Vec<Session>,
     /// The sessions this machine's agents started on other machines, each under its pilot: rows
     /// of the tree only. This machine's daemon does not know them, so nothing else reads them (a
@@ -34,6 +38,15 @@ pub struct Snapshot {
     /// The name of the machine this was read from, once there is another machine: this one, or the
     /// one in front.
     pub this_machine: Option<String>,
+}
+
+/// A project with no settings file that the daemon still holds something of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unconfigured {
+    pub name: String,
+    /// How many live sessions and how many workspaces it holds.
+    pub sessions: usize,
+    pub workspaces: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1238,6 +1251,16 @@ impl Snapshot {
             })
             .collect();
         projects.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut unconfigured: Vec<Unconfigured> = list(answers.projects, "unconfigured")
+            .iter()
+            .map(|project| Unconfigured {
+                name: text(project, "name"),
+                sessions: number(project, "sessions") as usize,
+                workspaces: number(project, "workspaces") as usize,
+            })
+            .filter(|project| !projects.iter().any(|known| known.name == project.name))
+            .collect();
+        unconfigured.sort_by(|a, b| a.name.cmp(&b.name));
         let mut workspaces: Vec<Workspace> = list(answers.workspaces, "workspaces")
             .iter()
             .filter_map(|w| serde_json::from_value::<Record>(w.clone()).ok())
@@ -1246,6 +1269,7 @@ impl Snapshot {
         workspaces.sort_by(|a, b| (&a.project, &a.name).cmp(&(&b.project, &b.name)));
         Snapshot {
             projects,
+            unconfigured,
             sessions,
             elsewhere: Vec::new(),
             workspaces,
@@ -1306,6 +1330,28 @@ impl Snapshot {
                 .then(a.id.cmp(&b.id))
         });
         live
+    }
+
+    /// Whether `session` runs on this machine.
+    pub fn is_here(&self, session: &Session) -> bool {
+        self.machine_of(session) == self.this_machine.as_deref().unwrap_or_default()
+    }
+
+    /// Whether this machine has a project of that name with no settings file: its row is its own,
+    /// beside the group of another machine's project of the same name, if there is one.
+    pub fn is_gone_here(&self, project: &str) -> bool {
+        self.unconfigured.iter().any(|gone| gone.name == project)
+    }
+
+    /// The live sessions of one row of `project`: this machine's alone on the row of the project
+    /// with no settings file (`gone`), and the others' on the group of that name, which has none
+    /// of this machine's while this machine's is that row.
+    pub fn level_sessions(&self, project: &str, gone: bool) -> Vec<&Session> {
+        let twin = self.is_gone_here(project);
+        self.live_sessions_of(project)
+            .into_iter()
+            .filter(|session| !twin || self.is_here(session) == gone)
+            .collect()
     }
 
     /// The sessions that ended, whatever their project, the most recent end first.
