@@ -238,7 +238,10 @@ fn a_proposal_never_changes_the_secret() {
     assert_eq!(entry["username"], "qa@example.invalid");
     assert!(entry["project"].is_null(), "every project's: {entry}");
     nothing_holds(&user, SECRET);
-    nothing_holds(&user, OTHER);
+    // The text an agent wrote is its own, recorded with its call as any argument is; what matters
+    // is that the vault took nothing of it.
+    let listed = user.call("vault.list", json!({})).unwrap().to_string();
+    assert!(!listed.contains(OTHER), "{listed}");
 }
 
 #[test]
@@ -306,7 +309,8 @@ fn a_proposal_that_moves_the_host_is_checked_as_a_hand_edit() {
     let (mcp, _) = root_in(&user);
 
     // What the user's own Save refuses (plain http to another machine, for a login) is refused
-    // the same, in its words, before the user is asked.
+    // the same before the user is asked: its password would travel in clear to that host. (The
+    // tool's words name no use: an agent is never told what an entry is bound to.)
     let plain = "http://id.example.invalid/realms/dev/account";
     let (_, by_hand) = user
         .call(
@@ -316,11 +320,12 @@ fn a_proposal_that_moves_the_host_is_checked_as_a_hand_edit() {
         .unwrap_err();
     let refused = propose(&mcp, json!({"url": plain}));
     assert!(refused.error, "{}", refused.text);
-    assert!(
-        refused.text.contains(&by_hand),
-        "{by_hand} / {}",
-        refused.text
-    );
+    for said in [&by_hand, &refused.text] {
+        for says in ["id.example.invalid", "in clear", "https"] {
+            assert!(said.contains(says), "{says}: {said}");
+        }
+    }
+    assert!(!refused.text.contains("browser"), "{}", refused.text);
     assert!(asks(&user).is_empty());
 
     // A new host the Save takes is said: the card names where the secret will go.

@@ -1068,8 +1068,19 @@ fn the_card_of_a_proposal_shows_before_and_after_and_accept_applies_it(cx: &mut 
             Some(said)
         );
     }
-    // No new entry is offered: the entry exists.
+    // No new entry is offered: the entry exists. The three buttons fit in the rail's card.
     assert!(!has(format!("vault-ask-{number}-add"), cx));
+    cx.update(|window, _| {
+        for part in ["dismiss", "edit", "accept", "details"] {
+            let id = format!("vault-ask-{number}-{part}");
+            assert!(
+                window
+                    .try_find(id.clone())
+                    .is_some_and(|found| found.visible()),
+                "{id} is in the rail's sight"
+            );
+        }
+    });
     assert_eq!(
         line_of(&session_page(&shell, cx), cx).as_deref(),
         Some("proposed an edit of the vault entry example-dev-login · waiting for you")

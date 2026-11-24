@@ -479,7 +479,11 @@ impl Waiting {
         let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell()) else {
             return div().into_any_element();
         };
-        let (dismiss, add) = crate::vault_ask::buttons(number, ask, shell, cx);
+        let buttons = crate::vault_ask::buttons(number, ask, shell, cx);
+        let title = match ask.proposes() {
+            true => "Proposes a vault edit",
+            false => "Asks for a vault entry",
+        };
         let head = div()
             .flex()
             .items_center()
@@ -499,8 +503,8 @@ impl Waiting {
                     .min_w_0()
                     .text_size(px(13.))
                     .semibold()
-                    .aria_label("Asks for a vault entry")
-                    .child("Asks for a vault entry")
+                    .aria_label(title)
+                    .child(title)
                     .test_support(),
             )
             .child(
@@ -559,14 +563,31 @@ impl Waiting {
             )
             .child(spaced(
                 space::XS,
-                div()
-                    .pt(space::XS)
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .child(div().flex_1().child(toggle))
-                    .child(dismiss)
-                    .child(add),
+                match ask.proposes() {
+                    // Three buttons and Details do not fit on one line of the rail: Details
+                    // stands on a line of its own above them.
+                    true => div()
+                        .pt(space::XS)
+                        .flex()
+                        .flex_col()
+                        .gap(space::SM)
+                        .child(toggle)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap(space::SM)
+                                .children(buttons),
+                        ),
+                    false => div()
+                        .pt(space::XS)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(div().flex_1().child(toggle))
+                        .children(buttons),
+                },
             ));
         div()
             .id(ElementId::Name(format!("vault-ask-{number}").into()))

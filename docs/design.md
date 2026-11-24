@@ -1711,6 +1711,10 @@ nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
 
+- An agent's proposed edit of a vault entry (`docs/vault.md`, "Proposing an edit of an entry"):
+  a second one for the entry while one waits is refused rather than joined (it would hide what
+  the first said), any save of the entry answers it as saved, and Accept has no command of its
+  own (Dismiss of an asked entry has none either).
 - Data in XDG folders; workspaces under the data folder unless the project says otherwise.
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one

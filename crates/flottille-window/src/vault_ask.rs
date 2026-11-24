@@ -10,6 +10,11 @@
 //! Settings, Vault's own form of a new entry, prefilled, where the user changes what they want and
 //! types the secret; Dismiss closes the request. It folds away once the daemon says the request
 //! was answered.
+//!
+//! An agent's proposed edit of an entry that exists is the same request and the same card
+//! (`docs/vault.md`, "Proposing an edit of an entry"): each field changed on a line of its own,
+//! before → after, then Dismiss, Edit (the entry's own form, prefilled with the proposal) and
+//! Accept (the daemon applies it as the user's Save would, the secret kept).
 
 use gpui_design_system::{Button, Palette, Type as _, presence, space};
 use gpui_kit::{
@@ -17,7 +22,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, div, px,
 };
 
-use crate::conversation::VaultAsk;
+use crate::conversation::{VaultAsk, VaultChange};
 use crate::shell::Shell;
 use crate::vault::{EVERY_PROJECT, VaultEntry};
 
@@ -112,11 +117,46 @@ fn project_said(ask: &VaultAsk) -> String {
     }
 }
 
+/// A field changed, as its line says it: its label and before → after, an empty side said so.
+fn change_said(change: &VaultChange) -> (&'static str, String) {
+    let label = match change.field.as_str() {
+        "url" => "URL",
+        "username" => "Username",
+        "description" => "What it is for",
+        "project" => "Project",
+        _ => "For",
+    };
+    let side = |side: &Option<String>| match (change.field.as_str(), side.as_deref()) {
+        ("project", None) => EVERY_PROJECT.to_owned(),
+        (_, None) => "(empty)".to_owned(),
+        ("for", Some(bound)) => {
+            flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned())
+        }
+        (_, Some(value)) => value.to_owned(),
+    };
+    (
+        label,
+        format!("{} → {}", side(&change.before), side(&change.after)),
+    )
+}
+
 /// The lines the compact card shows: the entry, where its secret goes, the project, the reason.
+/// A proposed edit shows each field changed, before → after, instead of the project.
 pub fn lines(number: u64, ask: &VaultAsk, p: Palette) -> Vec<AnyElement> {
     let mut lines = vec![labelled(number, "name", "Entry", &ask.name, false, p)];
+    for change in &ask.edit {
+        let (label, said) = change_said(change);
+        // An address or a sentence is too long to stand beside its label.
+        let stacked = matches!(change.field.as_str(), "url" | "description");
+        let name = format!("change-{}", change.field);
+        lines.push(labelled(number, &name, label, &said, stacked, p));
+    }
     if let Some(host) = ask.host.as_deref() {
         lines.push(labelled(number, "host", "Goes to", host, false, p));
+    }
+    if ask.proposes() {
+        lines.push(labelled(number, "why", "Why", &ask.why, false, p));
+        return lines;
     }
     lines.push(labelled(
         number,
@@ -156,27 +196,50 @@ pub fn details(number: u64, ask: &VaultAsk, source: String, p: Palette) -> Vec<A
     lines
 }
 
-/// Dismiss and New entry: the card's two buttons, in the place and kind the other cards have
-/// theirs. New entry opens the vault's form over the page; Dismiss is sent once.
+/// Dismiss and New entry, or for a proposed edit Dismiss, Edit and Accept: the card's buttons,
+/// in the place and kind the other cards have theirs. New entry and Edit open the vault's form
+/// over the page; Dismiss and Accept are sent once, every button disabled while one runs.
 pub fn buttons(
     number: u64,
     ask: &VaultAsk,
     shell: WeakEntity<Shell>,
     cx: &gpui_kit::App,
-) -> (Button, Button) {
+) -> Vec<Button> {
     let entry = prefilled(ask);
     let (why, host, connection) = (ask.why.clone(), ask.host.clone(), ask.connection.clone());
     let dismiss_to = shell.clone();
-    let dismissing = shell
+    let answering = shell
         .upgrade()
-        .is_some_and(|shell| shell.read(cx).is_dismissing(number));
+        .is_some_and(|shell| shell.read(cx).is_answering(number));
     let dismiss = Button::quiet(part(number, "dismiss"), "Dismiss")
-        .disabled(dismissing)
+        .disabled(answering)
         .on_click(move |_, _, cx| {
             dismiss_to
                 .update(cx, |shell, cx| shell.dismiss_vault_ask(number, cx))
                 .ok();
         });
+    if ask.proposes() {
+        let (accept_to, name) = (shell.clone(), ask.name.clone());
+        let edit = Button::secondary(part(number, "edit"), "Edit")
+            .disabled(answering)
+            .on_click(move |_, window, cx| {
+                let (entry, why, host) = (entry.clone(), why.clone(), host.clone());
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.edit_proposed_vault_entry(entry, why, host, window, cx)
+                    })
+                    .ok();
+            });
+        let accept = Button::primary(part(number, "accept"), "Accept")
+            .disabled(answering)
+            .on_click(move |_, _, cx| {
+                let name = name.clone();
+                accept_to
+                    .update(cx, |shell, cx| shell.accept_vault_ask(number, name, cx))
+                    .ok();
+            });
+        return vec![dismiss, edit, accept];
+    }
     let add = Button::primary(part(number, "add"), "New entry").on_click(move |_, window, cx| {
         let (entry, why, host) = (entry.clone(), why.clone(), host.clone());
         let connection = connection.clone();
@@ -186,5 +249,5 @@ pub fn buttons(
             })
             .ok();
     });
-    (dismiss, add)
+    vec![dismiss, add]
 }
