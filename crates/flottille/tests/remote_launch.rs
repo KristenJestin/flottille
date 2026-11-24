@@ -2676,7 +2676,7 @@ fn an_end_after_a_dropped_approval_shows_the_session_ended() {
         .unwrap();
 
     prompted(&server, "Do the work.");
-    assert!(!full.exists(), "nothing was kept for pc");
+    assert!(!full.exists(), "the answer's keeping was played full");
     let session = titled(&server, "Approval dropped");
     server
         .user
@@ -2685,4 +2685,35 @@ fn an_end_after_a_dropped_approval_shows_the_session_ended() {
     eventually("the launch recorded as ended", || {
         launches_out(&pc) == vec!["ended"]
     });
+}
+
+#[test]
+fn the_user_s_answer_past_the_hard_ceiling_is_dropped_with_its_inbox_entry() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Ceiling reached");
+    // As many messages wait for pc as the answer may be kept beyond: the most, and the launches
+    // held at once (`MOST_KEPT` and `MOST_HELD`, 100 and 4).
+    let full = server.user.path("kept-full");
+    std::fs::write(&full, "104").unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    eventually("an inbox entry for the answer not kept", || {
+        server.user.call("inbox.list", json!({})).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                let text = entry["text"].as_str().unwrap_or_default();
+                entry["kind"] == "dropped"
+                    && text.contains("A approval")
+                    && text.contains("was not sent")
+            })
+    });
+    assert!(!full.exists(), "the answer's keeping was played full");
 }
