@@ -74,6 +74,10 @@ const GENERAL_BLOCKS: [&str; 7] = [
     "version",
 ];
 
+/// What comes before the blocks among the children of what scrolls: the line of another
+/// machine's page (`SettingsPage::own_line`).
+const LEADING_CHILDREN: usize = 1;
+
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
 
@@ -568,7 +572,9 @@ impl SettingsPage {
             .iter()
             .position(|key| *key == block)
             .expect("a block of the tab");
-        self.scroll.scroll_to_top_of_item(at);
+        // The sentence of another machine's page is the first child of what scrolls (#1366): the
+        // blocks come after it, drawn or not.
+        self.scroll.scroll_to_top_of_item(at + LEADING_CHILDREN);
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
