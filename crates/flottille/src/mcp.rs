@@ -669,19 +669,25 @@ const SERVED: [Definition; 33] = [
             ask: when you need an entry the vault lacks, the user is offered its form, \
             prefilled with what you give; they type the secret (answered at once, their answer \
             later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
-            \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}.",
+            \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}. \
+            propose: when an entry is almost right (its URL, username, description, project or \
+            use), the user is shown your edit, before and after, to accept, edit or dismiss; \
+            never its secret (answered at once, their answer later as a delivery). \
+            {\"action\": \"propose\", \"name\": \"staging-login\", \"why\": \"the form is \
+            under /account\", \"url\": \"https://staging.example.com/account\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "ask"]},
-                "name": {"type": "string", "description": "ask: the new entry's name."},
-                "why": {"type": "string", "description": "ask: what you need it for, for the user."},
-                "url": {"type": "string", "description": "ask: where the secret goes (a login page)."},
-                "username": {"type": "string", "description": "ask: the account, if known."},
-                "for": {"type": "string", "description": "ask: its one use: worklog, or connection:<name> (a login)."},
-                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is, this project's when left out; an entry a connection's server is given is every project's."},
+                "action": {"type": "string", "enum": ["list", "ask", "propose"]},
+                "name": {"type": "string", "description": "ask: the new entry's name; propose: the entry's."},
+                "why": {"type": "string", "description": "ask: what you need it for; propose: what is wrong with it; for the user."},
+                "url": {"type": "string", "description": "ask, propose: where the secret goes (a login page)."},
+                "username": {"type": "string", "description": "ask, propose: the account, if known."},
+                "description": {"type": "string", "description": "propose: what the entry is for, as agents read it."},
+                "for": {"type": "string", "description": "ask, propose: its one use: worklog, or connection:<name> (a login)."},
+                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is, this project's when left out; an entry a connection's server is given is every project's. propose: whose it becomes."},
                 "connection": {"type": "string", "description": "ask: the connection it is for, declared or that your request asks to add: the entry is every project's, at the connection's address."}
             }, "required": ["action"], "additionalProperties": false})
         },
