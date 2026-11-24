@@ -1624,11 +1624,19 @@ way in:
   into a browser, a profile or a network that is not the one Flottille made. These are looked for in the server's command, the connection's `env`, and the
   environment the daemon itself started with, which agent-browser inherits; no configuration file
   of the user's is read (agent-browser reads the one `--config` Flottille names, and only it).
-  **The connection's `env` never moves the browser's folders**: Flottille sets
+  **The connection never moves the browser's folders**: Flottille sets
   `AGENT_BROWSER_SOCKET_DIR`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`
   last, on every start of the server and of a command of agent-browser's, and removes
   `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is refused, naming the variable,
-  while the connection's `env` names one of them. **Its other options and variables are not
+  while the connection's `env` names one of them or its command holds a word `NAME=value` for one
+  (`env AGENT_BROWSER_SOCKET_DIR=… agent-browser mcp`). **The server's command names its program
+  directly**: one that starts with a launcher (`env`, a shell, `nohup`, `setsid`, `nice`,
+  `timeout`, `sudo`, `systemd-run`, `bwrap`…) or an assignment `NAME=value` would run
+  agent-browser with an environment of its choosing, after Flottille set it, so `login` is refused,
+  naming the launcher or the variable, never a value. Both are said at the review and checked
+  again at each login, so an edit after the user accepted the connection is refused as well. A
+  package runner (`npx`, `pnpm dlx`, `bunx`, `uvx`) is no launcher: it runs agent-browser with the
+  environment it was given. **Its other options and variables are not
   judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as written.
   What is not covered: the variables of the daemon's own environment that send the session
   elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
