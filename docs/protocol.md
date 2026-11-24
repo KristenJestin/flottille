@@ -235,6 +235,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.close` | local |
 | `remote.settings` | local |
 | `remote.configure` | local |
+| `client.presence` | local |
 | `tunnel.open` | drive |
 | `tunnel.list` | local |
 | `tunnel.close` | local |
@@ -1432,12 +1433,22 @@ not start, `unavailable`, with the reason. No method answers a private key. Ever
 the hub: nothing listens, and no method takes or answers an address of a machine (the direct link
 was removed on 2026-11-21).
 
-- `remote.settings` (local) answers `{"on"}`: whether remote is on.
-- `remote.configure {on?}` (local) turns it on or off and answers `remote.settings`'. It writes
-  `daemon.toml` itself, every other key and comment kept, and takes the change without a restart:
-  the link starts or stops. A file that is not TOML is `refused` and left as it was. A `listen`
-  given is not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing
-  with the hub and the keys; turned on again, the same hub.
+- `remote.settings` (local) answers `{"on", "notify"}`: whether remote is on, and when the phone
+  is told (`docs/remote.md`, "Notifications"): `away`, the default, or `always`.
+- `remote.configure {on?, notify?}` (local) turns it on or off, sets when the phone is told
+  (`away` or `always`; anything else is `invalid-params`), and answers `remote.settings`'. It
+  writes `daemon.toml` itself (`[remote] on`, `[remote] notify`), every other key and comment kept,
+  and takes the change without a restart: the link starts or stops; `notify` is read each time a
+  phone may be told. A file that is not TOML is `refused` and left as it was. A `listen` given is
+  not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing with the
+  hub and the keys; turned on again, the same hub.
+- `client.presence {focused, input?}` (local) is what a client says of the user: whether it is in
+  front of them (the window focused), and `input: true` when they just gave it an input (a key, a
+  click, the wheel). The daemon stamps the input with its clock, keeps it, and tells the hub
+  (`{active, last_input}`, seconds since 1970), which tells the runners; it answers `{}`. The
+  window says it when its focus changes and at an input, every 20 seconds at most. With remote off
+  it is answered and kept nowhere. A runner tells the phone only when no client of the user had an
+  input in the last 2 minutes (`docs/remote.md`, "Notifications").
 
 - `remote.machines` answers `{"this": {"name", "key", "fingerprint"}, "machines": [{"name",
   "key", "fingerprint", "state", "since", "reason", "reached"}]}`: this machine's member name
@@ -2438,9 +2449,10 @@ sessions it leads and theirs in turn, in its project and in others, those that h
 workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
 `unpushed` or `unknown`), `losses` each as a sentence. A session it leads on another machine,
 which ends there with it, is listed too, with `machine` its name, `project` its project there and
-`state` `unknown` and `losses` `["unknown (on <machine>)"]`: what its workspace holds is not
-asked there, so that the answer never waits on another machine. The window reads it for its
-confirmation, each session on another machine said with its machine.
+`state` and `losses` as that machine reads them, asked there and awaited 3 seconds at most:
+`state` `unknown` and `losses` `["unknown (on <machine>)"]` when it is off, does not answer in
+time or is a machine of before (`docs/remote.md`, "A tree across machines"). The window reads
+it for its confirmation, each session on another machine said with its machine.
 
 #### `agent.detach`
 

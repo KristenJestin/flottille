@@ -27,7 +27,8 @@ to the ports of a run's server (#829), a vault entry shared with another machine
 connection shared the same way (#833), the window's machines, in Settings, Machines
 (#814), one list of the sessions of every machine in the window, with the close of a session
 of a machine that is off kept until it is back (#1150, its points 1 to 3), and the pictures and
-videos a session showed, sent to any device (#1165). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
+videos a session showed, sent to any device (#1165), and the runner's and the hub's side of the
+phone's notifications, with the window's presence and **Notify the phone** (#827). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
 what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
@@ -935,7 +936,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, `review` `{start, agent}` of a led session, and `workspace` `remove` of the workspace made for it, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch, `workspace` `remove` of the workspace made for it, and `session_losses`, the machine's own, which reads what a led session's workspace holds that is not saved for its pilot's End confirmation; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine").
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1126,8 +1127,19 @@ local child's work; nothing moves your branch.*
   answer is sent before the session's setup goes on, so that a setup that fails at once is never
   heard of first. The caller's machine marks its record of the launch `started` or `refused`
   (`ended` when a started one is told refused); an answer that comes before the record of the
-  launch's place is never undone by it, and one sent again is taken once. A refused launch leaves
-  no row under its pilot and counts in no cap. A handed session's caller is told too: it waited
+  launch's place is never undone by it, and the call then answers what was decided, never that it
+  waits (#1317). The user answers a launch once: an answer to a launch answered already is refused,
+  but the one stored, sent again by a machine that did not hear it was taken, which changes nothing.
+  The caller is never left waiting: a held launch with no session there, or whose answer cannot be
+  kept there, is told refused; an allowed one whose setup a restart of that machine cut never
+  starts and is told so (`… was approved by the user, but nothing was done: it could not start
+  there: Flottille stopped there while it was setting it up.`); a launch with no request number is
+  named by its title (`Your launch "Docs" on server …`). The window keys a held session by its
+  request and its machine (a name may hold spaces and dots), each machine counting its own, and says
+  a session started when the call itself answers that the user allowed it before it returned. A restart
+  there never stops a session that ran: an allowed launch whose workspace is ready and whose session
+  was briefed only has its answer settled again. A refused launch leaves no row under its
+  pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
   a `led` or `handed` launch whose caller is itself a session another agent started (here, or on
@@ -1571,6 +1583,43 @@ recreated.
 - When the hub is unreachable, nothing reaches the phone: it says so in its permanent notification
   ("Not connected to your hub") and reconnects with a backoff.
 
+**Built (#827), the runner's and the hub's side.** The runner reads its notification centre
+(`docs/protocol.md`, `notifications.list`): a row of kind `request`, `question`, `report` or
+`failure` (the centre makes them for a request held for the user, a question to the user, a root's
+report and a root's failure) is decided once, 30 seconds after it was made, on the daemon's clock
+(`crates/flottille/src/phone.rs`). Unless it was read or answered by then (`read_at`), it is told
+when **Notify the phone** says `always` or when no client of the user had an input in the last 2
+minutes: an input at a client of this machine, as the daemon stamped it, or any member's that is no
+phone as the hub last told it (the app says an input each time it opens its session, on another
+network say: it would silence the next notices). An input said to come more than a minute after
+the runner's clock is not counted: a clock ahead would silence the phone until then. Otherwise it
+is dropped, and does not ring later. A row told that is then read, answered or gone tells
+`dismissed`; a row never sent (no session then) is never dismissed, and what is told is queued in
+order, so that a `dismissed` never overtakes its notice. What came before the daemon started is
+never told, and with no session to the hub nothing is told and nothing is kept for later.
+
+- **Presence**: the window says `client.presence {focused, input}` to its daemon when its focus
+  changes and at an input (a key, a click, the wheel, every 20 seconds at most); the daemon stamps the input
+  and tells the hub `{"ask": {"kind": "presence", "active", "last_input"}}` (seconds since 1970), at
+  once and again at each new session; the hub tells the runners every member's (`{"presence":
+  […]}`), as before.
+- **What the runner asks**: `{"ask": {"id": n, "kind": "notify", "notice": N}}`, with
+  `N = {"kind": "request" | "question" | "report" | "failure" | "dismissed", "notification": <the
+  row's number on the runner>, "session": <the root agent's id>}`; `session` is left out when the
+  row has none. An id is 1 to 64 letters, digits, `-` or `_`, and a notice with any other field is
+  refused, on both sides: no title, excerpt, path or command can ride in it. The hub takes it from a
+  runner's machine only (`only a runner's machine tells the phones`, otherwise) and keeps nothing of
+  it.
+- **What the phone listens to** (#828): on its session to the hub, `{"notice": {"from": <the
+  runner's machine key>, "notice": N}}`, `Pushed::Notice { from, notice }` in the core. The hub
+  sends it to every open session of a member that asked for the notices (`{"kind": "about",
+  "device": "phone", "system", "notices": true}`), and to no other. The phone finds the runner among the members by its machine key, links to it, reads
+  the row (`notifications.list`) or the session's request (`approval.list`) and draws its
+  notification; on `dismissed` for the same `from` and `notification` it removes it.
+- **The setting**: `[remote] notify = "away" | "always"` in `daemon.toml`, `remote.settings` and
+  `remote.configure {notify}` (`docs/protocol.md`), and Settings, Machines, **Phone**: **Notify the
+  phone**, **When I am away** or **Always**.
+
 ## Tunnels
 
 - **A tunnel carries one run's port** of a machine to a client: the client listens on
@@ -1807,6 +1856,17 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **An allowed launch whose setup a restart cut is refused, not resumed** (#1317): the daemon that
+  starts again finds the request allowed and its answer never stored; it refuses the launch, removes
+  its workspace and tells the caller, which launches it again. Resuming it (laying its files again,
+  then its settings) could come later; refusing is the simpler and leaves nothing half made.
+- **An answer that cannot be kept tells the caller refused** (#1317): when the store refuses the
+  user's answer to a held launch, the caller is told nothing was done, while the launch there stays
+  held until its session ends; the refusal that end sends is a second answer, which the caller's
+  machine refuses.
+- **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
+  stored, only one whose workspace is still preparing or whose session was never briefed is refused;
+  one that ran is left running and its answer is stored again, since its caller was told approved.
 - **A method the user's door refuses for a child here is refused for a child of another machine
   too, whole** (#1304): the user's two ways out stay (`agent.answer` and `agent.stop`, while its
   parent's machine is off), nothing else of the user reaches it. `agent.mode` is refused rather
@@ -1824,6 +1884,7 @@ on a real phone, by hand, and reported.
   could be drawn over it. It is now the first line of what scrolls, so no text is ever drawn over
   another; the kit has no opaque, fixed header for what scrolls to pass under, and none is drawn
   here. A fixed header can come later, in the kit first.
+
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
   with the link's own refusal rather than run as any root's: the agent is answered `refused by
@@ -2062,9 +2123,11 @@ on a real phone, by hand, and reported.
   the user's on both machines (no longer a row under its pilot, reached with a leave as any
   session of another machine). A real end of the pilot ends it there (`its pilot ended`), the stop
   kept until that machine takes it; `agent.ending` and the window's End confirmation list it,
-  with its machine, its unsaved work `unknown (on server)`: it is not asked there, so that the
-  confirmation never waits on another machine. A `following`, a `pilot-ended`, a
-  `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
+  with its machine and its unsaved work as that machine reads it (#1354): asked there with a
+  `session_losses` `call` of the launch, all such machines at once, its answer awaited 3 seconds at
+  most, masked and cut here as any answer of another machine; `unknown (on server)` when it is
+  off, does not answer in time or cannot (a machine of before). A `following`, a
+  `pilot-ended`, a `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
   caller, never for a handed launch; a `following` only for a led one, its state `on`, `paused`
   or `ended`. The light list does not name a pilot of another machine (its
   `pilot` is a session of the same list): drawing it under its pilot on every window is the
@@ -2077,6 +2140,14 @@ on a real phone, by hand, and reported.
   until that machine takes it as the pilot's is, and only for a launch this machine made, never
   for anything another machine names. A failed pilot ends no led session, here or there: it can
   be resumed.
+- **A held launch goes with its caller, and a stop is never lost** (#1354). A launch held for the
+  user there names its agent already, and is stopped as any: that machine withdraws it (its
+  request goes, nothing is laid, its workspace is removed), the agent's reason saying the caller's
+  end (`withdrawn: agent … of pc, which asked for it, ended`, or `failed`). A launch whose code is
+  still travelling when its caller ends, whose agent is not known yet, is stopped as soon as that
+  machine names it. The stop is kept under `stop-<launch>` whatever the queue for that machine
+  holds: it replaces the calls kept for that launch (a message, a following, an earlier stop),
+  which it makes useless, so that the queue grows by one at most per launch it ends.
 - Where a question goes when the parent is off (#818): a parent of another machine that forwards
   a request of its child gives it to the user of the child's machine, never to its own parent on
   its machine (the request lives where the call was held). A request goes to the user when the
@@ -2631,11 +2702,16 @@ on a real phone, by hand, and reported.
   lists a launch held for its user `idle`, as it lists nothing it holds; while the launch is
   `held` here, that `idle` is not taken over the request's mark. Any other state that machine
   lists wins, so an allowed launch shows what it does as soon as its list says so.
-- **The End confirmation does not ask another machine** (#1277): a session the pilot leads on
-  another machine is listed with its unsaved work `unknown (on server)`, never read there, rather
-  than waiting, even briefly, for an answer that may not come. Asking that machine with a bounded
-  wait is a follow-up. A launch on another machine that names no agent yet (held for the user
-  there) is not stopped with its parent: a follow-up.
+- **The End confirmation waits 3 seconds for another machine** (#1354): the machines of the
+  sessions the pilot leads elsewhere are asked at once, and one that has not answered after 3
+  seconds is said `unknown (on server)`, rather than holding the confirmation longer.
+- **A stop replaces the messages kept for its launch** (#1354): rather than going past the 100
+  messages a machine may leave waiting, a stop takes the place of the calls kept for the same
+  launch, which it makes useless; a message the agent would have read before its stop is not
+  delivered.
+- **A held launch's withdrawal is said on the agent there** (#1354): its reason, `withdrawn: agent
+  … of pc, which asked for it, ended`; the user's request goes as any request of an agent that
+  ended.
 - **The review of a led session on another machine is not kept while that machine is off**
   (#1279): the lead's `review {start, agent}` is sent at once and refused while the machine
   cannot be reached, as a read or a stop is, rather than kept as a message is: a review started
@@ -2645,6 +2721,29 @@ on a real phone, by hand, and reported.
   says to call again once that machine is back, and does not promise a wake-up, as nothing comes
   back from a review that was not started. A machine not updated yet (it answers that `review` is
   no tool another machine calls) is told to the lead as a machine to update.
+
+- **A thing to notify is decided once, at its 30 seconds** (#827): told then, or dropped when a
+  client had an input in the last 2 minutes; it does not ring later if the user then goes away. A
+  row the user has not read is still in the window's bell and the phone's list. What is decided is
+  kept in memory: after a restart of the daemon, what came before is never told.
+- **Only an input counts as the user being there** (#827): a window that is focused and untouched
+  for 2 minutes is away, as the issue says it ("had an input"); the focus is told to the hub
+  (`active`) and not read by the runners.
+- **The phones told are the sessions that asked for the notices** (#827), in the `about` the app
+  tells the hub; no role or icon decides it. A `viewer`'s phone is told too, and draws no Allow or
+  Deny (#828). This app's core asks for them already, and ignores them until #828 draws them.
+- **Neither side of before #827 loses its session while the other is updated** (#827): a hub of
+  before closes the session of a runner that asks `notify`, and a phone of before ends its session
+  at a `notice`. So each says it takes them, with no new protocol number: the hub's welcome says
+  `{"welcome": {"notices": true}}`, and a runner asks `notify` only on a session whose welcome said
+  it (with a hub of before, nothing reaches the phone until the hub is updated); the app says
+  `"notices": true` in its `about`, and the hub sends `notice` only to the sessions that said it (a
+  phone of before is told none until it is updated). Both fields are read as `false` when absent,
+  and a side of before ignores them.
+- **The phones' presence is not counted** (#827): the app says an input each time it opens its
+  session, so a phone that changes network would silence the next notices. A runner counts the
+  presence of the members whose device says it is no `phone`; the app may tell its real inputs
+  later (#828).
 
 - **What an end sends back, and the removal of a workspace there** (#1278): a child stopped by
   its parent is told `child-ended`, with its commits, though it was its parent that stopped it:

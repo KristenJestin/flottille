@@ -3,7 +3,8 @@
 //!
 //! The page's skeleton is a veil laid over it that fades out when the daemon answered, whatever
 //! the page under it is: what is ready is drawn at once, under the veil, and enters with its own
-//! motion. The sidebar's is a block above its rows that folds away, as a `presence` does.
+//! motion. The sidebar's is a block that stands in while it has no row at all and folds away, as a
+//! `presence` does, as soon as it has one (or the daemon answered).
 
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{Palette, Skeleton, fade, space};
