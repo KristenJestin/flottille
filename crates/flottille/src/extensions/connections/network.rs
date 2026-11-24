@@ -127,7 +127,8 @@ fn out_of_reach(landlock: i64) -> Result<(), String> {
 /// The network recorded in the vault folder `vault`, once this host is known to keep a run out
 /// of the browser's reach (`out_of_reach`): checked each time one is used, not once when it was
 /// made.
-pub fn present(vault: &Path, _landlock: i64) -> Result<Option<Network>, String> {
+pub fn present(vault: &Path, landlock: i64) -> Result<Option<Network>, String> {
+    out_of_reach(landlock)?;
     Ok(found(vault))
 }
 
@@ -323,28 +324,37 @@ pub fn hold() -> ! {
 }
 
 /// The pids of the processes that answer on the sockets of agent-browser's daemons in the socket
-/// folder `sockets` (`<session>.sock`), as the kernel says (`SO_PEERCRED`), never as a file
-/// says: 0 for one whose process is gone or unknown, which no network holds. A socket nobody
-/// answers on is no browser's.
+/// folder `sockets` and the folders in it (`<session>.sock`; a namespace puts a session's in a
+/// subfolder), as the kernel says (`SO_PEERCRED`), never as a file says: 0 for one whose process
+/// is gone or unknown, which no network holds, and for one that stops accepting, which fails
+/// closed. A socket nobody answers on is no browser's. Never through a link.
 pub fn daemons(sockets: &Path) -> Vec<u32> {
     use std::os::unix::fs::FileTypeExt;
     let Ok(listed) = std::fs::read_dir(sockets) else {
         return Vec::new();
     };
-    listed
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "sock"))
-        // Never through a link: the type of the entry itself.
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_socket()))
-        .filter_map(|entry| {
-            let stream = std::os::unix::net::UnixStream::connect(entry.path()).ok()?;
-            Some(
-                peer(&stream)
-                    .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
-                    .unwrap_or(0),
-            )
-        })
-        .collect()
+    let mut pids = Vec::new();
+    for entry in listed.flatten() {
+        // The type of the entry itself, never of what a link leads to.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            pids.extend(daemons(&entry.path()));
+        } else if kind.is_socket() && entry.path().extension().is_some_and(|kind| kind == "sock") {
+            match connect_at_once(&entry.path()) {
+                Ok(stream) => pids.push(
+                    peer(&stream)
+                        .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
+                        .unwrap_or(0),
+                ),
+                // Alive, and not accepting: no browser that serves is, so none a network holds.
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => pids.push(0),
+                Err(_) => {}
+            }
+        }
+    }
+    pids
 }
 
 /// A connection to the socket at `path` that never waits for the daemon to accept it: a daemon

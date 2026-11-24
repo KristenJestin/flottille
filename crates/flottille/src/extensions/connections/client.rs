@@ -636,18 +636,19 @@ async fn start_with(
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
+            // Every value it was given, masked in what it says whatever its variable is named.
+            let mut given = Vec::new();
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
+                given.push(secret.clone());
+                env.insert(OsString::from(name), OsString::from(secret));
+            }
+            // Last: the connection's own variables never move the browser's folders.
             if let Some(vault) = &vault {
                 super::adapters::display(
                     &mut env,
                     display.as_ref().map(|shown| &shown.env),
                     vault,
                 )?;
-            }
-            // Every value it was given, masked in what it says whatever its variable is named.
-            let mut given = Vec::new();
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
-                given.push(secret.clone());
-                env.insert(OsString::from(name), OsString::from(secret));
             }
             let mut command = tokio::process::Command::new(&words[0]);
             command

@@ -2866,6 +2866,7 @@ fn adapter_said(
                     .own_config(words)
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
                     .or_else(|| adapter.unsafe_start(words, &declaration.env))
+                    .or_else(|| adapter.moves_folders(&declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }

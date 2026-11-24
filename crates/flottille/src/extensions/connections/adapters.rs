@@ -364,6 +364,23 @@ impl Adapter {
 }
 
 impl Adapter {
+    /// Why login is refused when the connection's environment names a variable that says where
+    /// agent-browser puts its socket and Chrome its profile, caches and crash dumps
+    /// (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder, and the
+    /// connection's env, which an agent can propose an edit of, is not to move them.
+    pub fn moves_folders(&self, env: &BTreeMap<String, String>) -> Option<String> {
+        let named = FOLDERS_OF_THE_BROWSER
+            .iter()
+            .find(|name| env.contains_key(**name))?;
+        Some(format!(
+            "login is refused while the connection's environment sets {named}: Flottille sets it \
+             for the browser, in the connection's vault folder, which no run reaches, so that the \
+             socket that drives the browser with no gate, its profile (cookies, the password \
+             filled) and its crash dumps stay out of their reach; one the connection moved would \
+             put them where a run reads them. The user takes {named} out of the connection's env"
+        ))
+    }
+
     /// Why login is refused when an option agent-browser itself calls unsafe (those its
     /// `--allowed-domains` rejects, `UNSAFE`) is set by the server's command, the connection's
     /// environment, or the environment the daemon started with, which agent-browser inherits:
@@ -401,7 +418,7 @@ impl Adapter {
 /// The options agent-browser itself calls unsafe beside a list of allowed domains, and the
 /// variables it reads as each: another profile, a session saved or restored, a browser reached
 /// over CDP or found running, a provider's browser, launch arguments (a `--proxy-server` among
-/// them).
+/// them), a plugin registry, a namespace.
 const UNSAFE: &[(&str, &[&str])] = &[
     ("--profile", &["AGENT_BROWSER_PROFILE"]),
     ("--state", &["AGENT_BROWSER_STATE"]),
@@ -412,6 +429,11 @@ const UNSAFE: &[(&str, &[&str])] = &[
     ("--provider", &["AGENT_BROWSER_PROVIDER"]),
     ("-p", &[]),
     ("--args", &["AGENT_BROWSER_ARGS"]),
+    // Its plugin registry replaces Flottille's plugin, which runs with the vault's access.
+    ("--plugins", &["AGENT_BROWSER_PLUGINS"]),
+    // A namespace puts the daemon's socket in a subfolder of its own, away from the socket
+    // folder's listing.
+    ("--namespace", &["AGENT_BROWSER_NAMESPACE"]),
 ];
 
 /// Where the first of the options `list`, or of the `variables` that stand for them, is set, by
@@ -613,7 +635,8 @@ pub fn shown(
     }
 }
 
-/// The browser's environment: no display of the daemon's own, never the session bus address,
+/// The browser's environment, applied after the connection's own variables (a connection's env
+/// never moves a folder of [`FOLDERS_OF_THE_BROWSER`]): no display of the daemon's own, never the session bus address,
 /// whether the browser is shown or not, and the display folder's variables (`shown`, a
 /// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
 /// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
@@ -653,6 +676,18 @@ pub fn display(
     }
     Ok(())
 }
+
+/// The variables [`display`] sets, or removes, for the browser: where agent-browser puts its
+/// socket, and where Chrome writes its profile, caches and crash dumps.
+pub const FOLDERS_OF_THE_BROWSER: [&str; 7] = [
+    "AGENT_BROWSER_SOCKET_DIR",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "CHROME_CONFIG_HOME",
+    "BREAKPAD_DUMP_LOCATION",
+];
 
 /// The variables that say where Chrome and agent-browser write outside the profile, and the
 /// folder of the vault folder each names.
@@ -787,9 +822,12 @@ pub fn browser(
 pub async fn close(daemon: &Daemon, browser: &Browser) {
     // In the browser's network, as every command of agent-browser's: one that found no browser
     // would start one where it runs. Without one, as it started.
-    let network = match network::found(browser.vault.path()) {
-        Some(network) => Some(network),
-        None => network::made(browser.vault.path()).await.ok(),
+    // Used only where a run stays out of the browser's reach (`network::present`), as when one
+    // is made for a login.
+    let network = match network::present(browser.vault.path(), crate::landlock::abi()) {
+        Ok(Some(network)) => Some(network),
+        Ok(None) => network::made(browser.vault.path()).await.ok(),
+        Err(_) => None,
     };
     closed_in(
         daemon,
@@ -803,12 +841,17 @@ pub async fn close(daemon: &Daemon, browser: &Browser) {
     // Nothing of the browser's runs in it any more.
     network::ended(browser.vault.path());
     // A Chrome that crashed left its profile, which agent-browser's close never removes.
-    emptied(&browser.vault.path().join(TEMPORARY));
+    emptied_once_ended(browser.vault.path());
 }
 
 /// Every entry of `folder` removed, the folder kept (a server's next browser makes its profile
-/// there): never through a link, the entry's own type.
+/// there): never through a link, the entry's own type, and `folder` itself a real folder. A link
+/// there (the vault folder is the user's, but a Flottille that crashed halfway is not trusted)
+/// would be followed by `read_dir` to a folder that is not Flottille's.
 fn emptied(folder: &Path) {
+    if !std::fs::symlink_metadata(folder).is_ok_and(|kind| kind.is_dir()) {
+        return;
+    }
     let Ok(listed) = std::fs::read_dir(folder) else {
         return;
     };
@@ -820,9 +863,15 @@ fn emptied(folder: &Path) {
     }
 }
 
-/// `emptied` the temporary folder of the vault folder `vault`, once the browsers it holds ended.
+/// `emptied` the temporary folder of the vault folder `vault`, once the browsers it holds ended:
+/// not while one still answers on the socket folder (a close that timed out or did not run, or
+/// one of the other sessions, which `agent-browser close` leaves), whose profile it uses and
+/// which of the folder's profiles is whose is not known.
 fn emptied_once_ended(vault: &Path) {
-    emptied(&vault.join(TEMPORARY));
+    let answering = sockets_in(vault).is_some_and(|sockets| !network::daemons(&sockets).is_empty());
+    if !answering {
+        emptied(&vault.join(TEMPORARY));
+    }
 }
 
 /// The network of the browser of the vault folder `vault`, found or made, for a command of
@@ -836,7 +885,8 @@ pub async fn network(
     folder: &Path,
     vault: &crate::display::Folder,
 ) -> Result<Network, String> {
-    let network = match network::found(vault.path()) {
+    // Each time one is used, not only when it is made: the host may have changed since.
+    let network = match network::present(vault.path(), crate::landlock::abi())? {
         Some(network) => network,
         None => {
             network::available()?;
@@ -1032,6 +1082,7 @@ pub async fn perform(
             .own_config(&program)
             .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
             .or_else(|| AGENT_BROWSER.unsafe_start(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.moves_folders(&declaration.env))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
@@ -1169,7 +1220,6 @@ async fn run(
     let _why_gone = Removed(why_file.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
-    display(&mut env, shown.as_ref().map(|shown| &shown.env), &vault)?;
     // The folders the login's commands may reach: the daemon's own, never what a variable of the
     // connection (the vault's, below) names. The browser they may start runs the plugin, which
     // reaches the token and the socket in the vault's.
@@ -1184,6 +1234,8 @@ async fn run(
     {
         env.insert(OsString::from(variable), OsString::from(secret));
     }
+    // Last: the connection's own variables never move the browser's folders.
+    display(&mut env, shown.as_ref().map(|shown| &shown.env), &vault)?;
     // Loaded first, then filled without navigating: agent-browser then checks, before each field
     // and the submit, that the page is still of the URL's origin (scheme, host and port), so a
     // page that redirects elsewhere gets no secret. Its own navigation checks nothing after it.
