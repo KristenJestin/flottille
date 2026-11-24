@@ -700,19 +700,19 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "agent_launch",
         title: "Launch a child, or start a session",
-        description: "kind (required): child, a part of your own task, in your place, that \
-            reports to you; led, an autonomous job that you pilot, a \
-            real session the user sees under you, which asks you its questions and wakes you at \
-            each end of its turns; handed, a session you start for the user and let go, of which \
-            you hear nothing more unless it writes to you. led and handed: a root only, judged, \
-            in workspace (main is the project folder) or new_workspace; you and it write with \
-            session_send. Answered at once with its id; never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. {\"kind\": \"handed\", \
-            \"title\": \"Add API\", \"brief\": \"...\", \"new_workspace\": \"api\", \
-            \"repositories\": [\"api\"]} machine: another of the user's machines, \
-            in a copy of your place (your uncommitted changes go with it). project: another \
-            registered project, always held for the user. new_workspace: name its branch by the \
-            repository's convention.",
+        description: "kind (required): child, a part of your own task, in your place, that reports \
+            to you; led, an autonomous job of its own that you pilot, a real session the user \
+            sees under you, which asks you its questions and wakes you; handed, a session you \
+            start for the user and let go, of which you hear no more unless it writes. led and \
+            handed: a root only, judged, in workspace or new_workspace. Answered at once; never \
+            poll. The brief is all it knows: the task, what to read, the checks, the \
+            deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \"brief\": \
+            \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \"...\", \
+            \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
+            machine: another of the user's machines, a copy of your place with your uncommitted \
+            changes. project: another registered project, held for the user. new_workspace: \
+            name its branch by the repository's convention.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -1037,7 +1037,7 @@ const GUIDE_SAID: &str = " Its guide, each action and each argument: {\"action\"
     with your first call.";
 
 /// What a family with no `action` to ask the guide with says of it: it comes with the first call.
-const GUIDE_SAID_FIRST: &str = " Its arguments' guide comes with your first call.";
+const GUIDE_SAID_FIRST: &str = " Argument guide: with your first call.";
 
 /// The name of a family read on demand, as `ON_DEMAND` holds it.
 fn on_demand(name: &str) -> Option<&'static str> {
@@ -4538,8 +4538,8 @@ mod tests {
         // is held for the user, and a new workspace's branch follows the repository's convention.
         let launch = listed("agent_launch");
         for said in [
-            "uncommitted changes go with it",
-            "another registered project, always held for the user",
+            "a copy of your place with your uncommitted changes",
+            "another registered project, held for the user",
             "the repository's convention",
         ] {
             assert!(launch.contains(said), "agent_launch lost: {said}\n{launch}");
@@ -4585,10 +4585,10 @@ mod tests {
         // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
         // definition's size (2,915 characters, measured on that branch), before it is listed
         // short as the other rarely used families are. The roots list is measured with the
-        // tool `vault` (an entry exists) and `routine` whole: 57,999 characters of the 60,000,
-        // a margin of 2,001 (measured on this branch, round 3, 2026-11-24; child 46,837, leaf
+        // tool `vault` (an entry exists) and `routine` whole: 58,035 characters of the 60,000,
+        // a margin of 1,965 (measured on this branch, round 3, 2026-11-24; child 46,873, leaf
         // 40,525). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
-        // which made 60,060; `agent_launch` is listed short too, which gave 2,061 back. The limits
+        // which made 60,060; `agent_launch` is listed short too, which gave 2,025 back. The limits
         // are not raised, and no tool is trimmed.
         const ROUTINE: usize = 2_915;
         let mut biggest = 0;
