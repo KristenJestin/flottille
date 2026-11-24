@@ -776,8 +776,9 @@ moves, and only when the forge says so:
   --head <b> --state merged`; `bkt pr list --state MERGED`) when the forge has that base, else
   the first branch of the repository's base rule that the forge confirms it has, said in the
   answer to be where the branch was not found, not merged and deleted. A forge's answer that is
-  not a clear "not found" (a 404 may also be a repository the sign-in cannot see) for the base,
-  and a clear "found" for where it went, moves nothing. A `merge` then accepts the pull request into that
+  not a clear "not found" (`HTTP 404` / `Not Found`, never a bare `404`: a branch named
+  `fix/1404-x` is in the URL a dropped call prints; and a 404 may also be a repository the
+  sign-in cannot see) for the base, and a clear "found" for where it went, moves nothing. A `merge` then accepts the pull request into that
   base, and only into it (GitHub retargets a pull request there itself when its base branch is
   deleted); a pull request into any other branch is refused as before, and so is one into the
   project's base while the branch is still there.
@@ -789,6 +790,10 @@ workspace's (`gh pr create --base`, `bkt pr create --target`), refused before an
 when the forge has no such branch, and it does not change the workspace's base. Without it, a
 workspace whose base branch is gone opens the pull request into where it went and says so in the
 answer.
+
+A move is made from the base its decision was read at: written only if the record still holds
+that base (one transaction), else the record is left and the answer says the base moved meanwhile
+(two sessions of one workspace, a `merge` and a `forge edit`, cannot undo each other).
 
 Each move is recorded (`workspace.base_changed`, `docs/events.md`), shown under the repository on
 the workspace's card as its base's note (`moved from chore/2-start: …`), and told to the
