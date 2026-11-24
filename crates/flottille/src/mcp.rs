@@ -151,7 +151,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Relative to the place, or to the repository when given; \".\" for its top."},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
+                "repository": {"type": "string", "description": "As fs_read's: a repository by its path, never a folder inside one."},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 5}
             }, "required": ["path"], "additionalProperties": false})
         },
@@ -188,7 +188,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
+                "repository": {"type": "string", "description": "As fs_read's: a repository by its path, never a folder inside one."},
                 "content": {"type": "string", "description": "The whole new content."},
                 "why": {"type": "string", "description": "One sentence: why this write."}
             }, "required": ["path", "content"], "additionalProperties": false})
@@ -207,7 +207,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
+                "repository": {"type": "string", "description": "As fs_read's: a repository by its path, never a folder inside one."},
                 "edits": {"type": "array", "minItems": 1, "maxItems": 50, "items": {
                     "type": "object", "properties": {
                         "old": {"type": "string", "minLength": 1, "description": "The text to replace, appearing once."},
@@ -510,11 +510,9 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "setup",
         title: "The project's setup",
-        description: "The steps that prepare each new workspace, in order, by number. list reads \
-            them; add (at a number, the last by default), edit, remove and move (to) change them, \
-            judged as for tasks, a run step as a run of its line. A step is one of copy (globs), \
-            link, root_entries, run (a line) and task, in a repository, for_each_repository or \
-            the workspace folder. {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
+        description: "The steps that prepare each new workspace, in order, by number: \
+            list reads them; add, edit, remove and move change them, judged as for tasks. \
+            {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
             \"for_each_repository\": true}}.",
         read_only: false,
         idempotent: false,
@@ -531,16 +529,11 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "project",
         title: "The project's settings",
-        description: "This project's settings. settings reads each repository's forge and the \
-            tracker; set_settings declares them (null removes one; a tracker left out is kept), \
-            and a repository's base branches and dependencies; what is left out is kept, a \
-            refused change saves nothing. rules reads how agents are told to work (the global \
-            rules, then the project's); set_rules replaces the project's text and sets \
-            rules_alone, for the agents created after. A change is done once the judge or the \
-            user allows it, of the tracker or of the rules only once the user does: you are \
-            answered at once, the result may come later. {\"action\": \"set_settings\", \
-            \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
-            \"depends_on\": [\"lib\"]}]}.",
+        description: "This project's settings: settings reads each repository's forge and the \
+            tracker, rules how agents are told to work; set_settings and set_rules change them \
+            once the judge or the user allows it (the tracker and the rules: the user). \
+            {\"action\": \"set_settings\", \"repositories\": [{\"path\": \"api\", \
+            \"base\": [\"develop\", \"main\"], \"depends_on\": [\"lib\"]}]}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -591,19 +584,11 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "services",
         title: "The machine's services",
-        description: "The services of the machine: programs every project shares (a database, \
-            an API the apps call), each run once, in its own folder, by Flottille. A task that \
-            needs one starts it before it runs. list: each with its state (stopped, starting, \
-            ready, running, outside: started by someone else, failed and why), folder and \
-            address; show: one, with the end of its output. start: starts it, what it needs \
-            first, judged as a run of its line in its folder: {\"action\": \"start\", \
-            \"name\": \"mongo\"}. Each service a start or a task's run starts first is held \
-            when marked ask_before_running, and one an agent wrote has its lines (line, ready and \
-            url commands) judged in your mode as a run of them in its folder. stop is always held for the user, whatever the mode: you are \
-            answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
-            \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
-            {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
-            \"folder\": \"~/tools/redis\"}.",
+        description: "The services of the machine: programs every project shares (a \
+            database, an API the apps call), each run once, in its own folder, by Flottille; a \
+            task that needs one starts it first. list and show read them; start is judged as a \
+            run of its line, stop is always held for the user. {\"action\": \"start\", \
+            \"name\": \"mongo\"}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -628,18 +613,11 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "connections",
         title: "The user's connections",
-        description: "The MCP servers the user gives every agent, each as one tool conn_<name>. \
-            list: each with its state and actions; show: one, its command or URL, its variables \
-            by vault entry name (never a secret), its limits and each action's setting. add, \
-            edit, remove, set (an action's setting: judged, passes, asked or off), on and off \
-            are always held for the user, whatever the mode: you are answered at once, the \
-            result comes later; the user reads the declaration whole before it is written. \
-            A connection is given to every project, so the vault entries it names are every \
-            project's, and a URL's secret goes only to its entry's own address (its url): the \
-            user's Accept waits until they are, and the user sets them from the request. One \
-            the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. \
-            {\"action\": \"add\", \"name\": \"notes\", \"about\": \"The user's notes.\", \
-            \"command\": \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
+        description: "The MCP servers the user gives every agent, each as one \
+            tool conn_<name>: list and show read them, never a secret; add, edit, remove, set, on \
+            and off are always held for the user, whatever the mode. {\"action\": \"add\", \
+            \"name\": \"notes\", \"about\": \"The user's notes.\", \"command\": \
+            \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -661,14 +639,10 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "vault",
         title: "The user's vault",
-        description: "The secrets the user keeps for agents (a tracker's token, a test \
-            account's login): list gives each entry's name, what it is for, its URL and its \
-            username. A secret is never shown: a tool of Flottille's that needs one takes the \
-            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
-            ask: when you need an entry the vault lacks, the user is offered its form, \
-            prefilled with what you give; they type the secret (answered at once, their answer \
-            later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
-            \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}.",
+        description: "The secrets the user keeps for agents: list gives each entry's \
+            name, use, URL and username, never a secret (a tool that needs one takes the entry's \
+            name); ask offers the user the form of an entry the vault lacks. {\"action\": \
+            \"ask\", \"name\": \"staging-login\", \"why\": \"to sign in to staging\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
@@ -936,7 +910,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "session": {"type": "string", "description": "The session's agent id or its title, whole; left out, your own."},
-                "project": {"type": "string", "description": "Another registered project: session is then matched, as a title or an id, among that project's root sessions. Left out, your own project's."},
+                "project": {"type": "string", "description": "Another registered project, as session_send's project."},
                 "last": {"type": "integer", "minimum": 1, "maximum": crate::session_read::MAX_MESSAGES, "description": "The messages of a page, 20 by default."},
                 "since": {"type": "string", "description": "A date, 2026-10-31T14:05:00Z or 2026-10-31: the messages from it on."},
                 "until": {"type": "string", "description": "With since: the messages before it."},
@@ -961,6 +935,128 @@ const SERVED: [Definition; 33] = [
         },
     },
 ];
+
+/// The whole description of `services`, its guide (`docs/tools.md`, "Guides read on demand").
+const SERVICES_WHOLE: &str = "The services of the machine: programs every project shares (a database, \
+    an API the apps call), each run once, in its own folder, by Flottille. A task that \
+    needs one starts it before it runs. list: each with its state (stopped, starting, \
+    ready, running, outside: started by someone else, failed and why), folder and \
+    address; show: one, with the end of its output. start: starts it, what it needs \
+    first, judged as a run of its line in its folder: {\"action\": \"start\", \
+    \"name\": \"mongo\"}. Each service a start or a task's run starts first is held \
+    when marked ask_before_running, and one an agent wrote has its lines (line, ready and \
+    url commands) judged in your mode as a run of them in its folder. stop is always held for the user, whatever the mode: you are \
+    answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
+    \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
+    {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
+    \"folder\": \"~/tools/redis\"}.";
+/// The whole description of `setup`, its guide (`docs/tools.md`, "Guides read on demand").
+const SETUP_WHOLE: &str = "The steps that prepare each new workspace, in order, by number. list reads \
+    them; add (at a number, the last by default), edit, remove and move (to) change them, \
+    judged as for tasks, a run step as a run of its line. A step is one of copy (globs), \
+    link, root_entries, run (a line) and task, in a repository, for_each_repository or \
+    the workspace folder. {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
+    \"for_each_repository\": true}}.";
+/// The whole description of `connections`, its guide (`docs/tools.md`, "Guides read on demand").
+const CONNECTIONS_WHOLE: &str = "The MCP servers the user gives every agent, each as one tool conn_<name>. \
+    list: each with its state and actions; show: one, its command or URL, its variables \
+    by vault entry name (never a secret), its limits and each action's setting. add, \
+    edit, remove, set (an action's setting: judged, passes, asked or off), on and off \
+    are always held for the user, whatever the mode: you are answered at once, the \
+    result comes later; the user reads the declaration whole before it is written. \
+    A connection is given to every project, so the vault entries it names are every \
+    project's, and a URL's secret goes only to its entry's own address (its url): the \
+    user's Accept waits until they are, and the user sets them from the request. One \
+    the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. \
+    {\"action\": \"add\", \"name\": \"notes\", \"about\": \"The user's notes.\", \
+    \"command\": \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.";
+/// The whole description of `vault`, its guide (`docs/tools.md`, "Guides read on demand").
+const VAULT_WHOLE: &str = "The secrets the user keeps for agents (a tracker's token, a test \
+    account's login): list gives each entry's name, what it is for, its URL and its \
+    username. A secret is never shown: a tool of Flottille's that needs one takes the \
+    entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
+    ask: when you need an entry the vault lacks, the user is offered its form, \
+    prefilled with what you give; they type the secret (answered at once, their answer \
+    later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
+    \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}.";
+
+/// The whole description of `project`, its guide (`docs/tools.md`, "Guides read on demand").
+const PROJECT_WHOLE: &str = "This project's settings. settings reads each repository's forge and the \
+    tracker; set_settings declares them (null removes one; a tracker left out is kept), \
+    and a repository's base branches and dependencies; what is left out is kept, a \
+    refused change saves nothing. rules reads how agents are told to work (the global \
+    rules, then the project's); set_rules replaces the project's text and sets \
+    rules_alone, for the agents created after. A change is done once the judge or the \
+    user allows it, of the tracker or of the rules only once the user does: you are \
+    answered at once, the result may come later. {\"action\": \"set_settings\", \
+    \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
+    \"depends_on\": [\"lib\"]}]}.";
+
+/// The families an agent rarely calls, listed short: their whole description, with each
+/// argument's sentence, is their guide, read on demand (`docs/tools.md`, "Guides read on demand").
+const ON_DEMAND: [(&str, &str); 5] = [
+    ("services", SERVICES_WHOLE),
+    ("setup", SETUP_WHOLE),
+    ("project", PROJECT_WHOLE),
+    ("connections", CONNECTIONS_WHOLE),
+    ("vault", VAULT_WHOLE),
+];
+
+/// What a family read on demand says of its guide, after its short description.
+const GUIDE_SAID: &str = " Its guide, each action and each argument: {\"action\": \"guide\"}, or \
+    with your first call.";
+
+/// The name of a family read on demand, as `ON_DEMAND` holds it.
+fn on_demand(name: &str) -> Option<&'static str> {
+    ON_DEMAND
+        .iter()
+        .find(|(family, _)| *family == name)
+        .map(|(family, _)| *family)
+}
+
+/// The guide of a family read on demand: its whole description, then a line for each argument
+/// that has a sentence, nested ones by their path.
+pub fn guide_of(definition: &Definition) -> Option<String> {
+    let (_, whole) = ON_DEMAND
+        .iter()
+        .find(|(family, _)| *family == definition.name)?;
+    fn lines(schema: &Value, path: &str, text: &mut String) {
+        let Some(properties) = schema["properties"].as_object() else {
+            return;
+        };
+        for (name, property) in properties {
+            let path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            if let Some(said) = property["description"].as_str() {
+                text.push_str(&format!("\n- {path}: {said}"));
+            }
+            lines(property, &path, text);
+            lines(&property["items"], &path, text);
+        }
+    }
+    let mut text = format!("{whole}\n\nArguments:");
+    lines(&(definition.schema)(), "", &mut text);
+    Some(text)
+}
+
+/// A schema without the sentence of any argument, nested ones included: what a family read on
+/// demand lists, the sentences being in its guide.
+fn without_sentences(schema: &mut Value) {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in properties.values_mut() {
+            if let Some(property) = property.as_object_mut() {
+                property.remove("description");
+            }
+            without_sentences(property);
+        }
+    }
+    if let Some(items) = schema.get_mut("items") {
+        without_sentences(items);
+    }
+}
 
 /// Whether the tool is one of the core's.
 pub fn serves(name: &str) -> bool {
@@ -1037,11 +1133,20 @@ fn definition(name: &str) -> Option<&'static Definition> {
 /// The tool as a client lists it. `always_load` loads it upfront in Claude Code instead of
 /// through tool search: for the agents Flottille runs, which have nothing else.
 pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
+    let mut schema = (definition.schema)();
+    let mut description = definition.description.to_owned();
+    if on_demand(definition.name).is_some() {
+        without_sentences(&mut schema);
+        if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
+            actions.push("guide".into());
+        }
+        description.push_str(GUIDE_SAID);
+    }
     let mut tool = json!({
         "name": definition.name,
         "title": definition.title,
-        "description": definition.description,
-        "inputSchema": (definition.schema)(),
+        "description": description,
+        "inputSchema": schema,
         "annotations": {
             "title": definition.title,
             "readOnlyHint": definition.read_only,
@@ -1185,6 +1290,8 @@ pub struct Server {
     pub seen: crate::web::Seen,
     /// Moves at every change of a session's tools: what listens for them looks again.
     changes: watch::Sender<u64>,
+    /// The families read on demand whose guide each agent's process was given, by agent.
+    guided: crate::locks::Lock<HashSet<(String, &'static str)>>,
 }
 
 /// Where a running session stands with the tools its grant serves (`docs/tools.md`, "When the
@@ -1265,7 +1372,16 @@ impl Server {
             keyless: crate::locks::Lock::named("keyless", Default::default()),
             seen: crate::web::Seen::default(),
             changes: watch::Sender::new(0),
+            guided: crate::locks::Lock::named("guided", Default::default()),
         }
+    }
+
+    /// Whether the agent's process is yet to be given the guide of `family`: true once.
+    fn first_guide(&self, agent: &str, family: &'static str) -> bool {
+        self.guided
+            .lock()
+            .unwrap()
+            .insert((agent.to_owned(), family))
     }
 
     /// The agent's running session is now served `tools`: told, or said to run an older list
@@ -1422,6 +1538,11 @@ impl Server {
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token = base64url(&bytes);
         let digest = files::sha256(token.as_bytes());
+        // A new process has read no guide.
+        self.guided
+            .lock()
+            .unwrap()
+            .retain(|(guided, _)| *guided != grant.agent);
         let mut tokens = self.tokens.lock().unwrap();
         let agent = grant.agent.clone();
         if let Some(old) = tokens.by_agent.insert(agent.clone(), digest.clone()) {
@@ -2121,6 +2242,19 @@ impl ServerHandler for Handler {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+        // A family read on demand that this agent holds: its guide, asked or with its first call.
+        let name = providers::PROVIDERS
+            .iter()
+            .find_map(|provider| provider.tool_of(&request.name))
+            .unwrap_or(&request.name);
+        let family = on_demand(name).filter(|family| grant.tools.contains(family));
+        let guide = family.and_then(|family| guide_of(definition(family)?));
+        if let (Some(family), Some(guide)) = (family, &guide)
+            && args["action"] == "guide"
+        {
+            self.daemon.mcp.first_guide(&grant.agent, family);
+            return Ok(CallToolResult::success(vec![ContentBlock::text(guide.clone())]).into());
+        }
         if self.daemon.mcp.called(&digest) {
             say_outdated(&self.daemon, &grant.agent, true);
         }
@@ -2150,6 +2284,15 @@ impl ServerHandler for Handler {
                     "[an image of this answer is left out: its file is gone]",
                 )),
             }
+        }
+        // After the result, in a block of its own: the result and its limits stay as they are.
+        if let (Some(family), Some(guide)) = (family, guide)
+            && self.daemon.mcp.first_guide(&grant.agent, family)
+        {
+            content.push(ContentBlock::text(format!(
+                "[flottille:guide {family}] The guide of {family}, given once with your first \
+                 call of it: {guide}"
+            )));
         }
         Ok(if error {
             CallToolResult::error(content)
@@ -4238,6 +4381,52 @@ mod tests {
                 "{tool} {parameter:?} lost: {said}\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_family_read_on_demand_keeps_its_whole_text_in_its_guide() {
+        fn sentences(schema: &Value, found: &mut Vec<String>) {
+            let Some(properties) = schema["properties"].as_object() else {
+                return;
+            };
+            for property in properties.values() {
+                if let Some(said) = property["description"].as_str() {
+                    found.push(said.to_owned());
+                }
+                sentences(property, found);
+                sentences(&property["items"], found);
+            }
+        }
+        for (family, whole) in ON_DEMAND {
+            let definition = definition(family).unwrap();
+            let guide = guide_of(definition).unwrap();
+            assert!(guide.starts_with(whole), "{family}: {guide}");
+            let mut whole_sentences = Vec::new();
+            sentences(&(definition.schema)(), &mut whole_sentences);
+            assert!(!whole_sentences.is_empty(), "{family}");
+            for said in &whole_sentences {
+                assert!(guide.contains(said.as_str()), "{family} lost: {said}");
+            }
+
+            // Listed: what it is, an example, where the guide is; no argument's sentence.
+            let tool = serde_json::to_value(tool_of(definition, true)).unwrap();
+            let description = tool["description"].as_str().unwrap();
+            assert!(
+                description.contains("{\""),
+                "{family} has no example: {description}"
+            );
+            assert!(description.ends_with(GUIDE_SAID), "{description}");
+            assert!(description.len() < whole.len(), "{family}");
+            let mut listed = Vec::new();
+            sentences(&tool["inputSchema"], &mut listed);
+            assert!(listed.is_empty(), "{family}: {listed:?}");
+            let actions = tool["inputSchema"]["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap();
+            assert_eq!(actions.last().unwrap(), "guide", "{family}");
+            assert!(guide_of(definition).is_some() && !guide.contains("[flottille:"));
+        }
+        assert!(guide_of(definition("forge").unwrap()).is_none());
     }
 
     #[test]
