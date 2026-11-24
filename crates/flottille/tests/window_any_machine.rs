@@ -1138,14 +1138,36 @@ fn drawn_over_the_own_line(cx: &mut VisualTestContext) -> Vec<String> {
 fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut TestAppContext) {
     let (_hub, pc, _server) = pc_and_server();
     let (shell, cx) = window(&pc, cx);
-    settings(&shell, "general", cx);
-    settings_of(&shell, "server", cx);
+    scroll_clear_of_the_own_line(&shell, cx);
+}
+
+/// A machine this device may only view holds its page (its ink fades, its controls are held): the
+/// held page scrolls clear of the sentence as well.
+#[gpui_kit::test]
+fn settings_content_of_a_viewed_machine_never_draws_under_the_fixed_line(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let server = Machine::of(runner());
+    let pc = Machine::of(runner());
+    pair(&hub, &server, "server", "runner");
+    pair(&hub, &pc, "pc", "viewer");
+    pc.wait_for("server", "online");
+    project(&server.user, "app");
+    let (shell, cx) = window(&pc, cx);
+    scroll_clear_of_the_own_line(&shell, cx);
+}
+
+fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    settings(shell, "general", cx);
+    settings_of(shell, "server", cx);
     for shade in ["light", "dark"] {
         // The window's own shade, set while it is tall enough to reach the control.
         cx.simulate_resize(size(px(1000.), px(2400.)));
-        click(&shell, "settings-tabs-general", cx);
-        settle(&shell, cx);
-        click(&shell, &format!("appearance-shade-{shade}"), cx);
+        click(shell, "settings-tabs-general", cx);
+        settle(shell, cx);
+        // A held page takes no click; its shade stays the first one.
+        if !present(cx, "page-held-veil") {
+            click(shell, &format!("appearance-shade-{shade}"), cx);
+        }
         // Short, so that every tab scrolls.
         for width in [1000., 640., 440.] {
             cx.simulate_resize(size(px(width), px(520.)));
@@ -1157,8 +1179,8 @@ fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut T
                 "machines",
                 "general",
             ] {
-                click(&shell, &format!("settings-tabs-{tab}"), cx);
-                settle(&shell, cx);
+                click(shell, &format!("settings-tabs-{tab}"), cx);
+                settle(shell, cx);
                 let at = bounds_of(cx, "settings-page").expect("the page").center();
                 for turn in 0..8 {
                     assert_eq!(
@@ -1171,7 +1193,7 @@ fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut T
                         delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
                         ..Default::default()
                     });
-                    settle(&shell, cx);
+                    settle(shell, cx);
                 }
             }
         }
