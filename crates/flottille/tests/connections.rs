@@ -6018,13 +6018,21 @@ fn real_user() -> Option<(User, PathBuf)> {
             return None;
         }
     };
+    if !pasta_on_the_path() {
+        return None;
+    }
+    Some((user, program))
+}
+
+/// Whether passt's `pasta` is on the `PATH`, which a test of the real agent-browser needs: its
+/// browser runs in a network of its own. Said when it is not.
+fn pasta_on_the_path() -> bool {
     let pasta = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .any(|folder| folder.join("pasta").is_file());
     if !pasta {
         eprintln!("skipped: no pasta (passt) on the PATH");
-        return None;
     }
-    Some((user, program))
+    pasta
 }
 
 /// The connection `browser` running the real `agent-browser mcp`, headless, its actions as the
@@ -8811,7 +8819,10 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     // in (a user's is under /run): Chrome is given a temporary folder of the test's own.
     let temporary = user.path("tmp");
     std::fs::create_dir(&temporary).unwrap();
-    let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
+    // Its browser in a network of its own, which the real pasta gives a way out.
+    let user = user
+        .with_env("TMPDIR", temporary.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let program = match real_agent_browser(&user.path("home")) {
         Ok(program) => program,
@@ -8820,6 +8831,9 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
             return;
         }
     };
+    if !pasta_on_the_path() {
+        return;
+    }
     let _weston = match weston(&user, "wayland-flottille-test") {
         Ok(weston) => weston,
         Err(why) => {
