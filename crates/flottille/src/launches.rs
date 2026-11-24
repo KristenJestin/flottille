@@ -1758,6 +1758,8 @@ mod tests {
         for (decided, said) in [
             ("refused", "was refused by the user there"),
             ("started", "was approved by the user there"),
+            // Approved, then its session ended before this call returned.
+            ("ended", "was approved by the user there"),
         ] {
             let placed = json!({"session": "0123456789ab", "workspace": "w", "branch": "b",
                 "request": 4, "decided": decided});
@@ -1769,6 +1771,9 @@ mod tests {
                 answer.starts_with(&format!("Request #4 on server (agent_launch) {said}")),
                 "{answer}"
             );
+            if decided == "refused" {
+                assert!(answer.contains("the reason was handed to you"), "{answer}");
+            }
         }
     }
 

@@ -2275,6 +2275,104 @@ fn a_second_answer_after_a_refusal_is_taken_only_as_the_one_stored() {
     assert_eq!(launches_out(&pc), vec!["refused"]);
 }
 
+#[test]
+fn a_new_refusal_after_the_launch_was_approved_is_refused_as_answered_already() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Approved once");
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    prompt_with(&pc, &format!("Request #{number} on server"));
+    eventually("the launch recorded as started", || {
+        launches_out(&pc) == vec!["started"]
+    });
+    let (launch, _) = answered_launch(&pc);
+    let key = server.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![MachineMessage::Deliver(Box::new(flottille_link::Deliver {
+            id: "another".into(),
+            launch,
+            agent: root,
+            kind: "approval".into(),
+            body: format!(
+                "Request #{number} on server (agent_launch) was refused by the user. Nothing \
+                 was done."
+            ),
+            urgency: "urgent".into(),
+            ended: true,
+        }))],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("answered already"), "{refused}");
+    a_while();
+    assert_eq!(launches_out(&pc), vec!["started"]);
+}
+
+#[test]
+fn a_restart_there_after_an_allowed_launch_ran_leaves_its_session_running() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Running on");
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    prompt_with(&pc, &format!("Request #{number} on server"));
+    let session = titled(&server, "Running on")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the session briefed", || {
+        deliveries_of(&server, "brief-%") > 0
+    });
+    // Its answer was told, but the store did not keep that it was: the daemon stopped there.
+    changed_while_stopped(
+        &server,
+        &format!("DELETE FROM deliveries WHERE id = 'approval-{number}';"),
+    );
+
+    a_while();
+    assert!(
+        !matches!(
+            server.agent(&session)["state"].as_str(),
+            Some("ended" | "stopped" | "failed")
+        ),
+        "{}",
+        server.agent(&session)
+    );
+    assert_eq!(launches_out(&pc), vec!["started"]);
+    assert!(
+        !pc.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Flottille stopped there")),
+        "its caller was told it was cut"
+    );
+    eventually("its answer settled again", || {
+        deliveries_of(&server, &format!("approval-{number}")) == 1
+    });
+}
+
+/// How many deliveries of `machine` have an id like `pattern`.
+fn deliveries_of(machine: &Machine, pattern: &str) -> i64 {
+    let store =
+        rusqlite::Connection::open(machine.user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE id LIKE ?1",
+            [pattern],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 /// `server`'s daemon stopped, `change` made to its store, and started again.
 fn changed_while_stopped(server: &Machine, change: &str) {
     let stopped = server.user.run(&["daemon", "stop"]);
