@@ -51,7 +51,7 @@ pub struct TestHub {
     /// Serves the hub while the test runs.
     _runtime: tokio::runtime::Runtime,
     _folder: tempfile::TempDir,
-    served: Served<SystemClock>,
+    served: Option<Served<SystemClock>>,
     address: SocketAddr,
 }
 
@@ -72,9 +72,26 @@ impl TestHub {
         TestHub {
             _runtime: runtime,
             _folder: folder,
-            served,
+            served: Some(served),
             address,
         }
+    }
+
+    /// Stops the hub: every session to it ends.
+    pub fn stop(&mut self) {
+        let served = self.served.take().unwrap();
+        self._runtime.block_on(served.stop());
+    }
+
+    /// Serves the hub again from its state folder, at the address it had.
+    pub fn start_again(&mut self) {
+        let (folder, address) = (self._folder.path().join("hub"), self.address);
+        let served = self._runtime.block_on(async {
+            let hub = Hub::open(&folder, SystemClock).unwrap();
+            let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+            flottille_hub::serve(hub, listener, None, Hello::ours("0.4.0")).unwrap()
+        });
+        self.served = Some(served);
     }
 
     pub fn url(&self) -> String {
@@ -85,12 +102,14 @@ impl TestHub {
     pub fn code(&self) -> String {
         let url = self.url();
         self.served
+            .as_ref()
+            .unwrap()
             .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 
     /// Does `act` with the hub, as its host's commands do.
     pub fn with_hub<R>(&self, act: impl FnOnce(&mut Hub<SystemClock>) -> R) -> R {
-        self.served.with_hub(act)
+        self.served.as_ref().unwrap().with_hub(act)
     }
 }
 
@@ -313,8 +332,9 @@ pub fn key_of(machine: &Machine) -> PublicKey {
 /// hub tells it for its notifications (`docs/remote.md`, "Notifications") is kept, in order, each
 /// with the key of the machine it is from and the frame as it came.
 pub struct Phone {
-    _runtime: tokio::runtime::Runtime,
+    runtime: tokio::runtime::Runtime,
     _folder: tempfile::TempDir,
+    asker: flottille_link::Asker,
     told: std::sync::Arc<std::sync::Mutex<Vec<(PublicKey, flottille_link::Notice)>>>,
 }
 
@@ -333,7 +353,7 @@ impl Phone {
         let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = told.clone();
         let name = name.to_owned();
-        runtime.block_on(async move {
+        let asker = runtime.block_on(async move {
             let proposed = Proposed {
                 key: key.public(),
                 name,
@@ -364,6 +384,7 @@ impl Phone {
                 })
                 .await
                 .unwrap();
+            let asker = session.asker();
             tokio::spawn(async move {
                 while let Some(pushed) = session.next().await {
                     if let Pushed::Notice { from, notice } = pushed {
@@ -371,12 +392,29 @@ impl Phone {
                     }
                 }
             });
+            asker
         });
         Phone {
-            _runtime: runtime,
+            runtime,
             _folder: folder,
+            asker,
             told,
         }
+    }
+
+    /// What the app says when it opens its session again: an input now (`mobile.rs`).
+    pub fn tell_presence(&self) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let asker = self.asker.clone();
+        self.runtime
+            .block_on(asker.ask(flottille_link::Ask::Presence {
+                active: true,
+                last_input: now,
+            }))
+            .unwrap();
     }
 
     /// What the hub told this phone so far.

@@ -1885,3 +1885,34 @@ fn the_window_tells_the_hub_its_presence_on_input(cx: &mut TestAppContext) {
             .is_some_and(|presence| presence.last_input >= before)
     });
 }
+
+#[gpui_kit::test]
+fn the_window_tells_the_hub_its_presence_on_a_scroll(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let member: flottille_link::PublicKey =
+        serde_json::from_value(pc.member("pc").unwrap()["key"].clone()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while pc.remote()["hub"]["state"] != "connected" {
+        assert!(Instant::now() < deadline, "the hub never connected");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let (shell, cx) = window(&pc, cx);
+    settle(&shell, cx);
+
+    // Reading by the wheel, no click nor key: the user is at the window all the same.
+    let middle = cx.update(|window, _| window.find("shell").bounds().center());
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: middle,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-200.))),
+        ..Default::default()
+    });
+
+    let served = hub.served.as_ref().unwrap();
+    until(&shell, cx, "the hub has the window's input", |_| {
+        served
+            .with_hub(|hub| hub.presence(&member))
+            .is_some_and(|presence| presence.last_input > 0)
+    });
+}

@@ -199,6 +199,65 @@ fn presence_at_a_client_of_another_machine_stops_the_notice_through_the_hub() {
 }
 
 #[test]
+fn a_phone_that_comes_back_does_not_count_as_the_user_at_a_client() {
+    let (_hub, server, phone) = server_and_phone();
+    // The app opens its session again, on another network: it says an input now.
+    phone.tell_presence();
+    // The hub tells the runners at once; a moment for the server to read it.
+    std::thread::sleep(Duration::from_secs(1));
+    let (id, _, row) = held_request(&server);
+
+    advance(&server, 30_000);
+    let told = phone.wait_told(1);
+    assert_eq!(told[0].1, notice(NoticeKind::Request, &row, &id));
+}
+
+#[test]
+fn an_input_said_to_be_in_the_future_does_not_silence_the_phone() {
+    let (hub, server, phone) = server_and_phone();
+    // A machine whose clock is an hour ahead: its input is said to come in an hour.
+    let pc = Machine::of(User::new().with_env("FLOTTILLE_TEST_CLOCK", "1"));
+    pair(&hub, &pc, "pc", "runner");
+    connected(&pc);
+    advance(&pc, 60 * 60_000);
+    input(&pc);
+    let member = pc.device().public();
+    eventually("the pc's presence on the hub", || {
+        hub.with_hub(|hub| hub.presence(&member)).is_some()
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let (id, _, row) = held_request(&server);
+
+    advance(&server, 30_000);
+    let told = phone.wait_told(1);
+    assert_eq!(told[0].1, notice(NoticeKind::Request, &row, &id));
+}
+
+#[test]
+fn a_notice_due_while_the_hub_is_down_is_never_dismissed() {
+    let (mut hub, server, _phone) = server_and_phone();
+    let (id, _, _) = held_request(&server);
+    hub.stop();
+    server.wait_until("the hub lost", |seen| seen["hub"]["state"] != "connected");
+    // Due now, with no session to tell it on: it is dropped.
+    advance(&server, 30_000);
+
+    hub.start_again();
+    connected(&server);
+    let phone = Phone::pair(&hub, "pixel");
+    server
+        .user
+        .call("notifications.read", json!({"session": id}))
+        .unwrap();
+
+    assert!(
+        phone.told_nothing_more(0, QUIET),
+        "dismissed what it never told: {:?}",
+        phone.told()
+    );
+}
+
+#[test]
 fn a_request_answered_within_the_delay_never_reaches_the_phone() {
     let (_hub, server, phone) = server_and_phone();
     let (_, number, row) = held_request(&server);
