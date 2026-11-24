@@ -1159,6 +1159,10 @@ fn a_card_s_error_unfolds_and_fades_in(cx: &mut TestAppContext) {
             heights.push(rect(block.clone(), cx).size.height);
         }
     }
+    assert!(
+        !heights.is_empty(),
+        "the error is drawn in a block that unfolds"
+    );
     let (first, last) = (heights[0], *heights.last().unwrap());
     assert!(first < last, "the line unfolds: {heights:?}");
     assert!(
@@ -1226,6 +1230,13 @@ fn a_card_pointed_at_from_the_conversation_slides_into_view(cx: &mut TestAppCont
     settle(cx);
     let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
     assert_eq!(waiting.read_with(cx, |w, _| w.scrolled()), px(0.));
+    for part in ["rail-waiting-cards", "approval", "approval-line"] {
+        let part = match part {
+            "rail-waiting-cards" => part.to_owned(),
+            _ => format!("{part}-{last}"),
+        };
+        assert!(has(part.clone(), cx), "{part} is drawn");
+    }
     let section = rect("rail-waiting-cards", cx);
     assert!(
         rect(format!("approval-{last}"), cx).bottom() > section.bottom(),
