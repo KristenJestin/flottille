@@ -19,6 +19,16 @@ use std::sync::atomic::{AtomicI32, Ordering};
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOUNT_ATTR_RDONLY: u64 = 0x1;
+
+/// `struct mount_attr` of `mount_setattr(2)`, its first version.
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
 
 /// The variable that plays a kernel refusing user namespaces, read by a test build only: the
 /// tests' daemon is given it, never a packaged one.
@@ -465,13 +475,38 @@ impl Plan {
                         _ => return Err(error),
                     }
                 }
-                check(libc::mount(
-                    none,
+                // Read-only with every mount below it, those just made to keep a folder in place
+                // included: a remount changes one mount alone, and a pinned folder below would
+                // stay writable under a read-only one.
+                let attr = MountAttr {
+                    attr_set: MOUNT_ATTR_RDONLY,
+                    attr_clr: 0,
+                    propagation: 0,
+                    userns_fd: 0,
+                };
+                let recursive = libc::syscall(
+                    libc::SYS_mount_setattr,
+                    libc::AT_FDCWD,
                     path.as_ptr(),
-                    none,
-                    libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
-                    std::ptr::null(),
-                ) as libc::c_long)?;
+                    AT_RECURSIVE,
+                    &attr as *const MountAttr,
+                    std::mem::size_of::<MountAttr>(),
+                );
+                // Before Linux 5.12, the top mount alone: such a kernel has no Landlock of the
+                // second ABI either, so no push is lent anything or run outside the sandbox
+                // (`pushed::ssh_unlent`, `pushed::unlifted`).
+                if recursive != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
+                {
+                    check(libc::mount(
+                        none,
+                        path.as_ptr(),
+                        none,
+                        libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
+                        std::ptr::null(),
+                    ) as libc::c_long)?;
+                } else {
+                    check(recursive)?;
+                }
             }
             // At best: a command started without them meets the refusal of `ssh` alone, where
             // failing its start would fail every command, git's and the daemon's too.
