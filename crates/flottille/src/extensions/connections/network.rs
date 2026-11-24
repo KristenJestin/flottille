@@ -347,9 +347,44 @@ pub fn daemons(sockets: &Path) -> Vec<u32> {
         .collect()
 }
 
-/// A connection to the socket at `path` that never waits for the daemon to accept it.
+/// A connection to the socket at `path` that never waits for the daemon to accept it: a daemon
+/// whose backlog is full (`WouldBlock`) would hold a blocking `connect` for ever.
 fn connect_at_once(path: &Path) -> io::Result<std::os::unix::net::UnixStream> {
-    std::os::unix::net::UnixStream::connect(path)
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: a zeroed sockaddr_un is valid, and `bytes` is copied within its bounds.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path too long"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+        *to = *from as libc::c_char;
+    }
+    // SAFETY: plain system calls; the descriptor is owned by the stream or closed here.
+    unsafe {
+        let fd = libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        );
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let connected = libc::connect(
+            fd,
+            (&raw const address).cast(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        if connected != 0 {
+            let error = io::Error::last_os_error();
+            libc::close(fd);
+            // A non-blocking connect to a full backlog says EAGAIN, which `WouldBlock` is.
+            return Err(error);
+        }
+        Ok(std::os::unix::net::UnixStream::from_raw_fd(fd))
+    }
 }
 
 /// The pid of the process at the other end of `stream`, as the kernel recorded it.
