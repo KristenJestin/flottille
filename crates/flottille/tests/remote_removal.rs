@@ -376,6 +376,105 @@ fn in_full_a_removal_from_another_machine_that_would_lose_work_is_held() {
 }
 
 #[test]
+fn in_full_a_removal_from_another_machine_that_loses_nothing_is_done() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("full");
+    let switched = server
+        .user
+        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
+    assert!(switched.status.success(), "{}", pc.log());
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    );
+    let session = id_in(done(&answer));
+    prompted(&server, "Finish the export.");
+    let agent = server.agent(&session);
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    // Its work, committed: it comes back before the removal is judged.
+    commit_all(&server, &there, "export.txt", "the export");
+    ended_there(&server, &session);
+
+    let answer = mcp.call(
+        "workspace",
+        json!({"action": "remove", "name": workspace, "machine": "server"}),
+    );
+
+    // Nothing to lose: done at once, as Full does any other, no request waiting there.
+    let text = done(&answer);
+    assert!(!text.contains("request #"), "{text}");
+    eventually("the workspace removed there", || !there.exists());
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn in_full_a_removal_from_another_machine_is_not_done_when_work_came_after_its_card() {
+    let user = server_user(allowing());
+    let after_card = user.path("after-card");
+    let reached = user.path("after-card.reached");
+    let user = user.with_env(
+        "FLOTTILLE_TEST_AFTER_CARD_FILE",
+        after_card.to_str().unwrap(),
+    );
+    let (_hub, pc, server) = pc_and_server(user, Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("full");
+    let switched = server
+        .user
+        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
+    assert!(switched.status.success(), "{}", pc.log());
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    );
+    let session = id_in(done(&answer));
+    prompted(&server, "Finish the export.");
+    let agent = server.agent(&session);
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    commit_all(&server, &there, "export.txt", "the export");
+    ended_there(&server, &session);
+    std::fs::write(&after_card, "").unwrap();
+
+    let (answer, card_made) = std::thread::scope(|scope| {
+        // Once the card is made (nothing would be lost), a commit lands in the workspace there;
+        // the call is let go whatever happens here.
+        let late = scope.spawn(|| {
+            let made = (0..300).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                reached.exists()
+            });
+            let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if made {
+                    commit_all(&server, &there, "late.txt", "a late commit");
+                }
+            }));
+            std::fs::remove_file(&after_card).unwrap();
+            committed.is_ok() && made
+        });
+        let answer = mcp.call(
+            "workspace",
+            json!({"action": "remove", "name": workspace, "machine": "server"}),
+        );
+        (answer, late.join().unwrap())
+    });
+
+    assert!(card_made, "the card was never made, or the commit failed");
+    // What the card did not say would be lost is not discarded unseen: refused, or held.
+    let text = done(&answer);
+    assert!(
+        text.contains("refused") || text.contains("request #"),
+        "{text}"
+    );
+    assert!(there.exists(), "the workspace was removed: {text}");
+    assert!(there.join("late.txt").exists());
+}
+
+#[test]
 fn a_removal_there_is_refused_for_another_workspace_a_handed_session_or_another_action() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, launch, mcp) = led_on_server(&pc, &server, "Finish the export.");

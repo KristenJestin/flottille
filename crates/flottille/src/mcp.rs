@@ -2844,7 +2844,21 @@ pub async fn judged_off(
         {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        judged(&daemon, &grant, &tool, &args)
+        let judged = judged(&daemon, &grant, &tool, &args);
+        // For the tests of what is written between a card and what is done: the card is made,
+        // `<file>.reached` says so, and the call waits while the file exists.
+        if cfg!(debug_assertions)
+            && tool == "workspace"
+            && let Some(file) = std::env::var_os("FLOTTILLE_TEST_AFTER_CARD_FILE")
+                .map(std::path::PathBuf::from)
+                .filter(|file| file.exists())
+        {
+            let _ = std::fs::write(file.with_extension("reached"), "");
+            while file.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        judged
     };
     match tokio::task::spawn_blocking(judging).await {
         Ok(judged) => judged,
