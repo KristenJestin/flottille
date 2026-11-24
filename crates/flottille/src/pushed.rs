@@ -23,7 +23,7 @@
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// The variable that plays the account's home (what `ssh` reads `~` as), read by a test build
 /// only: the tests' daemon is given its own, never the machine's `~/.ssh`.
@@ -112,7 +112,10 @@ struct Found {
     /// `<account>/.ssh`, when it is a folder.
     ssh: PathBuf,
     /// The files of the user's git settings that were there, in the order git reads them.
-    git: Vec<PathBuf>,
+    settings: Vec<Setting>,
+    /// The folders that hold a link on the way to those files, kept read-only to every confined
+    /// command (and so in `read_only`): no run re-points a link there.
+    kept: Vec<PathBuf>,
     /// Every path made read-only, with its device and inode then.
     read_only: Vec<(PathBuf, (u64, u64))>,
     /// The folders kept where they are, outermost first.
@@ -124,7 +127,37 @@ struct Found {
     started: std::time::SystemTime,
 }
 
+/// A file of the user's git settings found at the daemon's start.
+struct Setting {
+    /// Where git looks for it: `~/.config/git/config`, `~/.gitconfig`, `GIT_CONFIG_GLOBAL`.
+    named: PathBuf,
+    /// The file it led to then, its links followed.
+    file: PathBuf,
+}
+
+/// A setting whose links were moved since the daemon's start, to a file [`settle`] judged sound.
+struct Relinked {
+    named: PathBuf,
+    file: PathBuf,
+    /// The file's device and inode when it was judged.
+    id: (u64, u64),
+}
+
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
+
+/// What [`settle`] accepted, the newest of each setting last. A restart of the daemon starts none.
+static LATER: Mutex<Vec<Relinked>> = Mutex::new(Vec::new());
+
+fn later() -> std::sync::MutexGuard<'static, Vec<Relinked>> {
+    LATER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The restart a refusal names: `flottille daemon stop` stops the daemon and the next command
+/// starts another, which finds the settings again (`docs/cli.md`, "The daemon").
+const RESTART: &str = "restart the daemon, or work in Full (`flottille daemon stop` stops it, and \
+     the next command starts another)";
 
 /// Finds what a push reads, before anything runs, and makes a missing `~/.ssh` where `make` (the
 /// daemon's start; `0700`, as `ssh` would): a folder that is not there could not be kept
@@ -144,19 +177,29 @@ pub fn find(make: bool) {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute());
-        let git: Vec<PathBuf> = git_settings(home.as_deref())
+        let settings: Vec<Setting> = git_settings(home.as_deref())
             .into_iter()
-            .filter_map(|file| file.canonicalize().ok())
-            .filter(|file| std::fs::metadata(file).is_ok_and(|m| m.is_file()))
+            .filter_map(|named| {
+                let file = leads(&named)?;
+                Some(Setting { named, file })
+            })
             .collect();
-        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut kept: Vec<PathBuf> = settings
+            .iter()
+            .flat_map(|setting| links_on_the_way(&setting.named))
+            .map(|(_, folder)| folder)
+            .filter(|folder| keepable(folder, &account, home.as_deref()))
+            .collect();
+        kept.sort();
+        kept.dedup();
+        let mut paths: Vec<PathBuf> = kept.clone();
         if std::fs::symlink_metadata(&ssh).is_ok_and(|m| m.is_dir()) {
             paths.push(ssh.clone());
         }
-        for file in &git {
-            paths.push(file.clone());
+        for setting in &settings {
+            paths.push(setting.file.clone());
             let mut seen = Vec::new();
-            included_files(file, home.as_deref(), &mut seen);
+            included_files(&setting.file, home.as_deref(), &mut seen);
             paths.extend(seen);
         }
         paths.sort();
@@ -176,7 +219,8 @@ pub fn find(make: bool) {
             account,
             home,
             ssh,
-            git,
+            settings,
+            kept,
             read_only,
             pinned,
             made: make,
@@ -185,15 +229,22 @@ pub fn find(make: bool) {
     });
 }
 
-/// The paths every confined command has read-only.
+/// The paths every confined command has read-only: those found at the daemon's start, and the
+/// files a setting was relinked to since (for the commands started after).
 pub fn read_only() -> Vec<PathBuf> {
     found()
         .map(|found| {
-            found
+            let mut paths: Vec<PathBuf> = found
                 .read_only
                 .iter()
                 .map(|(path, _)| path.clone())
-                .collect()
+                .collect();
+            for relinked in later().iter() {
+                if !paths.contains(&relinked.file) {
+                    paths.push(relinked.file.clone());
+                }
+            }
+            paths
         })
         .unwrap_or_default()
 }
@@ -201,7 +252,18 @@ pub fn read_only() -> Vec<PathBuf> {
 /// The folders every confined command has kept where they are, outermost first.
 pub fn pinned() -> Vec<PathBuf> {
     found()
-        .map(|found| found.pinned.clone())
+        .map(|found| {
+            let mut pinned = found.pinned.clone();
+            for relinked in later().iter() {
+                for folder in on_the_way(&relinked.file) {
+                    if !pinned.contains(&folder) {
+                        pinned.push(folder);
+                    }
+                }
+            }
+            pinned.sort_by_key(|folder| folder.components().count());
+            pinned
+        })
         .unwrap_or_default()
 }
 
@@ -472,18 +534,191 @@ fn inside(path: &Path, ssh_folder: &Path) -> bool {
     within && lexical.canonicalize().is_ok_and(|real| real == lexical)
 }
 
+/// The device and inode `path` had when the daemon made it read-only (at its start, or once a
+/// setting was relinked to it).
+fn recorded(found: &Found, path: &Path) -> Option<(u64, u64)> {
+    let relinked = later()
+        .iter()
+        .rev()
+        .find(|relinked| relinked.file == path)
+        .map(|relinked| relinked.id);
+    relinked.or_else(|| {
+        found
+            .read_only
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, id)| *id)
+    })
+}
+
 /// Why `path`, made read-only at the daemon's start, may no longer be what a command sees
-/// read-only: gone, or another file at its path since.
+/// read-only: gone, or another file at its path since, which a command started before it still
+/// sees writable.
 fn changed(found: &Found, path: &Path) -> Option<String> {
-    let start = found.read_only.iter().find(|(p, _)| p == path)?.1;
+    let start = recorded(found, path)?;
     match identity(path) == Some(start) {
         true => None,
         false => Some(format!(
-            "{} is not the one the daemon found at its start (removed, or replaced): restart the \
-             daemon, or work in Full",
+            "{} is not the one the daemon found at its start (removed, or replaced), and a file a \
+             run can write: {RESTART}",
             path.display()
         )),
     }
+}
+
+/// The file the user's settings at `named` lead to, its links followed.
+fn leads(named: &Path) -> Option<PathBuf> {
+    let file = named.canonicalize().ok()?;
+    std::fs::metadata(&file).ok()?.is_file().then_some(file)
+}
+
+/// The links on the way to `path`, each with the real folder it is in: what the kernel walks to
+/// open it, the targets of the links met included.
+fn links_on_the_way(path: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut links = Vec::new();
+    if !path.is_absolute() {
+        return links;
+    }
+    let mut real = PathBuf::from("/");
+    let mut todo: Vec<OsString> = path
+        .components()
+        .rev()
+        .map(|part| part.as_os_str().to_owned())
+        .collect();
+    for _ in 0..256 {
+        let Some(name) = todo.pop() else { break };
+        match name.to_str() {
+            Some("/") => real = PathBuf::from("/"),
+            Some(".") => {}
+            Some("..") => {
+                real.pop();
+            }
+            _ => {
+                let next = real.join(&name);
+                match std::fs::read_link(&next) {
+                    Ok(target) => {
+                        links.push((next, real.clone()));
+                        todo.extend(
+                            target
+                                .components()
+                                .rev()
+                                .map(|part| part.as_os_str().to_owned()),
+                        );
+                    }
+                    Err(_) => real = next,
+                }
+            }
+        }
+    }
+    links
+}
+
+/// Whether `folder`, which holds a link on the way to the user's git settings, can be kept
+/// read-only to every confined command: one below the account's home that is the user's own to
+/// write. Not the home, nor the folder of every program's settings (`$XDG_CONFIG_HOME`), which
+/// would take the files of everything else with it.
+fn keepable(folder: &Path, account: &Path, home: Option<&Path>) -> bool {
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    folder.starts_with(account)
+        && folder != account
+        && home != Some(folder)
+        && config.as_deref() != Some(folder)
+        && changeable(folder)
+}
+
+/// Whether no confined command can change what `folder` holds: it is another's (root's, with
+/// nothing the user may write), or it is one kept read-only since the daemon's start and still the
+/// folder that was.
+fn held(found: &Found, folder: &Path) -> bool {
+    !changeable(folder)
+        || (found.kept.iter().any(|kept| kept == folder) && changed(found, folder).is_none())
+}
+
+/// The file the user's settings at `setting.named` are read from now, judged: the one they lead
+/// to, which is the one a push reads. **The rule of the daemon's start, held again for what
+/// changed since:** the settings are a file no run can write, because the daemon keeps it
+/// read-only to every confined command it starts (`find`), and no link on the way to it is one a
+/// run controls, because the folders that hold the links are kept the same. A settings file that
+/// leads somewhere else than where it did (a dotfiles update moved its link to a new version
+/// folder) is accepted only if every link on the way to it is in such a folder, and the file is
+/// then kept read-only for the commands started from now on, its identity the one recorded. Not
+/// so (no link at all: a file replaced in its own folder, which a run can write; a link in a folder
+/// a run can replace it in): refused, saying which rule, until the daemon restarts.
+///
+/// What remains: a command started before this judgement has not the new file read-only, and may
+/// write it before a push reads it (`docs/vault.md`, "The gaps"), as it may a file replaced in its
+/// place; the files are read again by the push, the judgement being made just before.
+fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
+    let named = &setting.named;
+    let current = later()
+        .iter()
+        .rev()
+        .find(|relinked| relinked.named == *named)
+        .map(|relinked| relinked.file.clone())
+        .unwrap_or_else(|| setting.file.clone());
+    let Some(now) = leads(named) else {
+        // No file there now: the settings the daemon found are gone from their place.
+        return Ok(current);
+    };
+    if now == current {
+        return Ok(current);
+    }
+    let links = links_on_the_way(named);
+    if links.is_empty() {
+        return Err(format!(
+            "{} is a file a run can write, and it is not the one the daemon found at its start \
+             (it led to {}, and no link on the way is kept): {RESTART}",
+            named.display(),
+            current.display()
+        ));
+    }
+    for (link, folder) in &links {
+        if !held(found, folder) {
+            return Err(format!(
+                "{} now leads to {} through {}, a link a run can replace (the folder {} is one a \
+                 run can write): {RESTART}",
+                named.display(),
+                now.display(),
+                link.display(),
+                folder.display()
+            ));
+        }
+    }
+    let Some(id) = identity(&now) else {
+        return Ok(current);
+    };
+    let mut accepted = later();
+    accepted.retain(|relinked| relinked.named != *named);
+    accepted.push(Relinked {
+        named: named.clone(),
+        file: now.clone(),
+        id,
+    });
+    Ok(now)
+}
+
+/// The files of the user's git settings a push reads now: each as [`settle`] judges it.
+fn git_now(found: &Found) -> Result<Vec<PathBuf>, String> {
+    found
+        .settings
+        .iter()
+        .map(|setting| settle(found, setting))
+        .collect()
+}
+
+/// [`git_now`], or the files found at the daemon's start where it refuses: what the settings a
+/// push is given are read from, whose refusal lends no agent already (`unlent`).
+fn git_files(found: Option<&Found>) -> Vec<PathBuf> {
+    let Some(found) = found else {
+        return Vec::new();
+    };
+    git_now(found).unwrap_or_else(|_| {
+        found
+            .settings
+            .iter()
+            .map(|setting| setting.file.clone())
+            .collect()
+    })
 }
 
 /// Why a link or a hard link in the folder, or its size, leaves something a command writes in
@@ -766,10 +1001,15 @@ fn unescape(field: &str) -> PathBuf {
     PathBuf::from(OsString::from_vec(out))
 }
 
-/// What git lends nothing for: a file of the settings no longer the one protected, or one that
-/// includes a file not protected since the start.
+/// What git lends nothing for: a file of the settings that leads where no rule lets it
+/// ([`settle`]), no longer the one protected, or one that includes a file not protected since the
+/// start.
 fn git_unlent(found: &Found) -> Option<String> {
-    for file in &found.git {
+    let files = match git_now(found) {
+        Ok(files) => files,
+        Err(why) => return Some(why),
+    };
+    for file in &files {
         if let Some(why) = changed(found, file).or_else(|| aliased(file)) {
             return Some(why);
         }
@@ -778,11 +1018,10 @@ fn git_unlent(found: &Found) -> Option<String> {
             return Some(why);
         }
         for path in seen {
-            let protected = found.read_only.iter().any(|(p, _)| *p == path);
-            if !protected {
+            if recorded(found, &path).is_none() {
                 return Some(format!(
                     "the git settings include {}, which was not there at the daemon's start: \
-                     restart the daemon",
+                     {RESTART}",
                     path.display()
                 ));
             }
@@ -872,10 +1111,7 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
         Some(own) => Some(own.to_string_lossy().into_owned()),
         None => {
             let mut own = None;
-            for file in found()
-                .map(|found| found.git.as_slice())
-                .unwrap_or_default()
-            {
+            for file in &git_files(found()) {
                 let read = crate::git::run_with(
                     folder,
                     &[
@@ -916,10 +1152,8 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
 /// settings is the user's own to change, as `~/.gitconfig` is for a dotfiles update.
 pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, String> {
     let mut settings = Vec::new();
-    for file in found()
-        .map(|found| found.git.as_slice())
-        .unwrap_or_default()
-    {
+    let files = git_files(found());
+    for file in &files {
         if std::fs::metadata(file).is_err() {
             continue;
         }
@@ -948,16 +1182,13 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
         let protected = |path: &Path| {
             start.is_some_and(|found| {
                 path.canonicalize().is_ok_and(|real| {
-                    found.read_only.iter().any(|(p, _)| *p == real)
-                        && changed(found, &real).is_none()
+                    recorded(found, &real).is_some() && changed(found, &real).is_none()
                 })
             })
         };
         let top = |path: &Path| {
-            start.is_some_and(|found| {
-                path.canonicalize()
-                    .is_ok_and(|real| found.git.contains(&real))
-            }) || protected(path)
+            start.is_some() && path.canonicalize().is_ok_and(|real| files.contains(&real))
+                || protected(path)
         };
         let home = start.and_then(|found| found.home.as_deref());
         settings.extend(given(&read.stdout, &top, &|value| {
@@ -1268,7 +1499,8 @@ mod tests {
             account: home.to_owned(),
             home: Some(home.to_owned()),
             ssh: home.join(".ssh"),
-            git: Vec::new(),
+            settings: Vec::new(),
+            kept: Vec::new(),
             read_only: Vec::new(),
             pinned: Vec::new(),
             made: false,
@@ -1317,6 +1549,167 @@ mod tests {
 
         let why = changed(&found, &settings).unwrap();
         assert!(why.contains("restart the daemon, or work in Full"), "{why}");
+    }
+
+    /// A settings file in the version `name` of a folder a dotfiles manager versions.
+    fn version(home: &Path, name: &str) -> PathBuf {
+        let file = home.join(format!("dots/{name}/config"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, format!("[user]\n\tname = {name}\n")).unwrap();
+        file
+    }
+
+    /// What a dotfiles update does to `link`: a new link renamed over it.
+    fn relink(link: &Path, target: &Path) {
+        let new = link.with_extension("new");
+        std::os::unix::fs::symlink(target, &new).unwrap();
+        std::fs::rename(&new, link).unwrap();
+    }
+
+    /// What a daemon starting now finds of the settings at `links`, the folders `kept` kept.
+    fn found_settings(home: &Path, links: &[&Path], kept: &[&Path]) -> Found {
+        let mut found = found_now(home);
+        for link in links {
+            found.settings.push(Setting {
+                named: link.to_path_buf(),
+                file: leads(link).unwrap(),
+            });
+        }
+        for folder in kept {
+            found.kept.push(folder.to_path_buf());
+            found
+                .read_only
+                .push((folder.to_path_buf(), identity(folder).unwrap()));
+        }
+        found
+    }
+
+    #[test]
+    fn the_links_on_the_way_to_a_file_are_found_with_their_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        std::fs::create_dir_all(home.join("config")).unwrap();
+        // A link to a folder, then a link to the file, one relative.
+        std::os::unix::fs::symlink(home.join("dots"), home.join("config/git")).unwrap();
+        std::os::unix::fs::symlink("a/config", home.join("dots/current")).unwrap();
+
+        assert_eq!(links_on_the_way(&a), []);
+        assert_eq!(
+            links_on_the_way(&home.join("config/git/current")),
+            [
+                (home.join("config/git"), home.join("config")),
+                (home.join("dots/current"), home.join("dots")),
+            ]
+        );
+        assert_eq!(leads(&home.join("config/git/current")), Some(a));
+    }
+
+    #[test]
+    fn only_a_folder_of_its_own_below_the_home_is_kept_for_a_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join("gitlink")).unwrap();
+
+        assert!(keepable(&home.join("gitlink"), &home, Some(&home)));
+        assert!(!keepable(&home, &home, Some(&home)), "the home itself");
+        assert!(!keepable(home.parent().unwrap(), &home, Some(&home)));
+        assert!(!keepable(Path::new("/tmp"), &home, Some(&home)));
+    }
+
+    #[test]
+    fn a_link_moved_to_a_new_version_is_accepted_where_its_folder_is_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        let kept = home.join("gitlink");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let found = found_settings(&home, &[&link], &[&kept]);
+        assert_eq!(git_now(&found).unwrap(), [a.clone()]);
+
+        // A dotfiles update: a new version, the link moved to it, the old one removed.
+        let b = version(&home, "b");
+        relink(&link, &b);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+
+        assert_eq!(git_now(&found).unwrap(), [b.clone()]);
+        // The new file is kept from now on, its identity the one judged.
+        assert_eq!(recorded(&found, &b), identity(&b));
+        assert!(changed(&found, &b).is_none());
+        // In place afterwards, it is the one judged still; replaced, it is not.
+        let replaced = home.join("dots/b/config.new");
+        std::fs::write(&replaced, "").unwrap();
+        std::fs::rename(&replaced, &b).unwrap();
+        assert!(
+            changed(&found, &b)
+                .unwrap()
+                .contains("a file a run can write")
+        );
+    }
+
+    #[test]
+    fn a_link_a_run_can_replace_is_refused_saying_so() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        // In the home folder, which cannot be kept; and in a folder that was not kept.
+        let in_home = home.join(".gitconfig");
+        std::os::unix::fs::symlink(&a, &in_home).unwrap();
+        let other = home.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let in_other = other.join("config");
+        std::os::unix::fs::symlink(&a, &in_other).unwrap();
+        let found = found_settings(&home, &[&in_home, &in_other], &[]);
+        let b = version(&home, "b");
+        relink(&in_home, &b);
+        relink(&in_other, &b);
+
+        for setting in &found.settings {
+            let why = settle(&found, setting).unwrap_err();
+            assert!(why.contains("a link a run can replace"), "{why}");
+            assert!(why.contains("flottille daemon stop"), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_kept_folder_a_run_swapped_is_no_longer_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        let kept = home.join("gitlink");
+        std::fs::create_dir_all(&kept).unwrap();
+        let link = kept.join("config");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let found = found_settings(&home, &[&link], &[&kept]);
+
+        // The folder itself replaced by another, with a link of its own to a file it wrote.
+        let b = version(&home, "b");
+        std::fs::rename(&kept, home.join("gitlink.old")).unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        std::os::unix::fs::symlink(&b, &link).unwrap();
+
+        let why = settle(&found, &found.settings[0]).unwrap_err();
+        assert!(why.contains("a link a run can replace"), "{why}");
+    }
+
+    #[test]
+    fn a_settings_file_that_became_one_with_no_link_is_a_file_a_run_can_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let a = version(&home, "a");
+        let settings = home.join(".gitconfig");
+        std::os::unix::fs::symlink(&a, &settings).unwrap();
+        let found = found_settings(&home, &[&settings], &[]);
+
+        // The link replaced by a file of its own.
+        std::fs::remove_file(&settings).unwrap();
+        std::fs::write(&settings, "[user]\n\tname = Someone\n").unwrap();
+
+        let why = settle(&found, &found.settings[0]).unwrap_err();
+        assert!(why.contains("a file a run can write"), "{why}");
+        assert!(why.contains("flottille daemon stop"), "{why}");
     }
 
     #[test]
