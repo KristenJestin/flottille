@@ -12,7 +12,7 @@
 //! secret, given only to a page of its entry's own site.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -1867,14 +1867,28 @@ mod tests {
 
     /// Why agent-browser's adapter refuses the command `line`, if it does.
     fn refused(line: &[&str]) -> Option<String> {
-        AGENT_BROWSER.command_refused(&words(line))
+        refused_on(line, OsStr::new("/nonexistent-folder"))
+    }
+
+    /// The same, with the folders the server looks for a program in (its `PATH`).
+    fn refused_on(line: &[&str], path: &OsStr) -> Option<String> {
+        AGENT_BROWSER.command_refused_on(&words(line), Some(path))
+    }
+
+    /// A folder holding a program named agent-browser, and the `PATH` that is that folder.
+    fn with_program() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("agent-browser");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (folder, program)
     }
 
     #[test]
     fn agent_browser_run_by_a_package_runner_is_accepted() {
         for line in [
             &["agent-browser", "mcp"][..],
-            &["/opt/tools/bin/agent-browser", "--headed", "mcp"],
             &["npx", "agent-browser", "mcp"],
             &["npx", "-y", "agent-browser@0.43.0", "mcp"],
             &["pnpm", "dlx", "agent-browser", "mcp"],
@@ -1890,6 +1904,112 @@ mod tests {
         ] {
             assert_eq!(refused(line), None, "{line:?}");
         }
+    }
+
+    #[test]
+    fn a_package_runner_is_given_agent_browser_by_its_name_and_a_version_or_a_tag_alone() {
+        for line in [
+            &["npx", "-y", "agent-browser@0.43.0", "mcp"][..],
+            &["npx", "agent-browser@latest", "mcp"],
+            &["npx", "agent-browser@^0.43", "mcp"],
+            &["pnpm", "dlx", "agent-browser@next", "mcp"],
+            &["bunx", "agent-browser@0.43.0", "mcp"],
+            &["yarn", "dlx", "agent-browser", "mcp"],
+        ] {
+            assert_eq!(refused(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_runner_given_another_package_that_ends_in_agent_browser_is_refused() {
+        for (spec, kind) in [
+            ("@someone/agent-browser", "scope"),
+            ("someone/agent-browser", "GitHub shorthand"),
+            ("https://host.example.test/agent-browser", "tarball URL"),
+            ("agent-browser@npm:another-package", "alias"),
+            ("agent-browser@github:someone/agent-browser", "git source"),
+            ("./agent-browser", "folder"),
+            ("../agent-browser", "folder above"),
+            ("/tmp/x/agent-browser", "absolute folder"),
+            ("agent-browser@file:x.tgz", "file"),
+            ("agent-browser@../x.tgz", "relative file"),
+            (
+                "agent-browser@git+https://host.example.test/x.git",
+                "git URL",
+            ),
+            ("agent-browser@", "no version"),
+            ("agent-browser@1.0.0@2.0.0", "two versions"),
+            ("agent-browser@.", "dot"),
+            ("agent-browser-evil", "another name"),
+        ] {
+            for runner in [
+                &["npx", "-y"][..],
+                &["npx"],
+                &["bunx"],
+                &["pnpm", "dlx"],
+                &["pnpm", "exec"],
+                &["yarn", "dlx"],
+            ] {
+                let mut line = runner.to_vec();
+                line.extend([spec, "mcp"]);
+                let said =
+                    refused(&line).unwrap_or_else(|| panic!("not refused ({kind}): {line:?}"));
+                assert!(said.contains("agent-browser"), "{line:?}: {said}");
+                // Never the spec itself: a URL may carry a token.
+                assert!(!said.contains("host.example.test"), "{line:?}: {said}");
+                assert!(!said.contains("someone"), "{line:?}: {said}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_run_by_a_path_is_accepted_when_it_is_the_one_found_on_the_path() {
+        let (folder, program) = with_program();
+        let path = folder.path().as_os_str();
+        let by_path = program.to_str().unwrap();
+        assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
+        assert_eq!(refused_on(&[by_path, "--headed", "mcp"], path), None);
+        // A link to it, and a path with a folder that goes back, are the same file.
+        let link = folder.path().join("link-to-it");
+        std::os::unix::fs::symlink(&program, &link).unwrap();
+        assert_eq!(refused_on(&[link.to_str().unwrap(), "mcp"], path), None);
+        let around = format!("{}/../{}/agent-browser", folder.path().display(), {
+            folder.path().file_name().unwrap().to_str().unwrap()
+        });
+        assert_eq!(refused_on(&[&around, "mcp"], path), None);
+    }
+
+    #[test]
+    fn a_program_run_by_a_path_that_is_not_the_one_found_on_the_path_is_refused() {
+        let (folder, _) = with_program();
+        let (other, elsewhere) = with_program();
+        let path = folder.path().as_os_str();
+        let said = refused_on(&[elsewhere.to_str().unwrap(), "mcp"], path).expect("refused");
+        assert!(said.contains("agent-browser"), "{said}");
+        assert!(!said.contains(other.path().to_str().unwrap()), "{said}");
+        // A path to nothing, a relative path (it is read from the connection's folder, which
+        // Flottille makes), and a path of the right name on a PATH that has none.
+        for line in [
+            &["/nonexistent-folder/agent-browser", "mcp"][..],
+            &["./agent-browser", "mcp"],
+            &["bin/agent-browser", "mcp"],
+        ] {
+            assert!(refused_on(line, path).is_some(), "{line:?}");
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert!(
+            refused_on(
+                &[elsewhere.to_str().unwrap(), "mcp"],
+                empty.path().as_os_str()
+            )
+            .is_some()
+        );
+        // A path whose program the PATH does not know, however it is spelt.
+        assert!(
+            AGENT_BROWSER
+                .command_refused_on(&words(&[elsewhere.to_str().unwrap(), "mcp"]), None)
+                .is_some()
+        );
     }
 
     #[test]
