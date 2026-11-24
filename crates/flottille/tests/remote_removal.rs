@@ -380,7 +380,6 @@ fn a_removal_there_is_refused_for_another_workspace_a_handed_session_or_another_
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, launch, mcp) = led_on_server(&pc, &server, "Finish the export.");
     let agent = server.agent(&session);
-    let workspace = agent["workspace"].as_str().unwrap().to_owned();
     let handed = launched(
         &mcp,
         json!({"kind": "handed", "machine": "server", "title": "Let go", "brief": "Yours."}),
