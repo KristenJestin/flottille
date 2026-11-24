@@ -1147,30 +1147,32 @@ fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut T
         settle(&shell, cx);
         click(&shell, &format!("appearance-shade-{shade}"), cx);
         // Short, so that every tab scrolls.
-        cx.simulate_resize(size(px(1000.), px(520.)));
-        for tab in [
-            "agents",
-            "approvals",
-            "features",
-            "vault",
-            "machines",
-            "general",
-        ] {
-            click(&shell, &format!("settings-tabs-{tab}"), cx);
-            settle(&shell, cx);
-            let at = bounds_of(cx, "settings-page").expect("the page").center();
-            for turn in 0..8 {
-                assert_eq!(
-                    drawn_over_the_own_line(cx),
-                    Vec::<String>::new(),
-                    "{tab}, {shade}, after {turn} turns of the wheel"
-                );
-                cx.simulate_event(gpui_kit::ScrollWheelEvent {
-                    position: at,
-                    delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
-                    ..Default::default()
-                });
+        for width in [1000., 640., 440.] {
+            cx.simulate_resize(size(px(width), px(520.)));
+            for tab in [
+                "agents",
+                "approvals",
+                "features",
+                "vault",
+                "machines",
+                "general",
+            ] {
+                click(&shell, &format!("settings-tabs-{tab}"), cx);
                 settle(&shell, cx);
+                let at = bounds_of(cx, "settings-page").expect("the page").center();
+                for turn in 0..8 {
+                    assert_eq!(
+                        drawn_over_the_own_line(cx),
+                        Vec::<String>::new(),
+                        "{tab}, {shade}, {width} px wide, after {turn} turns of the wheel"
+                    );
+                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                        position: at,
+                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
+                        ..Default::default()
+                    });
+                    settle(&shell, cx);
+                }
             }
         }
     }
