@@ -1133,10 +1133,12 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   not on that machine, its place is a folder that does not exist. Its answer, whatever its
   outcome (a refusal and a "cannot answer now" too), is masked again of the caller's machine's
   secrets, then cut there as a local result is (a refusal at the error limit), saying so. That
-  machine's cut comes after the masking and splits no secret; where the other machine cut it
-  (the end of a text, `‹+N chars›`; the middle of a long result, `[N characters left out …]`;
-  a long line shown as several), the start of such a secret before the cut and its end after it
-  (6 bytes or more) are masked too, so that no half of one is shown; an answer without
+  machine's cut comes after the masking and splits no secret. The whole answer is masked first,
+  a marker or what looks like one included; then, where the other machine cut it (the end of a
+  text, `‹+N chars›`; the middle of a long result, its marker exactly as `run` writes it, on a
+  line of its own; and in such a result each line end, as a long line is shown as several), the
+  start of such a secret before the cut and its end after it (6 bytes or more) are masked too,
+  so that no half of one is shown; an answer without
   an outcome, or a call without a project, comes from an older daemon and is refused saying that
   daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
