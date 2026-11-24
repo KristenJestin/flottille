@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use flottille_core::agent::Agent;
 use flottille_core::approval::{self, Request};
-use flottille_core::secrets::{self, Secrets};
+use flottille_core::secrets::Secrets;
 use flottille_core::store::{Launch, LaunchFilter, Outgoing, now_ms};
 use flottille_link::{Call, Deliver, LinkError, MachineMessage, Message, PublicKey, Received};
 use serde_json::{Value, json};
@@ -2492,37 +2492,86 @@ fn here(outcome: Outcome, place: &Place) -> Outcome {
     }
 }
 
-/// `text` masked, then cut at `limit` saying so; and wherever either machine cut it, the start
-/// of a secret whose end the cut left out masked too: masking by the whole value cannot find it.
+/// `text` masked, then cut at `limit` saying so; and wherever the other machine cut it, the
+/// halves of a secret its cut split masked too: masking by the whole value cannot find them.
+/// Masked whole before this machine cuts it, no secret is split by its own cut.
 fn masked_and_cut(text: &str, known: &Secrets, limit: usize) -> String {
-    let masked = cut_ends_masked(&known.mask(text), known);
-    if masked.chars().count() <= limit {
-        return masked;
-    }
-    // Masking the end it cuts lengthens it by the mask less the shortest secret at most.
-    let cut = crate::mcp::cut(
-        &masked,
-        limit - (secrets::MASK.len() - secrets::VAULT_SHORTEST),
-    );
-    cut_ends_masked(&cut, known)
+    crate::mcp::cut(&cuts_masked(text, known), limit)
 }
 
-/// `text` with the end of each piece a cut (`mcp::cut`, `‹+N chars›`) closes masked when it
-/// starts a secret.
-fn cut_ends_masked(text: &str, known: &Secrets) -> String {
+/// `text` masked piece by piece between the cuts the other machine made in it, the end of each
+/// piece a cut closes masked when it starts a secret, and the start of each piece a cut
+/// opens in the middle of the text masked when it ends one.
+fn cuts_masked(text: &str, known: &Secrets) -> String {
+    let piece = |piece: &str, opened: bool, closed: bool| {
+        let mut masked = known.mask(piece);
+        if closed {
+            masked = known.mask_cut_end(&masked);
+        }
+        if opened {
+            masked = known.mask_cut_start(&masked);
+        }
+        masked
+    };
     let mut shown = String::with_capacity(text.len());
-    let mut from = 0;
-    for (at, _) in text.match_indices("\u{2039}+") {
-        let rest = &text[at + "\u{2039}+".len()..];
-        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if digits == 0 || !rest[digits..].starts_with(" chars\u{203a}") {
+    let (mut from, mut opened) = (0, false);
+    for (span, goes_on) in cuts(text) {
+        if span.start < from {
             continue;
         }
-        shown.push_str(&known.mask_cut_end(&text[from..at]));
-        from = at;
+        shown.push_str(&piece(&text[from..span.start], opened, true));
+        shown.push_str(&text[span.clone()]);
+        (from, opened) = (span.end, goes_on);
     }
-    shown.push_str(&text[from..]);
+    shown.push_str(&piece(&text[from..], opened, false));
     shown
+}
+
+/// Every cut a daemon makes in the answer of a tool, found in `text`, in order: where it is, and
+/// whether what follows goes on from the middle of the text cut. They are the end of a text
+/// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the middle of a long
+/// result `results::shorten` left out (`[N characters left out (lines a-b of c): …]`, on a line
+/// of its own, its end after it); and, in a result cut so, the bound of each line longer than
+/// `results::LINE_CHARS` it showed as several (a new line after a line of that many characters).
+fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut cuts = Vec::new();
+    for (at, open) in text.match_indices("\u{2039}+") {
+        let rest = &text[at + open.len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let close = " chars\u{203a}";
+        if digits > 0 && rest[digits..].starts_with(close) {
+            cuts.push((at..at + open.len() + digits + close.len(), false));
+        }
+    }
+    for (at, said) in text.match_indices(" characters left out (lines ") {
+        let before = &text[..at];
+        let number = before.trim_end_matches(|c: char| c.is_ascii_digit());
+        let (Some(open), Some(close)) =
+            (number.strip_suffix('['), text[at + said.len()..].find("}]"))
+        else {
+            continue;
+        };
+        if number.len() == before.len() {
+            continue;
+        }
+        let start = open.strip_suffix('\n').unwrap_or(open).len();
+        let end = at + said.len() + close + "}]".len();
+        let end = end + usize::from(text[end..].starts_with('\n'));
+        cuts.push((start..end, true));
+    }
+    if cuts.iter().any(|(_, goes_on)| *goes_on) {
+        let mut line = 0;
+        for (at, _) in text.match_indices('\n') {
+            if text[line..at].chars().count() >= crate::results::LINE_CHARS
+                && !cuts.iter().any(|(span, _)| span.contains(&at))
+            {
+                cuts.push((at..at + 1, true));
+            }
+            line = at + 1;
+        }
+    }
+    cuts.sort_by_key(|(span, _)| span.start);
+    cuts
 }
 
 /// The answer of request `request`, held for the user of this machine, of a caller of another

@@ -222,6 +222,27 @@ impl Secrets {
         }
     }
 
+    /// `text`, whose start a cut left out, with that start masked when it is the end of a value
+    /// this masks, of `VAULT_SHORTEST` bytes or more: what a cut shows after it holds not even
+    /// the end of a secret. The rest of `text` is left as it is.
+    pub fn mask_cut_start(&self, text: &str) -> String {
+        let values = self.all();
+        let longest = values.first().map_or(0, String::len);
+        let end = (VAULT_SHORTEST..=longest.min(text.len()))
+            .rev()
+            .filter(|&at| text.is_char_boundary(at))
+            .find(|&at| {
+                let start = &text[..at];
+                values
+                    .iter()
+                    .any(|value| value.len() > start.len() && value.ends_with(start))
+            });
+        match end {
+            Some(at) => format!("{MASK}{}", &text[at..]),
+            None => text.to_owned(),
+        }
+    }
+
     /// How much of `text`, a message still streaming, is settled: masked alone, it reads as it will
     /// once the message is whole, so it can be stored and shown now. The rest may still be part of
     /// a secret the next pieces complete: the last word, as long as the longest value known at
