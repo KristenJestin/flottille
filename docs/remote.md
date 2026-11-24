@@ -1223,6 +1223,13 @@ items say `· on server` after their session, and its question cards `· on serv
   answer (`{"later": why}`): the sender keeps it, in its place, and sends it again on the next
   link, the next message kept, or 30 seconds later. Only a refusal is final: the message is then
   dropped.
+- **A delivery from another machine is masked as its answers are** (a report, a question, a led
+  session's turn, the answer to an approval): on the machine that takes it, before it is stored or
+  shown, of that machine's secrets and of those of the secret files of the place of the agent it
+  is for, the whole first, then both halves of a secret a cut of the other machine split (its
+  `[cut: N more characters; …]` marker, and the end of a body of 64,000 characters, where the
+  answer to a request is cut without a marker). When that place cannot be read, the delivery is
+  refused for now and sent again.
 
 ### Where a question goes when the parent is off
 
