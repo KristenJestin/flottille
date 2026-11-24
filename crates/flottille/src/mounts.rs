@@ -232,7 +232,9 @@ struct Copies {
 struct Copy {
     staged: CString,
     target: CString,
-    /// The file read (device, inode): the copy covers it, never another put at its path since.
+    /// The file read (device, inode): the copy covers a file with that identity, so not one put at
+    /// its path since. A reused inode would match: it is root's own old file, whose text a copy
+    /// holds, a harm to no one.
     id: (u64, u64),
     text: Vec<u8>,
     tree: libc::c_int,
@@ -673,7 +675,7 @@ const LEFT: i32 = 1 << 30;
 /// Writes each copy into a file system of the namespace's own mounted on `staging`, makes it
 /// read-only, takes each file out of it, takes the file system away, and puts each file over its
 /// target, opened without following a link on its way. A target gone since the plan was made, or
-/// another file than the one read, is not covered. A file system that cannot be taken away fails
+/// whose device and inode are no longer those of the file read, is not covered. A file system that cannot be taken away fails
 /// the start (`Failed::Left`).
 ///
 /// # Safety
