@@ -1269,4 +1269,51 @@ mod tests {
             "{started:?}"
         );
     }
+
+    #[test]
+    fn a_read_only_path_swapped_for_a_link_is_not_followed() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The folder made read-only, then a folder on its way, are swapped for a link since the
+        // plan: neither link leads the mounts to a folder a run chose.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for (kept, swapped) in [
+            (root.join("kept"), root.join("kept")),
+            (root.join("on/the/way"), root.join("on/the")),
+        ] {
+            std::fs::create_dir_all(&kept).unwrap();
+            let elsewhere = root.join("elsewhere");
+            std::fs::create_dir_all(elsewhere.join("way")).unwrap();
+            let plan = plan(&[], &[], &[], None)
+                .unwrap()
+                .protecting(&[], std::slice::from_ref(&kept))
+                .unwrap();
+            std::fs::rename(&swapped, root.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &swapped).unwrap();
+            let planted = elsewhere.join("way/planted");
+
+            let shown = printed(
+                plan,
+                "sh",
+                &[
+                    "-c".as_ref(),
+                    "touch \"$0\" && echo written".as_ref(),
+                    planted.as_os_str(),
+                ],
+            );
+
+            assert_eq!(
+                shown.as_deref().ok(),
+                Some("written\n"),
+                "{kept:?}: {shown:?}"
+            );
+            std::fs::remove_file(&swapped).unwrap();
+            std::fs::remove_dir_all(root.join("moved")).unwrap();
+            std::fs::remove_dir_all(&elsewhere).unwrap();
+            let _ = std::fs::remove_dir_all(root.join("on"));
+        }
+    }
 }
