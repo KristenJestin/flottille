@@ -6,7 +6,7 @@ use crate::kit_common;
 use kit_common::{Desktop, init};
 
 use flottille_window::state::AgentState;
-use flottille_window::tree::{SessionRow, session_id, session_mark_id};
+use flottille_window::tree::{SessionRow, session_id, session_machine_id, session_mark_id};
 use gpui_design_system::{Tie, tie_below_id, tie_turn_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -33,11 +33,20 @@ fn column<'a>(
     scope: Option<&str>,
     cx: &'a mut TestAppContext,
 ) -> (Vec<String>, &'a mut VisualTestContext) {
+    let (_, ids, cx) = column_view(scope, cx);
+    (ids, cx)
+}
+
+/// [`column`], with the view that holds its rows.
+fn column_view<'a>(
+    scope: Option<&str>,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Column>, Vec<String>, &'a mut VisualTestContext) {
     init(cx, Desktop::new(false).env());
     let ids = vec!["first".to_owned(), "second".to_owned()];
     let scope = scope.map(str::to_owned);
     let rows = ids.clone();
-    let (_, cx) = cx.add_window_view(move |_, cx| {
+    let (view, cx) = cx.add_window_view(move |_, cx| {
         let rows = rows
             .iter()
             .enumerate()
@@ -66,7 +75,7 @@ fn column<'a>(
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
     }
-    (ids, cx)
+    (view, ids, cx)
 }
 
 fn bounds(
@@ -94,4 +103,41 @@ fn a_scoped_row_s_tie_turns_at_its_first_line_too(cx: &mut TestAppContext) {
     let below = bounds(cx, tie_below_id(session_id(&ids[0])));
     assert_eq!(above.size.height, px(40.));
     assert!(f32::from(row.top() - below.bottom()).abs() <= 0.5);
+}
+
+/// How many frames the next `frames` ask for while they run: a row that fades keeps asking for
+/// one, GPUI's test platform showing no opacity.
+fn fading_frames(frames: usize, cx: &mut VisualTestContext) -> usize {
+    (0..frames)
+        .filter(|_| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx)) > 0
+        })
+        .count()
+}
+
+#[gpui_kit::test]
+fn a_row_s_place_line_fades_when_its_machine_tag_comes(cx: &mut TestAppContext) {
+    let (view, ids, cx) = column_view(None, cx);
+    assert_eq!(fading_frames(3, cx), 0, "at rest");
+    assert!(
+        cx.update(|window, _| window.try_find(session_machine_id(&ids[0])).is_none()),
+        "a row of this machine has its place line"
+    );
+
+    // Its pilot's machine lists it later: the row gains its machine's tag in place of the line.
+    view.update(cx, |column, cx| {
+        column.0[0].update(cx, |row, cx| row.set_tag(Some("server"), cx));
+    });
+    let fading = fading_frames(12, cx);
+    assert!(
+        cx.update(|window, _| window.try_find(session_machine_id(&ids[0])).is_some()),
+        "the tag is there"
+    );
+    assert!(
+        (3..12).contains(&fading),
+        "the line fades in over HOVER, not at once and not for ever: {fading} frames"
+    );
+    assert_eq!(fading_frames(3, cx), 0, "at rest once it is whole");
 }

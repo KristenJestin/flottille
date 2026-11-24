@@ -1980,6 +1980,104 @@ mod tests {
         }
     }
 
+    /// A listed session `id`, said to be led by the session `by.1` of the machine `by.0`.
+    fn led_by(id: &str, by: (&str, &str)) -> crate::machines::Listed {
+        let mut led = listed(id, "app", 9);
+        led.pilot_elsewhere = Some((by.0.to_owned(), by.1.to_owned()));
+        led
+    }
+
+    /// How many steps each row of the snapshot's rows takes up its pilots to a root, `None` for
+    /// a row whose pilots never end: a loop no row of which is a root.
+    fn depths(snapshot: &Snapshot) -> Vec<(String, Option<usize>)> {
+        let rows: Vec<&Session> = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .collect();
+        rows.iter()
+            .map(|row| {
+                let mut at = *row;
+                let mut steps = 0;
+                while let Some(pilot) = at.pilot.as_deref() {
+                    steps += 1;
+                    if steps > rows.len() {
+                        return (row.id.clone(), None);
+                    }
+                    match rows.iter().find(|other| other.id == pilot) {
+                        Some(next) => at = next,
+                        None => break,
+                    }
+                }
+                (row.id.clone(), Some(steps))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pilot_loop_across_machines_hides_no_row() {
+        // server's list says its s1 is led by lab's r1; lab's says its r1 is led by s1 of server.
+        // One of them lies: neither row may leave the sidebar of a third machine.
+        let snapshot = build(json!({"agents": []}), json!({}), &[]).with_lists(
+            &machines_listing(
+                "pc",
+                vec![
+                    ("server", vec![led_by("s1", ("lab", "r1"))]),
+                    ("lab", vec![led_by("r1", ("server", "s1"))]),
+                ],
+            ),
+            None,
+        );
+
+        let depths = depths(&snapshot);
+        assert!(
+            depths.iter().all(|(_, depth)| depth.is_some()),
+            "every row ends at a root: {depths:?}"
+        );
+        assert!(
+            depths.iter().any(|(_, depth)| *depth == Some(0)),
+            "{depths:?}"
+        );
+        let tied = ["s1@server", "r1@lab"]
+            .into_iter()
+            .filter(|id| snapshot.elsewhere(id).unwrap().pilot.is_some())
+            .count();
+        assert_eq!(
+            tied, 1,
+            "the edge that closes the loop is dropped, not both"
+        );
+    }
+
+    #[test]
+    fn a_pilot_loop_of_three_machines_hides_no_row() {
+        let snapshot = build(json!({"agents": []}), json!({}), &[]).with_lists(
+            &machines_listing(
+                "pc",
+                vec![
+                    ("server", vec![led_by("s1", ("lab", "r1"))]),
+                    ("lab", vec![led_by("r1", ("dock", "d1"))]),
+                    ("dock", vec![led_by("d1", ("server", "s1"))]),
+                ],
+            ),
+            None,
+        );
+
+        let depths = depths(&snapshot);
+        assert!(
+            depths.iter().all(|(_, depth)| depth.is_some()),
+            "every row ends at a root: {depths:?}"
+        );
+        assert!(
+            depths.iter().any(|(_, depth)| *depth == Some(0)),
+            "{depths:?}"
+        );
+        let tied = ["s1@server", "r1@lab", "d1@dock"]
+            .into_iter()
+            .filter(|id| snapshot.elsewhere(id).unwrap().pilot.is_some())
+            .count();
+        assert_eq!(tied, 2, "one edge of the three is dropped");
+    }
+
     #[test]
     fn the_sessions_of_every_machine_are_one_list_by_project() {
         let snapshot = build(
