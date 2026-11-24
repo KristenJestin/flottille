@@ -7562,6 +7562,43 @@ const MOVING: [&str; 7] = [
 ];
 
 #[test]
+fn a_connection_whose_env_sets_home_is_refused_at_the_login() {
+    // `HOME` moves where agent-browser looks for the Chrome it downloaded and where Chrome reads
+    // `~/.pki/nssdb`: refused like the variables of the browser's folders, by its name and never
+    // its value.
+    let user = user();
+    user.call(
+        "vault.set",
+        json!({"name": "browser-setting", "secret": SETTING}),
+    )
+    .unwrap();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"env": {"HOME": {"vault": "browser-setting"}}}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("HOME"), "{said}");
+    assert!(said.contains("password"), "{said}");
+    assert!(!said.contains(SETTING), "{said}");
+    assert!(logged(&user, "browser", "login").is_empty());
+    assert!(form(&user).is_none());
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert!(
+        review["adapter"]["said"].as_str().unwrap().contains("HOME"),
+        "{review}"
+    );
+}
+
+#[test]
 fn login_is_refused_while_the_connections_env_moves_the_browsers_folders() {
     for named in MOVING {
         let user = user();
