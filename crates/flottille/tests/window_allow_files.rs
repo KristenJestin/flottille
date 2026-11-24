@@ -59,7 +59,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// A hub, `pc` its first member with the project `app`, whose setup copies its ignored `.env`
+/// A hub, `pc` its first member with the project `app` on `feat/export`, whose setup copies its ignored `.env`
 /// and `config/local.toml`, and `server` a runner paired with it, which has no `app`; the two
 /// linked, `server` offering Claude.
 fn pc_and_server() -> (TestHub, Machine, Machine) {
@@ -70,6 +70,8 @@ fn pc_and_server() -> (TestHub, Machine, Machine) {
     std::fs::write(repo.join("a.txt"), "a\n").unwrap();
     pc.user.git(&repo, &["add", "."]);
     pc.user.git(&repo, &["commit", "--quiet", "-m", "first"]);
+    pc.user
+        .git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
     std::fs::write(repo.join(".env"), ENV).unwrap();
     std::fs::create_dir_all(repo.join("config")).unwrap();
     std::fs::write(repo.join("config/local.toml"), LOCAL).unwrap();
