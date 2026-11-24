@@ -27,9 +27,16 @@ pub(super) async fn has_branch(forge: &Forge, branch: &str) -> Result<bool, Stri
     };
     match found {
         Ok(()) => Ok(true),
-        Err(why) if why.contains("404") || why.contains("Not Found") => Ok(false),
+        Err(why) if not_found(&why) => Ok(false),
         Err(why) => Err(why),
     }
+}
+
+/// Whether an error is the forge's own "not found": `gh` prints `Not Found (HTTP 404)`, `bkt`
+/// `404 Not Found`. A bare `404` is not one: a branch named `fix/1404-x` is in the URL a dropped
+/// call prints, and a branch name holds no space.
+fn not_found(why: &str) -> bool {
+    why.contains("HTTP 404") || why.contains("Not Found")
 }
 
 /// The base of the merged pull request of `branch`, from the repository itself.
