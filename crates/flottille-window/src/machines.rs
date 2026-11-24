@@ -434,6 +434,8 @@ pub struct Machines {
     pub lists: Lists,
     /// The projects this machine offers, by name, when it says them.
     pub this_projects: Option<Vec<String>>,
+    /// When the phones are told (`remote.settings`): `away`, the default, or `always`.
+    pub notify: String,
 }
 
 impl Machines {
@@ -511,6 +513,10 @@ pub enum Ask {
     Configure {
         on: bool,
     },
+    /// When the phones are told, `away` or `always` (`remote.configure`).
+    Notify {
+        notify: String,
+    },
     /// A member's icon and colour, signed with this device's key as `flottille remote icon` and
     /// `colour` do.
     Look {
@@ -527,6 +533,7 @@ impl Ask {
             Ask::Rename { new_name, .. } => Asked::Rename(new_name.clone()),
             Ask::Remove { name } => Asked::Remove(name.clone()),
             Ask::Configure { on } => Asked::Configure { on: *on },
+            Ask::Notify { notify } => Asked::Notify(notify.clone()),
             Ask::Look { name, .. } => Asked::Look(name.clone()),
         }
     }
@@ -539,6 +546,7 @@ pub enum Asked {
     Rename(String),
     Remove(String),
     Configure { on: bool },
+    Notify(String),
     Look(String),
 }
 
@@ -641,6 +649,26 @@ impl Remote {
                 return Ok(());
             }
         }
+    }
+
+    /// Tells this machine's daemon whether the user is at the window and gave it an input
+    /// (`client.presence`), off the UI's thread: the hub tells the runners, which tell the phone
+    /// only while the user is away. Nothing comes back.
+    pub fn presence(&self, focused: bool, input: bool) {
+        let local = self.local.clone();
+        let _ = std::thread::Builder::new()
+            .name("flottille-presence".into())
+            .spawn(move || {
+                if let Ok(stream) = local()
+                    && let Ok(mut conn) = Conn::new(stream)
+                {
+                    let _ = conn.ask_within(
+                        "client.presence",
+                        json!({"focused": focused, "input": input}),
+                        BOUND,
+                    );
+                }
+            });
     }
 
     /// Asks `ask` of this machine's daemon, off the UI's thread: the answer comes back as news.
@@ -795,6 +823,10 @@ impl Remote {
                 request("remote.configure", json!({"on": on}))?;
                 Ok(())
             }
+            Ask::Notify { notify } => {
+                request("remote.configure", json!({"notify": notify}))?;
+                Ok(())
+            }
             Ask::Look { name, icon, colour } => {
                 let key = self.key()?;
                 let members = request("remote.members", json!({}))?;
@@ -855,7 +887,11 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         launches: Vec::new(),
         lists: Lists::default(),
         this_projects: offered(&machines["this"]["offers"]),
+        notify: "away".to_owned(),
     };
+    if let Ok(settings) = conn.ask_within("remote.settings", json!({}), BOUND)? {
+        read.notify = settings["notify"].as_str().unwrap_or("away").to_owned();
+    }
     if let Ok(lists) = conn.ask_within("remote.sessions", json!({}), BOUND)? {
         read.lists = Lists {
             this: Listed::all(&lists["this"]),

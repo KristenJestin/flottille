@@ -339,6 +339,8 @@ pub struct Daemon {
     pub developer: developer::Log,
     /// When the inactive sessions were last looked for (`inactive::check`); 0 before the first.
     pub inactive_checked: AtomicU64,
+    /// What the user's phones were told through the hub (`phone`).
+    pub phone: crate::phone::Phone,
     /// Where the vault's secrets are (`docs/vault.md`).
     pub vault: crate::vault::Keyring,
     /// What the extensions keep while the daemon runs.
@@ -458,6 +460,7 @@ impl Daemon {
             items: items::Items::default(),
             developer: developer::Log::open(paths),
             inactive_checked: AtomicU64::new(0),
+            phone: crate::phone::Phone::default(),
             vault: crate::vault::Keyring::open(paths),
             extensions: extensions::Live::default(),
             watch: Arc::default(),
@@ -1014,6 +1017,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "tunnel.",
             "whatsnew.",
             "signin.",
+            "client.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -1062,6 +1066,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
                     providers::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("client.") {
+                    crate::phone::call(&daemon, &request.method, request.params)
                 } else if request.method.starts_with("test.") {
                     sweep::call(daemon, &request.method, request.params).await
                 } else if request.method == "project.show" {
