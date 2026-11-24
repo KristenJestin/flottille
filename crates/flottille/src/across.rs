@@ -717,7 +717,7 @@ fn keep(
         .read(|store| store.outgoing(Some(machine)))
         .map_err(|error| format!("it cannot be kept: {error}"))?
         .len();
-    if waiting >= MOST_KEPT {
+    if playing_kept_full() || waiting >= MOST_KEPT {
         return Err(format!("{MOST_KEPT} messages wait for {name} already"));
     }
     daemon
@@ -725,6 +725,14 @@ fn keep(
         .map_err(|error| format!("it cannot be kept: {error}"))?;
     send_kept(daemon, machine);
     Ok(())
+}
+
+/// Whether a test plays as many messages waiting for another machine as may, once: in a test
+/// build, when the file `FLOTTILLE_TEST_KEPT_FULL_FILE` names exists, which it removes.
+fn playing_kept_full() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_KEPT_FULL_FILE")
+            .is_some_and(|file| std::fs::remove_file(file).is_ok())
 }
 
 /// The id under which the close of `agent` of the machine of key `machine` is kept: one close
