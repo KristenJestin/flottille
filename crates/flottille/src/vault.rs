@@ -492,6 +492,16 @@ async fn set(
     // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
     let _writing = writing(&asked.name).await;
+    // Accept read the entry before this lock: a save in between answered the proposal, and what
+    // Accept read is not the entry any more. It writes nothing over that save.
+    if let Some(number) = accepting {
+        open_ask(daemon, number).map_err(|_| {
+            Failure::refused(format!(
+                "the request #{number} was answered meanwhile (the entry was saved): nothing \
+                 is changed"
+            ))
+        })?;
+    }
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
