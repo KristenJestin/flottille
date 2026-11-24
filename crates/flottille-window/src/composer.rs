@@ -244,6 +244,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let machine = shell.machine().map(str::to_owned);
         // The text holds the pictures' chips where they were put (#773).
         let tokens = cx.new(|cx| TokenField::new("composer-text", window, cx));
         let field = tokens.read(cx).input().clone();
@@ -277,7 +278,10 @@ impl Composer {
         ];
         Self {
             shell,
-            keeping: Keeping::new(DraftKey::Project(project.clone())),
+            keeping: Keeping::new(DraftKey::Project {
+                machine,
+                name: project.clone(),
+            }),
             project,
             attached: Attachments::new(tokens.clone()),
             tokens,

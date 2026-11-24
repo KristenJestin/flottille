@@ -1322,14 +1322,18 @@ that follows over a link reads none of them. A draft is the user's own words: no
 log holds one, and no agent is ever given one. `draft.*` is answered by a task of its own, its
 pictures decoded and written off the runtime's threads.
 
-- `draft.get {kind, target}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
+- `draft.get {kind, target, machine?}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
   "data"}]}}` (the pictures in base64): `kind` is `session` (`target` is the agent's id, a
   session's composer) or `project` (`target` is the project's name, the first message of a new
   session). `not-found` when the agent or the project does not exist, when the session was
   forgotten (it ended and cannot be resumed, or its kept week is over) or its project is gone:
   such a composer has no draft, and the window says nothing of it. `invalid-params` for another
-  `kind`.
-- `draft.set {kind, target, text, images?}` keeps the draft, in place of the one there was, and
+  `kind`. `machine` names the machine the session or the project is of, when it is not this
+  one's (a window that shows another machine's pages): such a draft is kept by this daemon, under
+  that machine's name, and never sent to it; this daemon knows nothing of the session or the
+  project there, so it checks nothing of them (no `not-found`), and a draft of this machine's own
+  (no `machine`) is never the same as one of another machine's of the same name.
+- `draft.set {kind, target, machine?, text, images?}` keeps the draft, in place of the one there was, and
   answers `{"kept"}`. `images` replaces the pictures (the composer's limits hold: 20, 5 MiB each,
   png, jpeg, gif or webp); left out, those the draft has stay. A draft with no text beyond
   blanks and no picture is forgotten (`{"kept": false}`), which is how emptying a composer is
@@ -1338,10 +1342,10 @@ pictures decoded and written off the runtime's threads.
   and this one does not are removed once it commits. The same `not-found` as `draft.get` for a
   session forgotten or a project gone: a write that comes late (a pending wait, the close of a
   window) never brings a draft back.
-- `draft.clear {kind, target}` forgets the draft and its pictures; a session or a project that is
+- `draft.clear {kind, target, machine?}` forgets the draft and its pictures; a session or a project that is
   gone is forgotten all the same.
-- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>"]}`: which composers hold
-  one, never what.
+- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>",
+  "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is

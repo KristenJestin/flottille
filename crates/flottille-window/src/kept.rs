@@ -17,23 +17,41 @@ pub const DEBOUNCE: Duration = Duration::from_millis(500);
 /// The composer a draft belongs to, as the daemon names it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DraftKey {
-    /// A session's composer, by its root agent's id.
-    Session(String),
+    /// A session's composer, by its root agent's id on its machine.
+    Session {
+        machine: Option<String>,
+        agent: String,
+    },
     /// A project's first message of a new session.
-    Project(String),
+    Project {
+        machine: Option<String>,
+        name: String,
+    },
 }
 
 impl DraftKey {
     pub fn kind(&self) -> &'static str {
         match self {
-            DraftKey::Session(_) => "session",
-            DraftKey::Project(_) => "project",
+            DraftKey::Session { .. } => "session",
+            DraftKey::Project { .. } => "project",
         }
     }
 
     pub fn target(&self) -> &str {
         match self {
-            DraftKey::Session(target) | DraftKey::Project(target) => target,
+            DraftKey::Session { agent: target, .. } | DraftKey::Project { name: target, .. } => {
+                target
+            }
+        }
+    }
+
+    /// The machine the session or the project is of (`None`: this one). Its draft is kept by this
+    /// machine's daemon all the same, under that machine's name, and never travels.
+    pub fn machine(&self) -> Option<&str> {
+        match self {
+            DraftKey::Session { machine, .. } | DraftKey::Project { machine, .. } => {
+                machine.as_deref()
+            }
         }
     }
 }
