@@ -1190,4 +1190,83 @@ mod tests {
         assert_eq!(out["text"], "copy\n", "{out}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "root's\n");
     }
+
+    /// Makes `mount_setattr` fail with `ENOSYS` for the rest of the process's life, as a seccomp
+    /// filter written before Linux 5.12 does on a kernel that has it, Landlock's second ABI too.
+    ///
+    /// # Safety
+    /// In the child, before its program: system calls alone.
+    unsafe fn refuse_mount_setattr() -> io::Result<()> {
+        let statement = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        };
+        let filter = [
+            statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+            statement(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                0,
+                1,
+                libc::SYS_mount_setattr as u32,
+            ),
+            statement(
+                libc::BPF_RET | libc::BPF_K,
+                0,
+                0,
+                libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+            ),
+            statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_ptr().cast_mut(),
+        };
+        // SAFETY: as the function says; the program is alive for the call.
+        unsafe {
+            check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) as libc::c_long)?;
+            check(libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &program as *const libc::sock_fprog,
+            ) as libc::c_long)
+        }
+    }
+
+    #[test]
+    fn a_read_only_path_is_not_left_writable_when_mount_setattr_is_refused() {
+        use std::os::unix::process::CommandExt;
+        if !available() || crate::landlock::abi() < 2 {
+            eprintln!("skipped: no user namespace, or no Landlock of the second ABI");
+            return;
+        }
+        // A read-only folder with a folder kept in place below it: a remount of the top mount
+        // alone would leave the one below writable.
+        let temp = tempfile::tempdir().unwrap();
+        let kept = temp.path().canonicalize().unwrap().join("kept");
+        let below = kept.join("below");
+        std::fs::create_dir_all(&below).unwrap();
+        let mut plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .protecting(std::slice::from_ref(&below), std::slice::from_ref(&kept))
+            .unwrap();
+        let planted = below.join("planted");
+        let mut command = std::process::Command::new("touch");
+        command.arg(&planted);
+        // SAFETY: as in `landlock::confine`; the filter first, as the system's would be.
+        unsafe {
+            command.pre_exec(|| refuse_mount_setattr());
+            command.pre_exec(move || plan.enter());
+        }
+
+        let started = command.status();
+
+        assert!(!planted.exists(), "{started:?}");
+        assert_eq!(
+            started.as_ref().err().and_then(io::Error::raw_os_error),
+            Some(libc::ENOSYS),
+            "{started:?}"
+        );
+    }
 }
