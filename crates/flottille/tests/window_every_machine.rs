@@ -2526,11 +2526,11 @@ fn a_project_draft_of_another_machine_is_not_this_machine_s_draft_of_the_same_na
     shell.update_in(cx, |shell, window, cx| {
         shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
     });
-    until(&shell, cx, "the server's page of app is drawn", |cx| {
-        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
-    });
-    let there_composer = shell.read_with(cx, |s, _| s.composer_of("app").cloned().unwrap());
     until(&shell, cx, "the server's draft is back", |cx| {
-        there_composer.read_with(cx, |c, cx| c.field().read(cx).value() == "Plan the release")
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.composer_of("app")
+                    .is_some_and(|c| c.read(cx).field().read(cx).value() == "Plan the release")
+        })
     });
 }
