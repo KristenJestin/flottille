@@ -1473,15 +1473,23 @@ pub fn last_messages_after(daemon: &Daemon, agent: &str, after: u64) -> Vec<Stri
         .unwrap_or_default();
     events.retain(|event| event.seq > after);
     // Pieces of one message share its id: an event the daemon recorded between them does not
-    // split it. Without an id, the pieces of one follow each other: a gap in the numbers starts
-    // another message.
+    // split it. Without an id, the pieces of one follow each other among the agent's own events:
+    // another of its events between them starts another message. The numbers of the store are
+    // everyone's, so a gap in them says nothing: the daemon records other things meanwhile, and
+    // a reply held back in two pieces (`agents::Speech`) is parted by any of them.
+    let follows = |last: u64, seq: u64| {
+        daemon
+            .read(|store| store.agent_events(agent, last, 1))
+            .is_ok_and(|next| next.first().is_some_and(|next| next.seq == seq))
+    };
     let mut messages: Vec<(u64, Option<&str>, String)> = Vec::new();
     for event in events.iter().rev() {
         let text = event.data["text"].as_str().unwrap_or_default();
         let id = message_id(&event.data);
         match messages.last_mut() {
             Some((last, current, message))
-                if id == *current && (id.is_some() || event.seq == *last + 1) =>
+                if id == *current
+                    && (id.is_some() || event.seq == *last + 1 || follows(*last, event.seq)) =>
             {
                 message.push_str(text);
                 *last = event.seq;
