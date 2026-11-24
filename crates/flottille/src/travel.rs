@@ -303,8 +303,14 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
     let (Some(name), Some(there)) = (&first.workspace, &first.there) else {
         return Err(format!("launch {launch} has no workspace here"));
     };
-    let workspace = stored(daemon.read(|store| store.workspace(&first.project, name)))?
-        .ok_or_else(|| format!("the workspace {name} of launch {launch} is gone"))?;
+    let Some(workspace) = stored(daemon.read(|store| store.workspace(&first.project, name)))?
+    else {
+        // Gone once all of it went back, by its removal or the user's: nothing to say of it.
+        if travels.iter().all(|travel| travel.returned.is_some()) {
+            return Ok(json!({"repositories": []}));
+        }
+        return Err(format!("the workspace {name} of launch {launch} is gone"));
+    };
     let key: PublicKey = serde_json::from_value(json!(first.machine))
         .map_err(|_| "the machine of the launch is not a key".to_owned())?;
     let machine = remote
@@ -331,6 +337,24 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
         let file = scratch.path().join("bundle");
         let reference = format!("refs/heads/{there}");
         if bundle::returning(&folder, there, &has, &file).await? == bundle::Bundled::NothingNew {
+            // All of it is there already: what a removal and a later end are told of.
+            if travel.returned.is_none() {
+                let tip = git::output(&folder, &["rev-parse", "--verify", &reference], Class::Read)
+                    .await?
+                    .trim()
+                    .to_owned();
+                stored(daemon.write(|store| {
+                    store
+                        .set_travel_returned(
+                            "in",
+                            &travel.machine,
+                            launch,
+                            &travel.repository,
+                            &tip,
+                        )
+                        .map(|()| ((), None))
+                }))?;
+            }
             back.push(json!({"path": travel.repository, "commits": 0}));
             continue;
         }
