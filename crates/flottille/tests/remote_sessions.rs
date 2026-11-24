@@ -137,6 +137,7 @@ fn a_runner_s_sessions_are_kept_by_the_other_machine_without_their_conversation(
             "exchanged_at",
             "id",
             "pilot",
+            "pilot_elsewhere",
             "project",
             "state",
             "title"

@@ -29,6 +29,9 @@ const SIDEBAR: &str = "sidebar";
 struct Target {
     kind: String,
     target: String,
+    /// The machine the session or the project is of, when it is not this one's.
+    #[serde(default)]
+    machine: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +39,8 @@ struct Target {
 struct Set {
     kind: String,
     target: String,
+    #[serde(default)]
+    machine: Option<String>,
     #[serde(default)]
     text: String,
     /// The pictures that go with the text, all of them; left out, those it has are kept.
@@ -71,9 +76,29 @@ fn project_gone(daemon: &Daemon, name: &str) -> bool {
 
 /// The key of the composer `target` of `kind`, once the thing it belongs to is known: a session
 /// that was forgotten, or whose project is gone, and a project that is gone, have no composer.
-fn key_of(daemon: &Daemon, kind: &str, target: &str) -> Result<String, Failure> {
+///
+/// A composer of another machine's session or project is kept here, under that machine's name:
+/// this daemon cannot know the thing, so it checks nothing of it, and the machine it is of never
+/// hears of the draft. The key of a composer of this machine is the one it always had.
+fn key_of(
+    daemon: &Daemon,
+    kind: &str,
+    target: &str,
+    machine: Option<&str>,
+) -> Result<String, Failure> {
     if target.is_empty() || target.len() > 200 {
         return Err(Failure::refused("a draft's target is 1 to 200 bytes"));
+    }
+    if let Some(machine) = machine {
+        if machine.is_empty() || machine.len() > 200 {
+            return Err(Failure::refused("a draft's machine is 1 to 200 bytes"));
+        }
+        if !matches!(kind, "session" | "project") {
+            return Err(Failure::refused(format!(
+                "a draft is of a `session` or a `project`, not `{kind}`"
+            )));
+        }
+        return Ok(format!("machine:{machine}:{kind}:{target}"));
     }
     match kind {
         "session" => {
@@ -252,8 +277,12 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     let params = if params.is_null() { json!({}) } else { params };
     match method {
         "draft.get" => {
-            let Target { kind, target } = serde_json::from_value(params)?;
-            let key = key_of(daemon, &kind, &target)?;
+            let Target {
+                kind,
+                target,
+                machine,
+            } = serde_json::from_value(params)?;
+            let key = key_of(daemon, &kind, &target, machine.as_deref())?;
             let found = daemon.read(|store| store.draft(&key))?;
             let Some((text, names)) = found else {
                 return Ok(json!({"draft": null}));
@@ -264,6 +293,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             let Set {
                 kind,
                 target,
+                machine,
                 text,
                 images,
             } = serde_json::from_value(params)?;
@@ -273,12 +303,12 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                     MAX_TEXT_BYTES / 1024 / 1024
                 )));
             }
-            let key = key_of(daemon, &kind, &target)?;
+            let key = key_of(daemon, &kind, &target, machine.as_deref())?;
             let written = match &images {
                 Some(images) => Some(keep_pictures(&daemon.paths, &key, images)?),
                 None => None,
             };
-            let session = (kind == "session").then_some(target.as_str());
+            let session = (kind == "session" && machine.is_none()).then_some(target.as_str());
             // What it replaces is read and written in one transaction, and the session is looked
             // at again in it: one forgotten since `key_of` looked is not written.
             let done = daemon.write(|store| {
@@ -307,10 +337,14 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             }
         }
         "draft.clear" => {
-            let Target { kind, target } = serde_json::from_value(params)?;
+            let Target {
+                kind,
+                target,
+                machine,
+            } = serde_json::from_value(params)?;
             forget(
                 daemon,
-                &key_of(daemon, &kind, &target).or_else(|failure| {
+                &key_of(daemon, &kind, &target, machine.as_deref()).or_else(|failure| {
                     // A session or a project that is gone has no composer: its draft goes all the same.
                     match failure.code {
                         "not-found" => Ok(format!("{kind}:{target}")),
