@@ -644,7 +644,7 @@ shows of it is what it read while it was on.
 machine the window shows a page of has its own connections, made at the first need with the device
 key (read once for the window), then kept open while the window runs and made again with a backoff
 when they break; this machine's own connection is never cut to show another one, and the list,
-its folds and the bell stay this machine's whatever page is shown. What the window holds of a
+its folds stay this machine's whatever page is shown, and the bell holds every machine's (#1280). What the window holds of a
 machine is kept apart, by machine: its Settings and each of their sections, the parts of Flottille
 it runs, its providers, the forms and pages of its projects (another machine may have a project of
 the same name). A page of machine A never shows a value of machine B: what B answers fills B's
@@ -1893,6 +1893,15 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **The window reads the device key at its start once the user has another runner** (#1280): the
+  bell follows every machine, so its links need the key before any page of another machine is
+  shown, where it was read only then. A locked keyring holds those links until it is unlocked; the
+  rest of the window does not wait.
+- **"Ended" lists another machine's latest 50 ended sessions** (#1280): each title is a round trip
+  over the link (the session's brief), and the group is asked again each time it opens. A machine
+  that is off when it opens has its rows taken out rather than shown as last read, so the group never
+  lists what it cannot open.
+
 - **An allowed launch whose setup a restart cut is refused, not resumed** (#1317): the daemon that
   starts again finds the request allowed and its answer never stored; it refuses the launch, removes
   its workspace and tells the caller, which launches it again. Resuming it (laying its files again,
@@ -2043,7 +2052,8 @@ on a real phone, by hand, and reported.
 - **A page of another machine is that machine's, and nothing else switches** (#1271, replacing
   #1182's "the whole window goes to that machine"): Settings' and Add project's choosers, and
   opening a session or a project there, show that machine's page on its own connections, kept
-  open; the sidebar, its folds and the bell are this machine's one list, whatever page is shown.
+  open; the sidebar and its folds are this machine's one list, whatever page is shown, and the
+  bell and "Ended" hold every machine's (#1280).
   Going to that machine's whole read for one page was slow (seconds behind a link of 150 ms a
   round trip) and showed the previous machine's values meanwhile.
 - **`project.folders` lists one folder's folders at a time** (#1182), from the machine's home: the
@@ -2083,8 +2093,21 @@ on a real phone, by hand, and reported.
   went to the pilot is the pilot's to answer), a request of its tree is held for the user (a
   launch held there among them; not one its parent or the judge holds), or an agent of its tree
   asked for a vault entry; `running` while a turn runs in its tree, `idle` otherwise.
-- Opening a session of another machine shows its page only (#1271): the list, the "Ended" group
-  and the bell stay this machine's. A project of another machine only is a group of the list
+- Opening a session of another machine shows its page only (#1271): the list stays this
+  machine's.
+- **The bell and "Ended" hold every machine's** (#1280). The window follows each other runner's
+  notification centre by a light link of its own (made once the device key is read, signed as every
+  request to that machine, and reading `notifications.list` only, at each connection and on each
+  `notifications.*` event of that machine): the bell lists that machine's notifications beside this
+  one's, each session's heading saying `on server`, and its badge and counts add them. Choosing one
+  opens that machine's page of its session, and opening that page, or **Mark all read**, marks them
+  read on that machine (`notifications.read`); the request or question is answered on that page,
+  so on its machine. "Ended" asks each other machine for its ended roots (`agent.list`, and each
+  one's brief for its title, the latest 50) when the window first reaches it and each time the
+  group is opened; a row of it opens that machine's page of the session. A machine that is off when
+  the group opens is said once, by one line of the group (`server is offline since 22:14: its ended
+  sessions are not listed`), and its rows leave. What another machine answers only ever names its
+  own sessions: each is keyed by that machine (`a1@server`) and under no row. A project of another machine only is a group of the list
   whose page is that machine's.
 - A close of a session of another machine goes through this machine's daemon whether that machine
   is on or off: kept, then sent at once when it is linked. A close is kept 30 days, as every

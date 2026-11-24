@@ -1075,7 +1075,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   session's title and project once and its notifications under it, the sessions with something
   unread first and under each its unread notifications first; a click opens the session and marks
   its notifications read; **Mark all read** marks every one; an empty state says "No
-  notifications." The bell's badge counts what is unread, and the panel says it apart, what needs
+  notifications." With several machines, the bell holds each machine's centre, a session of
+  another machine headed `· on server`, its click opening that machine's page and marking it read
+  there (`docs/remote.md`, "The bell and Ended hold every machine's"). The bell's badge counts
+  what is unread, and the panel says it apart, what needs
   the user (a request, a question, a vault entry) and the rest: `2 need you · 5 new`. Opening a
   session marks its notifications read; what arrives in the session that is open stays unread
   until the user opens it again, clicks the row or marks all read, the window being perhaps open
