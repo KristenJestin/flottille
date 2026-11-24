@@ -288,28 +288,7 @@ impl Mcp {
     }
 
     fn call_with_meta(&self, tool: &str, arguments: Value, meta: Option<Value>) -> Answer {
-        let client = self.client.as_ref().unwrap();
-        let mut params = CallToolRequestParams::new(tool.to_owned())
-            .with_arguments(arguments.as_object().cloned().unwrap_or_default());
-        if let Some(meta) = meta {
-            params.meta = Some(serde_json::from_value(meta).unwrap());
-        }
-        let result = self
-            .runtime
-            .block_on(client.call_tool(params))
-            .unwrap_or_else(|e| panic!("{tool} answers: {e}"));
-        let result = serde_json::to_value(result).unwrap();
-        let text = result["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|c| c["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("");
-        Answer {
-            text,
-            error: result["isError"] == true,
-        }
+        self.call_whole(tool, arguments, meta).0
     }
 }
 
