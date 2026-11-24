@@ -429,10 +429,19 @@ fn a_rarely_used_family_reads_its_guidance_on_demand() {
     let tools = mcp.tools();
     let services = tools.iter().find(|t| t["name"] == "services").unwrap();
     let description = services["description"].as_str().unwrap();
-    assert!(description.contains("{\"action\": \"guide\"}"), "{description}");
-    assert!(description.contains("{\"action\": \"start\""), "{description}");
+    assert!(
+        description.contains("{\"action\": \"guide\"}"),
+        "{description}"
+    );
+    assert!(
+        description.contains("{\"action\": \"start\""),
+        "{description}"
+    );
     let properties = &services["inputSchema"]["properties"];
-    assert!(properties["ask_before_running"]["description"].is_null(), "{properties}");
+    assert!(
+        properties["ask_before_running"]["description"].is_null(),
+        "{properties}"
+    );
     assert_eq!(properties["ask_before_running"]["type"], "boolean");
     let actions = properties["action"]["enum"].as_array().unwrap();
     assert!(actions.contains(&json!("guide")), "{actions:?}");
@@ -457,7 +466,11 @@ fn a_rarely_used_family_reads_its_guidance_on_demand() {
     assert!(!asked.error, "{}", asked.text);
     assert_eq!(guide, None);
     assert!(asked.text.contains("for_each_repository"), "{}", asked.text);
-    assert!(asked.text.contains("to: move: its new number."), "{}", asked.text);
+    assert!(
+        asked.text.contains("to: move: its new number."),
+        "{}",
+        asked.text
+    );
     let (listed, guide) = mcp.call_with_guide("setup", json!({"action": "list"}));
     assert!(!listed.error, "{}", listed.text);
     assert_eq!(guide, None, "already read");

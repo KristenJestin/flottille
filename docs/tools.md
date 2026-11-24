@@ -70,6 +70,29 @@ do is the gate's business, not the list's), `skills`, `commands`, `setup` and `p
   the tool, the key, the arguments with every text cut at 500 characters and masked, the outcome
   and the duration.
 
+### Guides read on demand
+
+The families an agent rarely calls (`services`, `setup`, `connections`, `vault`) are listed
+short, so that every agent does not read their whole text at every request for a call it may
+never make (`docs/reference/mcp.md` §4, "The budget"). Nothing of them is lost: it is read when
+it is needed, as a skill is read with `skill_read`.
+
+- **What is listed**: the description's first part (what the family is, its rule the agent must
+  not miss, one example) and the sentence `Its guide, each action and each argument: {"action":
+  "guide"}, or with your first call.`; the schema whole but for the sentence of each argument
+  (names, types, enums, `required` and bounds stay), with `guide` added to its actions.
+- **The guide** is the family's whole text: its full description, then one line per argument,
+  `- <name>: <its sentence>`. It is a fixed text of Flottille's, the same for every agent.
+- **It comes with the first call** of the family by the agent's process, whatever the call (a
+  refusal and a held call included): the call is performed as it would be, and its answer carries
+  the guide in a text block of its own after the result, `[flottille:guide <tool>] …`, so that the
+  result and its limits are what they always are. It comes once: a later call has none.
+- **`{"action": "guide"}`** answers the guide itself, at once: it reads nothing, changes nothing,
+  goes to no gate and is not recorded as a call. Asked first, the next call carries no guide.
+- **Once is per process**: a new process of the agent (a reload, a resume, a daemon started again)
+  is given it again at its first call; an agent whose conversation lost it (a compaction) asks
+  for it with `guide`.
+
 ### When the tools change
 
 An agent's tools are its role's in its project as it is (`docs/design.md` §4.3), stored with the
