@@ -317,17 +317,21 @@ fn scroll_cards_down(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestCont
     }
 }
 
+/// The details of the card `number` unfolded, as the user opens them.
+fn open_details(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) {
+    scroll_cards_down(shell, number, cx);
+    cx.update(|window, cx| window.click(id(format!("approval-details-{number}")), cx));
+    settle(shell, cx);
+    let toggle = id(format!("approval-details-{number}"));
+    assert_eq!(
+        cx.update(|window, _| window.find(toggle).expanded()),
+        Some(true),
+        "the details are open"
+    );
+}
+
 /// What the card `number` says of the entries Deny leaves, its details open.
 fn deny_leaves(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) -> Option<String> {
-    let open = cx.update(|window, _| {
-        window
-            .try_find(id(format!("approval-more-{number}")))
-            .is_some()
-    });
-    if !open {
-        scroll_cards_down(shell, number, cx);
-        cx.update(|window, cx| window.click(id(format!("approval-details-{number}")), cx));
-    }
     settle(shell, cx);
     label(cx, format!("approval-shared-stay-{number}"))
 }
@@ -455,6 +459,7 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
     open_page(&shell, &agent, cx);
     the_card_lists_its_files(&shell, number, cx);
     // Nothing shared yet: Deny would leave nothing.
+    open_details(&shell, number, cx);
     assert_eq!(deny_leaves(&shell, number, cx), None);
     scroll_cards_down(&shell, number, cx);
     cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
@@ -517,6 +522,8 @@ fn allow_never_shares_a_hand_made_entry_of_the_file_s_name(cx: &mut TestAppConte
     let (shell, cx) = window(&server, cx);
     open_page(&shell, &agent, cx);
     the_card_lists_its_files(&shell, number, cx);
+    open_details(&shell, number, cx);
+    scroll_cards_down(&shell, number, cx);
     cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
     until(&shell, cx, "the refusal on the card", |cx| {
         label(cx, format!("approval-error-{number}")).is_some()
