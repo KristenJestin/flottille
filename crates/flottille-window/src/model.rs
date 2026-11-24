@@ -172,21 +172,10 @@ fn listed_by<'a>(
     sessions.iter().map(|s| s.project.as_str()).collect()
 }
 
-/// How a project of a machine is told from another's.
-enum Identity {
-    /// The remotes of its repositories: the same project as any other with the same.
-    Remotes(Vec<String>),
-    /// A repository of it has no remote: it is the same as no other.
-    Alone,
-    /// Its machine does not say (a list from before projects were listed): the same name is the
-    /// same project.
-    Unknown,
-}
-
 /// One row of the projects' list: a project and the machines that have it.
 struct Group {
     key: String,
-    identity: Identity,
+    identity: crate::machines::Identity,
     machines: Vec<String>,
     /// The name this machine's own project goes by in it, when this machine has it.
     own: Option<String>,
@@ -1692,20 +1681,12 @@ impl Snapshot {
             let mut seen = HashSet::new();
             names.retain(|name| seen.insert(*name));
             for name in names {
-                let identity = match held(machine).iter().find(|h| h.name == name) {
-                    Some(h) if h.remotes.is_empty() => Identity::Alone,
-                    Some(h) => Identity::Remotes(h.remotes.clone()),
-                    None => Identity::Unknown,
-                };
+                let identity = machines.identity(Some(machine), name);
                 // A machine has a project once in a row: two of its own with the same
                 // repositories stay two rows.
                 let found = groups.iter().position(|group| {
                     !group.machines.iter().any(|m| m == machine)
-                        && match (&group.identity, &identity) {
-                            (Identity::Remotes(a), Identity::Remotes(b)) => a == b,
-                            (Identity::Unknown, _) | (_, Identity::Unknown) => group.key == name,
-                            _ => false,
-                        }
+                        && crate::machines::same((&group.identity, &group.key), (&identity, name))
                 });
                 let index = match found {
                     Some(index) => {
