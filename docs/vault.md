@@ -383,7 +383,10 @@ the file takes the sign-in. The daemon makes `browsers/` at its start (mode 0700
 process it confines is kept out of it: the private mount namespace empties it as it empties the
 runtime folders, and only the connection's own folder is put back, for its server and its login
 (and its reload of the page), the folder the daemon made for that connection, never one a
-variable or a request names. It is made once and never made again while a browser may run (the
+variable or a request names. The folders on the way to `browsers/` that the user may change
+(the state folder, the home…) are kept where they are in the namespace, as the ones on the way to
+`~/.ssh` (below): a run that renamed one would have the next run, whose namespace empties the
+path found at the daemon's start, open the profiles under the new name; the rename fails. It is made once and never made again while a browser may run (the
 inode Landlock and the mount hold, #1040), and removed with its connection, once the browser is
 closed. The gate holds `browsers/` for a login's place, as Flottille's keys (`docs/tools.md`,
 "The gate"), so a line that names a path in it is refused in every mode, also where the kernel
