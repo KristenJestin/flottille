@@ -32,7 +32,7 @@ const MOST_WAITING: usize = 4;
 
 /// The most launches of one machine, of any kind, that may wait here for the user's answer: past
 /// them, its next is refused, so that a machine fills no list of requests.
-const MOST_HELD: usize = 4;
+pub(crate) const MOST_HELD: usize = 4;
 
 /// How long a launch may wait for its code before it is forgotten, with what came of it.
 const WAITING_FOR_CODE: Duration = Duration::from_secs(60 * 60);

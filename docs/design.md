@@ -823,7 +823,8 @@ line names, every program a wrapper or a runner runs included:
   `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
   `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
   `/etc/sudoers.d`; Flottille's keys, the folder `remote/` of its state folder, in any case
-  (`docs/remote.md`, "Identity and keys"); the agents' own folders of the home (`~/.claude`,
+  (`docs/remote.md`, "Identity and keys"), and its browsers' profiles, the folder `browsers/`
+  beside it (`docs/vault.md`, "The runtime folder"); the agents' own folders of the home (`~/.claude`,
   `~/.claude.json` and its copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where
   the path leads included (a link to them, a project that is the home folder); a file of a
   revision named `rev:path` (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git
@@ -1270,6 +1271,23 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   ended runs`: the last runs that ended, each with its place (`in main`, `in checkout-retry`) and
   how it ended. A click on a run opens its drawer. A workspace with no session is its row alone,
   with its facts.
+  **A project several machines have** (#1266) lists, after its places, the sessions of each other
+  machine that has it, as the one list has them (`docs/remote.md`, "One list of every machine"):
+  a block a machine, in the order its row marks them, whose heading is the machine's icon in its
+  colour, its name and its state (`server · online`, `pc · this machine` on another machine's
+  page of it), then its sessions, the latest exchange first, each with the machine's icon, its
+  title and how long since it was active; a click opens it there. A machine with no session of it
+  has no block; a block unfolds as its first session comes and folds away with its last, its rows
+  unfolding and folding away as theirs do, and its ink fades while its machine is off. A session
+  starts, and so the page that opens is the one of, this machine when it has the project and can
+  run an agent (its role is a runner); else the one machine online that has it; when several do and this one
+  cannot, the one the user chose for the project (window state, `sidebar`'s `starts`,
+  `docs/protocol.md`) while it still can, else the composer asks first, one line (`Choose where
+  it runs: server or laptop.`) and Start waiting until the machine picker chose one; choosing in
+  that picker is the choice kept. The
+  project's settings have the same picker on their title's line, `Settings of` to a reader: the
+  machines that have it, this one first, each with its state; choosing one shows that machine's
+  settings of the project. With the project on one machine only, it narrows away.
   **Pull requests** and **Tickets** (`items.md`) each count what they list, filtered on one row:
   `Open | Closed | All`, **Mine**, a repository for the pull requests, and a search by key or
   title (the quick switcher's matching, what matched in the accent); a line under the row says
@@ -1721,6 +1739,10 @@ nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
 
+- An agent's proposed edit of a vault entry (`docs/vault.md`, "Proposing an edit of an entry"):
+  a second one for the entry while one waits is refused rather than joined (it would hide what
+  the first said), any save of the entry answers it as saved, and Accept has no command of its
+  own (Dismiss of an asked entry has none either).
 - Data in XDG folders; workspaces under the data folder unless the project says otherwise.
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one

@@ -181,9 +181,6 @@ pub struct Declaration {
     pub except: Vec<String>,
     /// The OAuth client id the user registered with the server's authorization server, for a URL.
     pub client_id: Option<String>,
-    /// Whether an adapter's browser is shown: its server also gets the daemon's display
-    /// variables, and the adapter writes `headed` in the configuration it writes.
-    pub headed: bool,
 }
 
 /// A vault entry a URL connection's requests carry, and where.
@@ -525,6 +522,7 @@ const KEYS: &[&str] = &[
     // Read and ignored: it added hosts to a list of the browser's sites that is gone (#1041), and
     // a declaration written while it existed still loads.
     "sites",
+    // The same: showing the browser is the agent's, a call at a time (#1066).
     "headed",
 ];
 
@@ -712,12 +710,6 @@ impl Declaration {
                 return Err(format!("{at}.client_id: must be a client id, on one line"));
             }
         }
-        let headed = match table.get("headed") {
-            None => false,
-            Some(value) => value
-                .as_bool()
-                .ok_or_else(|| format!("{at}.headed: must be true or false"))?,
-        };
         Ok(Declaration {
             name,
             about,
@@ -728,7 +720,6 @@ impl Declaration {
             only,
             except,
             client_id,
-            headed,
         })
     }
 
@@ -776,15 +767,12 @@ impl Declaration {
         if let Some(id) = &self.client_id {
             table["client_id"] = json!(id);
         }
-        if self.headed {
-            table["headed"] = json!(true);
-        }
         table
     }
 
-    /// What trust is given to: how the server is reached, what it is given, the limits, and
-    /// whether an adapter's browser is shown. An edit of any of them is another server as
-    /// far as trust goes; the sentence, the switch and the projects left out are not.
+    /// What trust is given to: how the server is reached, what it is given and the limits. An edit
+    /// of any of them is another server as far as trust goes; the sentence and the
+    /// projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
             Reach::Command(words) => json!({"command": words}),
@@ -803,10 +791,6 @@ impl Declaration {
             "only": self.only});
         if let Some(others) = json.get("secrets") {
             trusted["secrets"] = others.clone();
-        }
-        // Only when it is: a connection that is not shown keeps the digest it was pinned for.
-        if self.headed {
-            trusted["headed"] = json!(true);
         }
         crate::files::sha256(trusted.to_string().as_bytes())
     }
@@ -1878,10 +1862,16 @@ fn help(declaration: &Declaration, row: &Row, of: Option<&str>, entries: &[Strin
             Some(action) => Outcome::Done(format!(
                 "The action {} of {tool}, as its server describes it ({says}):\n\
                  <connection_text>\n{}\n</connection_text>\nIts arguments, as JSON Schema \
-                 (arguments of the call):\n<connection_text>\n{}\n</connection_text>",
+                 (arguments of the call):\n<connection_text>\n{}\n</connection_text>{}",
                 action.name,
                 framed(&cut(&action.description, HELP_CHARS)),
-                framed(&action.schema.to_string())
+                framed(&action.schema.to_string()),
+                adapter
+                    .and_then(|adapter| adapter.shows)
+                    .filter(|(opens, _)| *opens == action.name)
+                    .map_or(String::new(), |(_, words)| format!(
+                        "\nFlottille's own words, not the server's: {words}"
+                    ))
             )),
             None => Outcome::Refused(format!("refused: {tool} has no action {action:?}")),
         },
@@ -2726,6 +2716,8 @@ async fn remove_if(
     })?;
     client::stop(daemon, &name).await;
     client::vault_removed(daemon, &name).await;
+    // Its browser closed with the server: its profile, the sign-ins made in it, goes with it.
+    crate::browsers::remove(&daemon.paths, &name);
     forget_row(daemon, &name)?;
     oauth::forget(daemon, &name)
         .await
@@ -2875,7 +2867,7 @@ fn adapter_said(
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config, declaration.headed), "said": said})
+                "changed": adapter.changed(config), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,

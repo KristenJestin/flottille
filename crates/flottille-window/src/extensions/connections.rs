@@ -97,14 +97,6 @@ pub const SECRETS_HINT: &str = "Each one's value is a vault entry every project 
 pub const LIMITS_HINT: &str = "An argument of that name may take only these values, in every \
                                action that has it.";
 
-/// What *Show the browser* says: what it gives the server.
-pub const HEADED_HINT: &str = "Shows the browser an agent drives on your screen. A change stops \
-     the server that runs, and the next start applies it. With X11 the browser can read the keys \
-     you type in other windows and type into them, a terminal's included; on some Wayland \
-     compositors a client can capture the screen and the clipboard. Your desktop can keep the \
-     browser from taking your focus, by the window class flottille-browser: docs/extensions.md \
-     (Show the browser) gives the rule.";
-
 /// The radio's label of what happens when an agent calls an action.
 pub const WHEN_CALLED: &str = "When an agent calls it";
 
@@ -205,10 +197,6 @@ pub struct Server {
     pub only: BTreeMap<String, Vec<String>>,
     /// The OAuth client id registered with the authorization server of its URL.
     pub client_id: Option<String>,
-    /// Whether an adapter's browser is shown on the screen.
-    pub headed: bool,
-    /// Why the browser of its running server is not shown though it is meant to be.
-    pub headless: Option<String>,
     /// `off`, `awaiting review`, `cut off` or `ready`.
     pub state: String,
     /// What changed when it was cut off.
@@ -267,8 +255,6 @@ impl Server {
                 })
                 .collect(),
             client_id: value["client_id"].as_str().map(str::to_owned),
-            headed: value["headed"] == true,
-            headless: value["headless"].as_str().map(str::to_owned),
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
             failing: value["failing"].as_str().map(str::to_owned),
@@ -976,8 +962,6 @@ pub struct ConnectionsSection {
     secret_rows: Listing<String>,
     limits: Vec<Limit>,
     limit_rows: Listing<String>,
-    /// The form's *Show the browser*.
-    headed: bool,
     made: u64,
     saving: bool,
     form_error: Option<SharedString>,
@@ -1038,7 +1022,6 @@ impl ConnectionsSection {
             secret_rows: Listing::default(),
             limits: Vec::new(),
             limit_rows: Listing::default(),
-            headed: false,
             made: 0,
             saving: false,
             form_error: None,
@@ -1296,16 +1279,6 @@ impl ConnectionsSection {
     /// What the form says is wrong, under its fields.
     pub fn form_error(&self) -> Option<String> {
         self.form_error.as_ref().map(ToString::to_string)
-    }
-
-    /// Under the switch, while it is on: why the browser of the server that runs is not shown.
-    pub fn headless_said(&self) -> Option<String> {
-        let Form::Editing(Some(name)) = &self.form else {
-            return None;
-        };
-        let why = self.server(name)?.headless?;
-        (self.headed && self.reach == Reach::Command)
-            .then(|| format!("The browser is not shown, it runs headless: {why}"))
     }
 
     /// The review's search field, once the dialog has drawn it.
@@ -1773,7 +1746,6 @@ impl ConnectionsSection {
         self.variables.clear();
         self.secrets.clear();
         self.limits.clear();
-        self.headed = server.is_some_and(|s| s.headed);
         if let Some(server) = server {
             for (name, entry) in server.env.clone() {
                 self.new_variable(Some((name, entry)), window, cx);
@@ -2024,9 +1996,6 @@ impl ConnectionsSection {
                 }
                 params["command"] = json!(words);
                 params["env"] = Value::Object(entries);
-                if editing || self.headed {
-                    params["headed"] = json!(self.headed);
-                }
                 if editing {
                     params["headers"] = json!({});
                     params["secrets"] = json!([]);
@@ -2047,7 +2016,6 @@ impl ConnectionsSection {
                 params["secrets"] = json!(secrets);
                 if editing {
                     params["env"] = json!({});
-                    params["headed"] = json!(false);
                 }
                 let client_id = value(&fields.client_id);
                 if client_id.chars().any(char::is_control) {
@@ -2865,12 +2833,6 @@ impl ConnectionsSection {
         let new_limit = Button::secondary("connection-new-limit", "New limit")
             .leading(Icon::Plus)
             .on_click(cx.listener(|this, _, window, cx| this.new_limit(None, window, cx)));
-        let headed = Switch::new("connection-headed", self.headed, "Show the browser")
-            .hint(HEADED_HINT)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.headed = !this.headed;
-                cx.notify();
-            }));
         let variables_field = Field::new(
             "connection-variables-field",
             "Variables of its environment",
@@ -2904,7 +2866,6 @@ impl ConnectionsSection {
                 .child(div().pt(space::SM).child(new_limit)),
         )
         .hint(LIMITS_HINT);
-        let why_headless = self.headless_said().map(SharedString::from);
         let body = div()
             .id("connection-form")
             .flex()
@@ -2980,20 +2941,6 @@ impl ConnectionsSection {
                 .space(space::LG),
             )
             .child(spaced(space::LG, limits_field))
-            .child(
-                presence(
-                    "connection-headed-block",
-                    self.reach == Reach::Command,
-                    headed,
-                )
-                .space(space::LG),
-            )
-            .child(problem_line(
-                "connection-headed-why",
-                why_headless,
-                space::LG,
-                cx,
-            ))
             .test_support();
         // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
         let error = problem_line("connection-error", self.form_error.clone(), px(0.), cx);

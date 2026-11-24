@@ -156,8 +156,21 @@ pub struct VaultAsk {
     /// The connection it is for: the entry is every project's.
     pub connection: Option<String>,
     pub why: String,
+    /// An agent's proposed edit of an entry that exists, instead of a new one: each field
+    /// changed, in the order the card says them. Empty for a new entry.
+    pub edit: Vec<VaultChange>,
     /// How it ended, once answered.
     pub outcome: Option<VaultOutcome>,
+}
+
+/// A field of a vault entry an agent proposes to change, as the daemon says it (`vault.asks`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultChange {
+    /// `url`, `username`, `description`, `project` or `for`.
+    pub field: String,
+    /// Left out: empty (a project's: every project).
+    pub before: Option<String>,
+    pub after: Option<String>,
 }
 
 /// How a request for a vault entry was answered.
@@ -165,6 +178,8 @@ pub struct VaultAsk {
 pub enum VaultOutcome {
     /// The user saved the entry.
     Saved,
+    /// The user accepted the proposed edit as it was.
+    Accepted,
     /// The user dismissed the request.
     Dismissed,
 }
@@ -173,6 +188,7 @@ impl VaultOutcome {
     fn of(data: &Value) -> Self {
         match data["outcome"].as_str() {
             Some("dismissed") => Self::Dismissed,
+            Some("accepted") => Self::Accepted,
             _ => Self::Saved,
         }
     }
@@ -182,6 +198,11 @@ impl VaultAsk {
     /// Waiting for the user.
     pub fn open(&self) -> bool {
         self.outcome.is_none()
+    }
+
+    /// An agent's proposed edit of an entry, not a request for a new one.
+    pub fn proposes(&self) -> bool {
+        !self.edit.is_empty()
     }
 
     /// A request as the daemon lists it (`vault.asks`, or the `vault.asked` event): never a secret.
@@ -202,6 +223,18 @@ impl VaultAsk {
             bound: option("for"),
             connection: option("connection"),
             why: text("why"),
+            edit: ["url", "username", "description", "project", "for"]
+                .into_iter()
+                .filter_map(|field| {
+                    let change = data["edit"].get(field)?;
+                    let side = |side: &str| change[side].as_str().map(str::to_owned);
+                    Some(VaultChange {
+                        field: field.to_owned(),
+                        before: side("before"),
+                        after: side("after"),
+                    })
+                })
+                .collect(),
             outcome: None,
         }
     }
@@ -212,9 +245,13 @@ impl VaultAsk {
         let end = match self.outcome {
             None => "waiting for you",
             Some(VaultOutcome::Saved) => "saved",
+            Some(VaultOutcome::Accepted) => "accepted",
             Some(VaultOutcome::Dismissed) => "dismissed",
         };
-        format!("asked for the vault entry {} · {end}", self.name)
+        match self.proposes() {
+            true => format!("proposed an edit of the vault entry {} · {end}", self.name),
+            false => format!("asked for the vault entry {} · {end}", self.name),
+        }
     }
 }
 
