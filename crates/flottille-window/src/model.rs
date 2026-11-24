@@ -1543,9 +1543,41 @@ impl Snapshot {
         }
         self.elsewhere.extend(added);
         self.arrange(machines, front);
+        self.drop_pilot_loops();
         self.tie_across();
         self.projects.sort_by(|a, b| a.name.cmp(&b.name));
         self
+    }
+
+    /// Drops the pilot of a row that would close a loop, of any length, among the rows' pilots:
+    /// a machine of the list is untrusted, and two machines that disagree on who leads whom
+    /// would otherwise leave every row of the loop under another, with none to start from, so
+    /// none drawn. A row whose pilot is itself loses it too. The rows keep their order, and the
+    /// first edge of a loop to be read stays.
+    fn drop_pilot_loops(&mut self) {
+        let mut kept: HashMap<String, String> = HashMap::new();
+        for row in self.sessions.iter_mut().chain(&mut self.elsewhere) {
+            let Some(pilot) = row.pilot.clone() else {
+                continue;
+            };
+            // `kept` has no loop, so the walk ends.
+            let mut at = pilot.as_str();
+            let closes = loop {
+                if at == row.id {
+                    break true;
+                }
+                match kept.get(at) {
+                    Some(next) => at = next,
+                    None => break false,
+                }
+            };
+            match closes {
+                true => row.pilot = None,
+                false => {
+                    kept.insert(row.id.clone(), pilot);
+                }
+            }
+        }
     }
 
     /// The rows led by a session of another machine: one in its pilot's project row sits under
