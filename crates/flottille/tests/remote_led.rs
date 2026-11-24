@@ -828,6 +828,9 @@ fn review_call(id: &str, launch: &str, root: &str, session: &str, args: Value) -
     }))
 }
 
+/// What the review tool of the machine says to a call that is not the review of a led session.
+const LED_ONLY: &str = "review only starts the review of a session its pilot leads here";
+
 #[test]
 fn the_pilot_of_another_machine_starts_no_other_review_there() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
@@ -839,15 +842,24 @@ fn the_pilot_of_another_machine_starts_no_other_review_there() {
             launch["launch"].as_str().unwrap().to_owned(),
         )
     };
+    // A child of the same root there: a launch of its own, which is not a led one.
+    let started = done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    ))
+    .to_owned();
+    let (child, child_launch) = (id_in(&started), launch_in(&started));
     drop(mcp);
     let key = pc.stand_in();
 
-    // Its own change, a pull request, a pass, a report: none is the review of the session it
-    // leads there, and none is served; that review alone is.
+    // Its own change, a pull request, a pass, a report, a field more: none is the review of the
+    // session it leads there, and none is served; that review alone is.
     let mut calls: Vec<MachineMessage> = [
         json!({"action": "start"}),
         json!({"action": "start", "pull_request": 7}),
         json!({"action": "start", "agent": session, "pull_request": 7}),
+        json!({"action": "start", "agent": session, "x": 1}),
         json!({"action": "start", "agent": "0123456789ab"}),
         json!({"action": "run_pass", "pass": "bugs"}),
         json!({"action": "report", "summary": "Nothing.", "findings": []}),
@@ -856,6 +868,14 @@ fn the_pilot_of_another_machine_starts_no_other_review_there() {
     .enumerate()
     .map(|(n, args)| review_call(&format!("call-r{n}"), &text, &root, &session, args))
     .collect();
+    // Sent over the launch of a child, a session it does not lead.
+    calls.push(review_call(
+        "call-child",
+        &child_launch,
+        &root,
+        &child,
+        json!({"action": "start", "agent": child}),
+    ));
     calls.push(review_call(
         "call-ok",
         &text,
@@ -868,13 +888,75 @@ fn the_pilot_of_another_machine_starts_no_other_review_there() {
 
     let (refused, started) = answers.split_at(answers.len() - 1);
     for answer in refused {
-        let served = answer
-            .as_ref()
-            .is_ok_and(|answer| answer["outcome"] == "ok");
-        assert!(!served, "{answer:?}");
+        // Each is refused by the guard itself, not by what the review tool would say further on.
+        let why = answer.as_ref().unwrap_err();
+        assert!(why.contains(LED_ONLY), "{why}");
     }
     let started = started[0].as_ref().unwrap();
     assert_eq!(started["outcome"], "ok", "{started}");
     let all = reviews_of(&server, &session);
     assert_eq!(all.len(), 1, "{all:?}");
+    assert!(reviews_of(&server, &child).is_empty());
+}
+
+#[test]
+fn a_review_with_no_launch_is_not_served_there() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, mcp) = led_with_review(&pc, &server);
+    let root = launches(&pc)[0]["caller"].as_str().unwrap().to_owned();
+    drop(mcp);
+    let key = pc.stand_in();
+
+    // The review of a session of this machine is called as any other session's tool is, by the
+    // stand-in's tools, which hold no review.
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![review_call(
+            "call-empty",
+            "",
+            &root,
+            &session,
+            json!({"action": "start", "agent": session}),
+        )],
+    );
+
+    let why = answers[0].as_ref().unwrap_err();
+    assert!(why.contains("is not a tool another machine calls"), "{why}");
+    assert!(reviews_of(&server, &session).is_empty());
+}
+
+#[test]
+fn a_viewer_machine_cannot_start_the_review_of_its_led_session() {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, mcp) = led_with_review(&pc, &server);
+    hub.make_viewer("pc");
+    eventually("pc a viewer on server", || {
+        server.seen("pc")["role"] == "viewer"
+    });
+
+    let started = mcp.call("review", json!({"action": "start", "agent": session}));
+
+    let text = refused(&started);
+    assert!(text.contains("may only view"), "{text}");
+    assert!(reviews_of(&server, &session).is_empty());
+}
+
+#[test]
+fn a_review_while_the_machine_is_off_says_to_call_again_when_it_is_back() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, mcp) = led_with_review(&pc, &server);
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+
+    let started = mcp.call("review", json!({"action": "start", "agent": session}));
+
+    let text = refused(&started);
+    // Nothing comes back from a review that was not started: the lead calls again.
+    assert!(!text.contains("woken"), "{text}");
+    assert!(text.contains("call again once server is back"), "{text}");
+    // The session is named as `forward` names it.
+    let named = format!("the session \"Finish the export\" (agent {session})");
+    assert!(text.contains(&named), "{text}");
+    on(&server);
 }

@@ -1245,7 +1245,16 @@ pub(crate) async fn review_led(
         woken: true,
     };
     let args = json!({"action": "start", "agent": id});
-    Some(forward_to(daemon, grant, REVIEW, &args, aim).await)
+    Some(older_review(
+        forward_to(daemon, grant, REVIEW, &args, aim).await,
+        &name,
+    ))
+}
+
+/// What `outcome`, the answer of `name` to a `review` call, says to the lead: a machine of before
+/// the review of a led session answers that review is no tool another machine calls.
+fn older_review(outcome: Outcome, _name: &str) -> Outcome {
+    outcome
 }
 
 fn called(
@@ -2831,6 +2840,28 @@ mod tests {
             session: "agent ab12".to_owned(),
             woken: true,
         }
+    }
+
+    #[test]
+    fn a_machine_of_before_the_review_is_told_to_be_updated() {
+        let said = "refused by server: \"review\" is not a tool another machine calls".to_owned();
+
+        let told = text_of(older_review(Outcome::Refused(said), "server"));
+
+        assert!(told.contains("server needs updating"), "{told}");
+        assert!(
+            !told.contains("is not a tool another machine calls"),
+            "{told}"
+        );
+    }
+
+    #[test]
+    fn another_refusal_of_a_review_is_left_as_it_is() {
+        let said = "refused by server: no.".to_owned();
+
+        let told = text_of(older_review(Outcome::Refused(said.clone()), "server"));
+
+        assert_eq!(told, said);
     }
 
     fn text_of(outcome: Outcome) -> String {
