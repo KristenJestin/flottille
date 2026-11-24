@@ -1220,25 +1220,34 @@ fn pc_and_server_on_one_repository() -> (TestHub, Machine, Machine) {
     let (hub, pc, server) = pc_and_server();
     pc.user
         .git(&pc.user.path("work/app"), &["remote", "add", "origin", APP]);
+    // A launch finds the project it runs in by a root commit in common (`travelled::recognise`):
+    // a clone has the pc's, where a commit of its own would share it only when both fell in the
+    // same second, else the server would make `app-2` and the session be in no row of `app`.
     let repo = server.user.path("work/app");
-    server.user.git_init(&repo);
-    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
-    server.user.git(&repo, &["add", "."]);
+    let work = server.user.path("work");
+    std::fs::create_dir_all(&work).unwrap();
+    server.user.git(
+        &work,
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            pc.user.path("work/app").to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
     server
         .user
-        .git(&repo, &["commit", "--quiet", "-m", "first"]);
-    server.user.git(&repo, &["remote", "add", "origin", APP]);
-    // A launch finds the project it runs in by a root commit in common (`travelled::recognise`):
-    // two repositories committed on their own share one only when both commits fall in the same
-    // second, else the server makes `app-2` and the session is in no row of `app`.
-    let root = |machine: &Machine, folder: &std::path::Path| {
-        machine
-            .user
-            .git_output(folder, &["rev-list", "--max-parents=0", "main"])
-    };
+        .git(&repo, &["remote", "set-url", "origin", APP]);
     assert_eq!(
-        root(&pc, &pc.user.path("work/app")),
-        root(&server, &repo),
+        server
+            .user
+            .git_output(&repo, &["rev-list", "--max-parents=0", "main"]),
+        pc.user.git_output(
+            &pc.user.path("work/app"),
+            &["rev-list", "--max-parents=0", "main"]
+        ),
         "the two repositories of app share no root commit"
     );
     register(&pc);
