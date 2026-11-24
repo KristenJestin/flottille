@@ -1103,30 +1103,33 @@ fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppCo
     assert!(!present(cx, "composer-machine-off"));
 }
 
-/// What of the elements under the settings' fixed sentence is drawn over it: the scrolling page
-/// starts below the sentence, and nothing of what scrolls, cut to the page, reaches into it.
-fn drawn_over_the_own_line(cx: &mut VisualTestContext) -> Vec<String> {
+/// What is drawn over the fixed header (the title and the tabs) or over the sentence of another
+/// machine's page: the sentence is read in what scrolls, so that it passes with it, and what
+/// scrolls, cut to its page, never reaches the header.
+fn drawn_over_the_header(cx: &mut VisualTestContext) -> Vec<String> {
+    let in_page =
+        |path: &[gpui_kit::ElementId]| path.iter().any(|id| *id == "settings-page".into());
     cx.update(|window, _| {
-        let own = window.find("settings-own").bounds();
+        let tabs = window.find("settings-tabs").bounds();
         let page = window.find("settings-page").bounds();
+        let own = window.find("settings-own");
         let mut over = Vec::new();
-        if page.origin.y < own.bottom() {
+        if !in_page(own.path()) {
+            over.push("the sentence stays fixed above what scrolls".to_owned());
+        }
+        if page.origin.y < tabs.bottom() {
             over.push(format!(
-                "the page starts at {:?}, the sentence ends at {:?}",
+                "the page starts at {:?}, the tabs end at {:?}",
                 page.origin.y,
-                own.bottom()
+                tabs.bottom()
             ));
         }
         for element in window.elements() {
-            if !element
-                .path()
-                .iter()
-                .any(|id| *id == "settings-page".into())
-            {
+            if !in_page(element.path()) {
                 continue;
             }
             let drawn = element.bounds().intersect(&page);
-            if drawn.size.width > px(0.) && drawn.size.height > px(0.) && drawn.intersects(&own) {
+            if drawn.size.width > px(0.) && drawn.size.height > px(0.) && drawn.intersects(&tabs) {
                 over.push(format!("{:?} is drawn at {drawn:?}", element.path().last()));
             }
         }
@@ -1186,7 +1189,7 @@ fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContex
                 let before = content_top(cx);
                 for turn in 0..8 {
                     assert_eq!(
-                        drawn_over_the_own_line(cx),
+                        drawn_over_the_header(cx),
                         Vec::<String>::new(),
                         "{tab}, {shade}, {width} px wide, after {turn} turns of the wheel"
                     );
