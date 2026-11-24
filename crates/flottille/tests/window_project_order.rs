@@ -1031,13 +1031,15 @@ fn removing_a_group_from_its_menu_keeps_its_projects_and_folds_it_away(cx: &mut 
     drag(project_id("bravo"), group_header_id(&id), 0., &shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["bravo", "alpha"]));
     settle(&shell, cx);
-    let before = bounds(cx, group_header_id(&id)).size.height;
+    // The heading's frame, which folds away; the heading itself keeps its height inside it.
+    let head = gpui_kit::ElementId::Name(format!("projects-list-group-{id}-head").into());
+    let before = bounds(cx, head.clone()).size.height;
 
     from_menu(&id, group_remove_id(&id), &shell, cx);
     // Half-way: the heading is still there, folding away with its gap.
     step(&shell, PANEL / 2, cx);
     assert!(present(cx, group_header_id(&id)), "the heading folds away");
-    let half = bounds(cx, group_header_id(&id)).size.height;
+    let half = bounds(cx, head).size.height;
     assert!(half > px(0.) && half < before, "{half:?} of {before:?}");
     assert!(
         held(&shell, "Work", cx).is_empty(),
@@ -1097,7 +1099,11 @@ fn a_folded_group_shows_its_strongest_mark(cx: &mut TestAppContext) {
     });
     new_group("Work", &shell, cx);
     let id = group_id(&shell, "Work", cx);
+    // Folded, the project's row is its heading alone: the pointer is not on one of its sessions.
+    cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
+    settle(&shell, cx);
     drag(project_id("app"), group_header_id(&id), 0., &shell, cx);
+    assert_eq!(held(&shell, "Work", cx), names(&["app"]));
     settle(&shell, cx);
     // The row shows it while the group is unfolded.
     assert!(
