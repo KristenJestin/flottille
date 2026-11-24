@@ -2587,9 +2587,13 @@ async fn played_whole(
                             // and a pull request approved or blocked, by `forge` or by a line,
                             // and the worklog's token sent to another site or entry, a
                             // worklog deleted, a connection written, and a pull request's code
-                            // run by its review.
+                            // run by its review. So is, asked from another machine, a removal
+                            // that would lose what did not go back there.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
+                                && !(crate::across::is_stand_in(&grant.agent)
+                                    && removes_a_workspace(tool, &args)
+                                    && crate::actions::removal_loses(&says))
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
                                 && !gate::asks_launch_elsewhere(&ask)

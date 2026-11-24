@@ -625,6 +625,14 @@ pub fn compared(says: &[String]) -> Vec<&String> {
         .collect()
 }
 
+/// What a removal's card says when it would lose nothing.
+const NOTHING_LOST: &str = "Nothing would be lost";
+
+/// Whether the removal a card `says` would lose anything.
+pub fn removal_loses(says: &[String]) -> bool {
+    !says.iter().any(|said| said == NOTHING_LOST)
+}
+
 fn removal_words(removal: Removal) -> Vec<String> {
     let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
@@ -637,7 +645,7 @@ fn removal_words(removal: Removal) -> Vec<String> {
         says.push(format!("{STOPPED}{}", lines.join(", ")));
     }
     if losses.is_empty() {
-        says.push("Nothing would be lost".into());
+        says.push(NOTHING_LOST.into());
     } else {
         says.push(
             "This would be lost, and the workspace is removed only if your answer says to \
