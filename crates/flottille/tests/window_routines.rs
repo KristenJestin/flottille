@@ -1199,7 +1199,12 @@ fn a_routine_an_agent_edited_says_which_session(cx: &mut TestAppContext) {
 fn a_routine_never_shows_the_editor_of_the_one_before(cx: &mut TestAppContext) {
     let user = user();
     add(&user, "Mornings", LIST_REVIEWS, json!({}));
-    add(&user, "Evenings", LIST_REVIEWS, json!({}));
+    add(
+        &user,
+        "Evenings",
+        LIST_REVIEWS,
+        json!({"schedule": "every day 18:30"}),
+    );
     let opened = user.received_requests("session/new").len();
     let started = user
         .call("agent.run", json!({"project": "app", "message": "hello"}))
@@ -1220,16 +1225,37 @@ fn a_routine_never_shows_the_editor_of_the_one_before(cx: &mut TestAppContext) {
     );
     assert!(!edited.error, "{}", edited.text);
 
+    // The other routine ran twice: a notification of its first run is no longer its last's, and
+    // leads straight to its page, from the page of the edited one, with no list between.
+    run_now(&user, "Evenings");
+    run_now(&user, "Evenings");
     let (shell, cx) = open_routine(&user, "Mornings", cx);
     until(&shell, cx, "its editor shows", |cx| {
         present(cx, "routine-edited-by")
     });
-    click(cx, "routines-back");
-    let row = "routine-Evenings";
-    until(&shell, cx, "the other is listed", |cx| present(cx, row));
-    click(cx, row);
-    until(&shell, cx, "its page shows", |cx| {
-        present(cx, "routine-header")
+    until(&shell, cx, "the other's notifications", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .bell
+                .iter()
+                .filter(|n| n.kind == "routine" && n.label == "Evenings")
+                .count()
+                == 2
+        })
+    });
+    let key = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .bell
+            .iter()
+            .filter(|n| n.kind == "routine" && n.label == "Evenings")
+            .min_by_key(|n| n.id)
+            .unwrap()
+            .key
+            .clone()
+    });
+    shell.update_in(cx, |s, window, cx| s.choose(&key, window, cx));
+    until(&shell, cx, "the other's page shows", |cx| {
+        label(cx, "routine-trigger").is_some_and(|said| said.contains("18:30"))
     });
 
     // Not a frame of its page, folding or not, says who edited the other one.
