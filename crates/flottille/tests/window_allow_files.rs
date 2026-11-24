@@ -6,17 +6,18 @@
 //! folder. Throwaway repositories. No window opens on a screen.
 
 use crate::common;
-use crate::remote::{Machine, TestHub, pc_and_server_on};
+use crate::remote::{Machine, NoKeyring, TestHub, pc_and_server_on};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
+use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
 use flottille_window::device::Device;
-use flottille_window::link::Connect;
+use flottille_window::link::{Connect, Sign};
 use flottille_window::model::elsewhere_id;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::session_id;
@@ -181,7 +182,28 @@ fn window<'a>(
     let (shell, cx) =
         cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));
+    shell.update(cx, |s, _| s.sign_with(signing(machine)));
     (shell, cx)
+}
+
+/// How the window signs, as its device would: with the device key file of `machine`'s key folder.
+fn signing(machine: &Machine) -> Sign {
+    let folder = machine.folder();
+    Arc::new(move |target, request| {
+        let key = DeviceKey::load(&NoKeyring, &folder)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .ok_or_else(|| std::io::Error::other("no device key"))?;
+        let signed = Request::sign(
+            &key,
+            &request.id,
+            target,
+            &request.method,
+            &request.params,
+            SystemTime::now(),
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        serde_json::to_value(signed).map_err(std::io::Error::other)
+    })
 }
 
 /// One step of the window as the platform would run it.
