@@ -1632,9 +1632,18 @@ way in:
   agent-browser's, and removes `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is
   refused, naming the variable, while the connection's `env` names one of them or `HOME` (which
   moves where agent-browser looks for the Chrome it downloaded and where Chrome reads
-  `~/.pki/nssdb`). **The server's command runs agent-browser itself**: by its name or its path, or
-  through a chain of package runners (`npx`, `bunx`, `pnpm` or `yarn` with `dlx` or `exec`) with no
-  word but `-y` before it (`npx agent-browser mcp`, `pnpm dlx agent-browser mcp`). Anything else
+  `~/.pki/nssdb`). **The server's command runs agent-browser itself**, in one of these forms
+  and no other: `agent-browser`, by its name, which the system finds on the `PATH` the server is
+  given; an **absolute path** that resolves (links and `..` followed) to the very file named
+  `agent-browser` on that `PATH` (a relative path, a path to another file, or one whose `PATH` is
+  set by the connection's `env`, is refused: the folder it is read from is not known); or a chain
+  of package runners (`npx`, `bunx`, `pnpm` or `yarn` with `dlx` or `exec`) with no word but `-y`
+  or `--yes` before the package, which is exactly `agent-browser` or `agent-browser@<version or
+  tag>` (`npx agent-browser mcp`, `pnpm dlx agent-browser@0.43.0 mcp`, `bunx agent-browser@latest
+  mcp`). A package name that ends in `agent-browser` is not it: a scope (`@someone/agent-browser`),
+  a GitHub shorthand (`someone/agent-browser`), a URL, a path (`./agent-browser`), an alias
+  (`agent-browser@npm:another`), a source (`agent-browser@github:…`, `@file:…`, `@git+…`) or
+  any `/`, `:` or second `@` after the `@` are refused, said without echoing the spec. Anything else
   between Flottille and agent-browser could set the environment after Flottille did, so it is an
   allow list, not a list of launchers: a program before agent-browser (`env`, `envdir`, `chpst`,
   `setpriv`, `flatpak run`, a shell, `node -e`…, also inside a runner, as in `pnpm exec env -u

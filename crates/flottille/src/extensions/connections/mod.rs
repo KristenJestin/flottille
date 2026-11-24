@@ -2867,7 +2867,7 @@ fn adapter_said(
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
                     .or_else(|| adapter.unsafe_start(words, &declaration.env))
                     .or_else(|| adapter.moves_folders(words, &declaration.env))
-                    .or_else(|| adapter.launched(words))
+                    .or_else(|| adapter.launched(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }
@@ -2920,7 +2920,7 @@ async fn accept_checked(
         // A listing seen before the command was checked at each start is not pinned with it.
         if let (Some(adapter), Reach::Command(words)) =
             (adapters::applying(&listing), &declaration.reach)
-            && let Some(why) = adapter.command_refused(words)
+            && let Some(why) = adapter.command_refused(words, &declaration.env)
         {
             return Err(Failure::refused(format!("{name} is not accepted: {why}")));
         }

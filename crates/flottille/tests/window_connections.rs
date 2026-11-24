@@ -37,7 +37,7 @@ fn fake_mcp() -> PathBuf {
 }
 
 fn user() -> User {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_agent_browser(&fake_mcp());
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -75,14 +75,7 @@ fn write_script(user: &User, name: &str, script: &Value) {
 /// `agent-browser`, the only program a browser connection's command may name.
 fn command_of(user: &User, name: &str) -> Vec<String> {
     let program = match name {
-        "browser" => {
-            let program = user.path("bin/agent-browser");
-            if !program.exists() {
-                std::fs::create_dir_all(program.parent().unwrap()).unwrap();
-                std::os::unix::fs::symlink(fake_mcp(), &program).unwrap();
-            }
-            program
-        }
+        "browser" => user.path("bin/agent-browser"),
         _ => fake_mcp(),
     };
     vec![

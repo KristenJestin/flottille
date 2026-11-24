@@ -399,8 +399,8 @@ impl Adapter {
 
     /// Why login is refused when the server's command does not run the adapter's program itself
     /// (`not_itself`).
-    pub fn launched(&self, words: &[String]) -> Option<String> {
-        let why = self.not_itself(words)?;
+    pub fn launched(&self, words: &[String], env: &BTreeMap<String, String>) -> Option<String> {
+        let why = self.not_itself(words, search_path(env).as_deref())?;
         Some(format!("login is refused while {why}"))
     }
 
@@ -409,24 +409,34 @@ impl Adapter {
     /// the program itself. Flottille sets the folders before it runs the command, so anything
     /// between the two (`env`, a shell, a sandbox) would put the browser's socket, which drives
     /// it with no gate, and its profile where a run reaches them.
-    pub fn command_refused(&self, words: &[String]) -> Option<String> {
+    pub fn command_refused(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        self.command_refused_on(words, search_path(env).as_deref())
+    }
+
+    /// `command_refused`, with the folders the server looks a program in (its `PATH`), `None`
+    /// when they are not known.
+    fn command_refused_on(&self, words: &[String], path: Option<&OsStr>) -> Option<String> {
         let why = self
             .folder_set(words)
             .map(command_sets)
-            .or_else(|| self.not_itself(words))?;
-        Some(format!("{} is not started while {why}", self.server))
+            .or_else(|| self.not_itself(words, path))?;
+        Some(format!("{} {REFUSED_START} {why}", self.server))
     }
 
     /// Whether the server's command names the adapter's program: run through a wrapper the gate
     /// unwraps, or any word of it (`setsid …/agent-browser mcp`, which the gate does not unwrap).
     /// Its server is checked before its first start, as the adapter's.
     pub fn named_by(&self, words: &[String]) -> bool {
-        self.reached(words).named || words.iter().any(|word| self.is_program(word))
+        self.reached(words, None).named || words.iter().any(|word| self.names_program(word))
     }
 
-    /// Whether `word` is the adapter's program: its name, its path, or a package runner's spec of
-    /// it (`agent-browser@0.43.0`).
-    fn is_program(&self, word: &str) -> bool {
+    /// Whether `word` looks like the adapter's program, by what follows its last `/`: it only
+    /// decides that the command is checked, never that it is accepted (`is_program`).
+    fn names_program(&self, word: &str) -> bool {
         let program = crate::gate::base(word);
         program == self.server
             || program
@@ -434,10 +444,47 @@ impl Adapter {
                 .is_some_and(|rest| rest.starts_with('@'))
     }
 
+    /// Whether a package runner's `spec` is the adapter's package: its name alone, or with a
+    /// version or a tag (`agent-browser@0.43.0`, `agent-browser@latest`). A scope, a path, a URL,
+    /// an alias (`@npm:`) or a source (`@github:`, `@file:`) would run another program.
+    fn is_package(&self, spec: &str) -> bool {
+        match spec.strip_prefix(self.server) {
+            Some("") => true,
+            Some(rest) => rest.strip_prefix('@').is_some_and(|version| {
+                version.starts_with(|c: char| c.is_ascii_alphanumeric() || "^~<>=*".contains(c))
+                    && version
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_+^~<>=*|".contains(c))
+            }),
+            None => false,
+        }
+    }
+
+    /// Whether `word`, run directly, is the adapter's program: its name, which the system finds
+    /// on the server's `PATH`, or the path of that very file.
+    fn is_program(&self, word: &str, path: Option<&OsStr>) -> bool {
+        if word == self.server {
+            return true;
+        }
+        let (Some(path), true) = (path, Path::new(word).is_absolute()) else {
+            return false;
+        };
+        let found = std::env::split_paths(path)
+            .map(|folder| folder.join(self.server))
+            .find(|program| program.is_file());
+        match (
+            std::fs::canonicalize(word),
+            found.map(std::fs::canonicalize),
+        ) {
+            (Ok(asked), Some(Ok(found))) => asked == found,
+            _ => false,
+        }
+    }
+
     /// The folder variable an assignment sets before the program, in any layer of the command.
     /// The program's own arguments are its own: one that holds `HOME=` as text sets nothing.
     fn folder_set(&self, words: &[String]) -> Option<&'static str> {
-        let reached = self.reached(words);
+        let reached = self.reached(words, None);
         FOLDERS_OF_THE_BROWSER.into_iter().find(|name| {
             reached.before.iter().any(|word| {
                 crate::gate::assignment(word) && word.split_once('=').map(|(n, _)| n) == Some(*name)
@@ -451,8 +498,8 @@ impl Adapter {
     /// Every other program before it is refused, whatever it is: a list of the wrappers that set
     /// an environment (`env`, `envdir`, `chpst`, `setpriv`, `flatpak`, a shell, `node -e`…) is
     /// never whole.
-    fn not_itself(&self, words: &[String]) -> Option<String> {
-        let what = self.reached(words).refused?;
+    fn not_itself(&self, words: &[String], path: Option<&OsStr>) -> Option<String> {
+        let what = self.reached(words, path).refused?;
         Some(format!(
             "the server's command {what}: a connection to {server} runs {server} itself, by its \
              name or its path, or through npx, bunx, pnpm or yarn with dlx or exec and no option \
@@ -465,7 +512,7 @@ impl Adapter {
 
     /// How the server's command reaches the adapter's program, layer after layer as the gate
     /// unwraps them.
-    fn reached(&self, words: &[String]) -> Reached {
+    fn reached(&self, words: &[String], path: Option<&OsStr>) -> Reached {
         let layers = crate::gate::layers(words).unwrap_or_else(|_| vec![words.to_vec()]);
         let mut reached = Reached::default();
         for (at, layer) in layers.iter().enumerate() {
@@ -488,8 +535,29 @@ impl Adapter {
                 break;
             };
             let program = crate::gate::base(first);
-            if self.is_program(first) {
+            if self.names_program(first) {
                 reached.named = true;
+                if reached.refused.is_none() {
+                    // What a runner was given is a package, what the command starts with a
+                    // program: neither is accepted by what follows its last `/`.
+                    let itself = match at {
+                        0 => self.is_program(first, path),
+                        _ => self.is_package(first),
+                    };
+                    if !itself {
+                        reached.refused = Some(match at {
+                            0 => format!(
+                                "runs {} by a path that is not the one found on the PATH",
+                                self.server
+                            ),
+                            _ => format!(
+                                "gives its runner another package than {}, or {} by a path, a \
+                                 scope, a URL, an alias or a source",
+                                self.server, self.server
+                            ),
+                        });
+                    }
+                }
                 return reached;
             }
             // The words between the program and what it runs: all of them when what it runs is
@@ -559,6 +627,25 @@ fn sets_a_folder(sets: &str, from: &str, named: &str) -> String {
          one the connection moved would put them where a run reads them. The user takes {named} \
          out of {from}"
     )
+}
+
+/// What follows the server's name in Flottille's own refusal to start it (`command_refused`),
+/// which says it apart from what a server says.
+const REFUSED_START: &str = "is not started while";
+
+/// Whether `why` is Flottille's own refusal to start a server (`command_refused`), not words of
+/// the server's.
+pub fn is_start_refusal(why: &str) -> bool {
+    why.contains(REFUSED_START)
+}
+
+/// Where the server looks for a program: the daemon's `PATH`, which it is given, unless the
+/// connection's environment sets one (its value is a vault entry, which is not read here).
+fn search_path(env: &BTreeMap<String, String>) -> Option<OsString> {
+    match env.contains_key("PATH") {
+        true => None,
+        false => std::env::var_os("PATH"),
+    }
 }
 
 fn command_sets(named: &str) -> String {
@@ -1282,7 +1369,7 @@ pub async fn perform(
             .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
             .or_else(|| AGENT_BROWSER.unsafe_start(&program, &declaration.env))
             .or_else(|| AGENT_BROWSER.moves_folders(&program, &declaration.env))
-            .or_else(|| AGENT_BROWSER.launched(&program))
+            .or_else(|| AGENT_BROWSER.launched(&program, &declaration.env))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
@@ -1969,8 +2056,10 @@ mod tests {
         let by_path = program.to_str().unwrap();
         assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
         assert_eq!(refused_on(&[by_path, "--headed", "mcp"], path), None);
-        // A link to it, and a path with a folder that goes back, are the same file.
-        let link = folder.path().join("link-to-it");
+        // A link to it, named as it is, and a path with a folder that goes back, are the same
+        // file.
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("agent-browser");
         std::os::unix::fs::symlink(&program, &link).unwrap();
         assert_eq!(refused_on(&[link.to_str().unwrap(), "mcp"], path), None);
         let around = format!("{}/../{}/agent-browser", folder.path().display(), {

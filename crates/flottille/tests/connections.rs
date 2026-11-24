@@ -36,7 +36,7 @@ fn eventually(what: &str, mut check: impl FnMut() -> bool) {
 
 /// A user whose agents are the fake agent, each turn of which says `ready`.
 fn user() -> User {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_agent_browser(&fake_mcp());
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     user
 }
@@ -123,12 +123,7 @@ fn command_of(user: &User, name: &str) -> Value {
 
 /// The fake server under the name `agent-browser`, in the user's temporary folder.
 fn as_agent_browser(user: &User) -> PathBuf {
-    let program = user.path("bin/agent-browser");
-    if !program.exists() {
-        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(fake_mcp(), &program).unwrap();
-    }
-    program
+    user.path("bin/agent-browser")
 }
 
 fn turn_on(user: &User) {
@@ -7790,6 +7785,30 @@ fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
 }
 
 #[test]
+fn a_call_to_a_connection_whose_command_was_refused_says_it_is_flottille_s_refusal() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "command": browser_command_after(
+            &user, &["env", "AGENT_BROWSER_SOCKET_DIR=/tmp/elsewhere"])}),
+    )
+    .unwrap();
+    let starts = logged(&user, "browser", "start").len();
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    assert!(said.contains("Flottille refused to start it"), "{said}");
+    assert!(said.contains("AGENT_BROWSER_SOCKET_DIR"), "{said}");
+    // Its own words, not a server's: no frame of a third party's data around them.
+    assert!(!said.contains("third party"), "{said}");
+    assert!(!said.contains("/tmp/elsewhere"), "{said}");
+    assert_eq!(logged(&user, "browser", "start").len(), starts);
+}
+
+#[test]
 fn a_connection_whose_command_starts_with_a_launcher_is_refused() {
     for launcher in [
         &["nohup"][..],
@@ -8046,6 +8065,7 @@ fn an_entry_bound_to_plain_http_on_this_machine_signs_in() {
 /// A user whose daemon has a display, as a desktop session gives it.
 fn user_with_display() -> User {
     let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
         .with_env("WAYLAND_DISPLAY", "wayland-test")
         .with_env("DISPLAY", ":7")
         .with_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus");
