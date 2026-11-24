@@ -355,6 +355,7 @@ No parameters. The result:
     "landlock_abi": 6,
     "private_mounts": true,
     "ssh_lent": true,
+    "browser_network": true,
     "warnings": []
   }
 }
@@ -369,7 +370,9 @@ that failed (`docs/agents.md`).
 `sandbox` is what confines the daemon's commands (`docs/vault.md`, "The runtime folder"):
 Landlock's ABI (0 without it), whether they start in their private mount namespace, whether the
 user's SSH agent is lent to a push the gate lets through (`ssh_lent`: false when what its `ssh`
-reads could be written by a confined command, the reason then among the warnings), and a sentence
+reads could be written by a confined command, the reason then among the warnings), whether a
+connection's browser can run in a network of its own (`browser_network`, `docs/vault.md`, "The
+browser's network"), and a sentence
 for each gap, which `flottille doctor` adds to its warnings.
 
 ### `daemon.stop`

@@ -215,6 +215,10 @@ pub const COMMANDS: &[(&str, Place)] = &[
         Script("the web tool's page reader, run by Flottille for an agent"),
     ),
     (
+        "browser-network",
+        Script("holds the network of a connection's browser, run by the daemon"),
+    ),
+    (
         "mcp",
         Script("the MCP server an outside agent starts on its own"),
     ),
