@@ -471,7 +471,7 @@ fn every_row_of_a_workspace_menu_has_an_icon_of_its_own(cx: &mut TestAppContext)
     let (shell, cx) = {
         let (shell, cx) = window(&user, cx);
         until(&shell, cx, "the ticket in the rail", |cx| {
-            present(cx, &session_id(&lead).to_string())
+            cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
         });
         cx.update(|window, cx| window.click(session_id(&lead), cx));
         until(&shell, cx, "the ticket in the rail", |cx| {
@@ -796,7 +796,7 @@ fn a_repository_s_name_stays_whole_beside_a_long_branch(cx: &mut TestAppContext)
 
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
-        present(cx, &session_id(&lead))
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
     });
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     until(&shell, cx, "the rail names the repository", |cx| {
