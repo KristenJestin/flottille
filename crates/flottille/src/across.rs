@@ -1085,7 +1085,14 @@ fn delivered(
         true => format!("decided-{}-{}", deliver.launch, deliver.id),
         false => format!("{}-{}", deliver.launch, deliver.id),
     };
-    let body = delivered_body(daemon, &deliver.agent, &deliver.body)?;
+    // An agent removed since is no one to deliver to: dropped, not kept in the queue.
+    let agent = agent_here(daemon, &deliver.agent)?.ok_or_else(|| {
+        format!(
+            "there is no agent {} on this machine",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+    })?;
+    let body = delivered_body(daemon, &agent, &deliver.body);
     deliveries::deliver(
         daemon,
         &deliver.agent,
@@ -1343,6 +1350,9 @@ fn called(
             if agent.state.is_final() {
                 return Err(format!("{} has {}", named(&agent), agent.state.as_str()).into());
             }
+            // What another machine wrote, masked of the secrets of the place of whom it is
+            // written to, as every delivery from afar is.
+            let text = &masked_for(daemon, &agent, text, false);
             match child {
                 true => deliveries::deliver(
                     daemon,
@@ -1716,16 +1726,22 @@ fn answered_request(
                 && request.state == approval::RequestState::Pending
                 && crate::tree::root_of(daemon, &request.agent) == child
         });
-    if held.is_none() {
+    let Some(held) = held else {
         return Err(format!(
             "request #{number} is not held by agent {} of {name}: it answers only the pending \
              requests that reached it as [flottille:child-asks]",
             launch.caller
         )
         .into());
-    }
+    };
     let by = format!("agent {} of {name}", launch.caller);
     if deny {
+        // The agent that asked reads it: masked of the secrets of its place too, before the
+        // denial is recorded (a store that cannot be read is sent again, a denial recorded is not).
+        let why = match agent_here(daemon, &held.agent)? {
+            Some(asker) => masked_for(daemon, &asker, &why, false),
+            None => why,
+        };
         let decided = daemon
             .write(|store| {
                 Ok(
@@ -2623,24 +2639,47 @@ fn known_in(place: &Place) -> Secrets {
     Secrets::new(&std::env::vars_os().collect(), &place.secret_values())
 }
 
+/// The secrets of this machine a text of another machine is masked of for `agent`: those of its
+/// place (`known_in`). A place that cannot be read any more (a workspace or a project removed
+/// meanwhile) is no reason to keep the text waiting, nor to show it whole: it is the folder the
+/// agent was given, as far as it still is, and the daemon's and the vault's secrets, that mask it.
+pub(crate) fn known_for(daemon: &Daemon, agent: &Agent) -> Secrets {
+    let place = match crate::mcp::grant_of(daemon, agent) {
+        Ok(grant) => grant.place,
+        Err(_) => Place {
+            project: agent.project.clone(),
+            workspace: agent.workspace.clone(),
+            root: agent.folder.clone(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        },
+    };
+    known_in(&place)
+}
+
+/// `text`, said by another machine to `agent` of this one, masked of the secrets of the agent's
+/// place before anything stores or shows it. With `cut_end`, its end is taken for a cut
+/// (`cuts_masked`).
+pub(crate) fn masked_for(daemon: &Daemon, agent: &Agent, text: &str, cut_end: bool) -> String {
+    cuts_masked(text, &known_for(daemon, agent), cut_end)
+}
+
+/// The agent of this machine named `id`; `None` when there is none. Refused for now only when
+/// the store cannot be read.
+fn agent_here(daemon: &Daemon, id: &str) -> Result<Option<Agent>, Refused> {
+    daemon
+        .read(|store| store.agent(id))
+        .map_err(|error| Refused::Now(error.to_string()))
+}
+
 /// `body`, a delivery of another machine for `agent` of this one, as it is stored: masked as an
 /// answer of that machine is (`here`), of the secrets of the agent's place too, before anything
 /// stores or shows it. A body of `LONGEST` characters may end where that machine cut it without
-/// saying (`answer_back`): its end is taken for a cut. Refused for now when the agent's place
-/// cannot be read: nothing of it is stored unmasked.
-fn delivered_body(daemon: &Daemon, agent: &str, body: &str) -> Result<String, Refused> {
-    let agent = daemon
-        .read(|store| store.agent(agent))
-        .map_err(|error| Refused::Now(error.to_string()))?
-        .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
-    let grant = crate::mcp::grant_of(daemon, &agent).map_err(|why| {
-        Refused::Now(format!(
-            "the place of agent {} cannot be read: {why}",
-            agent.id
-        ))
-    })?;
-    let cut_end = body.chars().count() == LONGEST;
-    Ok(cuts_masked(body, &known_in(&grant.place), cut_end))
+/// saying (`answer_back`): its end is taken for a cut.
+fn delivered_body(daemon: &Daemon, agent: &Agent, body: &str) -> String {
+    masked_for(daemon, agent, body, body.chars().count() == LONGEST)
 }
 
 /// `text` masked, then cut at `limit` saying so; and wherever the other machine cut it, the
@@ -2845,8 +2884,18 @@ fn delivered_answer(
     {
         return Ok(json!({}));
     }
-    // Masked before what is awaited is taken: an answer refused for now is sent again.
-    let body = delivered_body(daemon, &deliver.agent, &deliver.body)?;
+    let waits_for_no_answer = || {
+        format!(
+            "agent {} of this machine waits for no answer of request #{number} of {name}",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+    };
+    // An agent that is not here waits for nothing: refused for good, as any other answer to no
+    // wait is, before anything of its place is read.
+    let Some(agent) = agent_here(daemon, &deliver.agent)? else {
+        return Err(waits_for_no_answer().into());
+    };
+    let body = delivered_body(daemon, &agent, &deliver.body);
     // Looked at before what is awaited: a call answered meanwhile has recorded its wait.
     let calling = remote.calling.any(machine, &deliver.agent);
     let awaited = daemon
@@ -2860,10 +2909,7 @@ fn delivered_answer(
     // first is sent again. Any other is refused for good, so that it holds back nothing kept
     // behind it on its machine.
     if !awaited {
-        let agent = deliver.agent.chars().take(64).collect::<String>();
-        let why = format!(
-            "agent {agent} of this machine waits for no answer of request #{number} of {name}"
-        );
+        let why = waits_for_no_answer();
         return Err(if calling {
             Refused::Now(format!("{why} yet"))
         } else {

@@ -853,8 +853,10 @@ pub const LAUNCHED: &str = " started this session for the user with this message
 pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
     let brief = agent.brief.clone().unwrap_or_default();
     // Detached, it is still that agent's words.
-    // Started for an agent of another machine: that agent's words, never the user's.
+    // Started for an agent of another machine: that agent's words, never the user's, and masked
+    // of the secrets of the place it is given, as every text from afar is.
     if let Some((caller, machine, kind)) = crate::launches::launched_from(daemon, &agent.id) {
+        let brief = crate::across::masked_for(daemon, agent, &brief, false);
         if kind == "child" {
             return ("brief", brief);
         }
