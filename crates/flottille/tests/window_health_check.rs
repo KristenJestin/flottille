@@ -186,14 +186,17 @@ fn a_state_word_stays_on_one_line(shade: &str, cx: &mut TestAppContext) {
     let wide: Vec<f32> = STATES.iter().map(|id| height(cx, id)).collect();
     assert!(wide.iter().all(|height| *height > 0.), "{wide:?}");
 
-    cx.simulate_resize(size(px(420.), px(2400.)));
-    settle(cx);
-    for (id, wide) in STATES.iter().zip(&wide) {
-        assert_eq!(
-            height(cx, id),
-            *wide,
-            "{id} is one line high, as in a wide window"
-        );
+    // From a narrow window to one barely wider than its sidebar.
+    for width in [420., 320., 240., 160.] {
+        cx.simulate_resize(size(px(width), px(2400.)));
+        settle(cx);
+        for (id, wide) in STATES.iter().zip(&wide) {
+            assert_eq!(
+                height(cx, id),
+                *wide,
+                "{id} is one line high at {width} px, as in a wide window"
+            );
+        }
     }
 }
 
