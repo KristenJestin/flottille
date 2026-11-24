@@ -554,6 +554,37 @@ pending requests.
     rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
+- **In Full, a run is the user's own, as in their terminal, and nothing is held back from it.**
+  A command an agent runs while its session is in Full (the mode read at the run's start: a
+  switch reaches the next run, never one that goes on) gets none of the above: the daemon's
+  environment as it is, then the place's variables, as a command the user typed (the SSH agent,
+  the session bus and so the keyring, the display, `XDG_RUNTIME_DIR`, the forge and tracker
+  command lines' sign-ins, the user's git settings and hooks), and no namespace and no Landlock,
+  so that `git`, `gh`, `bkt`, `acli` and the `ssh` git runs work as in the user's terminal, and so
+  do the user's own folders (`git config --global`, a file made in `~`). Flottille's own folders
+  are not kept from it either: its runtime folder (the daemon's socket, the bridges' tokens, the
+  pushes' folders), its state (the store, the connections' vault sockets, its keys, the device
+  key that signs as this machine, `docs/remote.md`), the agents' own folders, and the vault's
+  items in the keyring (`docs/vault.md`). Nor is the machine: a command can start a process
+  outside Flottille (`systemd-run --user`, the compositor, X11), which the daemon's socket then
+  accepts as any of the user's. Flottille says so where Full is chosen (the mode's line), to the
+  agent at the switch, and in the project's map, which asks it to take the care the user would.
+  A `git push` in Full is such a run too, never the lent push below: the project's message checks
+  and branch format still read it first, outside any sandbox. `run` stays the only way to start
+  a command, shell syntax stays refused, and the gate's refusals stay (a launcher such as `ssh`
+  named on the line, `ssh host command` included, a login printed): bare mode holds, the sandbox
+  does not (`docs/design.md` §7.1). **Leaving Full confines the next run again**, and each live
+  agent of the tree is told so, between turns; a command started in Full and still running, a
+  service or a watcher among them, keeps what it started with until it ends. What a run in Full
+  wrote outlives it (`~/.ssh`, `~/.gitconfig`, a file of `~/.config`): a later push in Ask or
+  Auto still judges those files each time, as below and in `docs/vault.md`, "The gaps". **A
+  `git config --global` in Full (run by a program, as the gate refuses it on a line) replaces
+  `~/.gitconfig`** (git writes a new file and renames it
+  over the old), which is no longer the file the daemon found at its start: from then on every
+  push over SSH in Ask or Auto is refused, saying so, until the daemon restarts, or the work is
+  done in Full (#1322). The tools
+  `forge` and `tickets` stay for what only they do: following checks and reviews, which wakes the
+  agent, the window's view of pull requests and tickets, and every write to Jira.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
@@ -563,8 +594,10 @@ pending requests.
   or a task the user runs) gets a runtime folder of its own,
   `$XDG_RUNTIME_DIR/flottille/display/run-<id>` (mode 0700), holding only a hard link of the
   session's Wayland socket, removed when the run ends; its `XDG_RUNTIME_DIR` is that folder and
-  `WAYLAND_DISPLAY` names the socket: no session bus, no keyring, no other socket, and Landlock
-  still keeps the real runtime folder out of reach. X11's `DISPLAY` (with `XAUTHORITY`) is given
+  `WAYLAND_DISPLAY` names the socket: in Ask and Auto, no session bus, no keyring, no other
+  socket, and Landlock still keeps the real runtime folder out of reach. **In Full the setting
+  changes nothing**: a run there is the user's own (above), with their display, session bus and
+  keyring, and no runtime folder of its own is made for it. X11's `DISPLAY` (with `XAUTHORITY`) is given
   only when the session has no Wayland, which the setting's help says: an X11 client can read the
   keys typed in other windows and type into them; Landlock then leaves every abstract socket of
   the session within the run's reach, X11's and a session bus `dbus-launch` put on one alike,
@@ -601,7 +634,8 @@ pending requests.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A run that is itself a `git push` (its own
-  line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
+  line, no wrapper) the user, the judge or a rule let through (in Full, a push is a run of the
+  user's own, above) does not get the
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
   environment and `core.hooksPath=/dev/null`, the user's own `ssh` command (never a
   repository's `core.sshCommand`) and git's own transports alone (never an `ext::` URL), and
@@ -1777,7 +1811,8 @@ Both are the same kind of session otherwise:
   real end does it: the end of a pilot's turn, a crash (its process starts again, or the pilot
   fails and may be resumed, its sessions staying led by it), a compaction and a restart of the
   daemon end nothing. The window's confirmation lists the sessions that end with it, by title and
-  project, each with the work its workspace holds that is not saved, read by `agent.ending`
+  project (and machine, for one it leads on another machine, which ends there with it), each with
+  the work its workspace holds that is not saved, read by `agent.ending`
   (`docs/protocol.md`): one confirmation for the whole end. The card of an `agent_stop` the user
   is asked about says the same, by the same read: one line for each led session that ends with
   the session named (its title, its project, and what it holds that is not saved), so that the

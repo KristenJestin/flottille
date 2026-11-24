@@ -470,8 +470,8 @@ Declares a connection under `[[connections.server]]` of `extensions.toml`: a com
 without a shell (its words given after `--command`), or an `https://` URL (`http://` on this
 machine alone). `--env` and `--header` name vault entries of every project, `--only` limits the
 values of an argument, `--except` leaves a project out, `--client-id` is the OAuth client id you
-registered with the server's authorization server, when it registers none by itself (`connection
-login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
+registered with the server's authorization server, when it takes neither Flottille's client
+metadata document nor a registration by itself (`connection login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
 once, every action judged: the connection is given to agents as `add` returns (`state` is `ready`),
 and `connection review` is there to turn actions off or set them. A server that does not start
 leaves it waiting for its first review, `failing` saying why; one added while Connections or the
@@ -890,8 +890,8 @@ Removed skill react from shop. The project's files were not touched.
 
 ## The vault
 
-The user's secrets, kept by the keyring, that agents use through Flottille's tools and never see
-(`docs/vault.md`). A secret is never printed, by these commands or any other.
+The user's secrets, kept by the keyring, that agents use through Flottille's tools without seeing
+them in Ask and Auto; in Full a command they run can read them (`docs/vault.md`). A secret is never printed, by these commands or any other.
 
 ### `flottille vault list [--project <project>]`
 
@@ -1421,8 +1421,8 @@ judge and every base call passes at once, recorded as allowed by Full mode, and 
 refuses (shell syntax, a malformed call, `flottille` run as a command, a login's place, a write
 of Flottille's own folders or of a startup file, a launcher such as `systemd-run` or `tmux`…)
 stays refused. In `full`, code the agent runs (an interpreter's inline code, a script it wrote)
-acts with your rights, and the gate does not see what it touches: only a sandbox would close
-that. A session
+runs as you, as in your terminal: confined in no way (no sandbox, your keys, sign-ins and
+keyring), and the gate does not see what it touches. A session
 never starts in `full`. A tree has one mode, its root's: naming a
 child switches its root, and every agent of the tree follows at once. A new session starts in
 `auto`; the mode is kept when the session is resumed. Only you set it: no tool of an agent does.

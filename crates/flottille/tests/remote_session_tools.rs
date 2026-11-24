@@ -644,7 +644,8 @@ fn a_session_it_started_on_another_machine_named_by_its_title_is_called_as_by_it
         by_title.text
     );
     assert!(server.requests().is_empty(), "{:#?}", server.requests());
-    assert_eq!(stand_ins(&server), 0);
+    // The pilot's only, which its led session records there: no caller stood in for by a call.
+    assert_eq!(stand_ins(&server), 1);
 }
 
 /// The cursor an answer of `session_read` gives for its next page.

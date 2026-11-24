@@ -23,7 +23,9 @@
 //! `no_expiry` (the tokens carry no `expires_in`), `revoked` (`/mcp` answers `401` to every token),
 //! `refresh_hold` (the path of a file: a refresh is answered once it exists, and logs `hold` as it
 //! waits), `registration: false`
-//! (no dynamic registration), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
+//! (no dynamic registration), `cimd: true` (its metadata says
+//! `client_id_metadata_document_supported`: a client id that is an `https://` URL is taken as it
+//! is, the document behind it never fetched, so that no test reaches the network), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
 //! endpoint named on `localhost`, another origin than the issuer's `127.0.0.1`), `iss: false`
 //! (no `iss` in the authorization response, and none promised), and `tokens_file`, where every token it issues is written, so that a
 //! test looks for them where they must not be. Its log never holds a token: `bearer` is the number
@@ -803,6 +805,9 @@ impl Issuer {
                     "token_endpoint": format!("{}/token", at("token_at")),
                     "code_challenge_methods_supported": ["S256"],
                     "authorization_response_iss_parameter_supported": oauth["iss"] != false});
+                if oauth["cimd"] == true {
+                    metadata["client_id_metadata_document_supported"] = json!(true);
+                }
                 if oauth["registration"] != false {
                     metadata["registration_endpoint"] =
                         json!(format!("{}/register", at("register_at")));
