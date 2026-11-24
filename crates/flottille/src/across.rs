@@ -123,8 +123,9 @@ fn serving(remote: &Remote) -> Result<Arc<Daemon>, Refused> {
 }
 
 /// Whether a test plays a machine slow to record what its agent waits for once another machine
-/// answered its call: in a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE` names exists.
-fn playing_slow_call() -> bool {
+/// answered its call or its launch: in a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE`
+/// names exists.
+pub(crate) fn playing_slow_call() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("FLOTTILLE_TEST_SLOW_CALL_FILE")
             .is_some_and(|file| std::path::Path::new(&file).exists())
