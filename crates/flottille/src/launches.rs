@@ -982,24 +982,7 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
             return;
         };
         let (project, name) = (workspace.project.clone(), workspace.name.clone());
-        let removed = async {
-            if workspace.repositories.iter().any(|r| r.laid.is_none()) {
-                return Err("it is not made only of code that came".to_owned());
-            }
-            let losses = crate::workspaces::losses(&daemon, &project, &name)
-                .await
-                .map_err(|failure| failure.message)?;
-            let digest = crate::workspaces::digest(&workspace)
-                .await
-                .map_err(|failure| failure.message)?;
-            crate::workspaces::remove_with_project(
-                daemon.clone(),
-                &workspace,
-                Some((&losses, &digest)),
-            )
-            .await
-            .map_err(|failure| failure.message)
-        };
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {});
         if let Err(why) = removed.await {
             eprintln!(
                 "flottille daemon: the workspace {name} of project {project}, made of a launch \
@@ -1007,6 +990,29 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
             );
         }
     });
+}
+
+/// Removes `workspace`, made of code that came, unless work other than that code is in it. What it
+/// holds is read, then what the removal would lose; `between` runs after the first read.
+async fn remove_unless_work_came(
+    daemon: &Arc<Daemon>,
+    workspace: &flottille_core::workspace::Workspace,
+    between: impl AsyncFnOnce(),
+) -> Result<(), String> {
+    if workspace.repositories.iter().any(|r| r.laid.is_none()) {
+        return Err("it is not made only of code that came".to_owned());
+    }
+    let losses = crate::workspaces::losses(daemon, &workspace.project, &workspace.name)
+        .await
+        .map_err(|failure| failure.message)?;
+    between().await;
+    let digest = crate::workspaces::digest(workspace)
+        .await
+        .map_err(|failure| failure.message)?;
+    crate::workspaces::remove_with_project(daemon.clone(), workspace, Some((&losses, &digest)))
+        .await
+        .map_err(|failure| failure.message)
+        .map(|_| ())
 }
 
 /// Refused when what `git` says of the code it sends is not the launch's: its project, one of its
@@ -1601,4 +1607,113 @@ pub(crate) fn started_here(daemon: &Daemon, agent: &str) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|launch| launch.state == "started")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flottille_core::workspace::{Base, Workspace, Worktree};
+
+    /// Runs `git` in `dir`, in a home and a configuration of its own.
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let nowhere = std::ffi::OsStr::new("/dev/null");
+        let name = std::ffi::OsStr::new("Test");
+        let email = std::ffi::OsStr::new("test@example.org");
+        let env = [
+            ("GIT_CONFIG_GLOBAL", nowhere),
+            ("GIT_CONFIG_NOSYSTEM", std::ffi::OsStr::new("1")),
+            ("GIT_AUTHOR_NAME", name),
+            ("GIT_COMMITTER_NAME", name),
+            ("GIT_AUTHOR_EMAIL", email),
+            ("GIT_COMMITTER_EMAIL", email),
+        ];
+        crate::git::output_with(dir, args, crate::git::Class::Work, &env)
+            .await
+            .unwrap();
+    }
+
+    /// A workspace made of code that came (a repository laid), in a throwaway repository, with
+    /// `notes.txt` written in it and not committed: what the sender's work was.
+    async fn made_of_code_that_came(dir: &std::path::Path) -> (Arc<Daemon>, Workspace) {
+        let project = dir.join("app");
+        let folder = dir.join("workspace");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "--quiet", "-b", "main"]).await;
+        std::fs::write(project.join("a.txt"), "a\n").unwrap();
+        git(&project, &["add", "a.txt"]).await;
+        git(&project, &["commit", "--quiet", "-m", "first"]).await;
+        let commit = crate::git::output(&project, &["rev-parse", "HEAD"], crate::git::Class::Read)
+            .await
+            .unwrap()
+            .trim()
+            .to_owned();
+        let at = folder.to_string_lossy().into_owned();
+        git(&project, &["worktree", "add", "--quiet", "-b", "fix", &at]).await;
+        std::fs::write(folder.join("notes.txt"), "one\n").unwrap();
+        let mut workspace = Workspace {
+            id: 0,
+            project: "app".into(),
+            name: "workspace".into(),
+            branch: "fix".into(),
+            folder,
+            project_folder: project,
+            created_at: 1,
+            variables: Default::default(),
+            repositories: vec![Worktree {
+                path: ".".into(),
+                base: Base {
+                    branch: "main".into(),
+                    remote: "origin".into(),
+                    reference: "refs/heads/main".into(),
+                    commit,
+                    fetched_now: false,
+                    fetched_at: None,
+                    note: None,
+                    fetch: None,
+                },
+                resumed: false,
+                resumed_branch: None,
+                laid: Some("laid".into()),
+            }],
+            steps: Vec::new(),
+            ticket: None,
+        };
+        let daemon = crate::daemon::tests::a_daemon(dir, false);
+        workspace.id = daemon
+            .write(|store| {
+                let (id, event) =
+                    store.create_workspace(&workspace, ("workspace.created", json!({})))?;
+                Ok((id, event))
+            })
+            .unwrap();
+        (daemon, workspace)
+    }
+
+    #[tokio::test]
+    async fn a_workspace_of_code_that_came_goes_when_nothing_was_written_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, workspace) = made_of_code_that_came(dir.path()).await;
+
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {}).await;
+
+        assert_eq!(removed, Ok(()));
+        assert!(!workspace.folder.exists());
+    }
+
+    #[tokio::test]
+    async fn work_written_after_a_held_agent_stops_is_not_lost_by_the_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, workspace) = made_of_code_that_came(dir.path()).await;
+        let notes = workspace.folder.join("notes.txt");
+
+        // The file the sender's work holds is written again between the two reads of what the
+        // workspace holds: the same sentence says it lost, only its content tells.
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {
+            std::fs::write(&notes, "two\n").unwrap();
+        })
+        .await;
+
+        assert!(removed.is_err(), "{removed:?}");
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "two\n");
+    }
 }
