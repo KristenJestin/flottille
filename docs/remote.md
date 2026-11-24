@@ -2758,7 +2758,8 @@ on a real phone, by hand, and reported.
   an agent works in waits for the user's word, even in Full) does not apply as written. The removal
   sends the commits back first; what it would still lose (work never committed, or commits that
   could not go back) makes it wait for the user's word there, and a removal that loses nothing is
-  done as Full does any other.
+  done as Full does any other, unless work came after its card: what it finds then is refused,
+  never discarded unseen.
 - **Two launches of one caller whose workspaces there have one name** (#1278), in two projects
   there (a project made again for a branch of another root): the caller's daemon sends the removal
   for the first of its launches holding that name, and the machine there removes that launch's
