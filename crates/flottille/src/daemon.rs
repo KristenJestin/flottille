@@ -721,6 +721,9 @@ async fn serve(
     // started outside Flottille.
     runs::settle_at_start(&daemon).await;
     runs::tell_guarded_at_start(&daemon);
+    // Before a setup is resumed or a brief sent: an allowed launch of another machine cut while it
+    // was set up never starts.
+    crate::launches::interrupted_at_start(&daemon);
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);
