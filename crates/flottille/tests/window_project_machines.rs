@@ -15,6 +15,7 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
+use flottille_window::machines::News;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{machine_block_id, machine_session_mark_id, session_row_id};
 use flottille_window::shell::Selection;
@@ -898,4 +899,138 @@ fn its_settings_switch_between_the_machines_that_have_it(cx: &mut TestAppContext
                 s.selected() == Some(&Selection::ProjectSettings("app".into()))
             })
     });
+}
+
+// The shared project's page at rest (#1411): nothing is drawn once it settled, whatever the other
+// machines hold, and a read of them that changes nothing on it draws nothing.
+
+/// A shared project `app` on `pc`, `server` and a paired `laptop`: the server has a session that
+/// has a turn that runs while the page opens (held until `release` is written in its agent's
+/// folder, which the scenario does once the page shows it) and one that ended, the laptop one that ended and then went off. The window on `pc` shows the page of
+/// `app`, settled: it asks for no animation frame.
+fn shared_page_settled(
+    cx: &mut TestAppContext,
+) -> (
+    TestHub,
+    Machine,
+    Machine,
+    Entity<Shell>,
+    &mut VisualTestContext,
+) {
+    let (hub, pc, server) = ready_machines();
+    let laptop = Machine::of(ready_user());
+    crate::remote::pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop", "online");
+    for machine in [&pc, &server, &laptop] {
+        add(machine, "app", APP);
+    }
+    told_by(&pc, "server", &["app"]);
+    told_by(&pc, "laptop", &["app"]);
+    session(&server, "app", "Ship the server part");
+    session(&laptop, "app", "Tidy the laptop part");
+    server.user.provider_script(
+        "claude",
+        json!({"turns": [{"when": "Keep watching", "do": [{"hold": "release"}]}]}),
+    );
+    let running = server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "Keep watching"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the server's session works", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": running}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "working")
+    });
+    // The laptop's session stays in this machine's copy of its list while it is off.
+    eventually("pc is told the laptop's session", || {
+        let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+        lists["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|listed| {
+                listed["name"] == "laptop"
+                    && listed["sessions"].as_array().is_some_and(|s| !s.is_empty())
+            })
+    });
+    let stop = laptop.user.run(&["daemon", "stop"]);
+    assert!(stop.status.success(), "{}", laptop.log());
+    pc.wait_for("laptop", "offline");
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "both machines' blocks", |cx| {
+        present(cx, machine_block_id("server")) && present(cx, machine_block_id("laptop"))
+    });
+    // Its turn ends with the page shown: the page takes the snapshot that says so. A session that
+    // runs spins its mark, by design, and is no rest (`window_at_rest.rs` waits for every agent
+    // to be idle); the page is measured once it ended.
+    std::fs::write(server.user.path("fake-claude/release"), "").unwrap();
+    eventually("the server's session ends its turn", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": running}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
+    // The window's copy of the server's list says it too before the page is measured.
+    until(&shell, cx, "the server's list says no session runs", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines().read(cx).machines().is_some_and(|read| {
+                read.lists
+                    .machines
+                    .iter()
+                    .filter(|(name, _)| name == "server")
+                    .flat_map(|(_, listed)| listed)
+                    .all(|session| session.state == "idle")
+            })
+        })
+    });
+    quiet(&shell, cx);
+    (hub, pc, server, shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_shared_project_s_page_draws_nothing_at_rest(cx: &mut TestAppContext) {
+    let (_hub, _pc, _server, shell, cx) = shared_page_settled(cx);
+    assert_eq!(
+        label(cx, machine_block_id("laptop"))
+            .as_deref()
+            .map(|said| said.starts_with("laptop · offline since ")),
+        Some(true)
+    );
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+#[gpui_kit::test]
+fn a_snapshot_of_another_machine_that_changes_nothing_draws_nothing(cx: &mut TestAppContext) {
+    let (_hub, _pc, _server, shell, cx) = shared_page_settled(cx);
+    // The machines' worker tells what it read again after each thing the window asked, whether it
+    // changed or not (`Remote::ask`): the same read, as the daemon says it, comes again.
+    let read = shell
+        .read_with(cx, |s, cx| s.machines().read(cx).machines().cloned())
+        .expect("the machines are read");
+    cx.update(|window, _| window.reset_layout_stats());
+    let mut asked = 0;
+    let mut gone = Duration::ZERO;
+    while gone < Duration::from_secs(10) {
+        if gone.is_zero() || gone == Duration::from_millis(16 * 100) {
+            let again = read.clone();
+            shell.update_in(cx, |s, window, cx| {
+                s.machines().update(cx, |machines, cx| {
+                    machines.news(News::Read(Box::new(again)), window, cx)
+                })
+            });
+        }
+        asked += step(&shell, Duration::from_millis(16), cx);
+        gone += Duration::from_millis(16);
+    }
+    let drawn = cx.update(|window, _| window.layout_stats().frames);
+    assert_eq!((drawn, asked), (0, 0), "(drawn, asked)");
 }
