@@ -1562,6 +1562,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the place of Deny and Allow), counted in the section's number, marking its session's row and
   ringing the bell as a held request does; a card arriving unfolds and one leaving folds away;
   a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
+  a held launch that needs files the receiving machine lacks lists them on its card, `From pc →
+  to server · app · 2 files` (the caller's project), a sentence saying what Allow does with them, one step each (the file, its
+  vault entry, its mark and one word: `Waiting`, `Making…`, `Sharing…`, `Shared`, `Not made`,
+  `Not shared`) and a last one, `Allow on server`: Allow makes and shares each file in turn, then
+  allows, the steps' marks and words fading as they change, Allow and Deny off meanwhile; a step
+  that fails says which file and why on the card, the launch still held, and Allow becomes Try
+  again, which resumes at that step (`docs/remote.md`, "What travels"); allowed, the card shows
+  its marks a moment and folds away, the request's line, where the page still shows it, recording
+  `Allowed · 2 files shared`;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. When the session is a pilot,

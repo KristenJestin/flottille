@@ -11,6 +11,8 @@ mod guard;
 #[path = "../remote/mod.rs"]
 mod remote;
 
+#[path = "../window_allow_files.rs"]
+mod window_allow_files;
 #[path = "../window_any_machine.rs"]
 mod window_any_machine;
 #[path = "../window_appearance.rs"]

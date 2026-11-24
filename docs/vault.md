@@ -361,7 +361,10 @@ project its setup copies, and **bound to that file** (`"for": "file:<project>/<p
 serves no tool and no other use; it is then shared as any other, its binding kept. The other
 machine makes the file from an entry only when it is bound to that very file and was shared from
 the launch's machine: an entry of its own, or another machine's, whatever its name, is never
-written into a file. **A machine renamed leaves the copies it shared under its old name matching
+written into a file. **The window shares an entry for a file only when it is the file's own**:
+named `<project>-<path>` and bound to that file. An entry of that name made by hand, or bound to
+another use, is never shared in its place: the window asks `vault.from_file`, which refuses it, and
+a launch's `needs` that names another entry for a file is refused before anything is shared. **A machine renamed leaves the copies it shared under its old name matching
 nothing**: a launch from the new name finds no entry shared from it, so the file is asked for again
 (fail closed); share the entry again from the renamed machine. A name already taken is refused: by another entry (`a/b` and `a-b` both name
 `app-a-b`: the second file is refused, naming the first), and by the same file's entry unless the

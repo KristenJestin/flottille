@@ -1115,8 +1115,21 @@ local child's work; nothing moves your branch.*
   Full included, the judge not asked, and asks once, on every device, as any held launch does: its
   words name each file and entry there already (`app lays .env from the vault entry app-.env shared
   by pc`); one still missing starts them with `app needs .env on server: share it?`, its reasons
-  name each entry, and its card's `needs` gives them (`{"from", "files": [{"path", "entry"}]}`). On the caller's machine, `vault.from_file` makes the
-  entry from the file, read only then, masked before it is kept; `vault.share` sends it. Allowed,
+  name each entry, and its card's `needs` gives them (`{"from", "to", "project", "files": [{"path", "entry"}]}`,
+  `project` the caller's name of it). On the caller's machine, `vault.from_file` makes the
+  entry from the file, read only then, masked before it is kept; `vault.share` sends it. **Allow on
+  that card does both** (#1262), whichever machine the window runs on and shows: on `from`,
+  reached through this machine's daemon as Settings of another machine is and signed with this
+  device's key as a share is, it reads the vault's entries, then for each file in turn makes its
+  entry (unless the file's own is there already) and shares it with `to`, then allows the
+  launch. **An entry is shared only when it is the file's own**: named as the daemon names it
+  (`<project>-<path>`) and bound to that file (`file:<project>/<path>`); an entry of that name that
+  holds another secret is left to `vault.from_file`, which refuses it, and a card whose `needs`
+  names another entry for a file, or a `to` that is not the machine the launch is held on, is
+  refused before anything is asked, nothing shared (the daemon shown is not trusted with what
+  leaves `from`). The card names `from`, `to` and the project, so what the user consents to is
+  what is shared; each step shows on the card, and the first that fails ends it, saying which file and
+  why, the launch still held, Try again resuming at that step. Allowed,
   the receiving machine makes each file from its vault entry in the project's folder, never over
   a file, readable by the user alone, before the setup runs, whose `copy` step then copies it as
   any; one still missing refuses the launch, naming it. Refused, the launch ends and the agent that
@@ -2009,10 +2022,37 @@ on a real phone, by hand, and reported.
   `<project>-<path>` by the caller's name of the project, every project's (a project's name may
   differ on the other machine). A file is made from its entry only when the project there lacks it,
   in the project's folder, mode `0600`.
-- **The ask is the held launch's request** (#1214): Allow on a device shares nothing by itself yet;
-  the user makes the entry on the caller's machine (`vault.from_file`) and shares it (Settings,
-  Vault, **Share with…**) before Allow, and an Allow while it is still missing refuses the launch,
-  saying so. The window's card doing both on Allow is a follow-up.
+- **The ask is the held launch's request** (#1214): `approval.approve` shares nothing by itself;
+  the window's Allow makes and shares the entries first (#1262), and an approval while one is
+  still missing (the command line's, the phone's until it does the same) refuses the launch,
+  saying so.
+- **The window orchestrates an Allow that shares files** (#1262): the receiving machine cannot
+  read the caller's files, and a share is signed by a device of the user's, so no one method does
+  it all. It reads `vault.list` on `from` first and skips the making of the file's own entry
+  there (of its name and bound to it; no `replace`): a Try again keeps what an Allow that failed
+  further on made, and an entry the user corrected by hand is never overwritten; an entry made a
+  minute before keeps the file as it was then. A `vault.list` that fails blames no file: the card
+  says it, its rows as they were.
+- **Allowed with its files, the card is the result** (#1262): no toast; its marks show a moment
+  and it folds away, the request's line recording `Allowed · 2 files shared` where the page still
+  shows it (the page of the launched session reads its conversation again once it starts, and that
+  line is not in it). A failure stays on the card, never as a toast.
+- **After a failure the primary button says Try again** (#1262): the click resumes at the failed
+  step instead of doing it all again, and its word says so.
+- **Deny after a partial share leaves the entries shared** (#1262): each is bound to its one file
+  (`file:<project>/<path>`) and laid only by a launch the user allows; the card's Details says so
+  once a file is shared, and only then.
+  No Remove from the other machine is offered.
+- **Allow and Deny are off while it runs** (#1262): stopping in the middle would need a share
+  undone; the run takes seconds.
+- **A device that may only view signs no share** (#1262): the shares are signed for `from`, so
+  its rights on `from` are what count, whichever machine is in front: Allow on such a card is off,
+  its reason in its tooltip (`This device may only view pc`); the daemon's refusal stays the
+  guard.
+- **The steps are not capped on the card** (#1262): they are those of `copied`, which #1214 caps
+  already; the section scrolls past its height as for any card.
+- **The class of the card stays the daemon's** (#1262): a launch that lays a file is held whatever
+  the mode, its class as the gate gives it; the card draws it as any other.
 - **The row says `preparing <project>` until the first delivery** (#1214): the receiving machine
   says nothing while the setup runs, so the row cannot tell the setup's end from the first turn's;
   its next delivery says what it does.

@@ -3541,6 +3541,19 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(number, decision, refused, cx));
                 }
             }
+            Outcome::Allowing {
+                session,
+                number,
+                at,
+                step,
+                why,
+            } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.allowing(number, at, step, why, cx));
+                }
+            }
             Outcome::Providers(read, Some(providers)) => self.set_providers(read, providers, cx),
             Outcome::Providers(_, None) => {}
             Outcome::JudgeSet { refused } => {
