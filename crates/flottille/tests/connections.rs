@@ -7734,7 +7734,9 @@ fn a_connection_whose_command_starts_with_a_launcher_is_refused() {
             json!({"command": browser_command_after(&user, launcher)}),
         );
         let (_, mcp) = signed_up(&user);
-        login_and_review_refused(&user, &mcp, &format!("starts with {}", launcher[0]));
+        // Said by the launcher's own name, its folder left out.
+        let program = launcher[0].rsplit('/').next().unwrap();
+        login_and_review_refused(&user, &mcp, &format!("starts with {program}"));
     }
 }
 
