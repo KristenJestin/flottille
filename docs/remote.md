@@ -1906,11 +1906,14 @@ on a real phone, by hand, and reported.
 - **The window reads the device key at its start once the user has another runner** (#1280): the
   bell follows every machine, so its links need the key before any page of another machine is
   shown, where it was read only then. A locked keyring holds those links until it is unlocked; the
-  rest of the window does not wait.
+  rest of the window does not wait. A key that cannot be read is said once (a toast) and read again
+  at the next news of the machines.
 - **"Ended" lists another machine's latest 50 ended sessions** (#1280): each title is a round trip
   over the link (the session's brief), and the group is asked again each time it opens. A machine
-  that is off when it opens has its rows taken out rather than shown as last read, so the group never
-  lists what it cannot open.
+  that is off has its rows taken out rather than shown as last read, so the group never lists what
+  it cannot open.
+- **A machine whose role is not known yet has no bell link** (#1280): the bell follows runners only,
+  and one whose role the list has not said yet joins once it says runner.
 - **Another machine can run a shared project's session when it is an online runner that offers the
   project** (#1266): what agents it has signed in is not looked at, so that a machine is not left
   out while its providers are not read; a start it cannot run is refused there, and said. This
@@ -2142,8 +2145,8 @@ on a real phone, by hand, and reported.
   asked for a vault entry; `running` while a turn runs in its tree, `idle` otherwise.
 - Opening a session of another machine shows its page only (#1271): the list stays this
   machine's.
-- **The bell and "Ended" hold every machine's** (#1280). The window follows each other runner's
-  notification centre by a light link of its own (made once the device key is read, signed as every
+- **The bell and "Ended" hold every machine's** (#1280). The window follows each other runner that
+  is online: its notification centre by a light link of its own (made once the device key is read, signed as every
   request to that machine, and reading `notifications.list` only, at each connection and on each
   `notifications.*` event of that machine): the bell lists that machine's notifications beside this
   one's, each session's heading saying `on server`, and its badge and counts add them. Choosing one
@@ -2151,9 +2154,13 @@ on a real phone, by hand, and reported.
   read on that machine (`notifications.read`); the request or question is answered on that page,
   so on its machine. "Ended" asks each other machine for its ended roots (`agent.list`, and each
   one's brief for its title, the latest 50) when the window first reaches it and each time the
-  group is opened; a row of it opens that machine's page of the session. A machine that is off when
-  the group opens is said once, by one line of the group (`server is offline since 22:14: its ended
-  sessions are not listed`), and its rows leave. What another machine answers only ever names its
+  group is opened, one read at a time (a session gone between the list and its brief is left out);
+  a row of it opens that machine's page of the session. A machine that goes off has its link ended
+  and asked no more until it is back: its notifications leave the bell and its counts, its rows
+  leave "Ended", and the group says it once, by one line (`server is offline since 22:14: its ended
+  sessions are not listed`). A link the other machine does not answer is dialled again with a
+  growing wait (up to five seconds), which starts over only once it was read; a notification not
+  marked read there is marked again the next time. What another machine answers only ever names its
   own sessions: each is keyed by that machine (`a1@server`) and under no row. A project of another machine only is a group of the list
   whose page is that machine's.
 - A close of a session of another machine goes through this machine's daemon whether that machine

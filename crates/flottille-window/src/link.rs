@@ -159,6 +159,9 @@ pub enum Update {
     /// The sessions that ended on another machine, as it answered when its "Ended" group was
     /// opened (#1280): a snapshot of those roots only, or why it could not be read.
     EndedThere(Result<Snapshot>),
+    /// Notifications of another machine asked to be marked read there, which were not: asked
+    /// again the next time.
+    NotReadThere(Vec<u64>),
     /// An update of another machine's connections ([`Updates::of`]): what its pages asked, or
     /// read of it.
     Machine {
@@ -955,18 +958,19 @@ fn needing_the_user(conn: &mut Conn) -> Result<(HashSet<String>, Questions)> {
 
 /// Follows the notification centre of the machine `connect` reaches, for the bell (#1280): read
 /// at each connection and whenever a notification comes, is read or is answered there; nothing
-/// else of that machine is read. Connects again with a backoff, and ends with its updates.
+/// else of that machine is read. Connects again with a backoff, which starts over only once the
+/// machine was read: a connection that this machine's daemon makes and the other refuses at once
+/// is no reason to ask again at once. Ends with its updates.
 pub fn spawn_bell_into(connect: Connect, updates: Updates) {
     std::thread::Builder::new()
         .name("flottille-bell".into())
         .spawn(move || {
             let mut retry = FIRST_RETRY;
             while !updates.is_closed() {
-                if let Ok(stream) = connect() {
-                    match follow_bell(stream, &updates) {
-                        Ok(()) => return,
-                        Err(_) => retry = FIRST_RETRY,
-                    }
+                if let Ok(stream) = connect()
+                    && let Ok(()) = follow_bell(stream, &updates, &mut retry)
+                {
+                    return;
                 }
                 std::thread::sleep(retry);
                 retry = (retry * 2).min(LAST_RETRY);
@@ -975,7 +979,7 @@ pub fn spawn_bell_into(connect: Connect, updates: Updates) {
         .expect("a thread for the bell of another machine");
 }
 
-fn follow_bell(stream: UnixStream, updates: &Updates) -> Result<()> {
+fn follow_bell(stream: UnixStream, updates: &Updates, retry: &mut Duration) -> Result<()> {
     updates.hold(&stream);
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     conn.request("events.watch", json!({}))?;
@@ -1004,6 +1008,7 @@ fn follow_bell(stream: UnixStream, updates: &Updates) -> Result<()> {
                 if updates.unbounded_send(Update::Bell(read)).is_err() {
                     return Ok(());
                 }
+                *retry = FIRST_RETRY;
                 while let Some(event) = conn.queued() {
                     if about(&event) {
                         stale.get_or_insert_with(Instant::now);
@@ -1016,16 +1021,21 @@ fn follow_bell(stream: UnixStream, updates: &Updates) -> Result<()> {
 
 /// Marks notifications of the machine `connect` reaches read (`notifications.read`), by a
 /// connection of its own, off the UI thread: its bell link reads them again on the event that
-/// follows.
-pub fn read_there(connect: Connect, params: Value) {
+/// follows. Not marked, `ids` are said back ([`Update::NotReadThere`]).
+pub fn read_there(connect: Connect, params: Value, ids: Vec<u64>, updates: Updates) {
     let spawned = std::thread::Builder::new()
         .name("flottille-bell-read".into())
         .spawn(move || {
-            if let Ok(stream) = connect()
-                && let Ok(mut conn) = Conn::new(stream)
-                && let Err(why) = conn.ask_within("notifications.read", params, NOT_ANSWERING)
-            {
+            let marked = connect()
+                .map_err(|error| error.to_string())
+                .and_then(|stream| Conn::new(stream).map_err(|error| error.to_string()))
+                .and_then(|mut conn| {
+                    conn.ask_within("notifications.read", params, NOT_ANSWERING)?
+                })
+                .map(drop);
+            if let Err(why) = marked {
                 eprintln!("flottille: the notifications were not marked read: {why}");
+                let _ = updates.unbounded_send(Update::NotReadThere(ids));
             }
         });
     if let Err(error) = spawned {
@@ -1062,11 +1072,20 @@ pub fn read_ended(connect: &Connect, bound: Duration) -> Result<Snapshot> {
         let Some(id) = root["id"].as_str() else {
             continue;
         };
-        // Its agent alone: no event is numbered before the first.
-        let shown = ask("agent.show", json!({"agent": id, "before": 1}))?;
+        // Its agent alone: no event is numbered before the first. One that is gone since the
+        // list is left out, not the whole read.
+        let Ok(shown) = conn.ask_within("agent.show", json!({"agent": id, "before": 1}), bound)?
+        else {
+            continue;
+        };
         let brief = shown["agent"]["brief"].as_str().unwrap_or_default();
         briefs.insert(id.to_owned(), brief.to_owned());
     }
+    ended.retain(|root| {
+        root["id"]
+            .as_str()
+            .is_some_and(|id| briefs.contains_key(id))
+    });
     let nothing = json!({});
     Ok(Snapshot::build(Answers {
         projects: &nothing,
