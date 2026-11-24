@@ -7791,28 +7791,19 @@ fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
 #[test]
 fn a_call_to_a_connection_whose_command_was_refused_says_it_is_flottille_s_refusal() {
     let user = user();
-    browser(&user, &agent_browser("0.43.0"), json!({}));
-    let (_, mcp) = signed_up(&user);
-    done(mcp.call(
-        "conn_browser",
-        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
-    ));
-    user.call(
-        "connection.edit",
-        json!({"name": "browser", "command": browser_command_after(
-            &user, &["env", "AGENT_BROWSER_SOCKET_DIR=/tmp/elsewhere"])}),
-    )
-    .unwrap();
+    let (_, mcp) = browser_by_another_program(&user);
+    // Accepted with the adapter by a Flottille that did not check the command.
+    stored_version(&user, "browser", "pin", "0.43.0");
+    restart(&user, "browser");
     let starts = logged(&user, "browser", "start").len();
     let said = refused(mcp.call(
         "conn_browser",
-        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
     ));
     assert!(said.contains("Flottille refused to start it"), "{said}");
-    assert!(said.contains("AGENT_BROWSER_SOCKET_DIR"), "{said}");
+    assert!(said.contains("flottille-fake-mcp"), "{said}");
     // Its own words, not a server's: no frame of a third party's data around them.
     assert!(!said.contains("third party"), "{said}");
-    assert!(!said.contains("/tmp/elsewhere"), "{said}");
     assert_eq!(logged(&user, "browser", "start").len(), starts);
 }
 
