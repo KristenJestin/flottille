@@ -1037,20 +1037,28 @@ const EXTENSION_MIGRATIONS: &str = "
 ";
 
 /// A child an agent of another machine launched here was stored with no parent at depth 0 before
-/// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
-/// tree across machines"), and the agents under it, which that release let it start, one lower
-/// each, so that a stop ordered by depth still ends them before it. Made at every open rather than
-/// as a numbered migration: it changes nothing once done, as such a child is never stored so
-/// again, and every check of a root then reads the depth alone.
+/// #1274, a root's place, and a beta of it put it at depth 1 but left the agents it had started
+/// here at theirs: each is put at its place in the tree (`docs/remote.md`, "A tree across
+/// machines"), the remote child at its caller's depth plus one, as its launch says (1 when it
+/// says none), and each agent under it one lower than its parent, so that a stop ordered by depth
+/// ends them before it. A depth is only ever raised, never lowered, and an agent no launch of a
+/// child names, nor any under it, is left alone: made at every open rather than as a numbered
+/// migration, it changes nothing once done.
 const REMOTE_CHILDREN_DEPTH: &str = "
-    WITH RECURSIVE below(id) AS (
-        SELECT id FROM agents
-        WHERE parent IS NULL AND depth = 0
-          AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child')
+    WITH RECURSIVE placed(id, level) AS (
+        SELECT agents.id, max(agents.depth, 1 + coalesce((
+            SELECT max(json_extract(launches.asked, '$.asked.depth')) FROM launches
+            WHERE launches.way = 'in' AND launches.kind = 'child' AND launches.agent = agents.id
+              AND json_valid(launches.asked)
+        ), 0))
+        FROM agents
+        WHERE agents.parent IS NULL
+          AND agents.id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child')
         UNION ALL
-        SELECT agents.id FROM agents JOIN below ON agents.parent = below.id
+        SELECT agents.id, placed.level + 1 FROM agents JOIN placed ON agents.parent = placed.id
     )
-    UPDATE agents SET depth = depth + 1 WHERE id IN (SELECT id FROM below);
+    UPDATE agents SET depth = placed.level FROM placed
+    WHERE placed.id = agents.id AND placed.level > agents.depth;
 ";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
