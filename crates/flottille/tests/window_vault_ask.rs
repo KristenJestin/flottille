@@ -30,6 +30,9 @@ const STAGING: &str = "to sign in to staging";
 const BANK: &str = "to sign in to the bank";
 const SHOP: &str = "to sign in to the shop";
 const NOTES: &str = "to read the notes";
+const FIX: &str = "the realm's root shows no login form";
+const REALM_ROOT: &str = "https://id.example.invalid/realms/dev/";
+const ACCOUNT_PAGE: &str = "https://id.example.invalid/realms/dev/account";
 
 fn user() -> User {
     let user = User::with_fake_agent().with_fake_acli();
@@ -63,6 +66,12 @@ fn user() -> User {
                 {"action": "ask", "name": "notes-key", "why": NOTES,
                  "for": "connection:notes"}}},
             {"say": "Asked for the notes."},
+            {"hold": "release"}]},
+        {"when": "fix the login", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "propose", "name": "example-dev-login", "why": FIX,
+                 "url": ACCOUNT_PAGE}}},
+            {"say": "Proposed the fix."},
             {"hold": "release"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -964,5 +973,218 @@ fn a_vault_ask_marks_the_session_as_waiting_in_the_sidebar(cx: &mut TestAppConte
     until(&shell, cx, "the bell rings", |cx| {
         shell.read_with(cx, |shell, cx| shell.bell_sessions(cx).len()) == 1
     });
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+/// A session of `app` whose agent proposes to move the entry `example-dev-login`, saved with the
+/// realm's root, to its account page; its turn holds until the test releases it.
+fn proposing(user: &User) -> String {
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "example-dev-login", "secret": SECRET, "url": REALM_ROOT,
+            "username": "tester@example.invalid", "project": "app"}),
+    )
+    .unwrap();
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "fix the login"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the proposal", || {
+        !user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    id
+}
+
+/// Opens the session `id` and waits for the proposal's card in "Waiting for you": its number.
+fn proposal_card(user: &User, shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> u64 {
+    let number = open_ask(user);
+    until(shell, cx, "the session is in the tree", |cx| {
+        has(session_id(id), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    until(shell, cx, "the card of Waiting for you", |cx| {
+        has(format!("vault-ask-{number}-accept"), cx)
+    });
+    until(shell, cx, "the conversation's line", |cx| {
+        line_of(&session_page(shell, cx), cx).is_some()
+    });
+    settle(cx);
+    number
+}
+
+fn url_of(user: &User) -> serde_json::Value {
+    user.call("vault.list", json!({})).unwrap()["entries"][0]["url"].clone()
+}
+
+#[gpui_kit::test]
+fn the_card_of_a_proposal_shows_before_and_after_and_accept_applies_it(cx: &mut TestAppContext) {
+    let user = user();
+    let id = proposing(&user);
+    let (shell, cx) = window(&user, cx);
+    let number = proposal_card(&user, &shell, &id, cx);
+
+    assert_eq!(
+        label(format!("vault-ask-{number}-title"), cx).as_deref(),
+        Some("Proposes a vault edit")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-name"), cx).as_deref(),
+        Some("Entry: example-dev-login")
+    );
+    // Each field changed, before → after, and where the secret will go.
+    assert_eq!(
+        label(format!("vault-ask-{number}-change-url"), cx),
+        Some(format!("URL: {REALM_ROOT} → {ACCOUNT_PAGE}"))
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-host"), cx).as_deref(),
+        Some("Goes to: id.example.invalid")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-why"), cx),
+        Some(format!("Why: {FIX}"))
+    );
+    for (button, said) in [
+        ("accept", "Accept"),
+        ("edit", "Edit"),
+        ("dismiss", "Dismiss"),
+    ] {
+        assert_eq!(
+            label(format!("vault-ask-{number}-{button}"), cx).as_deref(),
+            Some(said)
+        );
+    }
+    // No new entry is offered: the entry exists. The three buttons fit in the rail's card.
+    assert!(!has(format!("vault-ask-{number}-add"), cx));
+    cx.update(|window, _| {
+        for part in ["dismiss", "edit", "accept", "details"] {
+            let id = format!("vault-ask-{number}-{part}");
+            assert!(
+                window
+                    .try_find(id.clone())
+                    .is_some_and(|found| found.visible()),
+                "{id} is in the rail's sight"
+            );
+        }
+    });
+    assert_eq!(
+        line_of(&session_page(&shell, cx), cx).as_deref(),
+        Some("proposed an edit of the vault entry example-dev-login · waiting for you")
+    );
+    assert_eq!(url_of(&user), REALM_ROOT, "nothing applied before Accept");
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-accept"), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert!(
+        shell.read_with(cx, |s, _| s.is_answering(number)),
+        "Accept is not disabled while its call runs"
+    );
+    until(&shell, cx, "the proposal is accepted", |_| {
+        user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    assert_eq!(url_of(&user), ACCOUNT_PAGE);
+    // The card folds away: still drawn while it folds, gone once it settled.
+    until(&shell, cx, "the card starts to fold", |cx| {
+        let line = line_of(&session_page(&shell, cx), cx);
+        line.as_deref() == Some("proposed an edit of the vault entry example-dev-login · accepted")
+    });
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-accept"), cx)
+    });
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn edit_on_a_proposal_opens_the_entry_s_form_with_it(cx: &mut TestAppContext) {
+    let user = user();
+    let id = proposing(&user);
+    let (shell, cx) = window(&user, cx);
+    let number = proposal_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-edit"), cx));
+    settle(cx);
+    let vault = the_vault(&shell, cx);
+    assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    // The entry's own form, prefilled with the proposal, its secret left empty to keep it.
+    assert_eq!(
+        vault.read_with(cx, |v, _| v.form_title()).as_deref(),
+        Some("Edit example-dev-login")
+    );
+    assert_eq!(value(&vault, VaultSection::url_field, cx), ACCOUNT_PAGE);
+    assert_eq!(
+        value(&vault, VaultSection::username_field, cx),
+        "tester@example.invalid"
+    );
+    assert_eq!(value(&vault, VaultSection::secret_field, cx), "");
+    assert_eq!(
+        label("vault-description-field-hint", cx),
+        Some(format!("Why the agent asks: {FIX}"))
+    );
+    assert_eq!(url_of(&user), REALM_ROOT, "nothing applied before Save");
+
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(&shell, cx, "the proposal is answered", |cx| {
+        if let Some(why) = vault.read_with(cx, |v, _| v.form_error().map(str::to_owned)) {
+            panic!("the form refused: {why}");
+        }
+        user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    assert_eq!(url_of(&user), ACCOUNT_PAGE);
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-accept"), cx)
+    });
+    assert_eq!(
+        line_of(&session_page(&shell, cx), cx).as_deref(),
+        Some("proposed an edit of the vault entry example-dev-login · saved")
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn dismiss_on_a_proposal_changes_nothing(cx: &mut TestAppContext) {
+    let user = user();
+    let id = proposing(&user);
+    let (shell, cx) = window(&user, cx);
+    let number = proposal_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-dismiss"), cx));
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-accept"), cx)
+    });
+    assert_eq!(
+        line_of(&session_page(&shell, cx), cx).as_deref(),
+        Some("proposed an edit of the vault entry example-dev-login · dismissed")
+    );
+    assert_eq!(url_of(&user), REALM_ROOT);
     std::fs::write(user.path("fake/release"), "").unwrap();
 }

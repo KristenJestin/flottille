@@ -101,6 +101,7 @@ jobs:
       hub: ${{ steps.hub.outputs.hub }}
       alpha: ${{ steps.alpha.outputs.alpha }}
       android: ${{ steps.android.outputs.android }}
+      browser: ${{ steps.browser.outputs.browser }}
     steps:
       # A feature branch's pull request publishes the branch's alpha, once `verify` passed (`build`,
       # `publish`): it has no push run to do it. Only a branch of this repository, named
@@ -176,6 +177,36 @@ jobs:
             esac
           done <<< "$files"
           echo "android=$android" >> "$GITHUB_OUTPUT"
+      # The real browser's job (`real-browser`) runs for a pull request that changes what its tests
+      # exercise: the connections extension, the sandbox a run and the browser's network are made
+      # in, the browsers' own code and the tests themselves. Every push runs it. A failure here
+      # says nothing (`browser` stays empty): it then runs.
+      - name: Does the real browser's job have to run
+        id: browser
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "browser=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          browser=false
+          while IFS= read -r path; do
+            case "$path" in
+              crates/flottille/src/extensions/connections/* | crates/flottille/src/landlock.rs | \
+                crates/flottille/src/mounts.rs | crates/flottille/src/browsers.rs | \
+                crates/flottille/tests/connections.rs | .github/workflows/ci.yml)
+                echo "::notice::$path: the real browser's tests run."
+                browser=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          if [ -z "$files" ]; then browser=true; fi
+          echo "browser=$browser" >> "$GITHUB_OUTPUT"
       # A pull request runs a fast check, not the whole suite (docs/releases.md, "What CI checks"):
       # `check`, and the tests it touches (`.github/scripts/pr-tests.sh`), which `test-selected`
       # runs. Only this step says `suite=false`: a failure of it says nothing, and the whole suite
@@ -467,6 +498,58 @@ jobs:
         run: df -h /
         continue-on-error: true
 
+  # The tests that drive the real agent-browser (`connections::`: its sign-in from the vault, its
+  # network, its kept profile) need agent-browser, passt's `pasta` and a Chrome, which no other job
+  # has: there each prints `skipped:` and passes, so a change of the browser's sandbox could pass
+  # unseen. Here they are installed, and `FLOTTILLE_REAL_BROWSER=required` turns a skip into a
+  # failure. Runs on every push and for a pull request that touches the files `changes` lists; the
+  # runner's own Chrome is the browser (a test's HOME has none), the version of agent-browser the
+  # adapter is checked on (`adapters.rs`, 0.43.x). Weston is installed for the headed tests of the
+  # window's browser (#1066), which start one of their own.
+  real-browser:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.browser != 'false' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      FLOTTILLE_REAL_BROWSER: required
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: verify
+          # As `test-selected`: the dependencies `build-tests` cached on dev.
+          add-rust-environment-hash-key: false
+          save-if: false
+      - name: Have the window's system libraries and the browser's
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev passt weston
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Have agent-browser
+        run: |
+          sudo npm install --global agent-browser@0.43.0
+          echo "FLOTTILLE_TEST_AGENT_BROWSER=$(command -v agent-browser)" >> "$GITHUB_ENV"
+          agent-browser --version
+          command -v pasta
+      - name: Build the fakes the tests spawn
+        run: |
+          fakes=()
+          for crate in crates/flottille-fake-*; do fakes+=(-p "${crate#crates/}"); done
+          cargo build --locked "${fakes[@]}"
+      # As `test`: lifted, the sandbox's user namespace is made, and the tests do not skip.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # All of `connections::`, so that a real test added later is run as well; a skip among them
+      # fails (`FLOTTILLE_REAL_BROWSER`). The passing tests' output is kept: it says which ran.
+      - run: cargo nextest run --locked --profile ci --success-output final --test group_remote -E 'test(/^connections::/)'
+
+
   # The tests that hold a rule over the whole repository, on every pull request the Rust suite
   # runs for, whatever it selects: no pull request changes their files, so `test-selected` never
   # picked them, and they failed dev eleven times in two days (21-23 November 2026). The unit
@@ -662,7 +745,7 @@ jobs:
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
   # `check` and the tests skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]
+    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, real-browser, hub, android]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -680,7 +763,14 @@ jobs:
           RUST: ${{ needs.changes.outputs.rust }}
           HUB: ${{ needs.hub.result }}
           ANDROID: ${{ needs.android.result }}
+          REAL_BROWSER: ${{ needs.real-browser.result }}
         run: |
+          # The real browser's tests (skipped when the pull request leaves its files alone, a
+          # pass): red or cancelled, never merged.
+          if [ "$REAL_BROWSER" = failure ] || [ "$REAL_BROWSER" = cancelled ]; then
+            echo "::error::real-browser: $REAL_BROWSER."
+            exit 1
+          fi
           # The Android job (the phone's core, its emulator run): skipped when the pull request
           # leaves the app and the core alone, a pass; red or cancelled, never merged.
           if [ "$ANDROID" = failure ] || [ "$ANDROID" = cancelled ]; then

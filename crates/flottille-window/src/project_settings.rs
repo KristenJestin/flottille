@@ -26,9 +26,10 @@ use gpui_design_system::{
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement,
+    IntoElement, ParentElement, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
+    px, relative,
 };
 use serde_json::{Value, json};
 
@@ -468,6 +469,8 @@ pub struct ProjectSettingsPage {
     /// The confirmation of its removal, which reads what the removal would do.
     removal: Entity<ProjectRemoval>,
     narrow: bool,
+    /// The switch of the machines that have the project is open.
+    machine_menu: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
     /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
@@ -609,6 +612,7 @@ impl ProjectSettingsPage {
             saving: None,
             removal,
             narrow: false,
+            machine_menu: false,
             rules,
             message_checks,
             commit_checks,
@@ -2910,6 +2914,78 @@ fn unlent_said(why: &str) -> SharedString {
     ))
 }
 
+impl ProjectSettingsPage {
+    /// Whose settings of the project these are, on the title's line (#1266): the machines that
+    /// have it, this one first, each with its state; choosing one shows its settings of the
+    /// project (`Shell::choose_machine`). None while the project is on one machine only.
+    fn machine_chooser(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown = crate::machines::shown_machine(cx);
+        let choices = self
+            .shell
+            .upgrade()
+            .and_then(|shell| {
+                let machines = shell.read(cx).machines().read(cx).machines()?;
+                Some(crate::machines::project_choices(
+                    machines,
+                    &self.name,
+                    shown.as_deref(),
+                ))
+            })
+            .unwrap_or_default();
+        let (choices, present) =
+            crate::machines::kept("project-settings-machine-kept", choices, window, cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
+        let toggle = page.clone();
+        let picker = (!choices.is_empty()).then(|| {
+            crate::machines::picker(
+                "project-settings-machine",
+                "project-settings-machine",
+                &choices,
+                chosen,
+                self.machine_menu,
+                move |_, cx| {
+                    toggle
+                        .update(cx, |page, cx| {
+                            page.machine_menu = !page.machine_menu;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+                move |name, window, cx| {
+                    page.update(cx, |page, cx| {
+                        page.machine_menu = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    shell
+                        .update(cx, |shell, cx| shell.choose_machine(name, window, cx))
+                        .ok();
+                },
+            )
+        });
+        let picker = div()
+            .id("project-settings-machine-field")
+            .aria_label("Settings of")
+            .flex_none()
+            .pl(space::LG)
+            .children(picker)
+            .test_support();
+        // It narrows and fades away once the project is on one machine only, and widens in when
+        // another machine comes to have it.
+        crate::machines::narrowing(
+            "project-settings-machine-fold",
+            present,
+            picker.into_any_element(),
+            window,
+            cx,
+        )
+    }
+}
+
 impl Render for ProjectSettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -2932,15 +3008,26 @@ impl Render for ProjectSettingsPage {
                 move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
             )
         };
+        // The switch of the machines that have it sits on the title's line, at the header's
+        // right, as Settings' own does.
+        let title = div()
+            .id("project-settings-header-line")
+            .flex()
+            .items_end()
+            .child(
+                div().flex_1().min_w_0().child(
+                    PageHeader::new("project-settings-header", "Settings")
+                        .crumb(crumb)
+                        .path(SharedString::from(shown_folder(&self.folder)))
+                        .more(self.more.clone()),
+                ),
+            )
+            .children(self.machine_chooser(window, cx))
+            .test_support();
         let header = div()
             .flex()
             .flex_col()
-            .child(
-                PageHeader::new("project-settings-header", "Settings")
-                    .crumb(crumb)
-                    .path(SharedString::from(shown_folder(&self.folder)))
-                    .more(self.more.clone()),
-            )
+            .child(title)
             .child(
                 presence_of(
                     "project-settings-unread-block",

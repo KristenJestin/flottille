@@ -323,6 +323,7 @@ fn the_ask_for_an_entry_has_no_field_for_a_secret() {
         [
             "action",
             "connection",
+            "description",
             "for",
             "name",
             "project",
