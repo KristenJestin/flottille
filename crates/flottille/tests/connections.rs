@@ -4583,13 +4583,31 @@ const LOCKED_TOO: [&str; 8] = [
 
 /// Actions that run a script in the page, which no gate can judge: off at the first pin, as
 /// `eval` is, and the user's to turn on.
-const SCRIPTS: [&str; 6] = [
+const SCRIPTS: [&str; 4] = [
     "agent_browser_add_init_script",
     "agent_browser_wait_for_function",
-    "agent_browser_batch",
     "agent_browser_network_route",
     "agent_browser_chat",
-    "agent_browser_flow_run",
+];
+
+/// Actions that run other commands of agent-browser's, the locked ones among them: `batch` any
+/// command, `flow_run` the steps of a flow kept in a file under the home, which runs write. Off,
+/// and no setting turns them on.
+const REPLAYS: [&str; 2] = ["agent_browser_batch", "agent_browser_flow_run"];
+
+/// Actions that answer with a request's headers and body, the `Authorization` a page sends and
+/// its cookies among them. Off, and no setting turns them on.
+const TRAFFIC: [&str; 2] = [
+    "agent_browser_network_requests",
+    "agent_browser_network_request",
+];
+
+/// Actions that open DevTools, or a local port that drives the browser with no gate, as
+/// `get_cdp_url` hands out. Off, and no setting turns them on.
+const DEVTOOLS: [&str; 3] = [
+    "agent_browser_inspect",
+    "agent_browser_stream_enable",
+    "agent_browser_dashboard_start",
 ];
 
 /// Actions that write the page's traffic to a file, which no masking reaches: off at the first
@@ -4603,13 +4621,12 @@ const FILES: [&str; 4] = [
 
 /// Other actions of agent-browser's, judged at the first pin: `login` is offered beside every one
 /// of them, as agent-browser's own login restricts nothing after it.
-const OTHERS: [&str; 9] = [
+const OTHERS: [&str; 8] = [
     "agent_browser_react_inspect",
     "agent_browser_react_tree",
     "agent_browser_get_attr",
     "agent_browser_get_html",
     "agent_browser_get_value",
-    "agent_browser_network_requests",
     "agent_browser_click",
     "agent_browser_fill",
     "agent_browser_get_text",
@@ -4655,6 +4672,10 @@ fn agent_browser(version: &str) -> Value {
             "agent_browser_wait_for_url",
             json!({"url": {"type": "string"}}),
         ),
+        tool(
+            "agent_browser_diff_url",
+            json!({"url1": {"type": "string"}, "url2": {"type": "string"}}),
+        ),
         tool("agent_browser_snapshot", json!({})),
         tool("agent_browser_eval", json!({"script": {"type": "string"}})),
     ];
@@ -4666,6 +4687,9 @@ fn agent_browser(version: &str) -> Value {
         .chain(&FLOWS)
         .chain(&OTHERS)
         .chain(&PROFILE_LOCKED)
+        .chain(&REPLAYS)
+        .chain(&TRAFFIC)
+        .chain(&DEVTOOLS)
     {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
     }
@@ -6622,6 +6646,9 @@ fn an_accepted_browser_connection_signs_in_without_switching_anything_off() {
         .iter()
         .chain(&LOCKED_TOO)
         .chain(&PROFILE_LOCKED)
+        .chain(&REPLAYS)
+        .chain(&TRAFFIC)
+        .chain(&DEVTOOLS)
         .copied()
         .collect();
     let mut actions = serde_json::Map::new();
@@ -7060,6 +7087,204 @@ fn an_agent_cannot_write_into_the_browser_s_profile_through_a_download_or_a_scre
     }
     let said = flottilles_words(&mcp);
     assert!(said.contains("screenshot"), "{said}");
+}
+
+/// `action` is off and stays off while the adapter applies: the user cannot turn it on, the
+/// refusal says `why`, and the agent's call of it with `arguments` is refused before the server
+/// sees anything.
+fn stays_off(user: &User, mcp: &Mcp, action: &str, arguments: Value, why: &str) {
+    assert_eq!(setting(user, action), "off", "{action}");
+    let refused_accept = user
+        .call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {action: "judged"}}),
+        )
+        .unwrap_err();
+    assert!(refused_accept.1.contains(action), "{refused_accept:?}");
+    assert!(refused_accept.1.contains(why), "{refused_accept:?}");
+    assert_eq!(setting(user, action), "off", "{action}");
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": action, "arguments": arguments}),
+    ));
+    assert!(answer.contains("off"), "{action}: {answer}");
+    assert!(logged(user, "browser", "call").is_empty(), "{action}");
+}
+
+#[test]
+fn an_agent_cannot_open_a_file_of_the_profile_through_diff_url() {
+    // diff_url opens two addresses, url1 and url2, and answers with what each page holds: a
+    // file: one is the profile's own storage, the tokens a page keeps in it in clear.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let storage = user
+        .path("state/flottille/browsers/browser/profile/Default/Local Storage/leveldb/000003.log");
+    let storage = format!("file://{}", storage.display());
+    let site = "https://shop.example.com/";
+    for arguments in [
+        json!({"url1": storage, "url2": site}),
+        json!({"url1": site, "url2": storage}),
+        json!({"url1": "javascript:document.cookie", "url2": site}),
+    ] {
+        refused_unseen(
+            &user,
+            &mcp,
+            "agent_browser_diff_url",
+            arguments,
+            "http or https",
+        );
+    }
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_diff_url",
+            "arguments": {"url1": site, "url2": "https://shop.example.com/cart"}}),
+    ));
+}
+
+#[test]
+fn an_agent_cannot_read_a_request_s_headers_through_the_browser() {
+    // A page that keeps its token in its storage sends it as `Authorization: Bearer …`, and every
+    // request carries the profile's cookies: the details of a request are a credential.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_network_request",
+        json!({"requestId": "1"}),
+        "headers",
+    );
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_network_requests",
+        json!({}),
+        "headers",
+    );
+}
+
+#[test]
+fn batch_and_flow_run_stay_off_with_the_adapter() {
+    // batch runs any command of agent-browser's (cookies get, state save, upload, get cdp-url),
+    // whatever action is locked; a flow is a file under the home, which a run plants and flow_run
+    // replays.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_batch",
+        json!({"commands": [["cookies", "get"]]}),
+        "any command",
+    );
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_flow_run",
+        json!({"name": "planted"}),
+        "any command",
+    );
+}
+
+#[test]
+fn devtools_and_the_browser_s_control_ports_stay_off_with_the_adapter() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    stays_off(&user, &mcp, "agent_browser_inspect", json!({}), "no gate");
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_stream_enable",
+        json!({"port": 9555}),
+        "no gate",
+    );
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_dashboard_start",
+        json!({"port": 9556}),
+        "no gate",
+    );
+}
+
+#[test]
+fn open_with_capture_is_refused() {
+    // capture: "flow" records the session, what a login types included, and flow_save writes it
+    // to a file under the home.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    for action in ["agent_browser_open", "agent_browser_tab_new"] {
+        refused_unseen(
+            &user,
+            &mcp,
+            action,
+            json!({"url": "https://shop.example.com/", "capture": "flow"}),
+            "capture",
+        );
+    }
+}
+
+#[test]
+fn a_tool_the_adapter_does_not_know_comes_in_off() {
+    // The adapter was checked on 0.43.0's own tools: one it does not know, which a 0.43 patch
+    // adds, may read the profile as cookies_get does. It comes in off, the review says why, and
+    // the user may turn it on.
+    let user = user();
+    let unknown = |name: &str| {
+        json!({"name": name, "description": format!("{name} of the browser."),
+            "inputSchema": {"type": "object", "properties": {}}})
+    };
+    let mut script = agent_browser("0.43.0");
+    let tools = script["tools"].as_array_mut().unwrap();
+    tools.push(unknown("agent_browser_cookies_export"));
+    browser(&user, &script, json!({}));
+    assert_eq!(setting(&user, "agent_browser_cookies_export"), "off");
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(changed.contains("does not know"), "{changed}");
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_cookies_export": "judged"}}),
+    )
+    .unwrap();
+    assert_eq!(setting(&user, "agent_browser_cookies_export"), "judged");
+    // A patch adds another, and a tool of 0.43.0's the server did not serve: at the review it
+    // asks, the unknown one comes in off, the known one judged, and the one the user turned on
+    // stays on.
+    let (_, mcp) = signed_up(&user);
+    let mut patch = script.clone();
+    patch["server"]["version"] = json!("0.43.1");
+    let tools = patch["tools"].as_array_mut().unwrap();
+    tools.push(unknown("agent_browser_storage_export"));
+    tools.push(unknown("agent_browser_get_title"));
+    patch["login"] = json!({"form": form_file(&user)});
+    restart(&user, "browser");
+    write_script(&user, "browser", &patch);
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_snapshot", "arguments": {}}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert_eq!(connection(&user, "browser")["state"], "cut off");
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "browser"}))
+        .unwrap();
+    assert_eq!(setting(&user, "agent_browser_storage_export"), "off");
+    assert_eq!(setting(&user, "agent_browser_get_title"), "judged");
+    assert_eq!(setting(&user, "agent_browser_cookies_export"), "judged");
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_storage_export", "arguments": {}}),
+    ));
+    assert!(answer.contains("off"), "{answer}");
 }
 
 #[test]
