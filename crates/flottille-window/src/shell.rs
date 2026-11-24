@@ -173,6 +173,10 @@ fn page_named(name: &str) -> Option<(Selection, Option<usize>)> {
     })
 }
 
+/// A project with no settings file, by name and, when the projects are shown by machine, by the
+/// machine's section.
+type GoneKey = (String, Option<String>);
+
 pub struct Shell {
     seen: Arc<Seen>,
     /// What "Restart Flottille" runs, off the UI's thread: `flottille daemon stop`, after which
@@ -219,7 +223,7 @@ pub struct Shell {
     /// The rows of this machine's projects with no settings file, by name (and by this machine's
     /// section when the projects are shown by machine): never in `projects` nor `machine_projects`,
     /// which are the projects' of any machine, so that one never takes the other's place.
-    gone: HashMap<(String, Option<String>), Entity<ProjectNode>>,
+    gone: HashMap<GoneKey, Entity<ProjectNode>>,
     /// The machines' sections, by name.
     sections: HashMap<String, Entity<MachineNode>>,
     /// The user's choice (`window.get`): the projects are shown by machine.
@@ -5009,7 +5013,7 @@ impl Shell {
         sessions: &mut HashMap<String, Entity<SessionRow>>,
         now: u64,
         cx: &mut Context<Self>,
-    ) -> Vec<((String, Option<String>), Entity<ProjectNode>)> {
+    ) -> Vec<(GoneKey, Entity<ProjectNode>)> {
         let this = cx.entity().downgrade();
         let mut nodes = Vec::new();
         for gone in &snapshot.unconfigured {
@@ -5048,7 +5052,7 @@ impl Shell {
             // (by machine, the sections do).
             let apart = (machine.is_none()
                 && snapshot.projects.iter().any(|p| p.name == gone.name))
-            .then(|| snapshot.this_machine.as_deref())
+            .then_some(snapshot.this_machine.as_deref())
             .flatten();
             if !node.read(cx).says(&gone.name, apart, &[]) {
                 node.update(cx, |node, cx| {
