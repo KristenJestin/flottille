@@ -294,6 +294,10 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
+fn visible(cx: &mut VisualTestContext, id: &str) -> bool {
+    cx.update(|window, _| window.try_find(id.to_owned()).is_some_and(|f| f.visible()))
+}
+
 fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     cx.update(|window, _| {
         window
