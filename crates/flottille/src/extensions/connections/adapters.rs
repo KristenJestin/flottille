@@ -40,7 +40,8 @@ pub struct Adapter {
     /// The server's actions off at the first pin, which the user may turn on: those that run a
     /// script in the page, which no gate can judge.
     scripts: &'static [&'static str],
-    /// The same, for those that write the page's traffic to a file, which no masking reaches.
+    /// The same, for those that write the page's traffic, or what was typed in it, to a file,
+    /// which no masking reaches.
     files: &'static [&'static str],
     /// Its actions whose `url` is a pattern matched against an address, never opened: every
     /// other `url` must be a web address (`web_address`).
@@ -86,6 +87,10 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_network_har_stop",
         "agent_browser_trace_start",
         "agent_browser_trace_stop",
+        // A recorded session saved as a flow, in a file agent-browser writes itself: what a
+        // login types may be in it.
+        "agent_browser_flow_save",
+        "agent_browser_flow_steps",
     ],
     patterns: &["agent_browser_wait_for_url", "agent_browser_network_route"],
     locked: &[
@@ -268,8 +273,8 @@ impl Adapter {
             self.scripts.join(", ")
         )];
         said.push(format!(
-            "{} write the page's traffic to a file, which is not masked: they are off at the \
-             first review, and the user may turn them on",
+            "{} write the page's traffic, or what was typed in it, to a file, which is not \
+             masked: they are off at the first review, and the user may turn them on",
             self.files.join(", ")
         ));
         said.push(
