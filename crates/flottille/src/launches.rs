@@ -32,7 +32,7 @@ const MOST_WAITING: usize = 4;
 
 /// The most launches of one machine, of any kind, that may wait here for the user's answer: past
 /// them, its next is refused, so that a machine fills no list of requests.
-const MOST_HELD: usize = 4;
+pub(crate) const MOST_HELD: usize = 4;
 
 /// How long a launch may wait for its code before it is forgotten, with what came of it.
 const WAITING_FOR_CODE: Duration = Duration::from_secs(60 * 60);
@@ -1223,13 +1223,14 @@ async fn with_agent(
         let mut shown = json!({"kind": asked.kind, "machine": launch.asked["from"],
             "title": asked.title, "brief": asked.brief});
         // What the user is asked to share from the caller's machine, by the entries' names:
-        // what a device shares before it allows the launch.
+        // what a device makes there from the caller's project (`vault.from_file`) and shares
+        // with this machine before it allows the launch.
         if launch.asked["missing"]
             .as_array()
             .is_some_and(|missing| !missing.is_empty())
         {
-            shown["needs"] =
-                json!({"from": launch.asked["from"], "files": launch.asked["missing"]});
+            shown["needs"] = json!({"from": launch.asked["from"], "to": this_machine(daemon),
+                "project": asked.project, "files": launch.asked["missing"]});
         }
         let request = Request {
             number: 0,

@@ -37,7 +37,7 @@ fn fake_mcp() -> PathBuf {
 }
 
 fn user() -> User {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_agent_browser(&fake_mcp());
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -71,9 +71,15 @@ fn write_script(user: &User, name: &str, script: &Value) {
     std::fs::write(script_file(user, name), script.to_string()).unwrap();
 }
 
+/// The command of the fake server of the connection `name`: for `browser`, the fake run as
+/// `agent-browser`, the only program a browser connection's command may name.
 fn command_of(user: &User, name: &str) -> Vec<String> {
+    let program = match name {
+        "browser" => user.path("bin/agent-browser"),
+        _ => fake_mcp(),
+    };
     vec![
-        fake_mcp().display().to_string(),
+        program.display().to_string(),
         "--script".into(),
         script_file(user, name).display().to_string(),
         "--log".into(),
@@ -1019,10 +1025,10 @@ fn the_form_scrolls_once_in_the_dialog_and_its_footer_stays_in_view(cx: &mut Tes
     });
     settle(cx);
     assert_eq!(bounds(cx, "save-connection"), save, "Save stays");
-    let last = bounds(cx, "connection-headed-label");
+    let last = bounds(cx, "connection-limits-field-label");
     assert!(
         last.bottom() <= save.top() && last.top() >= title.bottom(),
-        "the last switch is now between the title and the buttons: {last:?}"
+        "the last field is now between the title and the buttons: {last:?}"
     );
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),
@@ -1062,7 +1068,6 @@ fn the_form_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppCont
     for optional in [
         "connection-variables-field-label",
         "connection-limits-field-label",
-        "connection-headed-label",
     ] {
         assert!(
             bounds(cx, optional).top() >= line.bottom(),
@@ -1101,7 +1106,6 @@ fn the_form_has_no_sites_field(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     open_the_form_of(&shell, cx, "browser");
     // The browser goes wherever the agent takes it: no host is added to a sign-in.
-    assert!(visible(cx, "connection-headed"));
     assert!(!present(cx, "connection-sites-field-label"));
     assert!(!present(cx, "connection-new-site"));
 }
@@ -2646,6 +2650,10 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         "{changed}"
     );
     assert!(changed.contains("--config"), "{changed}");
+    // Folded again: what it changed grows with each lock it names, and pushes the rows below out
+    // of view.
+    click(cx, "connection-review-adapter-changes");
+    assert_eq!(height(cx, "connection-review-adapter-changes-body"), 0.);
 
     // Its own logins cannot be turned on: the pill is disabled, and the unfolded row says why.
     click(cx, "connection-review-unchanged");
@@ -2671,6 +2679,9 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         !present(cx, &format!("{locked}-pick")),
         "no box to tick it with"
     );
+    // Folded again: the reason, which says every lock of the adapter, is long.
+    click(cx, &format!("{locked}-row"));
+    assert!(!present(cx, &format!("{locked}-locked")));
     // Eval is off at its first pin, and the user's to turn on: its row has all four choices.
     let eval = row_of(cx, "agent_browser_eval");
     click(cx, &format!("{eval}-row"));
@@ -3172,67 +3183,31 @@ fn the_window_opens_only_an_https_or_a_local_http_address_to_sign_in(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn the_form_shows_the_browser_when_its_toggle_is_on(cx: &mut TestAppContext) {
+fn the_connection_form_has_no_show_the_browser_toggle(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);
     agent_browser(&user, &["agent_browser_click"], false);
     let (shell, cx) = window(&user, cx);
     open_the_form_of(&shell, cx, "browser");
-    // A labelled toggle, off by default.
-    assert_eq!(
-        label(cx, "connection-headed-label").as_deref(),
-        Some("Show the browser")
-    );
-    assert_eq!(connection(&user, "browser").unwrap()["headed"], Value::Null);
-    click(cx, "connection-headed");
     settle(cx);
-    click(cx, "save-connection");
-    until(&shell, cx, "the form closes", |cx| {
-        !visible(cx, "connection-modal")
-    });
-    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
-    // Open again: it is on, and saving another field keeps it.
-    click(cx, "connection-more-browser");
-    click(cx, "edit-connection-browser");
-    until(&shell, cx, "the form opens on it", |cx| {
-        visible(cx, "connection-modal")
-    });
-    settle(cx);
+    // Whether the browser is shown is the agent's, a call at a time: the form has no switch for
+    // it, no hint and no reason under it.
+    for id in [
+        "connection-headed",
+        "connection-headed-block",
+        "connection-headed-label",
+        "connection-headed-why",
+    ] {
+        assert!(!present(cx, id), "{id}");
+    }
+    // Saving another field leaves the connection with no `headed` of its own.
     let fields = section(&shell, cx).read_with(cx, |s, _| s.form_fields().unwrap());
     type_in(&fields.about, "The browser of the user.", cx);
     click(cx, "save-connection");
     until(&shell, cx, "the form closes", |cx| {
         !visible(cx, "connection-modal")
     });
-    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
-}
-
-#[gpui_kit::test]
-fn a_browser_that_could_not_be_shown_says_why_under_its_switch(cx: &mut TestAppContext) {
-    // The session names a Wayland socket that is not there: the browser runs headless.
-    let user = user().with_env("WAYLAND_DISPLAY", "wayland-none");
-    turn_on(&user);
-    agent_browser(&user, &["agent_browser_click"], false);
-    user.call(
-        "connection.edit",
-        json!({"name": "browser", "headed": true}),
-    )
-    .unwrap();
-    user.call("connection.review", json!({"name": "browser"}))
-        .unwrap();
-    let (shell, cx) = window(&user, cx);
-    open_the_form_of(&shell, cx, "browser");
-    settle(cx);
-    assert!(visible(cx, "connection-headed-why"));
-    let said = section(&shell, cx)
-        .read_with(cx, |s, _| s.headless_said())
-        .expect("it says why");
-    assert!(said.contains("not shown"), "{said}");
-    assert!(said.contains("Wayland socket"), "{said}");
-    // Turned off in the form, there is nothing to say: it folds away.
-    click(cx, "connection-headed");
-    settle(cx);
-    assert!(!visible(cx, "connection-headed-why"));
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], Value::Null);
 }
 
 // ── A review that needs a sign-in ────────────────────────────────────────────────────────────

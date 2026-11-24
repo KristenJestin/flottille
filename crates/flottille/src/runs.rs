@@ -1234,7 +1234,15 @@ fn start(
     let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
-    let child = spawned.map_err(|e| format!("cannot run {}: {e}", words[0]))?;
+    let child = spawned.map_err(|e| {
+        // Its namespace refused, as `flottille doctor` says it.
+        let refused = crate::mounts::whole_refused()
+            .filter(|_| !outside && !full && e.raw_os_error() == Some(libc::ENOSYS));
+        match refused {
+            Some(why) => format!("cannot run {}: {why}", words[0]),
+            None => format!("cannot run {}: {e}", words[0]),
+        }
+    })?;
     let pid = child.id().ok_or("the run ended at once")?;
     let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
         .map_err(|e| format!("cannot read the output of {}: {e}", words[0]))?;

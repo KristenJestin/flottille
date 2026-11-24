@@ -2522,14 +2522,18 @@ fn reads_a_login(call: &Call, layers: &[Vec<String>]) -> Option<String> {
     }
     let keys: Vec<Login> = own_folders(call.own)
         .iter()
-        .map(|own| (own.join(crate::remote::FOLDER), String::new()))
+        .flat_map(|own| {
+            OWN_LOGINS
+                .iter()
+                .map(|(folder, what)| (own.join(folder), format!("{what}, its {folder}/ folder")))
+        })
         .collect();
-    if let Some((layer, folder, _)) = reads_below(call, layers, &keys) {
+    if let Some((layer, folder, held)) = reads_below(call, layers, &keys) {
+        let what = held.first().map_or("", |(_, what)| what.as_str());
         return Some(format!(
-            "refused: {layer} reads every file below {folder}, which holds Flottille's keys, its \
-             {}/ folder, a login's place: an agent never reads nor writes a login, in any mode; \
-             name the folders to read, without it; nothing was done",
-            crate::remote::FOLDER
+            "refused: {layer} reads every file below {folder}, which holds {what}, a login's \
+             place: an agent never reads nor writes a login, in any mode; name the folders to \
+             read, without it; nothing was done"
         ));
     }
     let home = call.grant.place.home.as_deref();
@@ -3651,12 +3655,12 @@ fn acli_reads(args: &[String]) -> bool {
     )
 }
 
-fn base(word: &str) -> &str {
+pub(crate) fn base(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
 /// `NAME=value`, as `env` reads it.
-fn assignment(word: &str) -> bool {
+pub(crate) fn assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
             && !name.starts_with(|c: char| c.is_ascii_digit())
@@ -3665,7 +3669,7 @@ fn assignment(word: &str) -> bool {
 }
 
 /// The line, then each program a wrapper runs, unwrapped in turn.
-fn layers(words: &[String]) -> Result<Vec<Vec<String>>, String> {
+pub(crate) fn layers(words: &[String]) -> Result<Vec<Vec<String>>, String> {
     let mut layers = vec![words.to_vec()];
     while let Some(inner) = inner(layers.last().expect("one layer at least"))? {
         if layers.len() == LAYERS_MAX {
@@ -4900,29 +4904,46 @@ fn credential(own: &[PathBuf], home: Option<&Path>, path: &Resolved) -> Option<S
     ))
 }
 
-/// Flottille's keys folder, `remote/` (`docs/remote.md`, "Identity and keys"), when a path is in
-/// it: the machine key, and the clients' device key on a machine with no keyring. It is in the
-/// state folder; it is looked for in each of Flottille's own folders, which hold no other
-/// `remote`, so that no order of `own` can leave it out. A file system may not tell cases apart:
-/// `REMOTE` is `remote` there, as for an agent's folder.
+/// The folders of Flottille's own that are a login's place, and what they hold: its keys
+/// (`docs/remote.md`, "Identity and keys") and its browsers' profiles, their cookies and sign-ins
+/// (`docs/extensions.md`, "Adapters").
+const OWN_LOGINS: [(&str, &str); 2] = [
+    (crate::remote::FOLDER, "Flottille's keys"),
+    (
+        crate::browsers::FOLDER,
+        "the profiles of Flottille's browsers",
+    ),
+];
+
+/// Flottille's keys folder, `remote/` (`docs/remote.md`, "Identity and keys"), or its browsers'
+/// folder, `browsers/`, when a path is in it: the machine key, and the clients' device key on a
+/// machine with no keyring; the cookies and sign-ins of the connections' browsers. They are in
+/// the state folder; they are looked for in each of Flottille's own folders, which hold no other
+/// of that name, so that no order of `own` can leave one out. A file system may not tell cases
+/// apart: `REMOTE` is `remote` there, as for an agent's folder.
 ///
 /// Only what is in it: a folder above it is refused to a program that reads every file below
 /// (`reads_a_login`), and to a write (`forbidden`), but a listing of it shows names only.
 fn keys(own: &[PathBuf], path: &Resolved) -> Option<String> {
     let own = own_folders(own);
     let in_keys = |path: &Path| {
-        own.iter().any(|own| {
-            path.strip_prefix(own)
-                .ok()
-                .and_then(|rest| rest.components().next())
-                .and_then(|name| name.as_os_str().to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case(crate::remote::FOLDER))
+        own.iter().find_map(|own| {
+            let name = path
+                .strip_prefix(own)
+                .ok()?
+                .components()
+                .next()?
+                .as_os_str()
+                .to_str()?;
+            OWN_LOGINS
+                .iter()
+                .find(|(folder, _)| name.eq_ignore_ascii_case(folder))
         })
     };
     seen(path)
         .iter()
-        .any(|path| in_keys(path))
-        .then(|| format!("Flottille's keys, its {}/ folder", crate::remote::FOLDER))
+        .find_map(|path| in_keys(path))
+        .map(|(folder, what)| format!("{what}, its {folder}/ folder"))
 }
 
 /// The process's folder in `/proc` a path goes through when it reaches the files that process

@@ -333,6 +333,8 @@ pub struct SessionPage {
     /// asked, the oldest first: their cards are in the rail's "Waiting for you".
     vault_asks: Vec<VaultAsk>,
     decisions: HashMap<u64, String>,
+    /// The held launches this window allowed after sharing their files: how many it shared.
+    shared: HashMap<u64, usize>,
     /// How many pages of the shown agent's conversation are read, from its end.
     pages: usize,
     /// The shown agent's conversation was read by the current link.
@@ -487,6 +489,7 @@ impl SessionPage {
             requests: HashMap::new(),
             vault_asks: Vec::new(),
             decisions: HashMap::new(),
+            shared: HashMap::new(),
             pages: 1,
             read: false,
             histories: 0,
@@ -1508,6 +1511,40 @@ impl SessionPage {
         self.perform(command, cx);
     }
 
+    /// Allow on a held launch that needs files: they are made and shared from `from_step` on,
+    /// then the launch is allowed. Each step comes back to [`SessionPage::allowing`], the
+    /// approval to [`SessionPage::answered`].
+    pub fn allow_sharing(
+        &mut self,
+        number: u64,
+        needs: crate::waiting::Needs,
+        from_step: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let command = Command::AllowSharing {
+            session: self.opened.id.clone(),
+            number,
+            needs,
+            from_step,
+        };
+        self.perform(command, cx);
+    }
+
+    /// A step of an Allow that shares files, for its card.
+    pub fn allowing(
+        &mut self,
+        number: u64,
+        at: Option<usize>,
+        step: crate::waiting::Step,
+        why: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.waiting(cx);
+        waiting.update(cx, |waiting, cx| {
+            waiting.allowing(number, at, step, why, cx)
+        });
+    }
+
     /// What the daemon answered to an answer given on a card.
     pub fn answered(
         &mut self,
@@ -1516,10 +1553,15 @@ impl SessionPage {
         refused: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let waiting = self.waiting(cx);
+        if decision.as_deref() == Some("once")
+            && let Some(files) = waiting.read(cx).shared(number)
+        {
+            self.shared.insert(number, files);
+        }
         if let Some(decision) = decision {
             self.decisions.insert(number, decision);
         }
-        let waiting = self.waiting(cx);
         waiting.update(cx, |waiting, cx| waiting.answered(number, refused, cx));
         self.refresh_conversation(cx);
     }
@@ -2148,6 +2190,8 @@ impl SessionPage {
                 )
             }),
             asker: request.map(|r| self.said_name(&r.agent)),
+            needs: request.and_then(|r| r.needs.clone()),
+            shared: self.shared.get(&number).copied(),
             decision,
         })
     }
@@ -4259,6 +4303,10 @@ pub struct ApprovalCard {
     pub why: Option<String>,
     pub source: Option<String>,
     pub asker: Option<String>,
+    /// What a held launch needs shared before it is allowed, when it needs anything.
+    pub needs: Option<crate::waiting::Needs>,
+    /// How many files this window shared before it allowed it.
+    pub shared: Option<usize>,
     /// `deny`, `once` or `cancelled`, once decided.
     pub decision: Option<String>,
 }
@@ -4285,6 +4333,10 @@ impl ApprovalCard {
             other => other,
         };
         let mut parts = vec![said.to_owned()];
+        parts.extend(self.shared.map(|files| match files {
+            1 => "1 file shared".to_owned(),
+            files => format!("{files} files shared"),
+        }));
         parts.extend(self.asked.clone());
         parts.extend(self.asker.clone());
         if parts.len() == 1 {
@@ -11333,6 +11385,8 @@ mod tests {
             why: None,
             source: None,
             asker: Some("lead".into()),
+            needs: None,
+            shared: None,
             decision: Some("once".into()),
         };
         assert_eq!(card.record().as_deref(), Some("Allowed · Read .env · lead"));
@@ -11341,6 +11395,19 @@ mod tests {
             ..card
         };
         assert_eq!(pending.record(), None);
+        let shared = ApprovalCard {
+            asked: Some("Start a session led by pc".into()),
+            shared: Some(2),
+            ..pending
+        };
+        let allowed = ApprovalCard {
+            decision: Some("once".into()),
+            ..shared
+        };
+        assert_eq!(
+            allowed.record().as_deref(),
+            Some("Allowed · 2 files shared · Start a session led by pc · lead")
+        );
     }
 
     #[test]

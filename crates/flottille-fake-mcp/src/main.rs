@@ -103,7 +103,8 @@
 //!
 //! With `AGENT_BROWSER_SOCKET_DIR` set, a login and each tool call reach the browser agent-browser's
 //! daemon runs there, which outlives the command that started it: the file `browser.json` in that
-//! folder, written by the first one with the mode (`headed`, from the configuration) and the
+//! folder, written by the first one with the mode (`headed`: true when it was given a display, `WAYLAND_DISPLAY`
+//! or `DISPLAY`, null without one, as a call of `open` with `headed` is told to show it) and the
 //! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
 //! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
 //! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
@@ -133,6 +134,22 @@ fn loaded_config(args: &[String]) -> Value {
         .and_then(|file| std::fs::read_to_string(file).ok())
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or(Value::Null)
+}
+
+/// Whether the program writes and reads back a file in the profile its configuration names, as a
+/// browser does: null without one.
+fn profile_reached(args: &[String]) -> Value {
+    let Some(profile) = loaded_config(args)["profile"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+    else {
+        return Value::Null;
+    };
+    let file = profile.join("reached");
+    let reached = std::fs::create_dir_all(&profile).is_ok()
+        && std::fs::write(&file, std::process::id().to_string()).is_ok()
+        && std::fs::read_to_string(&file).is_ok_and(|read| read == std::process::id().to_string());
+    json!(reached)
 }
 
 fn main() {
@@ -184,7 +201,7 @@ fn main() {
         "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
         "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
         "cwd": std::env::current_dir().ok(), "args": args, "child": child,
-        "config": loaded_config(&args),
+        "config": loaded_config(&args), "profile_reached": profile_reached(&args),
         "display": display_environment()}),
     );
     if let Some(line) = script["stderr"].as_str() {
@@ -290,7 +307,7 @@ fn main() {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
                 write_log(&log, json!({"event": "received", "tool": tool}));
-                browser(&args, &log, "call");
+                browser(&log, "call");
                 let answer = script["answers"][&tool].clone();
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
@@ -369,7 +386,7 @@ fn display_environment() -> Value {
 
 /// The browser on `AGENT_BROWSER_SOCKET_DIR`, started by this command when none runs there: what
 /// agent-browser's daemon does, which then serves every command of that folder until it is closed.
-fn browser(args: &[String], log: &Option<String>, by: &str) {
+fn browser(log: &Option<String>, by: &str) {
     let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") else {
         return;
     };
@@ -379,7 +396,9 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let started = running.is_none();
     let browser = running.unwrap_or_else(|| {
-        let browser = json!({"headed": loaded_config(args)["headed"],
+        let shown =
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+        let browser = json!({"headed": shown.then_some(true),
             "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
         std::fs::write(&file, browser.to_string()).unwrap();
         // As Chrome does, its profile in the temporary folder.
@@ -416,6 +435,8 @@ fn chrome_folders() -> Value {
         "XDG_DATA_HOME",
         "CHROME_CONFIG_HOME",
         "BREAKPAD_DUMP_LOCATION",
+        "AGENT_BROWSER_SCREENSHOT_DIR",
+        "AGENT_BROWSER_DOWNLOAD_PATH",
     ] {
         folders.insert(name.into(), json!(std::env::var(name).ok()));
     }
@@ -466,7 +487,10 @@ fn write_log(log: &Option<String>, mut line: Value) {
         .append(true)
         .open(path)
         .unwrap();
-    writeln!(file, "{line}").unwrap();
+    // One write of the whole line: `writeln!` writes it piece by piece, and over HTTP another
+    // request's thread logs at the same time, so their pieces would mix. An append of one write
+    // is never interleaved with another's.
+    file.write_all(format!("{line}\n").as_bytes()).unwrap();
 }
 
 /// What `echo_env` appends: a space and the value of the variable, nothing without it.
@@ -1136,7 +1160,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         eprintln!("✗ no credential provider {provider}");
         std::process::exit(1);
     };
-    browser(args, log, "login");
+    browser(log, "login");
     // Beside the socket the plugin is given last: Flottille's files of the run.
     let beside = |file: &str| {
         plugin["args"]
@@ -1170,6 +1194,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
         "cwd": std::env::current_dir().ok(), "display": display_environment(),
+        "profile_reached": profile_reached(args),
         "plugin": {"success": success, "error": answer["error"]}});
     if behaviour["replay"] == true {
         let again = ask(&plugin);
@@ -1218,7 +1243,8 @@ fn open(args: &[String], script: &Value, log: &Option<String>) {
     write_log(
         log,
         json!({"event": "open", "args": args, "config": loaded_config(args),
-            "cwd": std::env::current_dir().ok(), "display": display_environment()}),
+            "cwd": std::env::current_dir().ok(), "display": display_environment(),
+            "profile_reached": profile_reached(args)}),
     );
     let behaviour = &script["login"];
     if behaviour["open_fail"] == true {

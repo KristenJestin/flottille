@@ -1133,6 +1133,15 @@ impl Machines {
     }
 }
 
+/// Machines named in a sentence: `server`, `server or laptop`, `server, laptop or pi`.
+pub fn said_or(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 /// The machines that have `project`, as the composer's picker lists them: this one first, each
 /// with its state. The machine in front (`front`, `None` for this one) is always one of them.
 pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {
@@ -1362,6 +1371,13 @@ pub fn holding(front: Option<&str>, machines: Option<&Machines>) -> Option<Holdi
         })
 }
 
+/// Why this device signs no share of what the machine `from` holds, when it signs none: `from` is
+/// off, or this device may only view it. This machine's own are this device's.
+pub fn sharing_held(from: &str, machines: Option<&Machines>) -> Option<Holding> {
+    let this = machines.and_then(|machines| machines.this.as_deref());
+    holding(Some(from).filter(|from| this != Some(*from)), machines)
+}
+
 /// What [`Held`] says now.
 pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
     cx.try_global::<Held>().and_then(|held| held.0.clone())
@@ -1556,6 +1572,7 @@ fn carry(pair: &Pair, machine: Option<&(String, Arc<DeviceKey>)>) -> std::io::Re
 mod tests {
     use super::{
         Holding, Listed, Lists, Machine, Machines, Member, front_choice, holding, project_choices,
+        sharing_held,
     };
     use serde_json::Value;
 
@@ -1617,6 +1634,27 @@ mod tests {
             None
         );
     }
+    #[test]
+    fn a_viewer_device_signs_no_share_from_the_machine_it_views() {
+        // In front: this machine, where the launch is held. The files are server's.
+        assert_eq!(
+            sharing_held("server", Some(&machines("online", "viewer"))),
+            Some(Holding {
+                line: "This device may only view server".to_owned(),
+                offline: false,
+            })
+        );
+        assert_eq!(
+            sharing_held("server", Some(&machines("online", "controller"))),
+            None
+        );
+        // This machine's own files are this device's to share.
+        assert_eq!(
+            sharing_held("pc", Some(&machines("online", "viewer"))),
+            None
+        );
+    }
+
     fn listing(project: &str) -> Listed {
         Listed {
             id: "s1".to_owned(),

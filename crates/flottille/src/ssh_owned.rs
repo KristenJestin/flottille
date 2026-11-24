@@ -240,7 +240,8 @@ impl Walk<'_> {
     /// machine's, a relative path in `folder`, and no `~`, which `ssh` refuses there with the
     /// whole configuration. A pattern with a token, a variable or a class of characters names
     /// none here. One of the user's outside `~/.ssh` is not followed: `flottille doctor` looks
-    /// at it (`scan_outside`), never a start, and through no link, a run having written it.
+    /// at it (`scan_outside`), never a start, following no link on the way, before its first
+    /// wildcard as after it: a run may have written any of them.
     fn expanded(&mut self, pattern: &str, folder: &Path) -> Vec<PathBuf> {
         if let (Some((ssh, _)), Some(account)) = (self.ssh.clone(), self.account) {
             return match crate::pushed::includes(pattern, &ssh, account) {
@@ -305,9 +306,10 @@ impl Walk<'_> {
 
 /// The paths `pattern`, an absolute path with `*` and `?`, matches, as `glob(3)` finds them for
 /// `ssh`: through a link to a folder too, a hidden name matched only by a part that starts with a
-/// dot, sorted. Without `links`, none is followed past the first wildcard, and none is a match:
-/// a folder a run can write names what it plants. `examined` counts the paths looked at over
-/// all the globs of a walk, which stop at `GLOB_MAX`: then the second is whether it was cut.
+/// dot, sorted. Without `links`, none is followed on the way and none is a match: a folder a run
+/// can write names what it plants, before a wildcard as after it (the home's own path is a real
+/// one). `examined` counts the paths looked at over all the globs of a walk, which stop at
+/// `GLOB_MAX`: then the second is whether it was cut.
 fn globbed(pattern: &Path, links: bool, examined: &mut usize) -> (Vec<PathBuf>, bool) {
     let parts: Vec<_> = pattern
         .components()
@@ -318,12 +320,9 @@ fn globbed(pattern: &Path, links: bool, examined: &mut usize) -> (Vec<PathBuf>, 
         })
         .collect();
     let mut found = vec![PathBuf::from("/")];
-    let mut wild_seen = false;
-    for (n, part) in parts.iter().enumerate() {
-        let last = n + 1 == parts.len();
+    let unlinked = !links;
+    for part in &parts {
         let wild = part.as_bytes().iter().any(|b| matches!(b, b'*' | b'?'));
-        wild_seen |= wild;
-        let unlinked = !links && (wild_seen || last);
         let mut next = Vec::new();
         for path in found {
             if *examined >= GLOB_MAX {
@@ -648,6 +647,28 @@ mod tests {
         for planted in ["target.txt", "evil.conf", "extra", "folder", "in.conf"] {
             assert!(!said.contains(planted), "{planted} named: {gaps:?}");
         }
+    }
+
+    #[test]
+    fn doctor_follows_no_link_before_the_wildcard_of_an_outside_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        file(
+            &account.join(".ssh/config"),
+            "Include ~/work/*.conf ~/deeper/work/*.conf\n",
+            0o600,
+        );
+        // A run replaced `~/work`, and a folder above `~/deeper/work`, with links to a folder of
+        // files the owner owns.
+        let elsewhere = account.join("elsewhere");
+        file(&elsewhere.join("named.conf"), "", 0o644);
+        file(&elsewhere.join("work/deeper.conf"), "", 0o644);
+        std::os::unix::fs::symlink(&elsewhere, account.join("work")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, account.join("deeper")).unwrap();
+
+        let gaps = gaps_of(&account.join("no-system"), Some(&account), me());
+
+        assert!(gaps.is_empty(), "{gaps:?}");
     }
 
     #[test]

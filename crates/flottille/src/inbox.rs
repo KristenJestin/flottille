@@ -228,6 +228,19 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
             "unchecked" | "put_back" => json!(daemon_text(kind, &event.data)),
+            "vault" if event.data["edit"].is_object() => {
+                let fields: Vec<&str> = event.data["edit"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|edit| edit.keys().map(String::as_str))
+                    .collect();
+                json!(format!(
+                    "It proposes an edit of the vault entry {} ({}), its secret kept: {}",
+                    event.data["name"].as_str().unwrap_or_default(),
+                    fields.join(", "),
+                    event.data["why"].as_str().unwrap_or_default()
+                ))
+            }
             "vault" => {
                 let whose = if event.data["every"] == true {
                     "every project".to_owned()
