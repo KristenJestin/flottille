@@ -43,10 +43,10 @@ mod remote_led;
 mod remote_link;
 #[path = "../remote_listed_state.rs"]
 mod remote_listed_state;
-#[path = "../remote_project_needs.rs"]
-mod remote_project_needs;
 #[path = "../remote_phone.rs"]
 mod remote_phone;
+#[path = "../remote_project_needs.rs"]
+mod remote_project_needs;
 #[path = "../remote_project_travels.rs"]
 mod remote_project_travels;
 #[path = "../remote_relay.rs"]
