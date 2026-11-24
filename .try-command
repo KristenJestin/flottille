@@ -1,0 +1,1 @@
+cargo test -p flottille --test group_window_shell -- window_every_machine::another_machine_s_pull_request window_every_machine::a_project_draft_typed 

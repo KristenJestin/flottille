@@ -1970,6 +1970,50 @@ fn accepting_a_review_opened_from_another_machine_s_toast_reaches_that_machine(
     });
 }
 
+/// A connection `notes` of `machine` whose header carries the vault entry `entry`, to a fake
+/// server that asks for a sign-in: it refuses what it is given. The server, stopped once dropped.
+fn a_server_refusing_its_header(machine: &Machine, entry: &str) -> common::Spawned {
+    let user = &machine.user;
+    let script = user.path("notes-script.json");
+    let announced = json!({
+        "server": {"name": "notes", "version": "1.0.0"},
+        "tools": [{"name": "search", "description": "Finds notes by words.",
+            "inputSchema": {"type": "object", "properties": {}}}],
+        "oauth": {"tokens_file": user.path("notes-tokens")}
+    });
+    std::fs::write(&script, announced.to_string()).unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    let port_file = user.path("notes-port");
+    let spawned = common::Spawned::new({
+        let mut command = std::process::Command::new(fake);
+        command.args([
+            "--script",
+            script.to_str().unwrap(),
+            "--http",
+            port_file.to_str().unwrap(),
+        ]);
+        command
+    });
+    eventually("the server listens", || {
+        std::fs::read_to_string(&port_file).is_ok_and(|port| !port.is_empty())
+    });
+    let port = std::fs::read_to_string(&port_file).unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.",
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "headers": {"Authorization": {"vault": entry}}}),
+    )
+    .unwrap();
+    spawned
+}
+
 #[gpui_kit::test]
 fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut TestAppContext) {
     let (_hub, pc, server, _here, _there) = two_machines();
@@ -1980,21 +2024,21 @@ fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut 
             json!({"name": "notes-token", "secret": "an-invented-test-value"}),
         )
         .unwrap();
+    // The server's connection sends the entry to a server that refuses it: its review names the
+    // entry, with Edit entry.
+    let _notes = a_server_refusing_its_header(&server, "notes-token");
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     let page = the_server_s_settings(&shell, cx);
-    let vault = page.read_with(cx, |page, _| page.vault().clone());
-    vault.update(cx, |vault, cx| vault.read(cx));
-    until(&shell, cx, "the server's vault is listed", |cx| {
-        vault.read_with(cx, |vault, _| {
-            vault
-                .entries()
-                .is_some_and(|entries| entries.iter().any(|e| e.name == "notes-token"))
-        })
+    let (vault, section) = page.read_with(cx, |page, _| {
+        (page.vault().clone(), page.connections().clone())
     });
-
-    // The review's Edit entry opens the server's vault on the entry (its section's own vault).
-    cx.update(|window, cx| vault.update(cx, |vault, cx| vault.replace("notes-token", window, cx)));
+    section.update(cx, |section, cx| section.open_review("notes", cx));
+    until(&shell, cx, "the review names the entry", |cx| {
+        present(cx, "connection-review-edit-entry")
+    });
+    settle(&shell, cx);
+    click(cx, "connection-review-edit-entry");
     until(&shell, cx, "the entry's dialog", |cx| {
         vault.read_with(cx, |vault, _| vault.is_open())
     });
@@ -2279,6 +2323,9 @@ fn another_machine_s_pull_request_stays_on_its_row_after_a_refresh(cx: &mut Test
     shell.update_in(cx, |shell, window, cx| {
         shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
     });
+    run_for(Duration::from_secs(3), cx);
+    eprintln!("DIAG asked: {:?}", relay.asked.lock().unwrap().iter().map(|(m, p)| format!("{m} {p}")).collect::<Vec<_>>());
+    eprintln!("DIAG gh: {:?}", std::fs::read_dir(server.user.path("gh")).map(|d| d.map(|e| e.unwrap().file_name()).collect::<Vec<_>>()));
     until(
         &shell,
         cx,
@@ -2314,6 +2361,8 @@ fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
         present(cx, "composer-field")
             && shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
+    run_for(Duration::from_secs(2), cx);
+    eprintln!("DIAG asked: {:?}", relay.asked.lock().unwrap().iter().map(|(m, _)| m.clone()).collect::<Vec<_>>());
     until(&shell, cx, "the server's draft of app is read", |_| {
         the_server_was_asked(&relay, "draft.get")
     });
