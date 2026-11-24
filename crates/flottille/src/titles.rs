@@ -65,7 +65,7 @@ pub fn session_title(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcom
         Ok(None) => return Outcome::Failed(format!("there is no agent {}", grant.agent)),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
-    if agent.parent.is_some() {
+    if agent.is_child() {
         return Outcome::Refused(
             "refused: a child's title is the one its parent gave it with agent_launch".to_owned(),
         );

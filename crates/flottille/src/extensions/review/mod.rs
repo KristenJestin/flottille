@@ -673,7 +673,7 @@ fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<Vec<PullRequest>>
 /// The review a session asked for, or why not: said before any agent starts.
 async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Value, Failure> {
     let project = super::active(daemon, &EXTENSION, &session.project)?;
-    if session.parent.is_some() {
+    if session.is_child() {
         return Err(Failure::refused(
             "a review reads a session's change: this agent is a child, review its session",
         ));
@@ -949,7 +949,7 @@ async fn start_pull(
     from: Option<&str>,
 ) -> std::result::Result<Value, Failure> {
     let project = super::active(daemon, &EXTENSION, &caller.project)?;
-    if caller.parent.is_some() {
+    if caller.is_child() {
         return Err(Failure::refused(
             "a review of a pull request is asked by a session: this agent is a child",
         ));
@@ -1485,7 +1485,7 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
         .into_iter()
         .filter(|agent| {
             agent.project == project
-                && agent.parent.is_none()
+                && !agent.is_child()
                 && !agent.state.is_final()
                 && agent.workspace.as_deref() == Some(workspace.name.as_str())
         })

@@ -1038,13 +1038,19 @@ const EXTENSION_MIGRATIONS: &str = "
 
 /// A child an agent of another machine launched here was stored with no parent at depth 0 before
 /// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
-/// tree across machines"). Made at every open rather than as a numbered migration: it changes
-/// nothing once done, as such a child is never stored so again, and every check of a root then
-/// reads the depth alone.
+/// tree across machines"), and the agents under it, which that release let it start, one lower
+/// each, so that a stop ordered by depth still ends them before it. Made at every open rather than
+/// as a numbered migration: it changes nothing once done, as such a child is never stored so
+/// again, and every check of a root then reads the depth alone.
 const REMOTE_CHILDREN_DEPTH: &str = "
-    UPDATE agents SET depth = 1
-    WHERE parent IS NULL AND depth = 0
-      AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child');
+    WITH RECURSIVE below(id) AS (
+        SELECT id FROM agents
+        WHERE parent IS NULL AND depth = 0
+          AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child')
+        UNION ALL
+        SELECT agents.id FROM agents JOIN below ON agents.parent = below.id
+    )
+    UPDATE agents SET depth = depth + 1 WHERE id IN (SELECT id FROM below);
 ";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
