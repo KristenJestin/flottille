@@ -7977,6 +7977,46 @@ fn a_browser_kept_to_its_domains_is_given_no_profile() {
 }
 
 #[test]
+fn a_browser_kept_to_its_domains_makes_its_own_profile_out_of_the_runs_reach() {
+    // With no profile of Flottille's, agent-browser makes one of its own for each browser
+    // (`agent-browser-chrome-…`, in the temporary folder): not in the daemon's, which runs list,
+    // but in the connection's vault folder.
+    let user = User::with_fake_agent().with_allowing_judge();
+    let temporary = user.path("tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    browser_run_with(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &["--allowed-domains", "shop.example.com"],
+    );
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    let started = logged(&user, "browser", "start");
+    assert_eq!(started.last().unwrap()["config"].get("profile"), None);
+    let browser = logged(&user, "browser", "browser");
+    assert_eq!(browser.last().unwrap()["started"], true, "{browser:?}");
+    for mode in ["ask", "auto"] {
+        let listing = listed_by_run(&user, &mcp, &id, mode, std::slice::from_ref(&temporary));
+        assert!(
+            listing["listed"]
+                .as_object()
+                .unwrap()
+                .contains_key(temporary.to_str().unwrap()),
+            "{mode}: {listing}"
+        );
+        found_no_profile(&listing, mode);
+    }
+}
+
+#[test]
 fn a_connection_file_with_headed_still_loads() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));

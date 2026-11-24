@@ -388,8 +388,8 @@ fn renamed_then_read(folder: &str, moved: &str) {
 
     // The folders on the way to the browsers' are kept where they are, as `~/.ssh`'s: the
     // rename fails, and the profile is under no other name for the next run to open.
+    assert_ne!(out["cookies"], "read", "{first} {out}");
     assert_ne!(first["renamed"], "renamed", "{first}");
-    assert_ne!(out["cookies"], "read", "{out}");
     assert!(cookies.is_file());
 }
 
