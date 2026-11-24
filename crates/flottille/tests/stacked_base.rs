@@ -582,9 +582,9 @@ fn a_retarget_outside_the_base_rule_leaves_the_base_and_the_merge_is_refused() {
     let merged = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
     assert!(merged.error, "{}", merged.text);
     assert!(
-        merged
-            .text
-            .contains(&format!("into release, not {STACKED}, the workspace's base")),
+        merged.text.contains(&format!(
+            "into release, not {STACKED}, the workspace's base"
+        )),
         "{}",
         merged.text
     );

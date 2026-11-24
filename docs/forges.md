@@ -761,15 +761,23 @@ moves, and only when the forge says so:
 
 - **A `forge edit` of `base` that succeeded** on the workspace's own pull request (from the
   repository itself, of the branch the workspace's worktree is on): the base of that repository
-  becomes the new one. A pull request that is not the workspace's own, a refused edit and a failed
-  one leave it.
+  becomes the new one, **only when the repository's base rule allows a merge into it**: the new
+  base is one of the rule's branches, or where the workspace's own stacked base went (the base of
+  its merged pull request, once that base is gone from the forge and the forge has the new one).
+  Any other base the forge took (`edit` of a base is judged as the gate judges it, and in Full or
+  a lenient Auto no one approves it) is the forge's: the workspace's base stays, the answer says
+  the merge into it will be refused and why, and `merge` refuses as before. A pull request that is
+  not the workspace's own, a refused edit and a failed one leave it too.
 - **A base branch merged and deleted on the forge.** Before a `create` or a `merge` of a base
   that is not one of the repository's base rule (a stacked one, started with `--base`), the forge
   is asked whether it still has the branch (`gh api repos/<repository>/branches/<b>`; Bitbucket
   Cloud's `refs/branches/<b>`; Data Center cannot be asked and is taken to have it). When it has
   not, the base goes where the branch went: the base of its merged pull request (`gh pr list
-  --head <b> --state merged`; `bkt pr list --state MERGED`), else the first branch of the
-  repository's base rule that the forge has. A `merge` then accepts the pull request into that
+  --head <b> --state merged`; `bkt pr list --state MERGED`) when the forge has that base, else
+  the first branch of the repository's base rule that the forge confirms it has, said in the
+  answer to be where the branch was not found, not merged and deleted. A forge's answer that is
+  not a clear "not found" (a 404 may also be a repository the sign-in cannot see) for the base,
+  and a clear "found" for where it went, moves nothing. A `merge` then accepts the pull request into that
   base, and only into it (GitHub retargets a pull request there itself when its base branch is
   deleted); a pull request into any other branch is refused as before, and so is one into the
   project's base while the branch is still there.

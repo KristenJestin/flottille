@@ -2887,8 +2887,14 @@ async fn forge_note(
             }
             let mut said = format!("Pull request #{number} of {slug} was changed.{reviewers_said}");
             if let (Some(head), Some(to)) = (retargeted, asked.base.as_deref()) {
-                let moved = follow_retarget(daemon, place, &checkout.path, &head, to, &number);
-                said.push_str(&moved.await);
+                let on = Retarget {
+                    place,
+                    repository: &checkout.path,
+                    head: &head,
+                    to,
+                    number: &number,
+                };
+                said.push_str(&follow_retarget(daemon, &forge, on).await);
             }
             if let Some(before) = before {
                 let target = json!({"project": place.project, "repository": checkout.path,
@@ -2900,17 +2906,29 @@ async fn forge_note(
     }
 }
 
+/// A pull request of the workspace's own branch that the forge moved onto `to`.
+struct Retarget<'a> {
+    place: &'a Place,
+    repository: &'a str,
+    head: &'a str,
+    to: &'a str,
+    number: &'a str,
+}
+
 /// The workspace's base follows a pull request of its own branch that the forge moved onto `to`
-/// (`forge edit` with a base): the sentence to add to the answer, none when it is not the
+/// (`forge edit` with a base), but only where the repository's base rule allows a merge: `to` is
+/// one of the rule's branches, or where the workspace's own stacked base went once merged and
+/// deleted. Whatever else the forge took is the forge's: the base stays, and the merge is
+/// refused, which the answer says. The sentence to add to the answer, none when it is not the
 /// workspace's own pull request or the base was `to` already.
-async fn follow_retarget(
-    daemon: &Arc<Daemon>,
-    place: &Place,
-    repository: &str,
-    head: &str,
-    to: &str,
-    number: &str,
-) -> String {
+async fn follow_retarget(daemon: &Arc<Daemon>, forge: &Forge, on: Retarget<'_>) -> String {
+    let Retarget {
+        place,
+        repository,
+        head,
+        to,
+        number,
+    } = on;
     let Some(name) = &place.workspace else {
         return String::new();
     };
@@ -2919,13 +2937,35 @@ async fn follow_retarget(
     };
     let (workspace, heads) = workspaces::follow(daemon, workspace).await;
     let branches = workspaces::branches(&workspace, &heads);
-    let own = workspace
+    let Some(at) = workspace
         .repositories
         .iter()
         .position(|worktree| worktree.path == repository)
-        .is_some_and(|at| branches[at] == head);
-    if !own {
+        .filter(|at| branches[*at] == head)
+    else {
         return String::new();
+    };
+    let recorded = workspace.repositories[at].base.branch.clone();
+    if recorded == to {
+        return String::new();
+    }
+    let rule = projects::load_project(daemon, &place.project)
+        .map(|project| repository_rule(&project, repository))
+        .unwrap_or_default();
+    let allowed = rule.iter().any(|branch| branch == to)
+        || (!rule.contains(&recorded)
+            && stacked::has_branch(forge, &recorded).await == Ok(false)
+            && stacked::successor(forge, &recorded).await.as_deref() == Some(to));
+    if !allowed {
+        return format!(
+            " The workspace's base stays {}: {} is not in the repository's base rule ({}), so \
+             the merge of #{number} into it will be refused; move the pull request back onto \
+             {} or a branch of the rule, or ask the user.",
+            masked(&recorded),
+            masked(to),
+            rule.join(", "),
+            masked(&recorded)
+        );
     }
     let why = format!("its pull request #{number} was moved onto it on the forge");
     workspaces::move_base(daemon, &workspace, repository, to, &why)
@@ -3525,23 +3565,32 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
         }
         ("create" | "merge", _) => {
             let rule = &repository_rule(&project, &checkout.path);
-            if let Some(to) = stacked::moved(&forge, &recorded, rule).await {
-                base = to.clone();
-                followed = Some(to);
+            if let Some(moved) = stacked::moved(&forge, &recorded, rule).await {
+                base = moved.to.clone();
+                followed = Some(moved);
             }
         }
         _ => {}
     }
     let settle = |forge_said: &str| -> String {
-        let Some(to) = &followed else {
+        let Some(followed) = &followed else {
             return forge_said.to_owned();
         };
-        let why = format!(
-            "{} is gone from {}, merged and deleted",
-            masked(&recorded),
-            forge.slug()
-        );
-        let moved = workspaces::move_base(daemon, &workspace, &checkout.path, to, &why);
+        let why = if followed.merged {
+            format!(
+                "{} is gone from {}, merged and deleted",
+                masked(&recorded),
+                forge.slug()
+            )
+        } else {
+            format!(
+                "{} was not found on {} and no merged pull request says where it went, so the \
+                 repository's base rule is taken",
+                masked(&recorded),
+                forge.slug()
+            )
+        };
+        let moved = workspaces::move_base(daemon, &workspace, &checkout.path, &followed.to, &why);
         match moved {
             Some(moved) => format!("{forge_said} {moved}"),
             None => forge_said.to_owned(),

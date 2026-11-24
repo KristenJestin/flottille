@@ -718,37 +718,44 @@ pub fn move_base(
     to: &str,
     why: &str,
 ) -> Option<String> {
-    let fresh = daemon
-        .read(|store| store.workspace(&workspace.project, &workspace.name))
-        .ok()??;
-    let mut repositories = fresh.repositories.clone();
-    let worktree = repositories.iter_mut().find(|w| w.path == repository)?;
-    if worktree.base.branch == to {
-        return None;
-    }
-    let was = std::mem::replace(&mut worktree.base.branch, to.to_owned());
-    // The tracking ref a review compares against follows the branch; a commit it started from
-    // is where it started, whatever its base is now.
-    if worktree.base.reference.starts_with("refs/remotes/") {
-        worktree.base.reference = format!("refs/remotes/{}/{to}", worktree.base.remote);
-    }
-    worktree.base.note = Some(format!("moved from {was}: {why}"));
-    let event = with(
-        about(&fresh),
-        json!({"repository": repository, "base": to, "was": was, "why": why}),
-    );
+    // Read and written in one transaction: a rename or another move in between is not undone.
     let written = daemon.write(|store| {
+        let Some(fresh) = store.workspace(&workspace.project, &workspace.name)? else {
+            return Ok((None, None));
+        };
+        let mut repositories = fresh.repositories.clone();
+        let Some(worktree) = repositories.iter_mut().find(|w| w.path == repository) else {
+            return Ok((None, None));
+        };
+        if worktree.base.branch == to {
+            return Ok((None, None));
+        }
+        let was = std::mem::replace(&mut worktree.base.branch, to.to_owned());
+        // The tracking ref a review compares against follows the branch; a commit it started from
+        // is where it started, whatever its base is now.
+        if worktree.base.reference.starts_with("refs/remotes/") {
+            worktree.base.reference = format!("refs/remotes/{}/{to}", worktree.base.remote);
+        }
+        worktree.base.note = Some(format!("moved from {was}: {why}"));
+        let event = with(
+            about(&fresh),
+            json!({"repository": repository, "base": to, "was": was, "why": why}),
+        );
         let event = store.set_workspace_repositories(
             fresh.id,
             &repositories,
             ("workspace.base_changed", event),
         )?;
-        Ok(((), event))
+        Ok((Some(was), Some(event)))
     });
-    if let Err(error) = written {
-        eprintln!("flottille daemon: workspace.base_changed: {error}");
-        return None;
-    }
+    let was = match written {
+        Ok(Some(was)) => was,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("flottille daemon: workspace.base_changed: {error}");
+            return None;
+        }
+    };
     let said = format!(
         "The base of {repository} in the workspace {} moved from {was} to {to}: {why}. Its pull \
          requests go into {to} now.",
