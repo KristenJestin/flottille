@@ -3240,6 +3240,19 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
+            Outcome::VaultAccepted { ask, name, refused } => {
+                let toast = match refused {
+                    // Refused (the Save's checks): Accept may be pressed again, or Edit.
+                    Some(why) => {
+                        self.dismissing.remove(&ask);
+                        gpui_design_system::Toast::failure("The edit was not accepted").detail(why)
+                    }
+                    // Taken, the card folds away.
+                    None => gpui_design_system::Toast::success(format!("Entry {name} saved")),
+                };
+                cx.notify();
+                gpui_design_system::toast(toast, cx);
+            }
             Outcome::VaultDismissed { ask, refused } => {
                 if let Some(why) = refused {
                     // Refused: Dismiss may be pressed again. Taken, the card folds away.
@@ -5666,6 +5679,36 @@ impl Shell {
         vault.update(cx, |vault, cx| {
             vault.add_for_request(number, name, host, window, cx)
         });
+    }
+
+    /// An agent's proposed edit of a vault entry, from its card's Edit: the entry's own form with
+    /// it, over the session.
+    pub fn edit_proposed_vault_entry(
+        &mut self,
+        entry: crate::vault::VaultEntry,
+        why: String,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let vault = self.vault(cx);
+        vault.update(cx, |vault, cx| {
+            vault.edit_proposed(&entry, why, host, window, cx)
+        });
+    }
+
+    /// Accept of the card of the proposed edit `ask` of the entry `name`: sent once, its buttons
+    /// disabled until the daemon answers.
+    pub fn accept_vault_ask(&mut self, ask: u64, name: String, cx: &mut Context<Self>) {
+        if self.dismissing.insert(ask) {
+            self.perform(Command::VaultAccept { ask, name });
+            cx.notify();
+        }
+    }
+
+    /// Whether an answer to the request `ask` (Accept or Dismiss) was sent and not refused.
+    pub fn is_answering(&self, ask: u64) -> bool {
+        self.dismissing.contains(&ask)
     }
 
     /// Dismiss of the card of the request `ask` for a vault entry: sent once, Dismiss disabled
