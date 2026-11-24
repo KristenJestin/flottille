@@ -65,13 +65,6 @@ fn a_child_launched_from_another_machine_has_a_child_s_tools() {
         .unwrap();
     assert_eq!(listed["launched_from"], shown["launched_from"]);
     assert_eq!(listed["depth"], 1);
-    // Its tools are the same when they are made again for it.
-    server
-        .user
-        .call("agent.reload_tools", json!({"agent": child}))
-        .unwrap();
-    let again = server.agent(&child);
-    assert_eq!(again["tools"], shown["tools"], "{again}");
 }
 
 #[test]
@@ -137,7 +130,7 @@ fn has_a_root_s_tool(tools: &Value) -> bool {
 }
 
 #[test]
-fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_and_a_resume() {
+fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
     prompted(&server, "Write the tests of the export.");
@@ -157,19 +150,8 @@ fn a_child_stored_at_depth_zero_before_the_upgrade_is_a_child_after_a_restart_an
 
     let shown = server.agent(&child);
     assert_eq!(shown["depth"], 1, "{shown}");
-    // Ended, then resumed by the user: its tools are made again at its next start, which its
-    // parent's message wakes, from its depth: a child's.
-    server
-        .user
-        .call("agent.stop", json!({"agent": child}))
-        .unwrap();
-    eventually("the child ended", || {
-        server.agent(&child)["state"] == "ended"
-    });
-    server
-        .user
-        .call("agent.resume", json!({"agent": child}))
-        .unwrap();
+    // Its tools are made again at its next start, which its parent's message wakes, from its
+    // depth: a child's. (The user resumes no child of another machine's agent: its parent does.)
     server.wait_for("pc");
     let sent = mcp.call(
         "agent_send",

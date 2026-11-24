@@ -308,7 +308,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.reload_tools" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "reloads its tools")?;
+            refuse_any_child(daemon, &agent, "reloads its tools")?;
             refuse_final(&agent)?;
             let asked = daemon
                 .agents
@@ -328,7 +328,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.resume" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "resumes it")?;
+            refuse_any_child(daemon, &agent, "resumes it")?;
             crate::projects::refuse_removing(daemon, &agent.project)?;
             if !agent.state.is_final() {
                 return Err(Failure::refused(format!(
@@ -410,19 +410,23 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     ),
                 )
             })?;
-            // A tree has one mode, its root's: a child of another machine's agent has its root
-            // there, and no switch here sets its mode apart from it.
-            if let Some((caller, machine, kind)) =
-                crate::launches::launched_from(daemon, &asked.agent)
+            // A tree has one mode, its root's: a child of another machine's agent, and every
+            // agent under it, has its root there, and no switch here sets its mode apart from it.
+            let root = tree::root_of(daemon, &asked.agent);
+            if let Some((caller, machine, kind)) = crate::launches::launched_from(daemon, &root)
                 && kind == "child"
             {
+                let whose = if root == asked.agent {
+                    format!("a child of agent {caller} of {machine}")
+                } else {
+                    format!("under agent {root}, a child of agent {caller} of {machine}")
+                };
                 return Err(Failure::refused(format!(
-                    "agent {} is a child of agent {caller} of {machine}: its mode is its \
-                     session's, set on {machine}",
+                    "agent {} is {whose}: its mode is its session's, set on {machine}",
                     asked.agent
                 )));
             }
-            let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
+            let agent = find(daemon, &root)?;
             let was = agent.gate_mode;
             // A switch to Full the user signed from a device is kept, for a launch on another
             // machine to start in Full there; any other switch forgets it.
@@ -587,9 +591,17 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
         return Ok(());
     };
     let root = tree::root_of(daemon, &agent.id);
+    // A root that is itself a child of another machine's agent is not the user's either: theirs
+    // is that tree's root, on that machine.
+    let theirs = match crate::launches::launched_from(daemon, &root) {
+        Some((caller, machine, kind)) if kind == "child" => {
+            format!("the root of agent {caller}'s tree, on {machine}")
+        }
+        _ => format!("its root, agent {root}"),
+    };
     Err(Failure::refused(format!(
         "agent {} is a child of agent {parent}: only its parent {does}; the user writes to and \
-         stops its root, agent {root}",
+         stops {theirs}",
         agent.id
     )))
 }
