@@ -14,9 +14,11 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_window::Shell;
+use flottille_window::model::elsewhere_id;
 use flottille_window::shell::Selection;
 use flottille_window::tree::{
-    project_id, project_menu_id, project_remove_id, project_unconfigured_id, session_id,
+    by_machine_id, project_gone_id, project_gone_on_id, project_id, project_menu_id, project_on_id,
+    project_remove_id, project_unconfigured_id, projects_menu_id, session_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -181,7 +183,7 @@ fn a_project_whose_configuration_is_gone_is_in_the_sidebar(cx: &mut TestAppConte
     let (shell, cx) = window(&user, cx);
 
     until(&shell, cx, "the row of the project", |cx| {
-        present(cx, project_id("app"))
+        present(cx, project_gone_id("app"))
     });
     settle(&shell, cx);
 
@@ -206,7 +208,7 @@ fn a_project_whose_configuration_is_gone_is_in_the_sidebar(cx: &mut TestAppConte
         !present(cx, project_menu_id("other")),
         "only a project with no file has the menu"
     );
-    cx.update(|window, cx| window.hover(project_id("app"), cx));
+    cx.update(|window, cx| window.hover(project_gone_id("app"), cx));
     settle(&shell, cx);
     assert!(
         present(cx, project_menu_id("app")),
@@ -217,10 +219,10 @@ fn a_project_whose_configuration_is_gone_is_in_the_sidebar(cx: &mut TestAppConte
 /// Asks to remove `app` from its row's menu, and waits for the confirmation to have read.
 fn ask_to_remove_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the row of the project", |cx| {
-        present(cx, project_id("app"))
+        present(cx, project_gone_id("app"))
     });
     settle(shell, cx);
-    cx.update(|window, cx| window.hover(project_id("app"), cx));
+    cx.update(|window, cx| window.hover(project_gone_id("app"), cx));
     settle(shell, cx);
     cx.update(|window, cx| window.click(project_menu_id("app"), cx));
     settle(shell, cx);
@@ -230,7 +232,7 @@ fn ask_to_remove_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     });
     settle(shell, cx);
     assert!(
-        present(cx, project_id("app")),
+        present(cx, project_gone_id("app")),
         "nothing is removed before the confirmation"
     );
 }
@@ -252,7 +254,7 @@ fn removing_a_project_whose_configuration_is_gone_from_the_window(cx: &mut TestA
     cx.update(|window, cx| window.click("project-removal-action", cx));
     said(&shell, "The project app was removed", cx);
 
-    assert!(!present(cx, project_id("app")), "the row folded away");
+    assert!(!present(cx, project_gone_id("app")), "the row folded away");
     assert_eq!(
         user.call("agent.show", json!({"agent": session})).unwrap()["agent"]["state"],
         "ended",
@@ -285,7 +287,7 @@ fn a_workspace_holding_work_is_kept_and_the_confirmation_says_so(cx: &mut TestAp
         json!([{"name": "app", "sessions": 0, "workspaces": 1}]),
         "what holds work stays, and so does its row: {listed}"
     );
-    assert!(present(cx, project_id("app")));
+    assert!(present(cx, project_gone_id("app")));
     assert!(dirty.join("draft.txt").exists(), "its work is not lost");
 }
 
@@ -305,6 +307,21 @@ fn app_gone_here_and_on_another_machine() -> (TestHub, Machine, Machine, String,
         .as_str()
         .unwrap()
         .to_owned();
+    eventually("the server's session is idle", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": there}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
+    eventually("pc is told server's project", || {
+        let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+        lists["machines"][0]["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|p| p["name"] == "app")
+    });
+    let there = elsewhere_id("server", &there);
     std::fs::remove_file(pc.user.project_file("app")).unwrap();
     (hub, pc, server, here, there)
 }
@@ -345,6 +362,73 @@ fn an_unconfigured_project_beside_another_machine_s_project_of_its_name_is_one_r
         present(cx, session_id(&here)),
         "this machine's session is under the row with no file"
     );
+    // The row with no file is a node of its own, with ids of its own, beside the group's, said as
+    // this machine's.
+    assert!(present(cx, project_id("app")), "the group's row");
+    assert!(present(cx, project_gone_id("app")), "the row with no file");
+    assert_eq!(
+        label(cx, project_unconfigured_id("app")).as_deref(),
+        Some("settings file missing")
+    );
+    shell.read_with(cx, |s, cx| {
+        let gone = s
+            .unconfigured_project("app", None)
+            .expect("the row with no file");
+        assert_ne!(Some(gone.entity_id()), group);
+        assert!(gone.read(cx).unconfigured());
+        assert_eq!(gone.read(cx).apart(), Some("pc"), "it says whose it is");
+        let held: Vec<String> = gone
+            .read(cx)
+            .sessions(cx)
+            .iter()
+            .map(|row| row.read(cx).id().to_owned())
+            .collect();
+        assert_eq!(held, [here.clone()], "it holds this machine's session only");
+    });
+    // Only the row with no file has the menu with Remove.
+    cx.update(|window, cx| window.hover(project_id("app"), cx));
+    settle(&shell, cx);
+    assert!(!present(cx, project_menu_id("app")));
+    cx.update(|window, cx| window.hover(project_gone_id("app"), cx));
+    settle(&shell, cx);
+    assert!(present(cx, project_menu_id("app")));
+}
+
+#[gpui_kit::test]
+fn an_unconfigured_project_beside_another_machine_s_project_is_one_row_each_by_machine(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, here, there) = app_gone_here_and_on_another_machine();
+    let (shell, cx) = machines::window(&pc, cx);
+    machines::until(&shell, cx, "the server's session is in the tree", |cx| {
+        present(cx, session_id(&there))
+    });
+    cx.update(|window, cx| window.click(projects_menu_id(), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(by_machine_id(), cx));
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, project_on_id("app", "server")) && present(cx, project_gone_on_id("app", "pc"))
+    });
+    settle(&shell, cx);
+
+    shell.read_with(cx, |s, cx| {
+        let theirs = s.project_on("app", "server").expect("the server's row");
+        let ours = s
+            .unconfigured_project("app", Some("pc"))
+            .expect("this machine's row");
+        assert_ne!(theirs.entity_id(), ours.entity_id());
+        assert!(!theirs.read(cx).unconfigured());
+        assert!(ours.read(cx).unconfigured());
+        let ids = |node: &Entity<flottille_window::tree::ProjectNode>| -> Vec<String> {
+            node.read(cx)
+                .sessions(cx)
+                .iter()
+                .map(|row| row.read(cx).id().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(theirs), [there.clone()]);
+        assert_eq!(ids(ours), [here.clone()]);
+    });
 }
 
 #[gpui_kit::test]
@@ -421,5 +505,106 @@ fn removing_another_machine_s_project_of_the_same_name_is_answered_on_its_page(
     assert_eq!(
         here["unconfigured"][0]["name"], "app",
         "this machine's is untouched: {here}"
+    );
+}
+
+/// How tall the row `name` with no file is drawn by its list item (`tree-project-<node>`), nothing
+/// while it is not drawn.
+fn item_height(cx: &mut VisualTestContext, node: u64) -> f32 {
+    let id = gpui_kit::ElementId::Name(format!("tree-project-{node}").into());
+    cx.update(|window, _| {
+        window
+            .find_all(id)
+            .iter()
+            .map(|found| f32::from(found.bounds().size.height))
+            .fold(0., f32::max)
+    })
+}
+
+/// The heights of the item of `node`, a frame of 16 ms and a poll of the daemon after another,
+/// until `done` says so on what was seen.
+fn heights(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    node: u64,
+    done: impl Fn(&[f32]) -> bool,
+) -> Vec<f32> {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut seen = Vec::new();
+    while !done(&seen) {
+        assert!(Instant::now() < deadline, "the row never settled: {seen:?}");
+        step(shell, cx);
+        seen.push(item_height(cx, node));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    seen
+}
+
+#[gpui_kit::test]
+fn the_row_of_a_project_whose_file_goes_unfolds_into_the_list(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    project(&user, "other");
+    workspace(&user, "app", "clean");
+    idle_root(&user, "app", "clean");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row of the project", |cx| {
+        present(cx, project_id("app"))
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, project_gone_id("app")));
+
+    std::fs::remove_file(user.project_file("app")).unwrap();
+    // The window reads the projects again when the daemon says something: another project's
+    // session.
+    user.call("agent.run", json!({"project": "other", "message": "hello"}))
+        .unwrap();
+    until(&shell, cx, "the row with no file", |cx| {
+        shell.read_with(cx, |s, _| s.unconfigured_project("app", None).is_some())
+    });
+    let node = shell
+        .read_with(cx, |s, _| {
+            s.unconfigured_project("app", None)
+                .map(|n| n.entity_id().as_u64())
+        })
+        .unwrap();
+    let seen = heights(&shell, cx, node, |seen| seen.len() >= 30);
+    let full = seen.iter().copied().fold(0., f32::max);
+    assert!(full > 0., "the row is drawn: {seen:?}");
+    assert!(
+        seen.iter().any(|height| *height > 0. && *height < full),
+        "the row unfolds over some frames, it does not jump: {seen:?}"
+    );
+    assert_eq!(
+        label(cx, project_unconfigured_id("app")).as_deref(),
+        Some("settings file missing")
+    );
+}
+
+#[gpui_kit::test]
+fn a_removed_project_s_row_folds_away_over_some_frames(cx: &mut TestAppContext) {
+    let user = user();
+    app_without_its_file(&user);
+    let (shell, cx) = window(&user, cx);
+    ask_to_remove_app(&shell, cx);
+    let node = shell
+        .read_with(cx, |s, _| {
+            s.unconfigured_project("app", None)
+                .map(|n| n.entity_id().as_u64())
+        })
+        .expect("the row");
+    let full = item_height(cx, node);
+    assert!(full > 0.);
+
+    cx.update(|window, cx| window.click("project-removal-action", cx));
+    let seen = heights(&shell, cx, node, |seen| seen.last() == Some(&0.));
+    assert!(
+        seen.iter().any(|height| *height > 0. && *height < full),
+        "the row is still there and shrinking partway through the fold: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().copied(),
+        Some(0.),
+        "and gone at the end: {seen:?}"
     );
 }

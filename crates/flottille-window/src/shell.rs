@@ -204,6 +204,10 @@ pub struct Shell {
     /// The projects' rows in a machine's section, by project then machine, while the projects are
     /// shown by machine.
     machine_projects: HashMap<(String, String), Entity<ProjectNode>>,
+    /// The rows of this machine's projects with no settings file, by name (and by this machine's
+    /// section when the projects are shown by machine): never in `projects` nor `machine_projects`,
+    /// which are the projects' of any machine, so that one never takes the other's place.
+    gone: HashMap<(String, Option<String>), Entity<ProjectNode>>,
     /// The machines' sections, by name.
     sections: HashMap<String, Entity<MachineNode>>,
     /// The user's choice (`window.get`): the projects are shown by machine.
@@ -830,6 +834,7 @@ impl Shell {
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
             machine_projects: HashMap::new(),
+            gone: HashMap::new(),
             sections: HashMap::new(),
             by_machine: false,
             grouped: false,
@@ -1791,7 +1796,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         // A project with no file is in no arrangement: it stays after the user's list.
-        if self.snapshot.unconfigured.iter().any(|p| p.name == project) {
+        if project.starts_with(crate::tree::GONE) {
             return;
         }
         let change = Change::MoveProject {
@@ -2480,8 +2485,11 @@ impl Shell {
         // Grouped by machine, the level is the project's under the session's machine, and holds
         // that machine's sessions only.
         let machine = self.grouped.then(|| snapshot.machine_of(found).to_owned());
+        // This machine's session of a project with no settings file is under that row, not under
+        // the group of another machine's project of its name.
+        let gone = snapshot.is_gone_here(&project) && snapshot.is_here(found);
         let live: Vec<&crate::model::Session> = snapshot
-            .live_sessions_of(&project)
+            .level_sessions(&project, gone)
             .into_iter()
             .filter(|s| {
                 machine
@@ -2489,11 +2497,12 @@ impl Shell {
                     .is_none_or(|m| snapshot.machine_of(s) == m)
             })
             .collect();
-        let node = match &machine {
-            Some(machine) => self
+        let node = match (gone, &machine) {
+            (true, _) => self.gone.get(&(project.clone(), machine.clone())),
+            (false, Some(machine)) => self
                 .machine_projects
                 .get(&(project.clone(), machine.clone())),
-            None => self.projects.get(&project),
+            (false, None) => self.projects.get(&project),
         };
         let Some(node) = node.cloned() else {
             eprintln!("flottille: the fold of {session} has no level of {project} to draw");
@@ -2631,6 +2640,17 @@ impl Shell {
         self.projects.get(name)
     }
 
+    /// The row of this machine's project `name` with no settings file, in the section of `machine`
+    /// while the projects are shown by machine.
+    pub fn unconfigured_project(
+        &self,
+        name: &str,
+        machine: Option<&str>,
+    ) -> Option<&Entity<ProjectNode>> {
+        self.gone
+            .get(&(name.to_owned(), machine.map(str::to_owned)))
+    }
+
     pub fn session(&self, id: &str) -> Option<&Entity<SessionRow>> {
         self.sessions.get(id)
     }
@@ -2720,6 +2740,17 @@ impl Shell {
                     .projects
                     .iter()
                     .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
+                    .chain(
+                        self.gone
+                            .iter()
+                            .filter(|((_, machine), _)| machine.is_none())
+                            .map(|((name, _), node)| {
+                                (
+                                    format!("{}{name}", crate::tree::GONE),
+                                    node.read(cx).is_open(),
+                                )
+                            }),
+                    )
                     .collect(),
             },
             by_machine: self.by_machine,
@@ -2738,6 +2769,12 @@ impl Shell {
                     .map(|((name, machine), node)| {
                         (machine_key(machine, name), node.read(cx).is_open())
                     })
+                    .chain(self.gone.iter().filter_map(|((name, machine), node)| {
+                        let kept = format!("{}{name}", crate::tree::GONE);
+                        machine
+                            .as_deref()
+                            .map(|machine| (machine_key(machine, &kept), node.read(cx).is_open()))
+                    }))
                     .collect(),
                 false => last.on_machines.clone(),
             },
@@ -4192,7 +4229,6 @@ impl Shell {
         (page.name() == project).then(|| page.tasks().clone())
     }
 
-    /// The open settings page, when it is `project`'s.
     /// The confirmation that asked to remove `project`: its settings page's, or its row's when its
     /// settings file is gone.
     fn removal_of(&self, project: &str, cx: &App) -> Option<Entity<ProjectRemoval>> {
@@ -4202,22 +4238,19 @@ impl Shell {
         }
     }
 
-    /// The confirmation on the row of `project`, a project with no settings file.
+    /// The confirmation on the row of `project`, a project with no settings file: this machine's,
+    /// so none for an answer of another machine, whose project of that name is its own.
     fn removal_of_unconfigured(&self, project: &str, cx: &App) -> Option<Entity<ProjectRemoval>> {
-        self.projects
-            .get(project)
-            .into_iter()
-            .chain(
-                self.machine_projects
-                    .iter()
-                    .filter(|((name, _), _)| name == project)
-                    .map(|(_, node)| node),
-            )
-            .map(|node| node.read(cx))
-            .find(|node| node.unconfigured())
-            .and_then(|node| node.removal().cloned())
+        if self.answering.is_some() {
+            return None;
+        }
+        self.gone
+            .iter()
+            .filter(|((name, _), _)| name == project)
+            .find_map(|(_, node)| node.read(cx).removal().cloned())
     }
 
+    /// The open settings page, when it is `project`'s.
     fn settings_of_project(&self, project: &str, cx: &App) -> Option<Entity<ProjectSettingsPage>> {
         self.project_settings
             .clone()
@@ -4748,7 +4781,8 @@ impl Shell {
     }
 
     /// The rows of the projects whose settings file is gone, in the section of `machine` when the
-    /// projects are shown by machine: this machine's alone, each with the sessions it holds.
+    /// projects are shown by machine: this machine's alone, each with the sessions it holds, and
+    /// never the row of another machine's project of the same name: that one is in `projects`.
     fn unconfigured_nodes(
         &mut self,
         snapshot: &Snapshot,
@@ -4756,13 +4790,13 @@ impl Shell {
         sessions: &mut HashMap<String, Entity<SessionRow>>,
         now: u64,
         cx: &mut Context<Self>,
-    ) -> Vec<(String, Entity<ProjectNode>)> {
+    ) -> Vec<((String, Option<String>), Entity<ProjectNode>)> {
         let this = cx.entity().downgrade();
         let mut nodes = Vec::new();
         for gone in &snapshot.unconfigured {
             let mut marks = Vec::new();
             let live: Vec<&crate::model::Session> = snapshot
-                .live_sessions_of(&gone.name)
+                .level_sessions(&gone.name, true)
                 .into_iter()
                 .filter(|session| {
                     machine.is_none_or(|machine| snapshot.machine_of(session) == machine)
@@ -4770,39 +4804,39 @@ impl Shell {
                 .collect();
             let rows = self.session_rows(live.iter().copied(), sessions, &mut marks, now, cx);
             let rows = nested(&live, &rows, cx);
-            let known = match machine {
-                None => self.projects.remove(&gone.name),
-                Some(machine) => self
-                    .machine_projects
-                    .remove(&(gone.name.clone(), machine.to_owned())),
-            };
-            let node = known.unwrap_or_else(|| {
+            let key = (gone.name.clone(), machine.map(str::to_owned));
+            let node = self.gone.remove(&key).unwrap_or_else(|| {
                 let this = this.clone();
                 let name = gone.name.clone();
+                let kept = format!("{}{name}", crate::tree::GONE);
                 let open = match machine {
-                    None => self.kept.projects.get(&name).copied(),
+                    None => self.kept.projects.get(&kept).copied(),
                     Some(machine) => self
                         .kept
                         .on_machines
-                        .get(&machine_key(machine, &name))
-                        .or_else(|| self.kept.projects.get(&name))
+                        .get(&machine_key(machine, &kept))
                         .copied(),
                 }
                 .unwrap_or(true);
                 let machine = machine.map(str::to_owned);
-                cx.new(|cx| ProjectNode::new(name, machine, this, open, cx))
+                cx.new(|cx| ProjectNode::gone(name, machine, this, open, cx))
             });
             let mark = AgentState::strongest(marks);
             if !node.read(cx).holds(&rows, mark, cx) {
                 node.update(cx, |node, cx| node.set(rows, mark, cx));
             }
-            if node.read(cx).commands() != 0 {
-                node.update(cx, |node, cx| node.set_commands(0, cx));
+            // Beside the group of another machine's project of its name, the row says whose it is
+            // (by machine, the sections do).
+            let apart = (machine.is_none()
+                && snapshot.projects.iter().any(|p| p.name == gone.name))
+            .then(|| snapshot.this_machine.as_deref())
+            .flatten();
+            if !node.read(cx).says(&gone.name, apart, &[]) {
+                node.update(cx, |node, cx| {
+                    node.set_look(&gone.name, apart, Vec::new(), cx)
+                });
             }
-            if !node.read(cx).unconfigured() {
-                node.update(cx, |node, cx| node.set_unconfigured(true, cx));
-            }
-            nodes.push((gone.name.clone(), node));
+            nodes.push((key, node));
         }
         nodes
     }
@@ -4830,6 +4864,7 @@ impl Shell {
         let mut section_nodes = Vec::new();
         let mut sections = HashMap::new();
         let mut machine_projects = HashMap::new();
+        let mut gone = HashMap::new();
         if grouped {
             // One section for each machine, each with the projects it has and its own sessions.
             for home in &snapshot.homes {
@@ -4841,7 +4876,7 @@ impl Shell {
                 {
                     let mut marks = Vec::new();
                     let live: Vec<&crate::model::Session> = snapshot
-                        .live_sessions_of(&project.name)
+                        .level_sessions(&project.name, false)
                         .into_iter()
                         .filter(|session| snapshot.machine_of(session) == home.machine)
                         .collect();
@@ -4889,15 +4924,11 @@ impl Shell {
                             )
                         });
                     }
-                    // A project that has its file again is a project like any.
-                    if node.read(cx).unconfigured() {
-                        node.update(cx, |node, cx| node.set_unconfigured(false, cx));
-                    }
                     nodes.push(node.clone());
                     machine_projects.insert(key, node);
                 }
                 if snapshot.homes.first() == Some(home) {
-                    for (name, node) in self.unconfigured_nodes(
+                    for (key, node) in self.unconfigured_nodes(
                         &snapshot,
                         Some(&home.machine),
                         &mut sessions,
@@ -4905,7 +4936,7 @@ impl Shell {
                         cx,
                     ) {
                         nodes.push(node.clone());
-                        machine_projects.insert((name, home.machine.clone()), node);
+                        gone.insert(key, node);
                     }
                 }
                 let section = self.sections.remove(&home.machine).unwrap_or_else(|| {
@@ -4928,7 +4959,7 @@ impl Shell {
         } else {
             for project in &snapshot.projects {
                 let mut marks = Vec::new();
-                let live = snapshot.live_sessions_of(&project.name);
+                let live = snapshot.level_sessions(&project.name, false);
                 let rows =
                     self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
                 let rows = nested(&live, &rows, cx);
@@ -4958,17 +4989,13 @@ impl Shell {
                         )
                     });
                 }
-                // A project that has its file again is a project like any.
-                if node.read(cx).unconfigured() {
-                    node.update(cx, |node, cx| node.set_unconfigured(false, cx));
-                }
                 project_nodes.push(node.clone());
                 projects.insert(project.name.clone(), node);
             }
             // The projects with no file go after the user's own list, to be removed.
-            for (name, node) in self.unconfigured_nodes(&snapshot, None, &mut sessions, now, cx) {
+            for (key, node) in self.unconfigured_nodes(&snapshot, None, &mut sessions, now, cx) {
                 project_nodes.push(node.clone());
-                projects.insert(name, node);
+                gone.insert(key, node);
             }
         }
         // The rows of the other way of showing the projects are on their way out: their
@@ -4977,6 +5004,7 @@ impl Shell {
             .projects
             .values()
             .chain(self.machine_projects.values())
+            .chain(self.gone.values())
             .cloned()
             .collect::<Vec<_>>()
         {
@@ -4985,6 +5013,7 @@ impl Shell {
             }
         }
         self.machine_projects = machine_projects;
+        self.gone = gone;
         self.grouped = grouped;
         for section in self.sections.values().cloned().collect::<Vec<_>>() {
             if !section.read(cx).projects(cx).is_empty() {

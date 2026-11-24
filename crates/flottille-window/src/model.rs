@@ -1332,6 +1332,28 @@ impl Snapshot {
         live
     }
 
+    /// Whether `session` runs on this machine.
+    pub fn is_here(&self, session: &Session) -> bool {
+        self.machine_of(session) == self.this_machine.as_deref().unwrap_or_default()
+    }
+
+    /// Whether this machine has a project of that name with no settings file: its row is its own,
+    /// beside the group of another machine's project of the same name, if there is one.
+    pub fn is_gone_here(&self, project: &str) -> bool {
+        self.unconfigured.iter().any(|gone| gone.name == project)
+    }
+
+    /// The live sessions of one row of `project`: this machine's alone on the row of the project
+    /// with no settings file (`gone`), and the others' on the group of that name, which has none
+    /// of this machine's while this machine's is that row.
+    pub fn level_sessions(&self, project: &str, gone: bool) -> Vec<&Session> {
+        let twin = self.is_gone_here(project);
+        self.live_sessions_of(project)
+            .into_iter()
+            .filter(|session| !twin || self.is_here(session) == gone)
+            .collect()
+    }
+
     /// The sessions that ended, whatever their project, the most recent end first.
     pub fn ended_sessions(&self) -> Vec<&Session> {
         let mut ended: Vec<&Session> = self.sessions.iter().filter(|s| s.ended).collect();

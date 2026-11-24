@@ -76,6 +76,21 @@ pub fn project_offline_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-offline-{name}").into())
 }
 
+/// What a row key of a project whose settings file is gone starts with: no project name holds a
+/// colon, so such a row is never the node, the key or the element ids of another machine's
+/// project of the same name.
+pub const GONE: &str = "gone:";
+
+/// The element id of the row of a project whose settings file is gone.
+pub fn project_gone_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-{GONE}{name}").into())
+}
+
+/// The element id of the row of a project whose settings file is gone, in a machine's section.
+pub fn project_gone_on_id(name: &str, machine: &str) -> ElementId {
+    ElementId::Name(format!("project-{GONE}{name}-on-{machine}").into())
+}
+
 /// The words on the row of a project whose settings file is gone.
 pub fn project_unconfigured_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-unconfigured-{name}").into())
@@ -753,7 +768,7 @@ impl Sidebar {
         let mut items: HashMap<String, gpui_kit::AnyElement> = HashMap::new();
         let mut canonical: Vec<String> = Vec::new();
         for row in self.list.rows() {
-            let mut key = row.value.read(cx).name().to_owned();
+            let mut key = row.value.read(cx).list_key();
             if items.contains_key(&key) {
                 key = format!("{key}~{}", row.key);
             }
@@ -1157,17 +1172,69 @@ impl ProjectNode {
         }
     }
 
+    /// The row of a project whose settings file is gone, which the daemon still holds sessions or
+    /// workspaces of: this machine's, with its menu and Remove. It is a node of its own from its
+    /// first frame to its last, never another machine's project of the same name.
+    pub fn gone(
+        name: String,
+        machine: Option<String>,
+        shell: WeakEntity<Shell>,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut node = Self::new(name, machine, shell, open, cx);
+        node.unconfigured = true;
+        let removal = cx.new(|_| ProjectRemoval::new(node.shell.clone().into(), node.name.clone()));
+        node.removal = Some(removal.clone());
+        let name = node.name.clone();
+        let menu = cx.new(|cx| {
+            Menu::new(project_menu_id(&name), "Project actions", cx).danger(
+                project_remove_id(&name),
+                "Remove…",
+                move |_, cx| removal.update(cx, |removal, cx| removal.ask(cx)),
+            )
+        });
+        // The row keeps the menu in sight while it is open: it draws again as it changes.
+        let watch = cx.observe(&menu, |_, _, cx| cx.notify());
+        node.menu = Some((menu, watch));
+        // Its ids are made from the key, which says it: so the fold is made again.
+        let key = node.key();
+        let sessions = node.sessions.clone();
+        node.fold = cx.new(|_| Fold::new(format!("fold-project-{key}"), sessions, open));
+        node
+    }
+
     /// The project's name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// What its ids are made from: its name, and its machine in a machine's section.
+    /// What its ids are made from: its name, and its machine in a machine's section; a row of a
+    /// project with no file is [`GONE`] before.
     fn key(&self) -> String {
-        match &self.machine {
+        let key = match &self.machine {
             Some(machine) => format!("{}-on-{machine}", self.name),
             None => self.name.clone(),
+        };
+        match self.unconfigured {
+            true => format!("{GONE}{key}"),
+            false => key,
         }
+    }
+
+    /// What the list of projects tells its rows by: the name, [`GONE`] before it on a row of a
+    /// project with no file.
+    fn list_key(&self) -> String {
+        match self.unconfigured {
+            true => format!("{GONE}{}", self.name),
+            false => self.name.clone(),
+        }
+    }
+
+    /// What the ids that are not the key's are made from: the name, [`GONE`] before it on a row
+    /// of a project with no file.
+    fn id_name(&self) -> String {
+        self.list_key()
     }
 
     /// The machine whose section it is in.
@@ -1240,37 +1307,6 @@ impl ProjectNode {
     /// The confirmation of its removal, while its settings file is gone.
     pub fn removal(&self) -> Option<&Entity<ProjectRemoval>> {
         self.removal.as_ref()
-    }
-
-    /// Marks the row as one whose settings file is gone, or not any more: only then has it the
-    /// menu with Remove.
-    pub fn set_unconfigured(&mut self, unconfigured: bool, cx: &mut Context<Self>) {
-        if self.unconfigured == unconfigured {
-            return;
-        }
-        self.unconfigured = unconfigured;
-        if unconfigured {
-            let removal = self
-                .removal
-                .get_or_insert_with(|| {
-                    cx.new(|_| ProjectRemoval::new(self.shell.clone().into(), self.name.clone()))
-                })
-                .clone();
-            let name = self.name.clone();
-            let menu = cx.new(|cx| {
-                Menu::new(project_menu_id(&name), "Project actions", cx).danger(
-                    project_remove_id(&name),
-                    "Remove…",
-                    move |_, cx| removal.update(cx, |removal, cx| removal.ask(cx)),
-                )
-            });
-            // The row keeps the menu in sight while it is open: it draws again as it changes.
-            let watch = cx.observe(&menu, |_, _, cx| cx.notify());
-            self.menu = Some((menu, watch));
-        } else {
-            self.menu = None;
-        }
-        cx.notify();
     }
 
     /// Its sessions' rows in the order drawn: the one that moved last first.
@@ -1370,9 +1406,11 @@ impl Render for ProjectNode {
         let name = self.name.clone();
         let key = self.key();
         let p = palette(cx);
-        let id = match &self.machine {
-            Some(machine) => project_on_id(&self.name, machine),
-            None => project_id(&self.name),
+        let id = match (&self.machine, self.unconfigured) {
+            (Some(machine), false) => project_on_id(&self.name, machine),
+            (None, false) => project_id(&self.name),
+            (Some(machine), true) => project_gone_on_id(&self.name, machine),
+            (None, true) => project_gone_id(&self.name),
         };
         // The machines' marks fade over each other as the machines that have the project change.
         let marks_said = SharedString::from(
@@ -1404,7 +1442,7 @@ impl Render for ProjectNode {
             .collect();
         let apart = self.apart.clone().map(|machine| {
             div()
-                .id(project_apart_id(&self.name))
+                .id(project_apart_id(&self.id_name()))
                 .flex_none()
                 .aria_label(machine.clone())
                 .child(meta(machine, cx))
@@ -1475,7 +1513,7 @@ impl Render for ProjectNode {
             ElementId::Name(format!("project-offline-fade-{key}").into()),
             self.offline(),
             div()
-                .id(project_offline_id(&self.name))
+                .id(project_offline_id(&self.id_name()))
                 .pl(space::XXL)
                 .pb(space::XS)
                 .text_size(px(11.5))
