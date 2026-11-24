@@ -4,7 +4,8 @@
 //! of a list unfolds when it arrives and folds away when it goes, the unread dot fades, a page's
 //! blocks enter one after another, the items of a result enter one after another with their
 //! group, which unfolds, and what left since the last run unfolds at the foot, the status of a run
-//! whose work goes on unfolds when it is read, and every button, row and link fades its hover.
+//! whose work goes on unfolds when it is read, the lines that say which agent made or edited a
+//! routine unfold when they come, and every button, row and link fades its hover.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -847,11 +848,19 @@ impl RoutinesTab {
             )
         };
         let next = routine.next(now);
-        // An agent's routine says whose it is: the user reads it as theirs to keep or remove.
-        let made_by = routine
-            .made_by
-            .clone()
-            .map(|title| fact("routine-made-by", Icon::Edit, "Made by", title));
+        // An agent's routine says whose it is, and which agent changed it last: the user reads it
+        // as theirs to keep or remove. Either line unfolds when an agent's write brings it in.
+        let by = |id: &'static str, label: &'static str, title: Option<String>| {
+            let block = ElementId::Name(format!("{id}-block").into());
+            presence_of(block, title.map(SharedString::from), move |title| {
+                LabelledLine::new(id, Icon::Edit, label, title.clone())
+                    .child(title)
+                    .into_any_element()
+            })
+            .space(LINE_GAP)
+        };
+        let made_by = by("routine-made-by", "Made by", routine.made_by.clone());
+        let edited_by = by("routine-edited-by", "Edited by", routine.edited_by.clone());
         let facts = stack(LINE_GAP)
             .child(fact(
                 "routine-trigger",
@@ -885,7 +894,8 @@ impl RoutinesTab {
                     _ => "When it has something to say".to_owned(),
                 },
             ))
-            .children(made_by);
+            .child(made_by)
+            .child(edited_by);
         let prompt = div()
             .id("routine-prompt")
             .aria_label(SharedString::from(routine.prompt.clone()))
