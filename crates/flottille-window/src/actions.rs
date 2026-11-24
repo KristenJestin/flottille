@@ -726,6 +726,17 @@ pub enum Command {
         number: u64,
         answer: Answer,
     },
+    /// Allow on a held launch that needs files (`needs`): on the machine `from`, each file from
+    /// `from_step` on made a vault entry (unless it is one already) and shared with the machine
+    /// `to`, signed with this device's key, one file after the other; then the launch allowed on
+    /// the machine shown. Each step is told as it goes ([`Outcome::Allowing`]), the approval's
+    /// answer as [`Outcome::Answered`].
+    AllowSharing {
+        session: String,
+        number: u64,
+        needs: crate::waiting::Needs,
+        from_step: usize,
+    },
 }
 
 /// What is imported from a project's `.claude` folder.
@@ -1501,6 +1512,15 @@ pub enum Outcome {
         decision: Option<String>,
         refused: Option<String>,
     },
+    /// A step of an Allow that shares files ([`Command::AllowSharing`]): the file `at` (`None`:
+    /// the approval) is now `step`; `why`, the sentence a failed one says, names the file.
+    Allowing {
+        session: String,
+        number: u64,
+        at: Option<usize>,
+        step: crate::waiting::Step,
+        why: Option<String>,
+    },
 }
 
 /// How long an answer is waited for.
@@ -1667,6 +1687,31 @@ impl Actions {
                     let _ = updates.unbounded_send(Update::Done(Outcome::Tunnel(news)));
                 })
                 .expect("a thread for closing a tunnel");
+            return;
+        }
+        // The files are the caller's machine's, reached on this machine's daemon, which carries
+        // each request signed for that machine (this one too); the approval is the machine
+        // shown's.
+        if let Command::AllowSharing {
+            session,
+            number,
+            needs,
+            from_step,
+        } = command
+        {
+            let (local, shown, updates, bounds) = (
+                self.local.clone(),
+                self.connect.clone(),
+                self.updates.clone(),
+                self.bounds,
+            );
+            std::thread::Builder::new()
+                .name("flottille-allow".into())
+                .spawn(move || {
+                    let ask = (session, number, needs, from_step);
+                    allow_sharing(&local, &shown, sign, ask, bounds, &updates);
+                })
+                .expect("a thread for an Allow that shares files");
             return;
         }
         if let Command::SignInOn { name, machine } = command {
@@ -2031,6 +2076,105 @@ fn signed_by_device(
     connected(connect)?
         .signing(sign, machine)
         .ask_within(method, params, bound)?
+}
+
+/// [`Command::AllowSharing`]: what `from` holds already is read first, so that an entry made
+/// before (by hand, or by an Allow that failed further on) is shared, never made again; then each
+/// file is made and shared in turn, and the first step refused ends it, the launch still held.
+fn allow_sharing(
+    local: &Connect,
+    shown: &Connect,
+    sign: Option<Sign>,
+    (session, number, needs, from_step): (String, u64, crate::waiting::Needs, usize),
+    bounds: Bounds,
+    updates: &Updates,
+) {
+    use crate::waiting::Step;
+    let told = |at: Option<usize>, step: Step, why: Option<String>| {
+        let outcome = Outcome::Allowing {
+            session: session.clone(),
+            number,
+            at,
+            step,
+            why,
+        };
+        updates.unbounded_send(Update::Done(outcome)).is_ok()
+    };
+    let on_from = |method: &str, params: Value| {
+        signed_by_device(
+            local,
+            sign.clone(),
+            Some(needs.from.clone()),
+            method,
+            params,
+            bounds.quick,
+        )
+    };
+    let made: HashSet<String> = match on_from("vault.list", json!({})) {
+        Ok(listed) => listed["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .collect(),
+        Err(why) => {
+            let path = needs.files.get(from_step).map_or("", |file| &file.path);
+            told(
+                Some(from_step),
+                Step::NotMade,
+                Some(format!("{path} was not made: {why}")),
+            );
+            return;
+        }
+    };
+    for (at, file) in needs.files.iter().enumerate().skip(from_step) {
+        if !made.contains(&file.entry) {
+            if !told(Some(at), Step::Making, None) {
+                return;
+            }
+            let params = json!({"project": needs.project, "path": file.path, "name": file.entry});
+            if let Err(why) = on_from("vault.from_file", params) {
+                let why = format!("{} was not made: {why}", file.path);
+                told(Some(at), Step::NotMade, Some(why));
+                return;
+            }
+        }
+        if !told(Some(at), Step::Sharing, None) {
+            return;
+        }
+        let params = json!({"name": file.entry, "machine": needs.to});
+        if let Err(why) = on_from("vault.share", params) {
+            let why = format!("{} was not shared with {}: {why}", file.path, needs.to);
+            told(Some(at), Step::NotShared, Some(why));
+            return;
+        }
+        if !told(Some(at), Step::Shared, None) {
+            return;
+        }
+    }
+    if !told(None, Step::Allowing, None) {
+        return;
+    }
+    let outcome = match ask_alone(
+        shown,
+        "approval.approve",
+        json!({"number": number}),
+        bounds.quick,
+    ) {
+        Ok(Ok(answered)) => Outcome::Answered {
+            session,
+            number,
+            decision: answered["request"]["decision"].as_str().map(str::to_owned),
+            refused: None,
+        },
+        Ok(Err(why)) | Err(why) => Outcome::Answered {
+            session,
+            number,
+            decision: None,
+            refused: Some(why),
+        },
+    };
+    let _ = updates.unbounded_send(Update::Done(outcome));
 }
 
 /// How long the window waits for a sign-in on another machine: the daemon's own wait, and a
@@ -2547,6 +2691,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             Outcome::Asked { then, answer }
         }
         Command::SignInOn { .. } => unreachable!("a sign-in on another machine has its thread"),
+        Command::AllowSharing { .. } => unreachable!("an Allow that shares files has its thread"),
         Command::TunnelOpen(_) | Command::TunnelClose { .. } => {
             unreachable!("a tunnel has its thread")
         }

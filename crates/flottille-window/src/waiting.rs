@@ -7,6 +7,12 @@
 //!
 //! The text of a card is what the daemon gave (`says`, the class, the judge's reason, the reasons
 //! it was held, who asked); the window only joins the reasons into sentences.
+//!
+//! A held launch that needs files the receiving machine lacks (its `needs`) lists them on its
+//! card, one step each, then the approval: Allow makes each file a vault entry on the caller's
+//! machine and shares it, one after the other, then allows the launch (`docs/remote.md`, "What
+//! travels"). Each step's mark and word move as it goes; a step that fails says which file and why
+//! and the launch stays held, Try again resuming at that step.
 
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
@@ -17,7 +23,7 @@ use std::f32::consts::PI;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Icon, Item, Listing, Palette, Placement, Type, fade, hoverable, icon, palette,
+    Button, Icon, Item, Listing, Palette, Placement, Type, changed, fade, hoverable, icon, palette,
     presence, space, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -32,6 +38,7 @@ use crate::commands::spaced;
 use crate::conversation::VaultAsk;
 use crate::runs::rail_label;
 use crate::session::{ApprovalCard, SessionPage};
+use crate::steps::{StepRow, StepTone};
 
 /// What waits for the user, as the section lists it: a request held for them, or an agent's
 /// request for a vault entry with who asked it.
@@ -43,6 +50,147 @@ enum Held {
 
 /// How long a card the user was sent to stays lit.
 const POINTED: Duration = Duration::from_millis(1600);
+
+/// How long a card whose Allow made and shared its files shows its marks before it folds away.
+const LINGER: Duration = Duration::from_millis(900);
+
+/// What a held launch needs shared before it is allowed (its request's `needs`): files of the
+/// caller's project `project` on the machine `from`, each made a vault entry there and shared with
+/// the machine `to`, where the launch is held.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Needs {
+    pub from: String,
+    pub to: String,
+    pub project: String,
+    pub files: Vec<NeededFile>,
+}
+
+/// A file a held launch needs, and the vault entry it is made into.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeededFile {
+    pub path: String,
+    pub entry: String,
+}
+
+impl Needs {
+    /// The `needs` of a request's call, when it has some.
+    pub fn of(needs: &serde_json::Value) -> Option<Needs> {
+        let text = |value: &serde_json::Value| value.as_str().map(str::to_owned);
+        let files: Vec<NeededFile> = needs["files"]
+            .as_array()?
+            .iter()
+            .filter_map(|file| {
+                Some(NeededFile {
+                    path: text(&file["path"])?,
+                    entry: text(&file["entry"])?,
+                })
+            })
+            .collect();
+        (!files.is_empty()).then_some(())?;
+        Some(Needs {
+            from: text(&needs["from"])?,
+            to: text(&needs["to"])?,
+            project: text(&needs["project"])?,
+            files,
+        })
+    }
+}
+
+/// Where a step of an Allow that shares files is: a file's, or the approval's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Waiting,
+    Making,
+    Sharing,
+    Shared,
+    NotMade,
+    NotShared,
+    Allowing,
+    Allowed,
+    NotAllowed,
+}
+
+impl Step {
+    /// The one word its row says.
+    pub fn word(self) -> &'static str {
+        match self {
+            Step::Waiting => "Waiting",
+            Step::Making => "Making…",
+            Step::Sharing => "Sharing…",
+            Step::Shared => "Shared",
+            Step::NotMade => "Not made",
+            Step::NotShared => "Not shared",
+            Step::Allowing => "Allowing…",
+            Step::Allowed => "Allowed",
+            Step::NotAllowed => "Not allowed",
+        }
+    }
+
+    fn failed(self) -> bool {
+        matches!(self, Step::NotMade | Step::NotShared | Step::NotAllowed)
+    }
+
+    /// Its mark: the window's state mark, a quiet ring, the spinner, a check or a cross.
+    fn state(self) -> AgentState {
+        match self {
+            Step::Waiting => AgentState::Idle,
+            Step::Making | Step::Sharing | Step::Allowing => AgentState::Running,
+            Step::Shared | Step::Allowed => AgentState::Completed,
+            Step::NotMade | Step::NotShared | Step::NotAllowed => AgentState::Failed,
+        }
+    }
+
+    fn tone(self) -> StepTone {
+        match self.state() {
+            AgentState::Running => StepTone::Now,
+            AgentState::Completed => StepTone::Done,
+            AgentState::Failed => StepTone::Failed,
+            _ => StepTone::Todo,
+        }
+    }
+}
+
+/// The steps of a card that needs files: each file's, then the approval's, each with its mark.
+struct Run {
+    steps: Vec<Step>,
+    marks: Vec<(Entity<Status>, Entity<StateIcon>)>,
+}
+
+impl Run {
+    fn new(files: usize, cx: &mut Context<Waiting>) -> Run {
+        let marks = (0..=files)
+            .map(|_| {
+                let status = cx.new(|_| Status::new(AgentState::Idle));
+                let icon = {
+                    let status = status.clone();
+                    cx.new(|cx| StateIcon::new(status, cx))
+                };
+                (status, icon)
+            })
+            .collect();
+        Run {
+            steps: vec![Step::Waiting; files + 1],
+            marks,
+        }
+    }
+
+    fn approval(&self) -> Step {
+        self.steps[self.steps.len() - 1]
+    }
+
+    /// The step `at` (`None`: the approval) is now `step`; its mark follows.
+    fn set(&mut self, at: Option<usize>, step: Step, cx: &mut Context<Waiting>) {
+        let at = at.unwrap_or(self.steps.len() - 1).min(self.steps.len() - 1);
+        self.steps[at] = step;
+        self.marks[at]
+            .0
+            .update(cx, |status, cx| status.set(step.state(), cx));
+    }
+
+    fn failed(&self) -> bool {
+        self.steps.iter().any(|step| step.failed())
+    }
+}
 
 pub use flottille_protocol::words::sentences;
 
@@ -64,6 +212,10 @@ pub struct Waiting {
     open: HashSet<u64>,
     /// The requests for a vault entry whose details are unfolded.
     open_asks: HashSet<u64>,
+    /// The steps of the cards that need files, made with the card.
+    runs: HashMap<u64, Run>,
+    /// The cards allowed with their files, which show their marks a moment before they fold away.
+    lingering: HashSet<u64>,
     /// The pulsing dot of a request to judge.
     dot: Entity<StateIcon>,
     scroll: ScrollHandle,
@@ -84,6 +236,8 @@ impl Waiting {
             pointed: None,
             open: HashSet::new(),
             open_asks: HashSet::new(),
+            runs: HashMap::new(),
+            lingering: HashSet::new(),
             dot: cx.new(|cx| StateIcon::new(status, cx)),
             scroll: ScrollHandle::new(),
             _lit: None,
@@ -110,8 +264,43 @@ impl Waiting {
         self.pointed
     }
 
-    /// The requests that wait now; nothing is drawn again when they are what was drawn.
-    pub fn set(&mut self, cards: Vec<ApprovalCard>, cx: &mut Context<Self>) {
+    /// The requests that wait now; nothing is drawn again when they are what was drawn. A card
+    /// whose Allow shared its files stays a moment, its marks seen, before it folds away.
+    pub fn set(&mut self, mut cards: Vec<ApprovalCard>, cx: &mut Context<Self>) {
+        for (at, card) in self.cards.iter().enumerate() {
+            let number = card.number;
+            let allowed = self
+                .runs
+                .get(&number)
+                .is_some_and(|run| matches!(run.approval(), Step::Allowing | Step::Allowed));
+            if cards.iter().any(|c| c.number == number) || !allowed {
+                continue;
+            }
+            cards.insert(at.min(cards.len()), card.clone());
+            if self.lingering.insert(number) {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(LINGER).await;
+                    this.update(cx, |this, cx| {
+                        this.lingering.remove(&number);
+                        this.runs.remove(&number);
+                        this.cards.retain(|card| card.number != number);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        for card in &cards {
+            if let Some(needs) = &card.needs
+                && !self.runs.contains_key(&card.number)
+            {
+                let run = Run::new(needs.files.len(), cx);
+                self.runs.insert(card.number, run);
+            }
+        }
+        self.runs
+            .retain(|n, _| cards.iter().any(|c| c.number == *n));
         if self.cards == cards {
             return;
         }
@@ -137,6 +326,15 @@ impl Waiting {
     /// The daemon's answer to Allow or Deny on a card: it leaves with the request, or says why not.
     pub fn answered(&mut self, number: u64, refused: Option<String>, cx: &mut Context<Self>) {
         self.busy.remove(&number);
+        if let Some(run) = self.runs.get_mut(&number)
+            && run.approval() == Step::Allowing
+        {
+            let step = match refused {
+                Some(_) => Step::NotAllowed,
+                None => Step::Allowed,
+            };
+            run.set(None, step, cx);
+        }
         match refused {
             Some(why) => self.errors.insert(number, why.into()),
             None => self.errors.remove(&number),
@@ -161,6 +359,62 @@ impl Waiting {
             })
             .ok();
         }));
+        cx.notify();
+    }
+
+    /// A step of the Allow of the card `number`: the file `at` (`None`: the approval) is now
+    /// `step`; one that failed says why, and the card takes Try again or Deny.
+    pub fn allowing(
+        &mut self,
+        number: u64,
+        at: Option<usize>,
+        step: Step,
+        why: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.runs.get_mut(&number) {
+            run.set(at, step, cx);
+        }
+        if let Some(why) = why {
+            self.busy.remove(&number);
+            self.errors.insert(number, why.into());
+        }
+        cx.notify();
+    }
+
+    /// How many files the card `number` shared, once each one is.
+    pub fn shared(&self, number: u64) -> Option<usize> {
+        let run = self.runs.get(&number)?;
+        let files = &run.steps[..run.steps.len() - 1];
+        files
+            .iter()
+            .all(|step| *step == Step::Shared)
+            .then_some(files.len())
+    }
+
+    /// Allow on a card that needs files: its steps run from the first not done, those done keep
+    /// their mark.
+    fn allow_sharing(&mut self, number: u64, needs: Needs, cx: &mut Context<Self>) {
+        if !self.busy.insert(number) {
+            return;
+        }
+        self.errors.remove(&number);
+        let Some(run) = self.runs.get_mut(&number) else {
+            return;
+        };
+        let files = run.steps.len() - 1;
+        let from_step = run.steps[..files]
+            .iter()
+            .position(|step| *step != Step::Shared)
+            .unwrap_or(files);
+        for at in from_step..=files {
+            run.set(Some(at), Step::Waiting, cx);
+        }
+        self.page
+            .update(cx, |page, cx| {
+                page.allow_sharing(number, needs, from_step, cx)
+            })
+            .ok();
         cx.notify();
     }
 
@@ -337,6 +591,20 @@ impl Waiting {
                         .test_support(),
                 )
             })
+            .when(card.needs.is_some(), |d| {
+                let to = card.needs.as_ref().map_or("", |needs| needs.to.as_str());
+                let said = format!(
+                    "Deny leaves on {to} the entries already shared: each is bound to its file \
+                     alone."
+                );
+                d.child(
+                    div()
+                        .id(id("approval-shared-stay"))
+                        .aria_label(SharedString::from(said.clone()))
+                        .child(SharedString::from(said))
+                        .test_support(),
+                )
+            })
             .when_some(card.source.clone(), |d, source| {
                 d.child(
                     div()
@@ -413,12 +681,26 @@ impl Waiting {
                             ),
                     ),
             )
+            .children(
+                card.needs
+                    .as_ref()
+                    .zip(self.runs.get(&number))
+                    .map(|(needs, run)| {
+                        presence(
+                            id("allow-files-block"),
+                            true,
+                            files_block(number, needs, run, p),
+                        )
+                        .space(space::XS)
+                    }),
+            )
             .child(presence(id("approval-more-block"), open, details).space(space::XS))
             .children(self.errors.get(&number).cloned().map(|error| {
                 spaced(
                     space::XS,
                     div()
                         .id(id("approval-error"))
+                        .aria_label(error.clone())
                         .text_size(px(12.))
                         .text_color(p.fail)
                         .child(error)
@@ -442,8 +724,12 @@ impl Waiting {
                                 this.page
                                     .update(cx, |page, cx| page.open_connection_request(number, cx))
                                     .ok();
-                            })),
-                        false => button("allow", "Allow", Answer::Once, true),
+                            }))
+                            .into_any_element(),
+                        false => match card.needs.clone() {
+                            Some(needs) => self.allow_button(number, needs, busy, window, cx),
+                            None => button("allow", "Allow", Answer::Once, true).into_any_element(),
+                        },
                     }),
             ));
         // A glow round the card the user was sent to, which fades in and out.
@@ -577,6 +863,34 @@ impl Waiting {
             .into_any_element()
     }
 
+    /// Allow on a card that needs files: Try again once a step failed, its word fading as it
+    /// changes. A device that may only view signs no share: it is off, and says why.
+    fn allow_button(
+        &self,
+        number: u64,
+        needs: Needs,
+        busy: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = |part: &str| ElementId::Name(format!("{part}-{number}").into());
+        let label: SharedString = match self.runs.get(&number).is_some_and(Run::failed) {
+            true => "Try again".into(),
+            false => "Allow".into(),
+        };
+        let shown = changed(&id("allow-label"), &label, window, cx);
+        let viewer = crate::machines::held(cx).filter(|held| !held.offline);
+        let mut button = Button::primary(id("allow"), label)
+            .disabled(busy || viewer.is_some())
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.allow_sharing(number, needs.clone(), cx)),
+            );
+        if let Some(viewer) = viewer {
+            button = button.tooltip(viewer.line);
+        }
+        div().opacity(shown).child(button).into_any_element()
+    }
+
     /// The card's mark: the pulsing dot of what waits for the user, or the still one of a base request.
     fn mark(&self, base: bool, p: Palette) -> AnyElement {
         match base {
@@ -671,6 +985,79 @@ impl Render for Waiting {
     }
 }
 
+/// The files a held launch needs, on its card: where they go, what Allow does with them, then one
+/// step each and the approval's, each with its mark and its word.
+fn files_block(number: u64, needs: &Needs, run: &Run, p: Palette) -> impl IntoElement {
+    let id = |part: &str| ElementId::Name(format!("{part}-{number}").into());
+    let count = match needs.files.len() {
+        1 => "1 file".to_owned(),
+        files => format!("{files} files"),
+    };
+    let head = format!("From {} → to {} · {count}", needs.from, needs.to);
+    let consent = format!(
+        "Allow makes each entry on {} from its file and shares it with {}, then allows the launch.",
+        needs.from, needs.to
+    );
+    let row = |at: String, step: usize, verb: String, object: Option<String>| {
+        let state = run.steps[step];
+        let row = StepRow::new(
+            ElementId::Name(format!("allow-step-{number}-{at}").into()),
+            run.marks[step].1.clone(),
+            verb,
+            state.tone(),
+            ElementId::Name(format!("allow-word-{number}-{at}").into()),
+        )
+        .time(state.word());
+        match object {
+            Some(object) => row.object(object),
+            None => row,
+        }
+    };
+    let files = needs.files.len();
+    div()
+        .id(id("allow-files"))
+        .aria_label(SharedString::from(head.clone()))
+        .pt(space::XS)
+        .flex()
+        .flex_col()
+        .gap(space::XS)
+        .child(
+            div()
+                .mono(11.)
+                .text_color(p.faint)
+                .child(SharedString::from(head)),
+        )
+        .child(
+            div()
+                .id(id("approval-sharing"))
+                .text_size(px(12.))
+                .text_color(p.mute)
+                .aria_label(SharedString::from(consent.clone()))
+                .child(SharedString::from(consent))
+                .test_support(),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .children(needs.files.iter().enumerate().map(|(at, file)| {
+                    row(
+                        at.to_string(),
+                        at,
+                        file.path.clone(),
+                        Some(file.entry.clone()),
+                    )
+                }))
+                .child(div().border_t_1().border_color(p.line).child(row(
+                    "approve".to_owned(),
+                    files,
+                    format!("Allow on {}", needs.to),
+                    None,
+                ))),
+        )
+        .test_support()
+}
+
 /// The "Details" row of a card: its chevron turns as it opens, its ink fades on the hover.
 fn details_toggle(
     id: ElementId,
@@ -733,11 +1120,63 @@ pub(crate) fn record_ink(decision: Option<&str>, p: Palette) -> gpui_kit::Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeldTones, held_tones, record_ink, sentences};
+    use super::{HeldTones, NeededFile, Needs, Step, held_tones, record_ink, sentences};
     use gpui_design_system::{Palette, theme::Shade};
 
     fn palettes() -> [Palette; 2] {
         [Palette::own(Shade::Light), Palette::own(Shade::Dark)]
+    }
+
+    #[test]
+    fn a_held_launch_s_needs_are_read_with_their_files_and_none_without() {
+        let needs = serde_json::json!({"from": "pc", "to": "server", "project": "app",
+            "files": [{"path": "config/local.toml", "entry": "app-config-local.toml",
+                "bound": "file:app/config/local.toml"}]});
+        assert_eq!(
+            Needs::of(&needs),
+            Some(Needs {
+                from: "pc".into(),
+                to: "server".into(),
+                project: "app".into(),
+                files: vec![NeededFile {
+                    path: "config/local.toml".into(),
+                    entry: "app-config-local.toml".into(),
+                }],
+            })
+        );
+        assert_eq!(Needs::of(&serde_json::Value::Null), None);
+        let none = serde_json::json!({"from": "pc", "to": "server", "project": "app", "files": []});
+        assert_eq!(Needs::of(&none), None);
+    }
+
+    #[test]
+    fn each_step_says_one_word_and_a_failed_one_is_drawn_as_failed() {
+        let words: Vec<&str> = [
+            Step::Waiting,
+            Step::Making,
+            Step::Sharing,
+            Step::Shared,
+            Step::NotMade,
+            Step::NotShared,
+        ]
+        .map(Step::word)
+        .to_vec();
+        assert_eq!(
+            words,
+            [
+                "Waiting",
+                "Making…",
+                "Sharing…",
+                "Shared",
+                "Not made",
+                "Not shared"
+            ]
+        );
+        for step in [Step::NotMade, Step::NotShared, Step::NotAllowed] {
+            assert!(step.failed());
+            assert_eq!(step.tone(), crate::steps::StepTone::Failed);
+        }
+        assert!(!Step::Shared.failed());
     }
 
     #[test]
