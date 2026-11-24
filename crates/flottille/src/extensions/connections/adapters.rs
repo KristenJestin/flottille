@@ -539,9 +539,9 @@ impl Adapter {
 
     /// How the server's command reaches the adapter's program, layer after layer as the gate
     /// unwraps them.
-    fn reached(&self, words: &[String], path: Option<&OsStr>) -> Reached {
+    fn reached(&self, words: &[String], path: Option<&OsStr>) -> Arrival {
         let layers = crate::gate::layers(words).unwrap_or_else(|_| vec![words.to_vec()]);
-        let mut reached = Reached::default();
+        let mut reached = Arrival::default();
         for (at, layer) in layers.iter().enumerate() {
             // Assignments in front of a program, as a shell's line has them.
             let set = layer
@@ -626,7 +626,7 @@ impl Adapter {
 
 /// What `Adapter::reached` found of a server's command.
 #[derive(Default)]
-struct Reached {
+struct Arrival {
     /// The words before the program, of every layer: the wrappers, their options and the
     /// assignments they make.
     before: Vec<String>,
