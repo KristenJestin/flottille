@@ -478,8 +478,6 @@ struct Shared {
     modals: Entity<Modals>,
     machines: Entity<MachinesSection>,
     version: Entity<crate::version::VersionSection>,
-    filing: Entity<crate::findings::Filing>,
-    check: Entity<crate::check::CheckSection>,
 }
 
 /// A machine's Settings, and its rules' editor: its sections hold what that machine said, and
@@ -488,24 +486,30 @@ fn settings_of(
     this: &WeakEntity<Shell>,
     machine: Option<&str>,
     shared: &Shared,
+    window: &mut Window,
     cx: &mut Context<Shell>,
 ) -> (Entity<SettingsPage>, Entity<RulesEditor>) {
     let modals = &shared.modals;
-    let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
-    let about = cx.new(|_| crate::about::AboutEditor::new(this.clone()));
-    let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
-    let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
-    let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
-    let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(this.clone()));
-    let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
-    let sign_in = cx.new(|_| crate::sign_in::SignInSection::new(this.clone(), modals.clone()));
+    // Every section and dialog of these Settings asks their machine, whichever is in front when
+    // it does (a dialog left open, a toast's action, a timer).
+    let asks = crate::commands::ShellOf::on(this.clone(), machine.map(str::to_owned));
+    let rules = cx.new(|_| RulesEditor::new(asks.clone(), None));
+    let about = cx.new(|_| crate::about::AboutEditor::new(asks.clone()));
+    let judge_guidance = cx.new(|_| RulesEditor::judge(asks.clone()));
+    let compaction_guidance = cx.new(|_| RulesEditor::compaction(asks.clone()));
+    let workspaces = cx.new(|_| WorkspacesFolder::new(asks.clone(), None));
+    let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(asks.clone()));
+    let vault = cx.new(|_| VaultSection::new(asks.clone(), modals.clone()));
+    let sign_in = cx.new(|_| crate::sign_in::SignInSection::new(asks.clone(), modals.clone()));
     let connections =
-        cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
+        cx.new(|_| ConnectionsSection::new(asks.clone(), vault.clone(), modals.clone()));
+    let filing = cx.new(|cx| crate::findings::Filing::new(asks.clone(), window, cx));
+    let check = cx.new(|_| crate::check::CheckSection::new(asks.clone()));
     let settings = cx.new(|cx| {
         // A provider's row draws its sign-in from the section: it follows the section's list.
         cx.observe(&sign_in, |_, _, cx| cx.notify()).detach();
         SettingsPage::new(
-            this.clone(),
+            asks.clone(),
             rules.clone(),
             about.clone(),
             judge_guidance.clone(),
@@ -517,8 +521,8 @@ fn settings_of(
             shared.machines.clone(),
             shared.version.clone(),
             sign_in.clone(),
-            shared.filing.clone(),
-            shared.check.clone(),
+            filing,
+            check,
         )
         .of_machine(machine.map(str::to_owned))
     });
@@ -679,16 +683,12 @@ impl Shell {
             let machines = machines.clone();
             cx.new(|cx| RemovalDialog::new(machines, cx))
         };
-        let filing = cx.new(|cx| crate::findings::Filing::new(this.clone(), window, cx));
-        let check = cx.new(|_| crate::check::CheckSection::new(this.clone()));
         let shared = Shared {
             modals: modals.clone(),
             machines: machines.clone(),
             version: version.clone(),
-            filing,
-            check,
         };
-        let (settings, rules) = settings_of(&this, None, &shared, cx);
+        let (settings, rules) = settings_of(&this, None, &shared, window, cx);
         {
             let reading = settings.clone();
             cx.defer(move |cx| {
@@ -698,7 +698,8 @@ impl Shell {
         }
         let services = {
             let this = this.clone();
-            cx.new(|cx| crate::services::ServicesPage::new(this, cx))
+            // The services are this machine's (`docs/services.md`), whichever is in front.
+            cx.new(|cx| crate::services::ServicesPage::new(this.into(), cx))
         };
         let whats_new = {
             let this = this.clone();
@@ -712,7 +713,7 @@ impl Shell {
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
         let toasts = cx.new(ToastStack::new);
-        let connection_request = cx.new(|_| ConnectionRequest::new(this.clone()));
+        let connection_request = cx.new(|_| ConnectionRequest::new(this.clone().into()));
         // The dialogs of the window, in the order they are first drawn: each is the kit's modal,
         // and opens through the host over whichever page is shown.
         modals.update(cx, |modals, cx| {
@@ -759,7 +760,7 @@ impl Shell {
         };
         let rename = {
             let this = this.clone();
-            cx.new(|cx| RenameSession::new(this, window, cx))
+            cx.new(|cx| RenameSession::new(this.into(), window, cx))
         };
         let group_form = {
             let this = this.clone();
@@ -771,7 +772,7 @@ impl Shell {
             let (this, focus) = (this.clone(), focus.clone());
             cx.new(|cx| Switcher::new(this, focus, window, cx))
         };
-        let extensions = cx.new(|_| Registry::new(this.clone()));
+        let extensions = cx.new(|_| Registry::new(this.clone().into()));
         let reading = extensions.clone();
         cx.defer(move |cx| reading.update(cx, |registry, cx| registry.read(cx)));
         // What they list shows in many places: each is drawn again, and the page open is shown
@@ -1324,7 +1325,6 @@ impl Shell {
         let was = std::mem::replace(&mut self.front, machine);
         self.sides.insert(was, left);
         cx.set_global(crate::machines::Shown(self.front.clone()));
-        cx.set_global(crate::commands::Acting(self.front.clone()));
         if cx.has_global::<crate::shown_files::ShownFiles>() {
             let connect = self.follow.connect.clone();
             cx.global_mut::<crate::shown_files::ShownFiles>()
@@ -1377,8 +1377,9 @@ impl Shell {
                 (actions, follow)
             }
         };
-        let (settings, rules) = settings_of(&this, machine, &self.shared, cx);
-        let extensions = cx.new(|_| Registry::new(this.clone()));
+        let (settings, rules) = settings_of(&this, machine, &self.shared, window, cx);
+        let asks = crate::commands::ShellOf::on(this.clone(), machine.map(str::to_owned));
+        let extensions = cx.new(|_| Registry::new(asks));
         cx.observe_in(&extensions, window, |this, _, window, cx| {
             this.extensions_moved(window, cx)
         })
@@ -1417,8 +1418,8 @@ impl Shell {
     }
 
     /// Runs `then` with the pages of `machine` in front, as if they were: what it answered
-    /// fills its own Settings, never those of the machine shown.
-    /// What its pages ask meanwhile, or later from what they did then, goes to `machine`.
+    /// fills its own Settings, never those of the machine shown. What its pages ask, now or
+    /// later, goes to `machine`: each holds its machine ([`crate::commands::ShellOf`]).
     fn on_pages(
         &mut self,
         machine: Option<String>,
@@ -1429,10 +1430,6 @@ impl Shell {
             return;
         }
         let answering = std::mem::replace(&mut self.answering, machine.clone());
-        let acting = std::mem::replace(
-            &mut cx.default_global::<crate::commands::Acting>().0,
-            machine.clone(),
-        );
         if machine == self.front {
             then(self, cx);
         } else if let Some(pages) = self.sides.remove(&machine) {
@@ -1443,8 +1440,16 @@ impl Shell {
             let pages = self.swap_pages(front);
             self.sides.insert(machine, pages);
         }
-        cx.default_global::<crate::commands::Acting>().0 = acting;
         self.answering = answering;
+    }
+
+    /// The machine of the pages the shell holds now: the one in front, or the one whose answer
+    /// they are taking aside ([`Shell::on_pages`]).
+    fn pages_machine(&self) -> Option<String> {
+        match self.aside {
+            true => self.answering.clone(),
+            false => self.front.clone(),
+        }
     }
 
     /// What was read of `machine` for its projects' pages, by a link of its own made the first
@@ -1562,9 +1567,10 @@ impl Shell {
             return None;
         };
         let this = cx.entity().downgrade();
+        let machine = self.pages_machine();
         let made = !self.forms.contains_key(name);
         let forms = self.forms.entry(name.clone()).or_insert_with(|| {
-            let (a, b) = (this.clone(), this);
+            let (a, b) = (this.clone(), crate::commands::ShellOf::on(this, machine));
             (
                 cx.new(|cx| Composer::new(a, name.clone(), window, cx)),
                 cx.new(|cx| NewWorkspace::new(b, name.clone(), window, cx)),
@@ -1609,6 +1615,7 @@ impl Shell {
             return Some(open);
         }
         let this = cx.entity().downgrade();
+        let this = crate::commands::ShellOf::on(this, self.pages_machine());
         let made = cx.new(|cx| ProjectSettingsPage::new(this, name.clone(), window, cx));
         // The shell is being updated here: it asks the daemon itself, not through the page.
         self.perform(Command::ReadProjectSettings(name.clone()));
@@ -1919,7 +1926,7 @@ impl Shell {
         {
             return Some(open);
         }
-        let this = cx.entity().downgrade();
+        let this = crate::commands::ShellOf::on(cx.entity().downgrade(), self.pages_machine());
         let made = cx.new(|_| SpecPage::new(this, project.clone(), *spec));
         let reading = made.clone();
         cx.defer(move |cx| reading.update(cx, |page, cx| page.read(cx)));
@@ -2457,6 +2464,17 @@ impl Shell {
         self.perform_here(Command::Resume {
             session: session.to_owned(),
         });
+    }
+
+    /// The names of the projects of `machine` (`None`: this one), as last read of it: none of
+    /// another machine whose projects were never read.
+    pub fn projects_on(&self, machine: Option<&str>) -> Vec<String> {
+        let read = match machine {
+            None => Some(self.read.as_ref().unwrap_or(&self.snapshot)),
+            Some(name) => self.copies.get(name).and_then(|copy| copy.read.as_ref()),
+        };
+        read.map(|read| read.projects.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// What the window shows now, as the daemon last gave it.
@@ -5353,9 +5371,11 @@ impl Shell {
     }
 
     /// Opens the dialog of an agent's request to write a connection.
+    /// It reads and answers the request on the machine of the pages that open it.
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
+        let machine = self.pages_machine();
         self.connection_request
-            .update(cx, |dialog, cx| dialog.open(number, cx));
+            .update(cx, |dialog, cx| dialog.open(number, machine, cx));
     }
 
     /// The review of the connection `name`, over the page the user is on (the kit's modal, as

@@ -254,10 +254,18 @@ impl MainArea {
         // Another project's page is a new one: its content enters, the old one is gone.
         self.project = match (&page, forms) {
             (Page::Project { name }, Some((composer, new_workspace))) => {
+                // The page is of its forms' machine: another's project of the same name is
+                // another page (#1271).
+                let shell = new_workspace.read(cx).shell().clone();
                 match self.project.take() {
-                    Some(open) if open.read(cx).name() == name => Some(open),
+                    Some(open)
+                        if open.read(cx).name() == name
+                            && open.read(cx).machine() == shell.machine() =>
+                    {
+                        Some(open)
+                    }
                     _ => {
-                        let (shell, name) = (self.shell.clone(), name.clone());
+                        let name = name.clone();
                         let narrow = self.layout == Layout::Narrow;
                         Some(cx.new(|cx| {
                             let mut page =

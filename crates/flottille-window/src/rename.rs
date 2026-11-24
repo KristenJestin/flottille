@@ -6,12 +6,11 @@ use gpui_design_system::{Button, Field, Modal, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     Context, Entity, Focusable as _, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, WeakEntity, Window, div,
+    Subscription, Window, div,
 };
 
 use crate::actions::Command;
 use crate::commands::{boxed, line_field, perform_later, problem_line};
-use crate::shell::Shell;
 
 /// The dialog's id; its field is `rename-title`, its button `rename-save`.
 pub const RENAME: &str = "rename";
@@ -19,7 +18,7 @@ pub const RENAME: &str = "rename";
 pub const RENAME_LABEL: &str = "Rename…";
 
 pub struct RenameSession {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The session being renamed, while the dialog is open, and the actions of its machine,
     /// taken as it opened (#1271).
     session: Option<String>,
@@ -30,7 +29,11 @@ pub struct RenameSession {
 }
 
 impl RenameSession {
-    pub fn new(shell: WeakEntity<Shell>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        shell: crate::commands::ShellOf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let field = line_field("for example Rework the login page", window, cx);
         let subscription = cx.subscribe_in(&field, window, |this, _, event, _, cx| {
             if let InputEvent::PressEnter { .. } = event {

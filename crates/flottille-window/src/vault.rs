@@ -14,15 +14,13 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
-    px,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, spaced};
 use crate::modals::Modals;
-use crate::shell::Shell;
 
 /// What the section says the vault is for.
 pub const SENTENCE: &str = "Secrets agents use through Flottille's tools, without seeing them \
@@ -126,7 +124,7 @@ pub const SHARE_SENTENCE: &str = "Its secret goes from this machine's keyring in
 pub const NO_MACHINE: &str = "No other machine of yours is online.";
 
 pub struct VaultSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The window's host of dialogs: the entry's form opens through it, over any page.
     modals: Entity<Modals>,
     listed: Option<Vec<VaultEntry>>,
@@ -251,7 +249,7 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
 }
 
 impl VaultSection {
-    pub fn new(shell: WeakEntity<Shell>, modals: Entity<Modals>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, modals: Entity<Modals>) -> Self {
         Self {
             shell,
             modals,

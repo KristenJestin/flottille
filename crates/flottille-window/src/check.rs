@@ -15,14 +15,13 @@ use gpui_design_system::{
 };
 use gpui_kit::{
     Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, div, px,
 };
 use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::programs::ProgramState;
 use crate::providers::Provider;
-use crate::shell::Shell;
 
 /// What to do with the daemon's answer to a request of the section.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,7 +63,7 @@ struct Needed {
 }
 
 pub struct CheckSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// Asked once the section is shown: never in a loop.
     started: bool,
     providers: Option<Vec<Provider>>,
@@ -75,7 +74,7 @@ pub struct CheckSection {
 }
 
 impl CheckSection {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf) -> Self {
         Self {
             shell,
             started: false,
@@ -104,18 +103,12 @@ impl CheckSection {
             return;
         }
         self.started = true;
+        // Its machine's projects, not those of the machine in front (#1271).
+        let machine = self.shell.machine();
         let projects: Vec<String> = self
             .shell
             .upgrade()
-            .map(|shell| {
-                shell
-                    .read(cx)
-                    .snapshot()
-                    .projects
-                    .iter()
-                    .map(|project| project.name.clone())
-                    .collect()
-            })
+            .map(|shell| shell.read(cx).projects_on(machine))
             .unwrap_or_default();
         self.programs.clear();
         self.ask("provider.list", json!({}), Then::Providers, cx);
@@ -129,13 +122,17 @@ impl CheckSection {
 
     fn ask(&mut self, method: &str, params: Value, then: Then, cx: &mut Context<Self>) {
         self.pending += 1;
+        let machine = self.shell.machine().map(str::to_owned);
         self.shell
             .update(cx, |shell, _| {
-                shell.perform(Command::Ask {
-                    method: method.to_owned(),
-                    params,
-                    then: crate::extensions::Then::Check(then),
-                })
+                shell.perform_on(
+                    machine.as_deref(),
+                    Command::Ask {
+                        method: method.to_owned(),
+                        params,
+                        then: crate::extensions::Then::Check(then),
+                    },
+                )
             })
             .ok();
     }

@@ -45,7 +45,6 @@ use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
-use crate::shell::Shell;
 use crate::skills::SkillsSection;
 use crate::tasks::TasksSection;
 use crate::vault::VaultEntry;
@@ -408,7 +407,7 @@ impl Reveal {
 }
 
 pub struct ProjectSettingsPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// Where it was opened at, when it was.
     revealed: Option<Reveal>,
     /// The tab chosen: the index of its section in [`SECTIONS`]. Kept while the page is open.
@@ -498,7 +497,7 @@ pub struct ProjectSettingsPage {
 
 impl ProjectSettingsPage {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,

@@ -665,10 +665,15 @@ Every page asks its own machine, whichever machine's page is shown when it asks:
 and its composer take the actions of their session's machine when they are made, so the kept page
 of another machine's session gets its pictures there while it is hidden, and every answer of that
 machine (a message sent, a mode or a model changed, an interruption, its draft) reaches its
-composer; a Rename, from a row or from the page's header, goes to its session's machine. What a
-machine's Settings ask later (a list read again after an answer, a toast's action, a read after a
-quiet while) goes to that machine even once another is in front, and an agent's request to write a
-connection is the dialog of the machine whose page opened it, closed if that machine is removed.
+composer; a Rename, from a row or from the page's header, goes to its session's machine. Each
+section, dialog and page of a machine (its Settings and their checks and findings, a project's page,
+its settings, its forms and its spec) holds its machine from the moment it is made: whatever it asks
+later (a dialog's button, a list read again after an answer, a toast's action, a read after a quiet
+while) goes to that machine even once another is in front, or while another is still being reached.
+A project page's details and its pull requests are its machine's: one of another machine never
+fills the page shown nor a session row of this one. The version and its update are this machine's
+own, in every machine's Settings. An agent's request to write a connection is the dialog of the
+machine whose page opened it, closed if that machine is removed.
 Add project's choice of machine is the form's own: the project is added there, held only while that
 machine takes no change, and the page behind stays shown, its machine in front. Back and Forward
 return to the page of the machine it was a page of (Settings, a project's settings and a spec are

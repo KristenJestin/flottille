@@ -122,7 +122,7 @@ impl Then {
     }
 }
 
-fn ask(shell: &WeakEntity<Shell>, method: &str, params: Value, then: Then, cx: &mut App) {
+fn ask(shell: &crate::commands::ShellOf, method: &str, params: Value, then: Then, cx: &mut App) {
     let command = Command::Ask {
         method: method.to_owned(),
         params,
@@ -319,7 +319,7 @@ pub(super) fn answered(
 }
 
 /// "Launch development" of a Ready spec: the user's gesture alone.
-fn launch(shell: &WeakEntity<Shell>, spec: u64, cx: &mut App) {
+fn launch(shell: &crate::commands::ShellOf, spec: u64, cx: &mut App) {
     let then = Then::Develop { spec };
     ask(shell, "spec.develop", json!({"spec": spec}), then, cx);
 }
@@ -473,7 +473,7 @@ fn facts_line(id: String, facts: Vec<(&'static str, String)>, cx: &App) -> impl 
 /// The project's Specs tab: each spec with its status, its tickets and its open questions, and
 /// "New spec".
 pub struct SpecsTab {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     list: Listing<Summary>,
     /// "New spec" is open.
@@ -490,7 +490,7 @@ const STATUSES: [&str; 5] = ["draft", "ready", "in_progress", "review", "done"];
 
 impl SpecsTab {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         project: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -705,7 +705,7 @@ impl Render for SpecsTab {
 /// "Write the spec" of a ticket of the project: the session starts at once, in the project's
 /// default mode. "Write the spec as…" asks for the mode of this one spec first.
 pub struct WriteSpec {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     /// The ticket being written, as the tracker writes it, and its title.
     ticket: Option<(String, String)>,
@@ -722,7 +722,7 @@ pub struct WriteSpec {
 }
 
 impl WriteSpec {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,
@@ -1302,7 +1302,7 @@ impl Spec {
 /// A spec's page: the spec as it is, its questions answered in one click, Ready and Back to
 /// draft, and the sessions that worked on it.
 pub struct SpecPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     spec: u64,
     shown: Option<Result<Spec, String>>,
@@ -1359,7 +1359,7 @@ pub struct SpecPage {
 }
 
 impl SpecPage {
-    pub fn new(shell: WeakEntity<Shell>, project: String, spec: u64) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String, spec: u64) -> Self {
         Self {
             shell,
             project,

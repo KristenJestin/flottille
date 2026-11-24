@@ -21,14 +21,13 @@ use gpui_design_system::{
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, HighlightStyle,
     InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement,
-    Styled, StyledText, Task, TestSupportExt as _, WeakEntity, div, px,
+    Styled, StyledText, Task, TestSupportExt as _, div, px,
 };
 use serde_json::{Map, Value, json};
 
 use crate::actions::Command;
 use crate::commands::perform_later;
 use crate::rules::RulesEditor;
-use crate::shell::Shell;
 
 /// One of its settings, as the daemon lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -273,7 +272,7 @@ const QUIET: Duration = Duration::from_millis(100);
 /// What the window knows of the parts it draws in its places: read at its start, and again once
 /// the events that change them go quiet.
 pub struct Registry {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     list: Vec<Listed>,
     /// The daemon answered a read.
     known: bool,
@@ -296,7 +295,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf) -> Self {
         Self {
             shell,
             list: Vec::new(),
@@ -326,13 +325,12 @@ impl Registry {
 
     /// An event says what is listed changed: it is read again once they go quiet.
     pub fn changed(&mut self, cx: &mut Context<Self>) {
-        // Read again from the machine that said it changed, whichever is in front by then.
-        let acting = crate::commands::acting(cx);
+        // Read again from the registry's own machine, whichever is in front by then.
         self.quiet = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(QUIET).await;
             this.update(cx, |this, cx| {
                 this.quiet = None;
-                crate::commands::acting_as(acting, cx, |cx| this.read(cx));
+                this.read(cx);
             })
             .ok();
         }));

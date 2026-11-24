@@ -14,15 +14,14 @@ use gpui_design_system::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity,
-    Window, div, px,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div,
+    px,
 };
 use serde_json::{Value, json};
 
 use super::connections::{Server, ServerSecret, command_line};
 use crate::actions::Command;
 use crate::commands::{perform_later, problem_line};
-use crate::shell::Shell;
 
 /// The id of the dialog's modal, the one the window's host holds.
 pub const MODAL: &str = "connection-request";
@@ -219,7 +218,7 @@ fn setting_said(setting: &str) -> &'static str {
 }
 
 pub struct ConnectionRequest {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The machine of the request (`None`: this one): the one whose page opened it, which it
     /// asks and whose answers it takes, whichever is in front (#1271).
     machine: Option<String>,
@@ -275,7 +274,7 @@ fn entries_said(said: &str) -> Vec<(String, Option<String>)> {
 }
 
 impl ConnectionRequest {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf) -> Self {
         Self {
             shell,
             machine: None,
@@ -307,9 +306,9 @@ impl ConnectionRequest {
             params,
             then: super::Then::ConnectionRequest(then),
         };
-        crate::commands::acting_as(self.machine.clone(), cx, |cx| {
-            perform_later(&self.shell, command, cx)
-        });
+        // The request's machine, whichever is in front when the user decides (#1271).
+        let shell = crate::commands::ShellOf::on((*self.shell).clone(), self.machine.clone());
+        perform_later(&shell, command, cx);
     }
 
     /// The machine of the request open (`None`: this one).
@@ -324,8 +323,8 @@ impl ConnectionRequest {
     }
 
     /// Opens the dialog on the request `number`: the daemon says what it would write.
-    pub fn open(&mut self, number: u64, cx: &mut Context<Self>) {
-        self.machine = crate::commands::acting(cx);
+    pub fn open(&mut self, number: u64, machine: Option<String>, cx: &mut Context<Self>) {
+        self.machine = machine;
         self.number = Some(number);
         self.open = true;
         self.proposal = None;

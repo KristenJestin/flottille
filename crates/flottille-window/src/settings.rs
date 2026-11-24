@@ -37,7 +37,6 @@ use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{NewSession, Provider, Providers};
 use crate::rules::RulesEditor;
-use crate::shell::Shell;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -297,7 +296,7 @@ const FINDINGS_HINT: &str = "What agents reported about Flottille itself, one fi
      Export them for the agent that files the issues.";
 
 pub struct SettingsPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// The machine whose Settings these are (`None`: this one): another machine's page enters as
     /// a page that shows up when it is chosen (#1271).
     of: Option<String>,
@@ -441,7 +440,7 @@ impl SettingsPage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         rules: Entity<RulesEditor>,
         about: Entity<AboutEditor>,
         judge_guidance: Entity<RulesEditor>,
@@ -599,11 +598,7 @@ impl SettingsPage {
             return;
         }
         self.compaction_pending = true;
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::CompactionSet { params })
-            })
-            .ok();
+        self.shell.perform(Command::CompactionSet { params }, cx);
         cx.notify();
     }
 
@@ -1130,9 +1125,7 @@ impl SettingsPage {
             name: name.to_owned(),
             enabled,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
         cx.notify();
     }
 
@@ -1166,10 +1159,7 @@ impl SettingsPage {
             None => (None, None),
         };
         self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::SetJudge { provider, model })
-            })
-            .ok();
+            .perform(Command::SetJudge { provider, model }, cx);
         cx.notify();
     }
 
@@ -1194,9 +1184,7 @@ impl SettingsPage {
         }
         self.judge_pending = true;
         self.judge_refused = None;
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::PickJudge))
-            .ok();
+        self.shell.perform(Command::PickJudge, cx);
         cx.notify();
     }
 
@@ -1232,15 +1220,14 @@ impl SettingsPage {
             Some((provider, model, effort)) => (Some(provider), model, effort),
             None => (None, None, None),
         };
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::SetNewSession {
-                    provider,
-                    model,
-                    effort,
-                })
-            })
-            .ok();
+        self.shell.perform(
+            Command::SetNewSession {
+                provider,
+                model,
+                effort,
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -1260,11 +1247,7 @@ impl SettingsPage {
         }
         self.new_session_mode_pending = Some(mode.to_owned());
         let mode = mode.to_owned();
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::SetNewSessionMode { mode })
-            })
-            .ok();
+        self.shell.perform(Command::SetNewSessionMode { mode }, cx);
         cx.notify();
     }
 
@@ -1362,9 +1345,7 @@ impl SettingsPage {
         }
         let log = !self.developer_on();
         self.developer_pending = Some(log);
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::DeveloperSet { log }))
-            .ok();
+        self.shell.perform(Command::DeveloperSet { log }, cx);
         cx.notify();
     }
 
@@ -1435,9 +1416,7 @@ impl SettingsPage {
             return;
         }
         self.exporting = true;
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::FindingsExport))
-            .ok();
+        self.shell.perform(Command::FindingsExport, cx);
         cx.notify();
     }
 
@@ -1633,13 +1612,12 @@ impl SettingsPage {
             return;
         }
         self.unchanged_pending = Some(!unchanged);
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::UnchangedSet {
-                    unchanged: !unchanged,
-                })
-            })
-            .ok();
+        self.shell.perform(
+            Command::UnchangedSet {
+                unchanged: !unchanged,
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -1648,11 +1626,7 @@ impl SettingsPage {
             return;
         }
         self.tool_results_pending = Some(limit);
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::ToolResultsSet { limit })
-            })
-            .ok();
+        self.shell.perform(Command::ToolResultsSet { limit }, cx);
         cx.notify();
     }
 
@@ -1766,9 +1740,7 @@ impl SettingsPage {
             return;
         }
         self.sessions_pending = Some(days);
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::SessionsSet { days }))
-            .ok();
+        self.shell.perform(Command::SessionsSet { days }, cx);
         cx.notify();
     }
 
@@ -1819,10 +1791,7 @@ impl SettingsPage {
         }
         self.resume_pending = Some(!resume);
         self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::ResumeSet { resume: !resume })
-            })
-            .ok();
+            .perform(Command::ResumeSet { resume: !resume }, cx);
         cx.notify();
     }
 
@@ -2482,9 +2451,7 @@ impl SettingsPage {
             }));
         let check = Button::secondary("providers-check", "Check again").on_click(cx.listener(
             |this, _, _, cx| {
-                this.shell
-                    .update(cx, |shell, _| shell.perform(Command::ReadProviders))
-                    .ok();
+                this.shell.perform(Command::ReadProviders, cx);
             },
         ));
         // What is in use, not how many rows there are: three rows with one switched on count one.
