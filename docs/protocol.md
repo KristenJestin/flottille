@@ -1349,7 +1349,9 @@ pictures decoded and written off the runtime's threads.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). The user's
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). Beside
+  them, `"starts": {<project>: <machine>}`: the machine the user chose a shared project's sessions
+  start on, this machine by its own name (#1266; `docs/design.md` §10, the project page). The user's
   arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
   arrangement writes (a fold or a lead never does, so a window that only folds a project cannot
   erase what another made): `{"order": [<name>], "groups": [{"id", "name", "open", "projects":
