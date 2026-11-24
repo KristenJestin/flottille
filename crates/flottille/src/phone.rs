@@ -8,8 +8,9 @@
 //!
 //! The presence is each client's: the window says when it is focused and when the user gave it an
 //! input (`client.presence`), stamped with the daemon's clock and told to the hub, which tells the
-//! runners every client's. With the hub unreachable nothing is told, and nothing waits for it: a
-//! notice due then is dropped.
+//! runners every client's but the phones'. With the hub unreachable, or a hub of before the
+//! notices, nothing is told, and nothing waits for it: a notice due then is dropped, and never
+//! dismissed.
 //!
 //! What is decided is kept in memory: a row is decided once, at its delay, and what came before
 //! the daemon started is never told.
@@ -98,7 +99,7 @@ fn control(daemon: &Daemon) -> Option<std::sync::Arc<crate::hub_session::Control
 
 /// Whether no client of the user had an input in the last `AWAY_MS`, as this machine's clients
 /// said it and the hub told every other's but the phones'. An input said to come more than
-/// `AHEAD_MS` from now is not counted. With no session to the hub, the user is away.
+/// `AHEAD_MS` from now is not counted.
 fn away(control: &crate::hub_session::Control, now: u64) -> bool {
     let recent =
         |at_ms: u64| at_ms <= now.saturating_add(AHEAD_MS) && now.saturating_sub(at_ms) < AWAY_MS;
@@ -112,80 +113,79 @@ fn away(control: &crate::hub_session::Control, now: u64) -> bool {
 }
 
 /// Tells the phones what is due and dismisses what was seen or answered. Called whenever the
-/// centre changes and by the sweep.
+/// centre changes and by the sweep. What it tells is queued before the state is let go, so that
+/// a `dismissed` never overtakes its notice.
 pub fn check(daemon: &Daemon) {
     let Ok(rows) = daemon.read(|store| store.notifications(None, LOOKED, false)) else {
         return;
     };
     let now = now_ms();
     let control = control(daemon);
-    let mut told = Vec::new();
-    {
-        let mut state = daemon.phone.state.lock().unwrap();
-        let since = *state.since.get_or_insert(now);
-        let seen: HashMap<u64, bool> = rows
-            .iter()
-            .map(|row| (row.id, row.read_at.is_some()))
-            .collect();
-        // A row read, answered, or gone from the centre is dismissed on the phones it was told.
-        for (id, notice) in state.decided.iter_mut() {
-            if seen.get(id).copied().unwrap_or(true)
-                && let Some(was) = notice.take()
-            {
-                told.push(Notice {
-                    kind: NoticeKind::Dismissed,
-                    ..was
-                });
-            }
-        }
-        let listed: HashSet<u64> = seen.keys().copied().collect();
-        state
-            .decided
-            .retain(|id, notice| notice.is_some() || listed.contains(id));
-        // Read once, when a row is due.
-        let mut tells = None;
-        for row in &rows {
-            let Some(kind) = kind_of(&row.kind) else {
-                continue;
+    // With no session to a hub that takes notices, nothing is told and nothing waits for it.
+    let notifier = control.as_ref().and_then(|control| control.notifier());
+    let mut state = daemon.phone.state.lock().unwrap();
+    let since = *state.since.get_or_insert(now);
+    let seen: HashMap<u64, bool> = rows
+        .iter()
+        .map(|row| (row.id, row.read_at.is_some()))
+        .collect();
+    // A row read, answered, or gone from the centre is dismissed on the phones it was told.
+    for (id, notice) in state.decided.iter_mut() {
+        if seen.get(id).copied().unwrap_or(true)
+            && let Some(was) = notice.take()
+            && let Some(notifier) = &notifier
+        {
+            let dismissed = Notice {
+                kind: NoticeKind::Dismissed,
+                ..was
             };
-            if state.decided.contains_key(&row.id) {
-                continue;
-            }
-            if row.at < since || row.read_at.is_some() {
-                state.decided.insert(row.id, None);
-                continue;
-            }
-            if now < row.at.saturating_add(DELAY_MS) {
-                continue;
-            }
-            let tell = *tells.get_or_insert_with(|| {
-                crate::remote::notify_always(&daemon.paths)
-                    || control.as_ref().is_none_or(|control| away(control, now))
-            });
-            let notice = tell.then(|| Notice {
+            send(&daemon.phone, notifier.clone(), dismissed);
+        }
+    }
+    let listed: HashSet<u64> = seen.keys().copied().collect();
+    state
+        .decided
+        .retain(|id, notice| notice.is_some() || listed.contains(id));
+    // Read once, when a row is due.
+    let mut tells = None;
+    for row in &rows {
+        let Some(kind) = kind_of(&row.kind) else {
+            continue;
+        };
+        if state.decided.contains_key(&row.id) {
+            continue;
+        }
+        if row.at < since || row.read_at.is_some() {
+            state.decided.insert(row.id, None);
+            continue;
+        }
+        if now < row.at.saturating_add(DELAY_MS) {
+            continue;
+        }
+        let tell = *tells.get_or_insert_with(|| {
+            crate::remote::notify_always(&daemon.paths)
+                || control.as_ref().is_some_and(|control| away(control, now))
+        });
+        // Told only once it is queued on a session: what was never sent is never dismissed.
+        let told = notifier.as_ref().filter(|_| tell).and_then(|notifier| {
+            let notice = Notice {
                 kind,
                 notification: row.id,
                 session: row.session.as_deref().and_then(|id| id.parse().ok()),
-            });
-            told.extend(notice.clone());
-            state.decided.insert(row.id, notice);
-        }
-    }
-    // With no session to a hub that takes notices, nothing is told and nothing waits for it.
-    let Some(asker) = control.and_then(|control| control.notifier()) else {
-        return;
-    };
-    for notice in told {
-        send(&daemon.phone, asker.clone(), notice);
+            };
+            send(&daemon.phone, notifier.clone(), notice.clone()).then_some(notice)
+        });
+        state.decided.insert(row.id, told);
     }
 }
 
-/// `notice` to the hub, after those before it: one task tells them in order.
-fn send(phone: &Phone, asker: Asker, notice: Notice) {
+/// `notice` to the hub, after those before it: one task tells them in order. Whether it was
+/// queued.
+fn send(phone: &Phone, asker: Asker, notice: Notice) -> bool {
     let mut out = phone.out.lock().unwrap();
     if out.as_ref().is_none_or(|out| out.is_closed()) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
+            return false;
         };
         let (sender, mut notices) = mpsc::unbounded_channel::<(Asker, Notice)>();
         runtime.spawn(async move {
@@ -198,7 +198,6 @@ fn send(phone: &Phone, asker: Asker, notice: Notice) {
         });
         *out = Some(sender);
     }
-    if let Some(out) = out.as_ref() {
-        let _ = out.send((asker, notice));
-    }
+    out.as_ref()
+        .is_some_and(|out| out.send((asker, notice)).is_ok())
 }
