@@ -58,10 +58,10 @@ impl TestHub {
         format!("http://{}", self.address)
     }
 
-    /// The role of the device `name` changed, as the hub's host changes it.
-    pub(crate) fn change_role(&self, name: &str, role: Role) {
+    /// `name` made a viewer, as the hub's host does.
+    pub(crate) fn make_viewer(&self, name: &str) {
         self.served
-            .with_hub(|hub| hub.change_role(name, role).map(|_| ()).unwrap());
+            .with_hub(|hub| hub.change_role(name, Role::Viewer).unwrap());
     }
 
     /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.

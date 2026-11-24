@@ -3039,7 +3039,7 @@ pub fn root_of(daemon: &Daemon, id: &str) -> String {
 /// whose agent said it resumes or loads sessions, and that opened one. Flottille forgets it
 /// `KEPT_MS` after the root ended (`forget_kept_sessions`).
 pub fn keeps_session(agent: &Agent) -> bool {
-    agent.state.is_final() && agent.parent.is_none() && agent.reopens && agent.native_id.is_some()
+    agent.state.is_final() && !agent.is_child() && agent.reopens && agent.native_id.is_some()
 }
 
 /// How long an ended root's session is kept to be resumed: 7 days.

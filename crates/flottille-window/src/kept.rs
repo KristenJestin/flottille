@@ -116,6 +116,11 @@ impl Keeping {
         self.sent
     }
 
+    /// How many writes were asked and not answered yet.
+    pub fn unanswered(&self) -> usize {
+        self.writing.len()
+    }
+
     /// Whether a write waits for its 500 ms.
     pub fn is_due(&self) -> bool {
         self.due.is_some()

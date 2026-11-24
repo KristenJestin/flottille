@@ -2122,7 +2122,7 @@ fn a_section_before_its_list_arrives_ends_under_its_sentence(cx: &mut TestAppCon
     let (_view, cx) = cx.add_window_view(|_, cx| {
         let section = gpui_kit::AppContext::new(cx, |_| {
             flottille_window::commands::CommandsSection::new(
-                gpui_kit::WeakEntity::new_invalid(),
+                gpui_kit::WeakEntity::new_invalid().into(),
                 "app".into(),
             )
         });

@@ -27,7 +27,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, point, px,
+    Subscription, TestSupportExt as _, Window, div, point, px,
 };
 
 use crate::actions::{Command, Details, RepositoryStatus};
@@ -38,7 +38,7 @@ use crate::progress::ProgressPage;
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
 use crate::runs::{CommandRow, arrange};
-use crate::shell::{Selection, Shell};
+use crate::shell::Selection;
 use crate::tasks::{ProjectTasks, TaskInfo};
 
 /// A session as its place lists it.
@@ -132,7 +132,7 @@ struct ListsSaid {
 }
 
 pub struct ProjectPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     name: String,
     folder: String,
     repositories: Vec<String>,
@@ -173,7 +173,7 @@ pub struct ProjectPage {
 
 impl ProjectPage {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         name: String,
         composer: Entity<Composer>,
         new_workspace: Entity<NewWorkspace>,
@@ -232,6 +232,11 @@ impl ProjectPage {
             _subscriptions: subscriptions,
             renders: 0,
         }
+    }
+
+    /// The machine the page is of (`None`: this one).
+    pub fn machine(&self) -> Option<&str> {
+        self.shell.machine()
     }
 
     pub fn name(&self) -> &str {
@@ -533,11 +538,6 @@ impl Render for ProjectPage {
         let header = {
             let (shell, name) = (self.shell.clone(), self.name.clone());
             let mut header = PageHeader::new("project-header", self.name.clone())
-                .crumb(crate::machines::where_line(
-                    "project-where",
-                    &[&self.name],
-                    cx,
-                ))
                 .path(home_relative(&self.folder))
                 .action(
                     "project-settings",
@@ -789,7 +789,7 @@ const PREVIEW_AFTER: std::time::Duration = std::time::Duration::from_millis(300)
 /// branch, and a button that creates it, as `flottille workspace create` does (the command line
 /// keeps `--offline`; the window always fetches).
 pub struct NewWorkspace {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     open: bool,
     name: Entity<InputState>,
@@ -822,9 +822,14 @@ pub struct NewWorkspace {
 }
 
 impl NewWorkspace {
+    /// The shell as the form's machine asks it: its project's page is of the same machine.
+    pub fn shell(&self) -> &crate::commands::ShellOf {
+        &self.shell
+    }
+
     /// The form of one project: a name asked in it is answered in it.
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         project: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1006,9 +1011,7 @@ impl NewWorkspace {
                         project: this.project.clone(),
                         ticket: typed,
                     };
-                    this.shell
-                        .update(cx, |shell, _| shell.perform(command))
-                        .ok();
+                    this.shell.perform(command, cx);
                 }
             })
             .ok();
@@ -1102,9 +1105,7 @@ impl NewWorkspace {
             branch: (!branch.is_empty()).then_some(branch),
             bases,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
         cx.notify();
     }
 

@@ -20,14 +20,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::{Command, PastedCode};
 use crate::commands::{boxed, perform_later, problem_line, spaced};
 use crate::modals::Modals;
-use crate::shell::Shell;
 
 /// The id of the sign-in's dialog, the one the window's host holds.
 pub const MODAL: &str = "sign-in-modal";
@@ -187,7 +186,7 @@ struct Flow {
 }
 
 pub struct SignInSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     modals: Entity<Modals>,
     /// The programs as last listed; `None` until the daemon said.
     listed: Option<Vec<SignInRow>>,
@@ -212,7 +211,7 @@ pub struct SignInSection {
 }
 
 impl SignInSection {
-    pub fn new(shell: WeakEntity<Shell>, modals: Entity<Modals>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, modals: Entity<Modals>) -> Self {
         Self {
             shell,
             modals,

@@ -12,13 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::arrange::{self, Arrangement, Change};
 use crate::commands::CommandInfo;
 use crate::kept::{Draft, DraftKey, Written};
-use crate::link::{Conn, Connect, Sign, Update};
+use crate::link::{Conn, Connect, Sign, Update, Updates};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow, Watch};
 use crate::session_link::{PullRequest, TICKET_FRESH, TicketFacts, pull_requests, ticket_facts};
@@ -983,6 +982,8 @@ pub enum Outcome {
     Started {
         project: String,
         agent: String,
+        /// Its title, as the daemon gave it, or else the first line of its brief.
+        title: String,
     },
     /// No session started, and why, in a sentence.
     NotStarted {
@@ -1530,7 +1531,7 @@ pub struct Actions {
     local: Connect,
     /// The machine `connect` goes to, when the window may show another.
     aim: Option<crate::machines::Aim>,
-    updates: UnboundedSender<Update>,
+    updates: Updates,
     bounds: Bounds,
     /// How this window signs what only the user's device may ask, when it was given its own
     /// (`Shell::sign_with`); the process's (`link::sign_with`) otherwise.
@@ -1544,18 +1545,14 @@ impl Actions {
     }
 
     /// Starts the details' thread; it ends when every `Actions` is dropped.
-    pub fn spawn(connect: Connect, updates: UnboundedSender<Update>) -> Actions {
-        Self::spawn_bounded(connect, updates, BOUNDS)
+    pub fn spawn(connect: Connect, updates: impl Into<Updates>) -> Actions {
+        Self::spawn_bounded(connect, updates.into(), BOUNDS)
     }
 
     /// The actions on `aim`'s connections, which go to the machine the window shows; what the
     /// window keeps (its folds, the drafts) and its appearance are this machine's, asked on
     /// `local`.
-    pub fn spawn_aimed(
-        aim: crate::machines::Aim,
-        local: Connect,
-        updates: UnboundedSender<Update>,
-    ) -> Actions {
+    pub fn spawn_aimed(aim: crate::machines::Aim, local: Connect, updates: Updates) -> Actions {
         let mut actions = Self::spawn_on(aim.connect(local.clone()), local, updates, BOUNDS);
         actions.aim = Some(aim);
         actions
@@ -1563,18 +1560,13 @@ impl Actions {
 
     pub(crate) fn spawn_bounded(
         connect: Connect,
-        updates: UnboundedSender<Update>,
+        updates: impl Into<Updates>,
         bounds: Bounds,
     ) -> Actions {
-        Self::spawn_on(connect.clone(), connect, updates, bounds)
+        Self::spawn_on(connect.clone(), connect, updates.into(), bounds)
     }
 
-    fn spawn_on(
-        connect: Connect,
-        local: Connect,
-        updates: UnboundedSender<Update>,
-        bounds: Bounds,
-    ) -> Actions {
+    fn spawn_on(connect: Connect, local: Connect, updates: Updates, bounds: Bounds) -> Actions {
         let (details, asked) = channel();
         let (to, updates_to) = (connect.clone(), updates.clone());
         std::thread::Builder::new()
@@ -1764,7 +1756,7 @@ enum Keep {
 }
 
 /// The keeper's thread: what the window keeps, one request at a time on a connection kept.
-fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update>, bounds: Bounds) {
+fn keep(connect: Connect, asked: Receiver<Keep>, updates: Updates, bounds: Bounds) {
     let mut conn: Option<Conn> = None;
     while let Ok(next) = asked.recv() {
         let command = match next {
@@ -1919,12 +1911,7 @@ fn draft_of(found: &Value) -> Option<Draft> {
     Some(Draft { text, pictures })
 }
 
-fn read_details(
-    connect: Connect,
-    asked: Receiver<String>,
-    updates: UnboundedSender<Update>,
-    bounds: Bounds,
-) {
+fn read_details(connect: Connect, asked: Receiver<String>, updates: Updates, bounds: Bounds) {
     let mut conn: Option<Conn> = None;
     let mut tickets = Tickets::new();
     let mut pulls = Pulls::new();
@@ -2059,7 +2046,7 @@ fn sign_in_on(
     name: &str,
     machine: &str,
     bounds: Bounds,
-    updates: &UnboundedSender<Update>,
+    updates: &Updates,
 ) {
     let said = |then: crate::extensions::connections::Then, answer: Result<Value, String>| {
         updates
@@ -2132,7 +2119,7 @@ fn hold_tunnel(
     sign: Option<Sign>,
     ask: crate::tunnels::Ask,
     bounds: Bounds,
-    updates: &UnboundedSender<Update>,
+    updates: &Updates,
 ) {
     use crate::tunnels::{News, Tunnel, run_for_port};
     let said = |news: News| {
@@ -2349,7 +2336,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 (&images, &texts),
                 bounds.quick,
             ) {
-                Ok(Ok(started)) => started_outcome(&project, &started),
+                Ok(Ok(started)) => started_outcome(&project, &message, &started),
                 Ok(Err(why)) | Err(why) => Outcome::NotStarted { project, why },
             }
         }
@@ -3935,11 +3922,21 @@ fn start_params(
     })
 }
 
-fn started_outcome(project: &str, started: &Value) -> Outcome {
+fn started_outcome(project: &str, message: &str, started: &Value) -> Outcome {
+    let title = match started["agent"]["title"].as_str() {
+        Some(title) if !title.trim().is_empty() => title.to_owned(),
+        _ => message
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_owned(),
+    };
     match started["agent"]["id"].as_str() {
         Some(agent) => Outcome::Started {
             project: project.to_owned(),
             agent: agent.to_owned(),
+            title,
         },
         None => Outcome::NotStarted {
             project: project.to_owned(),
@@ -4211,7 +4208,8 @@ mod tests {
             next(&mut updates, Duration::from_secs(5)),
             Some(Outcome::Started {
                 project: "atlas".into(),
-                agent: "made-up-agent".into()
+                agent: "made-up-agent".into(),
+                title: "Fix the timeout".into()
             })
         );
     }

@@ -12,7 +12,7 @@ use crate::remote_launch::{
 };
 
 use flottille_core::store::{LaunchFilter, Store};
-use flottille_link::{Call, MachineMessage, Role};
+use flottille_link::{Call, MachineMessage};
 use serde_json::{Value, json};
 
 /// A session led by a root of `pc` in Auto, started on `server` with `brief`: its id there, the
@@ -220,7 +220,7 @@ fn a_device_that_may_only_view_removes_nothing_and_takes_no_commit() {
     let there = folder_of(&agent);
     let workspace = agent["workspace"].as_str().unwrap().to_owned();
     commit_all(&server, &there, "export.txt", "the export");
-    hub.change_role("pc", Role::Viewer);
+    hub.make_viewer("pc");
     eventually("server sees pc as a viewer", || {
         server.user.call("remote.members", json!({})).unwrap()["members"]
             .as_array()
