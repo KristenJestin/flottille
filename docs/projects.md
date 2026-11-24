@@ -117,7 +117,10 @@ is kept, and the result says why. There is no file to remove, and its folder is 
 daemon never removes it by itself, at start or when the file goes: a start deleting what the user
 may still want is not Flottille's to decide; and the list a machine sends to the others holds only
 the sessions of the projects it knows ("One list of every machine", `docs/remote.md`). A project
-with nothing left but ended sessions is not listed: they are history.
+with nothing left but ended sessions is not listed: they are history. `project add` with the name
+of such a project takes over the sessions and workspaces it holds, as they were. If its file comes
+back while its removal waits for the agents to stop, the project and its file stay, and the result
+says so.
 
 A failure partway (an agent still running after the wait, a workspace git could not remove)
 stops there and leaves the project known; the refusal says what failed and what was done

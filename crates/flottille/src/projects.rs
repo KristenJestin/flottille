@@ -1,7 +1,7 @@
 //! The `project.*` methods: registering folders and keeping each project's configuration
 //! (`docs/protocol.md`, `docs/projects.md`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -207,9 +207,9 @@ pub fn refuse_removing(daemon: &Daemon, project: &str) -> std::result::Result<()
 /// The agents of the project that have not ended, the shallowest first.
 fn live_agents(daemon: &Daemon, project: &str) -> std::result::Result<Vec<Agent>, Failure> {
     let mut agents: Vec<Agent> = daemon
-        .read(Store::agents)?
+        .read(Store::live_agents)?
         .into_iter()
-        .filter(|agent| agent.project == project && !agent.state.is_final())
+        .filter(|agent| agent.project == project)
         .collect();
     agents.sort_by_key(|agent| agent.depth);
     Ok(agents)
@@ -238,8 +238,9 @@ fn run_json(run: &Run) -> Value {
     json!({"run": run.id, "name": run.name, "line": run.line, "agent": run.agent})
 }
 
-/// What a project whose file is gone still holds in the store: its live sessions (roots) and its
-/// workspaces. A project that holds neither is not left over: its ended sessions are history.
+/// What a project whose file is gone still holds in the store: its live sessions (a child whose
+/// root ended is one too: removing the project stops it) and its workspaces. A project that
+/// holds neither is not left over: its ended sessions are history.
 struct Left {
     name: String,
     sessions: usize,
@@ -262,8 +263,8 @@ fn left_over(daemon: &Daemon, known: &[String]) -> std::result::Result<Vec<Left>
             false => held.workspaces += 1,
         }
     };
-    for agent in daemon.read(Store::agents)? {
-        if agent.parent.is_none() && !agent.state.is_final() && !known.contains(&agent.project) {
+    for agent in daemon.read(Store::live_agents)? {
+        if !known.contains(&agent.project) {
             hold(&agent.project, true);
         }
     }
@@ -547,9 +548,23 @@ async fn remove_marked(
     }
 
     let mut projects = daemon.projects.lock().unwrap();
-    // A project whose file was gone at the start has nothing to forget but what was made for it.
-    if !projects.registry.remove(name)? && filed {
-        return Err(done.partway(name, "its file is gone already"));
+    if filed {
+        if !projects.registry.remove(name)? {
+            return Err(done.partway(name, "its file is gone already"));
+        }
+    } else if projects.registry.file(name).exists() {
+        // A project whose file was gone at the start has no file to delete. One that came back
+        // during the wait (a `project add`, a file put back) is the user's new project: what was
+        // asked is done, the project and its file stay.
+        drop(projects);
+        return Ok(json!({
+            "removed": null,
+            "project_kept": format!(
+                "its file came back during the removal, so the project {name} and its file stay"
+            ),
+            "stopped": {"agents": done.agents, "runs": done.runs},
+            "workspaces": {"removed": done.removed, "kept": done.kept},
+        }));
     }
     projects.known.remove(name);
     drop(projects);
@@ -2039,6 +2054,25 @@ pub fn tools_changed(daemon: &Daemon) {
 pub fn exists(daemon: &Daemon, name: &str) -> bool {
     let projects = daemon.projects.lock().unwrap();
     matches!(projects.registry.load(name), Ok(Some(_)))
+}
+
+/// The names of the projects whose file can be used, as the files say now; `None` when the
+/// folder of the files cannot be read, which says nothing of any project.
+pub fn usable_names(daemon: &Daemon) -> Option<HashSet<String>> {
+    let projects = daemon.projects.lock().unwrap();
+    match projects.registry.load_all() {
+        Ok(loaded) => Some(
+            loaded
+                .projects
+                .into_iter()
+                .map(|project| project.name)
+                .collect(),
+        ),
+        Err(error) => {
+            eprintln!("flottille daemon: the projects: {error}");
+            None
+        }
+    }
 }
 
 /// The project as its file says now.
