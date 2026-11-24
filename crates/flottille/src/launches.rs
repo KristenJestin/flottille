@@ -1429,7 +1429,12 @@ fn finish(
         Ok(()) => "done",
         Err(_) => "refused",
     };
-    if let Err(error) = daemon.write(|store| Ok(((), store.settle_unsent(request, outcome)?))) {
+    if let Err(error) = daemon.write(|store| {
+        if playing_unsettled() {
+            return Err(flottille_core::Error::Refused("a test refused it".into()));
+        }
+        Ok(((), store.settle_unsent(request, outcome)?))
+    }) {
         eprintln!(
             "flottille daemon: request #{}: its answer cannot be stored: {error}",
             request.number
@@ -1497,6 +1502,14 @@ fn finish(
         true,
     );
     go_on(daemon, &launch, &agent);
+}
+
+/// Whether a test plays a store that refuses to keep the user's answer once: in a test build, when
+/// the file `FLOTTILLE_TEST_UNSETTLED_FILE` names exists, which it removes.
+fn playing_unsettled() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_UNSETTLED_FILE")
+            .is_some_and(|file| std::fs::remove_file(file).is_ok())
 }
 
 /// What the agent `agent` of the held `launch`, allowed now, was placed in: as `placed` says it
