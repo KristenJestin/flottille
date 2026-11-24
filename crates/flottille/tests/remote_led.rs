@@ -656,6 +656,8 @@ fn a_pilot_ended_stop_from_a_machine_that_did_not_start_the_session_is_refused()
 fn ending_a_pilot_lists_its_led_sessions_on_other_machines() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let folder = crate::remote_launch::folder_of(&server.agent(&session));
+    std::fs::write(folder.join("notes.txt"), "draft\n").unwrap();
 
     let ending = pc
         .user
@@ -668,6 +670,34 @@ fn ending_a_pilot_lists_its_led_sessions_on_other_machines() {
     assert_eq!(sessions[0]["title"], "Finish the export", "{ending:#}");
     assert_eq!(sessions[0]["machine"], "server", "{ending:#}");
     assert_eq!(sessions[0]["project"], "app", "{ending:#}");
+    // Asked there: what its workspace holds that is not saved, as that machine reads it.
+    assert_eq!(sessions[0]["state"], "uncommitted", "{ending:#}");
+    let losses = sessions[0]["losses"].to_string();
+    assert!(losses.contains("notes.txt"), "{ending:#}");
+    assert!(!losses.contains("unknown (on server)"), "{ending:#}");
+}
+
+#[test]
+fn the_end_confirmation_says_unknown_when_the_other_machine_does_not_answer() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+
+    let asked = std::time::Instant::now();
+    let ending = pc
+        .user
+        .call("agent.ending", json!({"agent": root}))
+        .unwrap();
+
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        asked.elapsed()
+    );
+    let sessions = ending["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{ending:#}");
+    assert_eq!(sessions[0]["id"], session.as_str(), "{ending:#}");
     assert_eq!(sessions[0]["state"], "unknown", "{ending:#}");
     assert_eq!(
         sessions[0]["losses"],
@@ -707,5 +737,30 @@ fn a_pilot_ended_while_the_machine_is_off_ends_them_when_it_is_back() {
         "its parent stopped",
         "{:#}",
         server.agent(&child)
+    );
+}
+
+#[test]
+fn a_failed_pilot_does_not_end_its_led_session_on_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.user
+        .fake_script(json!({"load_error": "the session is lost", "turns": [
+        {"when": "die now", "do": [{"die": 3}]}]}));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    pc.user
+        .call("agent.send", json!({"agent": root, "message": "die now"}))
+        .unwrap();
+
+    eventually("the pilot failed on pc", || {
+        pc.agent(&root)["state"] == "failed"
+    });
+    // It can be resumed: what it leads goes on, there as here.
+    a_while();
+    a_while();
+    let there = server.agent(&session);
+    assert!(
+        !matches!(there["state"].as_str(), Some("ended" | "failed")),
+        "{there:#}"
     );
 }

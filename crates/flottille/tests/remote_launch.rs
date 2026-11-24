@@ -2184,3 +2184,67 @@ fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
         "the failure came before the answer:\n{all}"
     );
 }
+
+#[test]
+fn a_launch_held_elsewhere_is_withdrawn_when_its_caller_ends() {
+    // No judge on server: the launch is held for its user.
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Held child",
+            "brief": "Write the tests."}),
+    ));
+    let held = titled(&server, "Held child");
+    assert_eq!(launch_states(&server), vec!["held"]);
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+
+    // Withdrawn there: nobody waits for it any more, and the user is told why.
+    eventually("the launch withdrawn on server", || {
+        launch_states(&server) == vec!["refused"]
+    });
+    let shown = server.agent(held["id"].as_str().unwrap());
+    assert_eq!(shown["state"], "ended", "{shown:#}");
+    assert_eq!(
+        shown["state_reason"],
+        format!("withdrawn: agent {root} of pc, which asked for it, ended").as_str(),
+        "{shown:#}"
+    );
+    let pending: Vec<Value> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request["state"] == "pending")
+        .collect();
+    assert!(pending.is_empty(), "{pending:#?}");
+}
+
+#[test]
+fn a_launch_not_yet_answered_is_withdrawn_when_its_caller_ends() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    // pc records what server answered only once this file is gone.
+    let slow = pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+    let launching = std::thread::spawn(move || {
+        launched(
+            &mcp,
+            json!({"kind": "child", "machine": "server", "title": "Late child",
+                "brief": "Write the tests."}),
+        )
+    });
+    let child = titled(&server, "Late child");
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+    eventually("the caller ended on pc", || {
+        pc.agent(&root)["state"] == "ended"
+    });
+    std::fs::remove_file(&slow).unwrap();
+    let _ = launching.join();
+
+    eventually("the child ended on server", || {
+        server.agent(child["id"].as_str().unwrap())["state"] == "ended"
+    });
+}

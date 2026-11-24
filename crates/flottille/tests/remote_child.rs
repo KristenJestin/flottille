@@ -7,7 +7,7 @@
 use crate::common;
 use crate::remote_deliveries::{child_on_server, off, on, prompts_with, script};
 use crate::remote_launch::{
-    allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
+    a_while, allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
 };
 
 use common::mcp::{Mcp, server_of};
@@ -275,4 +275,82 @@ fn a_child_on_another_machine_stops_with_its_parent() {
         "{:#}",
         server.agent(&child)
     );
+}
+
+/// `pc`'s fake agents die at a message `die now` and cannot be loaded again: one sent it fails.
+fn dying(pc: &crate::remote_launch::Machine) {
+    pc.user
+        .fake_script(json!({"load_error": "the session is lost", "turns": [
+        {"when": "die now", "do": [{"die": 3}]}]}));
+}
+
+#[test]
+fn a_child_on_another_machine_stops_with_its_failed_parent() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    dying(&pc);
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    let root = pc.agents()[0]["id"].as_str().unwrap().to_owned();
+
+    pc.user
+        .call("agent.send", json!({"agent": root, "message": "die now"}))
+        .unwrap();
+
+    eventually("the parent failed on pc", || {
+        pc.agent(&root)["state"] == "failed"
+    });
+    eventually("the child ended on server", || {
+        server.agent(&child)["state"] == "ended"
+    });
+    assert_eq!(
+        server.agent(&child)["state_reason"],
+        "its parent failed",
+        "{:#}",
+        server.agent(&child)
+    );
+}
+
+#[test]
+fn a_stop_is_kept_whatever_the_queue_for_an_offline_machine_holds() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    let root = pc.agents()[0]["id"].as_str().unwrap().to_owned();
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+    // The queue for server filled with messages to the child, until one more is refused.
+    let mut sent = 0;
+    loop {
+        let answer = mcp.call(
+            "agent_send",
+            json!({"agent_id": child, "message": format!("Kept message {sent}.")}),
+        );
+        if answer.error || answer.text.starts_with("refused") {
+            assert!(
+                answer.text.contains("messages wait for server"),
+                "{}",
+                answer.text
+            );
+            break;
+        }
+        sent += 1;
+        assert!(sent <= 100, "the queue for server is never full");
+    }
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+    on(&server);
+    server.wait_for("pc");
+
+    eventually("the child ended on server", || {
+        server.agent(&child)["state"] == "ended"
+    });
+    assert_eq!(
+        server.agent(&child)["state_reason"],
+        "its parent stopped",
+        "{:#}",
+        server.agent(&child)
+    );
+    // The stop replaced what it made useless: no message kept for the child reached it.
+    a_while();
+    assert_eq!(prompts_with(&server, "Kept message"), 0);
 }
