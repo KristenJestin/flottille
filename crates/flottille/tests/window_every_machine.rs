@@ -1916,25 +1916,41 @@ fn a_connection_to_review(server: &Machine, name: &str) {
 fn accepting_a_review_opened_from_another_machine_s_toast_reaches_that_machine(
     cx: &mut TestAppContext,
 ) {
-    let (_hub, pc, server, here, _there) = two_machines();
+    let (_hub, pc, server, _here, _there) = two_machines();
     a_connection_to_review(&server, "almanac");
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
     let page = the_server_s_settings(&shell, cx);
     let section = page.read_with(cx, |page, _| page.connections().clone());
 
-    // The server's toast's Review opens its review, read there.
-    section.update(cx, |section, cx| section.open_review("almanac", cx));
+    // Left without an Accept, the server's review leaves a toast that leads back to it.
+    section.update(cx, |section, cx| {
+        section.open_review_after_request("almanac", cx)
+    });
     until(&shell, cx, "the server's review is ready", |cx| {
         present(cx, "accept-connection")
     });
-    // This machine is brought in front before the user accepts: the dialog stays the server's.
-    click(cx, session_id(&here));
+    click(cx, "connection-review-cancel");
+    until(&shell, cx, "the toast", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "The server almanac still waits for your review")
+    });
+    // This machine in front, the toast's Review opens the server's review over its page.
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
     until(&shell, cx, "this machine is in front", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).is_none()
     });
     settle(&shell, cx);
-    assert!(present(cx, "accept-connection"), "the review is still open");
+    let review = (1..16)
+        .map(|n| format!("toast-{n}-action"))
+        .find(|id| label(cx, id).as_deref() == Some("Review"))
+        .expect("the toast's Review");
+    click(cx, review);
+    until(&shell, cx, "the server's review is ready again", |cx| {
+        present(cx, "accept-connection")
+    });
+    settle(&shell, cx);
     relay.take();
     click(cx, "accept-connection");
     until(&shell, cx, "the accept is sent somewhere", |cx| {
@@ -1956,7 +1972,7 @@ fn accepting_a_review_opened_from_another_machine_s_toast_reaches_that_machine(
 
 #[gpui_kit::test]
 fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut TestAppContext) {
-    let (_hub, pc, server, here, _there) = two_machines();
+    let (_hub, pc, server, _here, _there) = two_machines();
     server
         .user
         .call(
@@ -1982,11 +1998,14 @@ fn a_vault_entry_edited_from_another_machine_s_review_is_written_there(cx: &mut 
     until(&shell, cx, "the entry's dialog", |cx| {
         vault.read_with(cx, |vault, _| vault.is_open())
     });
-    click(cx, session_id(&here));
+    // This machine brought in front while the dialog is open (the review was opened from the
+    // server's toast over this machine's page).
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
     until(&shell, cx, "this machine is in front", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).is_none()
     });
     settle(&shell, cx);
+    assert!(vault.read_with(cx, |vault, _| vault.is_open()));
     relay.take();
     let field = vault.read_with(cx, |vault, _| vault.secret_field().unwrap().clone());
     cx.update(|window, cx| {
