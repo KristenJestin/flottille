@@ -256,3 +256,23 @@ fn a_child_of_another_machine_s_agent_gets_its_brief_again_after_a_compaction() 
         prompts_with(&server, "Your brief, again") == 1
     });
 }
+
+#[test]
+fn a_child_on_another_machine_stops_with_its_parent() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    let root = pc.agents()[0]["id"].as_str().unwrap().to_owned();
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+
+    eventually("the child ended on server", || {
+        server.agent(&child)["state"] == "ended"
+    });
+    assert_eq!(
+        server.agent(&child)["state_reason"],
+        "its parent stopped",
+        "{:#}",
+        server.agent(&child)
+    );
+}
