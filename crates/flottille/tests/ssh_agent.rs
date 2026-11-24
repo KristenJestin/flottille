@@ -3021,3 +3021,48 @@ fn a_confined_run_cannot_write_below_the_kept_dotfiles_folder() {
     );
     assert!(!versions.join("c").exists(), "{said}");
 }
+
+#[test]
+fn a_confined_run_cannot_write_below_ssh_where_a_folder_is_kept_in_place() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    // The git settings include a file of a folder of `~/.ssh`: that folder is kept in place, below
+    // the read-only `~/.ssh`.
+    let extra = user.path("home/.ssh/git/extra");
+    std::fs::create_dir_all(extra.parent().unwrap()).unwrap();
+    std::fs::write(&extra, "[user]\n\tname = Test\n").unwrap();
+    let settings = user.path("home/.gitconfig");
+    std::fs::write(&settings, "[include]\n\tpath = ~/.ssh/git/extra\n").unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+
+    let folder = user.path("home/.ssh/git");
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "import errno\nfolder = {folder:?}\n\
+             for name, act in [\n\
+             \x20   ('planted', lambda: open(folder + '/planted', 'w').write('x')),\n\
+             \x20   ('folder', lambda: os.mkdir(folder + '/more')),\n\
+             ]:\n\
+             \x20   try:\n\
+             \x20       act()\n\
+             \x20       print(name + '=written')\n\
+             \x20   except OSError as e:\n\
+             \x20       print(name + '=' + errno.errorcode[e.errno])\n",
+            folder = folder.to_str().unwrap(),
+        ),
+    );
+
+    for name in ["planted", "folder"] {
+        assert!(
+            said.contains(&format!("{name}=EROFS")) || said.contains(&format!("{name}=EACCES")),
+            "{name}: {said}"
+        );
+    }
+    assert!(!folder.join("planted").exists(), "{said}");
+}
