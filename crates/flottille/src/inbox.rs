@@ -189,7 +189,11 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             Some(id) => daemon.read(|store| store.agent(id))?,
             None => None,
         };
-        let Some(agent) = agent.filter(|agent| agent.parent.is_none() || daemon_s) else {
+        // A child of another machine's agent reports and fails to that agent; only its question to
+        // the user, while its parent's machine is off, is the user's.
+        let Some(agent) = agent.filter(|agent| {
+            daemon_s || (agent.parent.is_none() && (!agent.is_child() || kind == "question"))
+        }) else {
             if daemon_s {
                 entries.push(json!({
                     "seq": event.seq, "at": event.at, "kind": kind,
