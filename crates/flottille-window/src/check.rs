@@ -10,8 +10,8 @@
 //! (`presence_of`), and the buttons are the kit's (their hover and press fade).
 
 use gpui_design_system::{
-    Button, ListCard, ListRow, Section, Skeleton, Toast, awaiting, changing, palette, presence_of,
-    space, toast,
+    Button, Icon, ListCard, ListRow, Section, Skeleton, Toast, awaiting, changing, icon, palette,
+    presence_of, space, toast,
 };
 use gpui_kit::{
     Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
@@ -20,6 +20,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
+use crate::glyphs;
 use crate::programs::ProgramState;
 use crate::providers::Provider;
 use crate::shell::Shell;
@@ -221,6 +222,14 @@ impl CheckSection {
     }
 }
 
+/// The mark before a row's title, so that no row starts with an empty slot.
+fn mark_of(id: &str, glyph: Icon, ink: gpui_kit::Hsla) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(format!("{id}-mark").into()))
+        .child(icon(glyph).size(px(14.)).text_color(ink))
+        .test_support()
+}
+
 /// What a provider's row says of whether its agents can run.
 fn provider_state(provider: &Provider) -> &'static str {
     match (provider.enabled, provider.ready) {
@@ -261,6 +270,8 @@ impl Render for CheckSection {
                         div()
                             .id(ElementId::Name(format!("{id}-state").into()))
                             .aria_label(said.clone())
+                            .flex_none()
+                            .whitespace_nowrap()
                             .text_size(px(13.))
                             .text_color(p.text)
                             .child(said)
@@ -288,6 +299,7 @@ impl Render for CheckSection {
             };
             let trailing = div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(space::MD)
                 .child(mark)
@@ -298,6 +310,7 @@ impl Render for CheckSection {
             }
             why.extend(provider.warnings.iter().cloned());
             let mut row = ListRow::new(ElementId::Name(id.clone().into()), provider.title.clone())
+                .leading(mark_of(&id, glyphs::AGENTS, p.faint))
                 .trailing(trailing);
             if !why.is_empty() {
                 row = row.line(why.join(" · "));
@@ -310,15 +323,19 @@ impl Render for CheckSection {
             Some(Ok(sandbox)) if sandbox.warnings.is_empty() => ("Confined".to_owned(), None),
             Some(Ok(sandbox)) => ("Gaps".to_owned(), Some(sandbox.warnings.join(" · "))),
         };
-        let mut row = ListRow::new("check-flottille-sandbox", "Sandbox").trailing(
-            div()
-                .id("check-flottille-sandbox-state")
-                .aria_label(SharedString::from(sandbox.0.clone()))
-                .text_size(px(13.))
-                .text_color(p.text)
-                .child(SharedString::from(sandbox.0))
-                .test_support(),
-        );
+        let mut row = ListRow::new("check-flottille-sandbox", "Sandbox")
+            .leading(mark_of("check-flottille-sandbox", glyphs::SHIELD, p.faint))
+            .trailing(
+                div()
+                    .id("check-flottille-sandbox-state")
+                    .aria_label(SharedString::from(sandbox.0.clone()))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(13.))
+                    .text_color(p.text)
+                    .child(SharedString::from(sandbox.0))
+                    .test_support(),
+            );
         if let Some(line) = sandbox.1 {
             row = row.line(line);
         }
@@ -333,11 +350,14 @@ impl Render for CheckSection {
             let mark = if state.is_ready() { "Ready" } else { "To do" };
             list = list.row(
                 ListRow::new(ElementId::Name(id.clone().into()), state.program.clone())
+                    .leading(mark_of(&id, Icon::Terminal, p.faint))
                     .line(line)
                     .trailing(
                         div()
                             .id(ElementId::Name(format!("{id}-state").into()))
                             .aria_label(SharedString::from(mark))
+                            .flex_none()
+                            .whitespace_nowrap()
                             .text_size(px(13.))
                             .text_color(p.text)
                             .child(SharedString::from(mark))
