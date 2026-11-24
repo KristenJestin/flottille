@@ -2673,11 +2673,70 @@ mod tests {
         }
     }
 
-    /// No piece of the secret, at least as long as the shortest value masked, is in `text`.
+    /// No piece of the secret, its start or its end at least as long as the shortest value
+    /// masked, is in `text`.
     fn holds_no_piece_of_the_secret(text: &str) {
-        for at in 0..=SECRET.len() - secrets::VAULT_SHORTEST {
-            let piece = &SECRET[..SECRET.len() - at];
-            assert!(!text.contains(piece), "{piece:?} in {text}");
+        for at in 0..=SECRET.len() - flottille_core::secrets::VAULT_SHORTEST {
+            let start = &SECRET[..SECRET.len() - at];
+            assert!(!text.contains(start), "{start:?} in {text}");
+            let end = &SECRET[at..];
+            assert!(!text.contains(end), "{end:?} in {text}");
+        }
+    }
+
+    /// A text of `length` characters of one line holding the secret at each of `at`, cut by
+    /// `results::shorten` as the daemon of another machine cuts a long result of a tool.
+    fn cut_by_the_other_machine(length: usize, at: &[usize]) -> String {
+        let mut whole = "x".repeat(length);
+        for &at in at {
+            whole.replace_range(at..at + SECRET.len(), SECRET);
+        }
+        let (shown, _) = crate::results::shorten(&whole, 8_000, "res_ab12").unwrap();
+        assert!(shown.contains(" characters left out (lines "), "{shown}");
+        shown
+    }
+
+    #[test]
+    fn a_secret_cut_by_the_other_machine_s_head_and_tail_is_masked_on_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // Cut there at 3,000 and 9,000 characters: one secret's start ends the head, another's
+        // end starts the tail.
+        let text = cut_by_the_other_machine(10_000, &[2_991, 8_991]);
+        assert!(text.contains(&format!("{}\n[", &SECRET[..9])), "{text}");
+        assert!(text.contains(&format!("]\n{}", &SECRET[9..])), "{text}");
+
+        // Only a result that is done is cut so there.
+        for outcome in ["ok", "held"] {
+            let answer = json!({"outcome": outcome, "text": text});
+            let shown = text_of(answered(Ok(answer.clone()), &aim(), &place));
+            assert!(shown.contains("[masked]\n["), "{outcome}: {shown}");
+            assert!(shown.contains("]\n[masked]"), "{outcome}: {shown}");
+            holds_no_piece_of_the_secret(&shown);
+            let shown = text_of(call_answered(Ok(answer), "server", "ab12", &place));
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_secret_split_by_the_other_machine_s_cut_of_a_long_line_is_masked_on_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // A line of 10,000 characters is shown there as lines of 1,000: the secret across the
+        // first bound is split by a new line.
+        let text = cut_by_the_other_machine(10_000, &[991]);
+        assert!(
+            text.contains(&format!("{}\n{}", &SECRET[..9], &SECRET[9..])),
+            "{text}"
+        );
+
+        let answer = || json!({"outcome": "ok", "text": text});
+        for shown in [
+            text_of(answered(Ok(answer()), &aim(), &place)),
+            text_of(call_answered(Ok(answer()), "server", "ab12", &place)),
+        ] {
+            assert!(shown.contains("[masked]\n[masked]"), "{shown}");
+            holds_no_piece_of_the_secret(&shown);
         }
     }
 
@@ -2753,10 +2812,11 @@ mod tests {
     fn an_answer_of_another_machine_longer_than_the_result_limit_is_cut_here_too() {
         let dir = tempfile::tempdir().unwrap();
         let place = place_with_secret(dir.path());
-        // The secret straddles where this machine cuts: its start would end what is kept.
+        // The secret straddles where this machine cuts, with or without "On server: " before
+        // it: cut before it is masked, its start would end what is kept.
         let text = format!(
             "{}{SECRET}{}",
-            "x".repeat(RESULT_LIMIT - 20),
+            "x".repeat(RESULT_LIMIT - 35),
             "y".repeat(60_000)
         );
         let answer = || json!({"outcome": "ok", "text": text});
@@ -2769,6 +2829,11 @@ mod tests {
                 panic!("not done");
             };
             assert!(shown.chars().count() <= RESULT_LIMIT, "{}", shown.len());
+            assert!(
+                shown.contains("x[masked]"),
+                "{}",
+                &shown[shown.len() - 40..]
+            );
             assert!(
                 shown.ends_with(" chars\u{203a}"),
                 "{}",
