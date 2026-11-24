@@ -1073,7 +1073,7 @@ fn the_composer_machine_picker_folds_away_when_the_project_is_on_one_machine_onl
 }
 
 #[gpui_kit::test]
-fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppContext) {
+fn leaving_an_off_machine_brings_this_machine_s_own_page_of_the_project(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     let (shell, cx) = window(&pc, cx);
     open_project(&shell, "app", cx);
@@ -1092,25 +1092,21 @@ fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppCo
     let whole = height_of(cx, "composer-machine-off-line").expect("its frame");
     assert!(whole > 10., "{whole}");
 
-    // Leaving the machine folds the notice away, with its words, over several frames.
+    // Leaving the machine brings this machine's own page of the project, a new one that enters
+    // (#1271): the server's page, its composer and its notice wait with the server's pages.
+    let left = shell.read_with(cx, |s, cx| {
+        s.main().read(cx).project_page().cloned().unwrap()
+    });
     click_without_settling(&shell, "machine-picker", cx);
     cx.update(|window, cx| window.click("machine-choice-here".to_owned(), cx));
-    let drawn = std::cell::RefCell::new(Vec::new());
-    until(&shell, cx, "the notice is gone", |cx| {
-        match height_of(cx, "composer-machine-off-line") {
-            Some(height) => {
-                drawn.borrow_mut().push(height);
-                false
-            }
-            None => true,
-        }
+    until(&shell, cx, "this machine's page", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page != &left && page.read(cx).machine().is_none())
+        })
     });
-    let drawn = drawn.into_inner();
-    assert!(
-        drawn
-            .iter()
-            .any(|height| *height > 1. && *height < whole - 1.),
-        "it folds before it is gone: {drawn:?}"
-    );
+    settle(&shell, cx);
     assert!(!present(cx, "composer-machine-off"));
 }
