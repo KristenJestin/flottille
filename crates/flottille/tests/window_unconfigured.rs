@@ -355,7 +355,11 @@ fn an_unconfigured_project_beside_another_machine_s_project_of_its_name_is_one_r
                 .iter()
                 .map(|row| row.read(cx).id().to_owned())
                 .collect();
-            assert_eq!(held, [there.clone()], "it holds the server's session only");
+            assert_eq!(
+                held,
+                std::slice::from_ref(&there),
+                "it holds the server's session only"
+            );
         });
     }
     assert!(
@@ -383,7 +387,11 @@ fn an_unconfigured_project_beside_another_machine_s_project_of_its_name_is_one_r
             .iter()
             .map(|row| row.read(cx).id().to_owned())
             .collect();
-        assert_eq!(held, [here.clone()], "it holds this machine's session only");
+        assert_eq!(
+            held,
+            std::slice::from_ref(&here),
+            "it holds this machine's session only"
+        );
     });
     // Only the row with no file has the menu with Remove.
     cx.update(|window, cx| window.hover(project_id("app"), cx));
@@ -426,8 +434,8 @@ fn an_unconfigured_project_beside_another_machine_s_project_is_one_row_each_by_m
                 .map(|row| row.read(cx).id().to_owned())
                 .collect()
         };
-        assert_eq!(ids(theirs), [there.clone()]);
-        assert_eq!(ids(ours), [here.clone()]);
+        assert_eq!(ids(theirs), std::slice::from_ref(&there));
+        assert_eq!(ids(ours), std::slice::from_ref(&here));
     });
 }
 
