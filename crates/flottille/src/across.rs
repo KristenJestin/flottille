@@ -2779,12 +2779,7 @@ pub(crate) fn removal_aimed(
         ));
     }
     // As on one machine, the agent the user talks to manages workspaces, a child none.
-    let root = daemon
-        .read(|store| store.agent(caller))
-        .ok()
-        .flatten()
-        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
-    if !root {
+    if !crate::actions::is_root_agent(daemon, caller) {
         return Some(Err(crate::actions::CHILD_WORKSPACES.to_owned()));
     }
     let (Some(machine), Some(name)) = (machine.as_str(), args["name"].as_str()) else {
