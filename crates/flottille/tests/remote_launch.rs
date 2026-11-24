@@ -2479,11 +2479,13 @@ fn a_held_launch_with_no_request_number_never_says_request_0_when_it_ends() {
     });
 }
 
-/// A launch of `kind` held on `server`, then allowed there while its store refused to keep that
-/// answer, its setup still going when the daemon there stopped and started again: its caller was
-/// told it was approved first.
+/// A setup that is still going when a test stops the daemon.
+const SLOW_SETUP: &str = "[[setup]]\nrun = \"sleep 600\"\n";
+
+/// A launch of `kind` held on `server`, whose setup lasts (`SLOW_SETUP`), then allowed there while
+/// its store refused to keep that answer, its setup still going when the daemon there stopped and
+/// started again: its caller was told it was approved first.
 fn told_approved_then_cut(pc: &Machine, server: &Machine, mcp: &Mcp, kind: &str) {
-    server.register("[[setup]]\nrun = \"sleep 600\"\n");
     done(&launched(
         mcp,
         json!({"kind": kind, "machine": "server", "title": "Cut once told",
@@ -2512,6 +2514,7 @@ fn told_approved_then_cut(pc: &Machine, server: &Machine, mcp: &Mcp, kind: &str)
 #[test]
 fn a_led_session_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
     let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
 
@@ -2527,6 +2530,7 @@ fn a_led_session_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_e
 #[test]
 fn a_child_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
     let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("ask");
 
