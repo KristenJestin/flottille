@@ -2596,6 +2596,149 @@ mod tests {
         assert!(!delivered_to(&launch, "another", "approval"));
     }
 
+    /// A session `id`, led by the stand-in `pilot`, in `state`.
+    fn led_by(daemon: &Daemon, id: &str, pilot: &str, state: flottille_core::agent::AgentState) {
+        let mut session =
+            stand_in_agent(daemon, id.into(), "app", "", "laptop", Default::default());
+        session.launched_by = Some(pilot.to_owned());
+        session.led = true;
+        session.state = state;
+        daemon
+            .write(|store| {
+                let event = store.create_agent(&session, ("agent.created", json!({})))?;
+                Ok(((), event))
+            })
+            .unwrap();
+    }
+
+    /// The daemon of a machine with `live` pilots calling it, each leading a live session, and
+    /// the ended pilots `ended`, each with an ended session only.
+    fn pilots_of_aa(dir: &std::path::Path, live: usize, ended: &[&str]) -> Arc<Daemon> {
+        use flottille_core::agent::AgentState::{Ended, Idle};
+        let daemon = crate::daemon::tests::a_daemon(dir, false);
+        // The ended ones first: kept with no session yet, one would count as a new caller.
+        for name in ended {
+            let pilot = stand_in_agent(
+                &daemon,
+                format!("{name}@aa"),
+                "app",
+                "",
+                "laptop",
+                Default::default(),
+            );
+            keep_stand_in(&daemon, &pilot, "laptop").ok().unwrap();
+            led_by(&daemon, &format!("old-{name}"), &pilot.id, Ended);
+        }
+        for n in 0..live {
+            let pilot = stand_in_agent(
+                &daemon,
+                format!("p{n}@aa"),
+                "app",
+                "",
+                "laptop",
+                Default::default(),
+            );
+            keep_stand_in(&daemon, &pilot, "laptop").ok().unwrap();
+            led_by(&daemon, &format!("s{n}"), &pilot.id, Idle);
+        }
+        daemon
+    }
+
+    /// The launch of a led session that the caller `caller` of the machine `aa` asks.
+    fn a_led_launch(caller: &str) -> Launch {
+        Launch {
+            way: "in".into(),
+            machine: "aa".into(),
+            launch: format!("launch-{caller}"),
+            caller: caller.into(),
+            kind: "led".into(),
+            project: "app".into(),
+            state: "started".into(),
+            request: None,
+            agent: None,
+            workspace: None,
+            workspace_id: None,
+            asked: json!({"from": "laptop"}),
+            at: 1,
+        }
+    }
+
+    #[test]
+    fn an_ended_pilot_over_the_cap_is_refused_when_it_launches_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS, &["old"]);
+
+        let refused =
+            pilot_stand_in(&daemon, &a_led_launch("old"), "app", Default::default()).unwrap_err();
+
+        assert!(
+            refused.contains("64 agents calling this machine's sessions already"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn an_ended_pilot_under_the_cap_counts_again_when_it_launches() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS - 1, &["old"]);
+
+        let pilot =
+            pilot_stand_in(&daemon, &a_led_launch("old"), "app", Default::default()).unwrap();
+
+        assert_eq!(pilot, "old@aa");
+    }
+
+    #[test]
+    fn two_ended_pilots_launching_at_the_cap_never_make_it_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS - 1, &["x", "y"]);
+        let at_once = Arc::new(std::sync::Barrier::new(2));
+
+        let launched: Vec<bool> = ["x", "y"]
+            .into_iter()
+            .map(|caller| {
+                let (daemon, at_once) = (daemon.clone(), at_once.clone());
+                std::thread::spawn(move || {
+                    let pilot =
+                        pilot_stand_in(&daemon, &a_led_launch(caller), "app", Default::default())
+                            .unwrap();
+                    at_once.wait();
+                    let mut session = stand_in_agent(
+                        &daemon,
+                        format!("new-{caller}"),
+                        "app",
+                        "",
+                        "laptop",
+                        Default::default(),
+                    );
+                    session.launched_by = Some(pilot);
+                    session.led = true;
+                    crate::agents::write_new(&daemon, &session).is_ok()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+
+        assert_eq!(
+            launched.iter().filter(|made| **made).count(),
+            1,
+            "{launched:?}"
+        );
+        // One more caller does not fit: the machine's callers counted are 64, never 65.
+        assert!(
+            daemon
+                .read(|store| store.stand_in_fits("probe@aa", MOST_STAND_INS + 1))
+                .unwrap()
+        );
+        assert!(
+            !daemon
+                .read(|store| store.stand_in_fits("probe@aa", MOST_STAND_INS))
+                .unwrap()
+        );
+    }
+
     #[test]
     fn a_caller_of_another_machine_is_given_only_the_session_tools_the_issue_names() {
         // A tool of the tree added later reaches no caller of another machine until it is
