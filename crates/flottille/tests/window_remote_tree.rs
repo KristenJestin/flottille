@@ -1358,3 +1358,183 @@ fn a_led_session_of_another_machine_is_under_its_pilot(cx: &mut TestAppContext) 
         gpui_kit::ElementId::Name(format!("session-machine-icon-{row}").into())
     ));
 }
+
+/// The notification `machine` keeps of a request held for its session `agent`: its number there,
+/// once it is kept.
+fn request_noted(machine: &Machine, agent: &str) -> u64 {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let listed = machine
+            .user
+            .call("notifications.list", json!({"limit": 100}))
+            .unwrap();
+        let found = listed["notifications"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["kind"] == "request" && row["session"] == agent)
+            .and_then(|row| row["id"].as_u64());
+        if let Some(id) = found {
+            return id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the request was never noted: {listed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Whether `machine` says its notification `id` was read.
+fn noted_read(machine: &Machine, id: u64) -> bool {
+    let listed = machine
+        .user
+        .call("notifications.list", json!({"limit": 100}))
+        .unwrap();
+    listed["notifications"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|row| row["id"] == id && !row["read_at"].is_null())
+}
+
+#[gpui_kit::test]
+fn the_bell_holds_a_request_of_another_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+    let id = request_noted(&server, &agent);
+
+    // On pc's window, the bell holds what waits on server, said of server.
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    let key = format!("n-{id}@server");
+    until(&shell, cx, "the bell holds server's request", |cx| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    // Its row unfolds into the open panel, from nothing.
+    let item = format!("bell-item-{key}");
+    let coming = heights(cx, &item).into_iter().fold(f32::MAX, f32::min);
+    settle(&shell, cx);
+    let full = heights(cx, &item).into_iter().fold(0., f32::max);
+    assert!(coming < full, "the row unfolds: {coming} of {full}");
+    let titles = shell.read_with(cx, |s, cx| s.bell_sessions(cx));
+    assert!(
+        titles
+            .iter()
+            .any(|title| title == "Finish the export · on server"),
+        "{titles:?}"
+    );
+    let counts = label(cx, gpui_kit::ElementId::Name("bell-counts".into())).unwrap_or_default();
+    assert!(counts.contains("need you"), "{counts}");
+
+    // Chosen, it opens server's page of its session, and it is read there.
+    shell.update_in(cx, |shell, window, cx| shell.choose(&key, window, cx));
+    until(&shell, cx, "server's page of the session", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.selected() == Some(&Selection::Session(row.clone()))
+        })
+    });
+    eventually("server says its notification was read", || {
+        noted_read(&server, id)
+    });
+}
+
+/// A session the user starts on `server` in `app`, its first turn ended, then ended: its id.
+fn ended_on_server(server: &Machine) -> String {
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    let started = server
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "Fix the export of the report"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let state = || {
+        server
+            .user
+            .call("agent.show", json!({"agent": id}))
+            .unwrap()["agent"]["state"]
+            .clone()
+    };
+    eventually("its first turn on server", || state() == "idle");
+    server
+        .user
+        .call("agent.stop", json!({"agent": id}))
+        .unwrap();
+    eventually("it ended on server", || state() == "ended");
+    id
+}
+
+/// The ids of the rows of the "Ended" group.
+fn ended_rows(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.ended()
+            .map(|group| {
+                group
+                    .read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Opens the "Ended" group, or closes it.
+fn toggle_ended(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let group = shell.read_with(cx, |s, _| s.ended().cloned()).unwrap();
+    group.update(cx, |group, cx| group.toggle(cx));
+}
+
+#[gpui_kit::test]
+fn an_ended_session_of_another_machine_is_in_ended(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = ended_on_server(&server);
+    let row = elsewhere_id("server", &agent);
+
+    // Opened on pc, the "Ended" group asks server for its ended sessions: there with its title
+    // and its machine.
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the Ended group", |cx| {
+        shell.read_with(cx, |s, _| s.ended().is_some())
+    });
+    if !shell.read_with(cx, |s, cx| s.ended().unwrap().read(cx).is_open()) {
+        toggle_ended(&shell, cx);
+    }
+    until(&shell, cx, "server's ended session is in Ended", |cx| {
+        ended_rows(&shell, cx).contains(&row) && present(cx, session_id(&row))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, session_id(&row)).as_deref(),
+        Some("Fix the export of the report")
+    );
+    let said = label(cx, session_machine_id(&row)).unwrap_or_default();
+    assert!(said.starts_with("server"), "{said}");
+
+    // Off, it says so once when the group is opened again, and its sessions are not listed.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    toggle_ended(&shell, cx);
+    settle(&shell, cx);
+    toggle_ended(&shell, cx);
+    let unlisted = gpui_kit::ElementId::Name("ended-unlisted".into());
+    until(&shell, cx, "the group says server is off", |cx| {
+        label(cx, unlisted.clone()).is_some_and(|said| {
+            said.starts_with("server is offline since ")
+                && said.ends_with(": its ended sessions are not listed")
+        })
+    });
+    settle(&shell, cx);
+    assert!(!ended_rows(&shell, cx).contains(&row));
+}
