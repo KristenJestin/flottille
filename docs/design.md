@@ -1273,8 +1273,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   unfolding and folding away as theirs do, and its ink fades while its machine is off. A session
   starts, and so the page that opens is the one of, the machine the user chose for the project
   (window state, `sidebar`'s `starts`, `docs/protocol.md`), while it has the project and is
-  online; else this machine when it has the project and can run an agent (its role is a runner,
-  and a provider is ready); else the one machine online that has it; when several do and this one
+  online; else this machine when it has the project and can run an agent (its role is a
+  runner); else the one machine online that has it; when several do and this one
   cannot, the composer asks first, one line (`Choose where it runs: server or laptop.`) and Start
   waiting until the machine picker chose one. Choosing in that picker is the choice kept. The
   project's settings have the same picker on their title's line, `Settings of` to a reader: the

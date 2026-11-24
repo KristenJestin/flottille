@@ -1289,22 +1289,15 @@ impl Shell {
         }
     }
 
-    /// Whether this machine runs agents: its role lets it, and one of its providers is ready (or
-    /// they are not read yet, when nothing says it cannot).
+    /// Whether this machine runs agents: its role lets it. Its providers are not looked at: the
+    /// page that opens would change as they are read, and the composer says itself when none is
+    /// ready.
     fn this_can_run(&self, machines: &crate::machines::Machines) -> bool {
-        let runner = machines
+        machines
             .this
             .as_deref()
             .and_then(|this| machines.members.iter().find(|member| member.name == this))
-            .is_none_or(|member| member.role == "runner");
-        let providers = match &self.front {
-            None => &self.providers,
-            Some(_) => match self.sides.get(&None) {
-                Some(pages) => &pages.providers,
-                None => return runner,
-            },
-        };
-        runner && (!providers.known || providers.offered().next().is_some())
+            .is_none_or(|member| member.role == "runner")
     }
 
     /// The machine of the page `selection` names: a session's row says it; a project is this

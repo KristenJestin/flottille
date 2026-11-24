@@ -1852,7 +1852,8 @@ on a real phone, by hand, and reported.
 - **Another machine can run a shared project's session when it is an online runner that offers the
   project** (#1266): what agents it has signed in is not looked at, so that a machine is not left
   out while its providers are not read; a start it cannot run is refused there, and said. This
-  machine "can run" when its role is a runner and one of its providers is ready.
+  machine "can run" when its role is a runner: its providers are not looked at either, so that the
+  page that opens does not change as they are read (its composer says when none is ready).
 - **A shared project's start and settings switches match the project by its name on each machine**
   (#1266), as the composer's picker did: a project another machine has under another name (the same
   repositories) has its sessions on the page, but that machine is not offered to start on nor in
