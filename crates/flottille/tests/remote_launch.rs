@@ -2478,3 +2478,63 @@ fn a_held_launch_with_no_request_number_never_says_request_0_when_it_ends() {
         launches_out(&pc) == vec!["refused"]
     });
 }
+
+/// A launch of `kind` held on `server`, then allowed there while its store refused to keep that
+/// answer, its setup still going when the daemon there stopped and started again: its caller was
+/// told it was approved first.
+fn told_approved_then_cut(pc: &Machine, server: &Machine, mcp: &Mcp, kind: &str) {
+    server.register("[[setup]]\nrun = \"sleep 600\"\n");
+    done(&launched(
+        mcp,
+        json!({"kind": kind, "machine": "server", "title": "Cut once told",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+    let unsettled = server.user.path("unsettled");
+    std::fs::write(&unsettled, "").unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(
+        pc,
+        &format!("Request #{number} on server (agent_launch) was approved by the user, and"),
+    );
+    eventually("the launch recorded as started", || {
+        launches_out(pc) == vec!["started"]
+    });
+    assert!(!unsettled.exists(), "its answer was kept");
+    restarted(server);
+}
+
+#[test]
+fn a_led_session_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "led");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
+}
+
+#[test]
+fn a_child_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "child");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
+}
