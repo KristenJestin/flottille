@@ -56,8 +56,9 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// A project `app` over a throwaway repository, and a root of it in Full (nothing is judged
-/// here) whose first message is `message`: its id and its MCP session.
+/// A project `app` over a throwaway repository, and a root of it started in Full (nothing is
+/// judged here, and no switch is told) whose first message is `message`: its id and its MCP
+/// session.
 fn root(user: &User, message: &str) -> (String, Mcp) {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -68,12 +69,13 @@ fn root(user: &User, message: &str) -> (String, Mcp) {
         .unwrap();
     let opened = user.received_requests("session/new").len();
     let answer = user
-        .call("agent.run", json!({"project": "app", "message": message}))
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": message, "gate_mode": "full"}),
+        )
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
     let (url, authorization) = server_of(user, opened);
-    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
-        .unwrap();
     eventually("its first turn", || turns(user, &id) >= 1);
     (id, Mcp::initialize(&url, &authorization))
 }

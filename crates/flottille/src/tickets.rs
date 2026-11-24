@@ -539,24 +539,27 @@ pub(crate) fn signed_in_site(status: &str) -> Option<String> {
 /// That `acli` is there, signed in, and to the tracker's site: nothing is asked of Jira
 /// otherwise. `nothing` says what was not done then: `read` or `written`.
 async fn jira_site(site: &str, nothing: &str) -> Result<(), String> {
-    let status = match acli(&["jira", "auth", "status"]).await {
-        Err(Gh::Missing) => {
-            return Err(
-                "Flottille cannot find acli, Atlassian's command line: install it \
-                 (https://developer.atlassian.com/cloud/acli/) and sign in with `acli jira auth \
-                 login` to read Jira tickets; the rest of Flottille works without it"
-                    .into(),
-            );
+    let ran = acli(&["jira", "auth", "status"]).await;
+    if matches!(ran, Err(Gh::Missing)) {
+        return Err(
+            "Flottille cannot find acli, Atlassian's command line: install it \
+             (https://developer.atlassian.com/cloud/acli/) and sign in with `acli jira auth \
+             login` to read Jira tickets; the rest of Flottille works without it"
+                .into(),
+        );
+    }
+    let status = match &ran {
+        Ok((true, stdout, _)) => stdout.clone(),
+        _ => {
+            return Err(match forge::auth_of("acli", ran) {
+                forge::Auth::Unchecked(why) => forge::unchecked("acli", &why, nothing == "written"),
+                forge::Auth::NotSignedIn | forge::Auth::SignedIn => {
+                    "acli is not signed in to Jira: run `acli jira auth login` to read Jira \
+                     tickets; the rest of Flottille works without it"
+                        .into()
+                }
+            });
         }
-        Err(Gh::Failed(why)) => return Err(format!("acli cannot run: {why}")),
-        Ok((false, _, _)) => {
-            return Err(
-                "acli is not signed in to Jira: run `acli jira auth login` to read Jira \
-                 tickets; the rest of Flottille works without it"
-                    .into(),
-            );
-        }
-        Ok((true, stdout, _)) => stdout,
     };
     match signed_in_site(&status) {
         Some(active) if active == site => {}
@@ -809,11 +812,7 @@ pub(crate) async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         )),
         Ok(Err(error)) => Err(Gh::Failed(error.to_string())),
-        Err(_) => Err(Gh::Failed(format!(
-            "acli {} took more than {} s",
-            args[..2].join(" "),
-            ACLI_TIME.as_secs()
-        ))),
+        Err(_) => Err(Gh::Failed(forge::no_answer(ACLI_TIME))),
     }
 }
 
@@ -2397,7 +2396,7 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let milestone = match milestones::chosen(&forge, asked.milestone_named()).await {
@@ -2497,7 +2496,7 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let milestone = match milestones::chosen(&forge, asked.milestone_named()).await {
@@ -3611,7 +3610,7 @@ async fn status(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &K
         Ok(forge) => forge,
         Err(refusal) => return refusal,
     };
-    if let Err(problem) = forge::signed_in().await {
+    if let Err(problem) = forge::signed_in_to_write().await {
         return Outcome::Failed(problem);
     }
     let (repo, slug, number) = (forge.gh_repository(), forge.slug(), number.to_string());

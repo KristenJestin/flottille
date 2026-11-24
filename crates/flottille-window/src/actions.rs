@@ -12,12 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
+use crate::arrange::{self, Arrangement, Change};
 use crate::commands::CommandInfo;
 use crate::kept::{Draft, DraftKey, Written};
-use crate::link::{Conn, Connect, Sign, Update};
+use crate::link::{Conn, Connect, Sign, Update, Updates};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow, Watch};
 use crate::session_link::{PullRequest, TICKET_FRESH, TicketFacts, pull_requests, ticket_facts};
@@ -140,8 +140,9 @@ pub enum Command {
         images: Vec<Picture>,
         /// The large pasted texts that go with it, as files.
         texts: Vec<Pasted>,
-        /// The mode the session starts in: `ask`, `auto` or `full`.
-        mode: String,
+        /// The mode the user chose for this session (`ask`, `auto` or `full`); none when they
+        /// chose nothing, so that the daemon applies the machine's default.
+        mode: Option<String>,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -162,6 +163,10 @@ pub enum Command {
         provider: Option<String>,
         model: Option<String>,
         effort: Option<String>,
+    },
+    /// Chooses the mode a new session starts in (`provider.set_new_session_mode`).
+    SetNewSessionMode {
+        mode: String,
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
@@ -267,6 +272,12 @@ pub enum Command {
     WindowSet {
         key: String,
         value: Value,
+    },
+    /// Keeps a change of the user's arrangement of the projects: the daemon's arrangement is
+    /// read, the change applied to it and the whole written (`window.get`, `window.set`), so
+    /// that what another window arranged meanwhile stays.
+    ArrangementChange {
+        change: Change,
     },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
@@ -430,8 +441,10 @@ pub enum Command {
         project: String,
         write: CommandWrite,
     },
-    /// The programs and whether each is signed in (`signin.list`, #1185).
+    /// The programs, each to be checked one by one (`signin.list` without its checks, #1315).
     SignIns,
+    /// One program's check, run by its daemon (`signin.list` of that program alone, #1315).
+    SignInCheck(String),
     /// A program's own sign-in, started by its daemon (`signin.start`).
     SignInStart(String),
     /// The code the user pasted for that program's sign-in (`signin.code`), sent once.
@@ -586,6 +599,13 @@ pub enum Command {
         project: Option<String>,
         place: Option<String>,
         path: Option<String>,
+    },
+    /// Where this machine makes the projects of other machines' launches
+    /// (`travelled_folder.show`).
+    TravelledFolderRead,
+    /// Keeps it (`travelled_folder.set`): the user's folder, or none for the data folder.
+    TravelledFolderSet {
+        folder: Option<String>,
     },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
@@ -962,6 +982,8 @@ pub enum Outcome {
     Started {
         project: String,
         agent: String,
+        /// Its title, as the daemon gave it, or else the first line of its brief.
+        title: String,
     },
     /// No session started, and why, in a sentence.
     NotStarted {
@@ -1079,6 +1101,10 @@ pub enum Outcome {
     NewSessionSet {
         refused: Option<String>,
     },
+    /// The mode new sessions start in was chosen, or the daemon refused with why.
+    NewSessionModeSet {
+        refused: Option<String>,
+    },
     ProviderSet {
         name: String,
         refused: Option<String>,
@@ -1092,8 +1118,14 @@ pub enum Outcome {
         name: String,
         read: Result<CommandInfo, String>,
     },
-    /// The programs' sign-in states, as `signin.list` answers them, or why they cannot be read.
+    /// The programs, as `signin.list` answers them, or why they cannot be read: each says it is
+    /// being checked, and its check is asked next.
     SignIns(Result<Value, String>),
+    /// One program's check, as `signin.list` of that program alone answers it.
+    SignInChecked {
+        program: String,
+        answer: Result<Value, String>,
+    },
     /// What a program's sign-in said it needs, or why it did not start.
     SignInStarted {
         program: String,
@@ -1187,9 +1219,17 @@ pub enum Outcome {
         key: DraftKey,
         result: Written,
     },
-    /// How the write of a value of the window's state ended, with the value.
+    /// How the write of a value of the window's state ended, with its key and the value.
     WindowKept {
+        key: String,
         value: Value,
+        result: Written,
+    },
+    /// How the keeping of a change of the arrangement ended, with the arrangement the daemon
+    /// holds then (none when it could not be read).
+    ArrangementKept {
+        change: Change,
+        arrangement: Option<Arrangement>,
         result: Written,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
@@ -1238,6 +1278,12 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// Where this machine makes the projects of other machines' launches, after a read
+    /// (`written` false) or a choice.
+    TravelledFolder {
+        written: bool,
+        shown: Result<crate::travelled_folder::Shown, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -1485,7 +1531,7 @@ pub struct Actions {
     local: Connect,
     /// The machine `connect` goes to, when the window may show another.
     aim: Option<crate::machines::Aim>,
-    updates: UnboundedSender<Update>,
+    updates: Updates,
     bounds: Bounds,
     /// How this window signs what only the user's device may ask, when it was given its own
     /// (`Shell::sign_with`); the process's (`link::sign_with`) otherwise.
@@ -1499,18 +1545,14 @@ impl Actions {
     }
 
     /// Starts the details' thread; it ends when every `Actions` is dropped.
-    pub fn spawn(connect: Connect, updates: UnboundedSender<Update>) -> Actions {
-        Self::spawn_bounded(connect, updates, BOUNDS)
+    pub fn spawn(connect: Connect, updates: impl Into<Updates>) -> Actions {
+        Self::spawn_bounded(connect, updates.into(), BOUNDS)
     }
 
     /// The actions on `aim`'s connections, which go to the machine the window shows; what the
     /// window keeps (its folds, the drafts) and its appearance are this machine's, asked on
     /// `local`.
-    pub fn spawn_aimed(
-        aim: crate::machines::Aim,
-        local: Connect,
-        updates: UnboundedSender<Update>,
-    ) -> Actions {
+    pub fn spawn_aimed(aim: crate::machines::Aim, local: Connect, updates: Updates) -> Actions {
         let mut actions = Self::spawn_on(aim.connect(local.clone()), local, updates, BOUNDS);
         actions.aim = Some(aim);
         actions
@@ -1518,18 +1560,13 @@ impl Actions {
 
     pub(crate) fn spawn_bounded(
         connect: Connect,
-        updates: UnboundedSender<Update>,
+        updates: impl Into<Updates>,
         bounds: Bounds,
     ) -> Actions {
-        Self::spawn_on(connect.clone(), connect, updates, bounds)
+        Self::spawn_on(connect.clone(), connect, updates.into(), bounds)
     }
 
-    fn spawn_on(
-        connect: Connect,
-        local: Connect,
-        updates: UnboundedSender<Update>,
-        bounds: Bounds,
-    ) -> Actions {
+    fn spawn_on(connect: Connect, local: Connect, updates: Updates, bounds: Bounds) -> Actions {
         let (details, asked) = channel();
         let (to, updates_to) = (connect.clone(), updates.clone());
         std::thread::Builder::new()
@@ -1584,7 +1621,10 @@ impl Actions {
     pub fn send(&self, command: Command) {
         if matches!(
             command,
-            Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. }
+            Command::DraftRead { .. }
+                | Command::DraftWrite { .. }
+                | Command::WindowSet { .. }
+                | Command::ArrangementChange { .. }
         ) {
             let _ = self.keeper.send(Keep::Do(command));
             return;
@@ -1716,7 +1756,7 @@ enum Keep {
 }
 
 /// The keeper's thread: what the window keeps, one request at a time on a connection kept.
-fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update>, bounds: Bounds) {
+fn keep(connect: Connect, asked: Receiver<Keep>, updates: Updates, bounds: Bounds) {
     let mut conn: Option<Conn> = None;
     while let Ok(next) = asked.recv() {
         let command = match next {
@@ -1783,7 +1823,41 @@ fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update
                     params,
                     bounds.quick,
                 ));
-                Outcome::WindowKept { value, result }
+                Outcome::WindowKept { key, value, result }
+            }
+            Command::ArrangementChange { change } => {
+                let read = coded(&connect, &mut conn, "window.get", json!({}), bounds.quick);
+                match read {
+                    Ok(Ok(state)) => {
+                        let mut arrangement = Arrangement::of(&state["state"][arrange::KEY]);
+                        let before = arrangement.clone();
+                        arrangement.apply(&change);
+                        // What the change does not change is not written.
+                        let result = match arrangement == before {
+                            true => Written::Kept,
+                            false => written(coded(
+                                &connect,
+                                &mut conn,
+                                "window.set",
+                                json!({"key": arrange::KEY, "value": arrangement.to_json()}),
+                                bounds.quick,
+                            )),
+                        };
+                        Outcome::ArrangementKept {
+                            change,
+                            arrangement: Some(arrangement),
+                            result,
+                        }
+                    }
+                    other => Outcome::ArrangementKept {
+                        change,
+                        arrangement: None,
+                        result: match other {
+                            Ok(Err(refused)) => written(Ok(Err(refused))),
+                            _ => Written::Retry,
+                        },
+                    },
+                }
             }
             _ => unreachable!("only what the window keeps is sent to the keeper"),
         };
@@ -1837,12 +1911,7 @@ fn draft_of(found: &Value) -> Option<Draft> {
     Some(Draft { text, pictures })
 }
 
-fn read_details(
-    connect: Connect,
-    asked: Receiver<String>,
-    updates: UnboundedSender<Update>,
-    bounds: Bounds,
-) {
+fn read_details(connect: Connect, asked: Receiver<String>, updates: Updates, bounds: Bounds) {
     let mut conn: Option<Conn> = None;
     let mut tickets = Tickets::new();
     let mut pulls = Pulls::new();
@@ -1977,7 +2046,7 @@ fn sign_in_on(
     name: &str,
     machine: &str,
     bounds: Bounds,
-    updates: &UnboundedSender<Update>,
+    updates: &Updates,
 ) {
     let said = |then: crate::extensions::connections::Then, answer: Result<Value, String>| {
         updates
@@ -2050,7 +2119,7 @@ fn hold_tunnel(
     sign: Option<Sign>,
     ask: crate::tunnels::Ask,
     bounds: Bounds,
-    updates: &UnboundedSender<Update>,
+    updates: &Updates,
 ) {
     use crate::tunnels::{News, Tunnel, run_for_port};
     let said = |news: News| {
@@ -2235,7 +2304,10 @@ fn sign_in_step(
 fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Bounds) -> Outcome {
     match command {
         Command::Details(_) => unreachable!("the details have their own thread"),
-        Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. } => {
+        Command::DraftRead { .. }
+        | Command::DraftWrite { .. }
+        | Command::WindowSet { .. }
+        | Command::ArrangementChange { .. } => {
             unreachable!("what the window keeps has its own thread")
         }
         Command::Start {
@@ -2254,11 +2326,17 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             match ask_with_files(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message, &mode),
+                start_params(
+                    &project,
+                    workspace.as_deref(),
+                    &pick,
+                    &message,
+                    mode.as_deref(),
+                ),
                 (&images, &texts),
                 bounds.quick,
             ) {
-                Ok(Ok(started)) => started_outcome(&project, &started),
+                Ok(Ok(started)) => started_outcome(&project, &message, &started),
                 Ok(Err(why)) | Err(why) => Outcome::NotStarted { project, why },
             }
         }
@@ -2299,6 +2377,19 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::NewSessionSet { refused }
+        }
+        Command::SetNewSessionMode { mode } => {
+            let params = json!({"mode": mode});
+            let refused = match ask_alone(
+                connect,
+                "provider.set_new_session_mode",
+                params,
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::NewSessionModeSet { refused }
         }
         Command::JudgeNoticed => {
             // Shown or not, the notice goes once it was seen: the providers say it.
@@ -2788,8 +2879,24 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             }
         }
         Command::SignIns => Outcome::SignIns(
-            ask_alone(connect, "signin.list", json!({}), bounds.quick).and_then(|listed| listed),
+            ask_alone(
+                connect,
+                "signin.list",
+                json!({"checked": false}),
+                bounds.quick,
+            )
+            .and_then(|listed| listed),
         ),
+        Command::SignInCheck(program) => Outcome::SignInChecked {
+            answer: ask_alone(
+                connect,
+                "signin.list",
+                json!({"program": program}),
+                bounds.quick,
+            )
+            .and_then(|listed| listed),
+            program,
+        },
         Command::SignInStart(program) => Outcome::SignInStarted {
             answer: ask_alone(
                 connect,
@@ -2953,6 +3060,29 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                     .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
                 written: true,
                 project,
+            }
+        }
+        Command::TravelledFolderRead => {
+            let shown = ask_alone(connect, "travelled_folder.show", json!({}), bounds.quick);
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::TravelledFolderSet { folder } => {
+            let shown = ask_alone(
+                connect,
+                "travelled_folder.set",
+                json!({"folder": folder}),
+                bounds.quick,
+            );
+            Outcome::TravelledFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::travelled_folder::Shown::of(&shown)),
+                written: true,
             }
         }
         Command::RulesWrite { project, text } => {
@@ -3778,7 +3908,7 @@ fn start_params(
     workspace: Option<&str>,
     pick: &Pick,
     message: &str,
-    mode: &str,
+    mode: Option<&str>,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
@@ -3792,11 +3922,21 @@ fn start_params(
     })
 }
 
-fn started_outcome(project: &str, started: &Value) -> Outcome {
+fn started_outcome(project: &str, message: &str, started: &Value) -> Outcome {
+    let title = match started["agent"]["title"].as_str() {
+        Some(title) if !title.trim().is_empty() => title.to_owned(),
+        _ => message
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_owned(),
+    };
     match started["agent"]["id"].as_str() {
         Some(agent) => Outcome::Started {
             project: project.to_owned(),
             agent: agent.to_owned(),
+            title,
         },
         None => Outcome::NotStarted {
             project: project.to_owned(),
@@ -4050,7 +4190,7 @@ mod tests {
             message: "Fix the timeout".into(),
             images: Vec::new(),
             texts: Vec::new(),
-            mode: "auto".into(),
+            mode: None,
         }
     }
 
@@ -4068,7 +4208,8 @@ mod tests {
             next(&mut updates, Duration::from_secs(5)),
             Some(Outcome::Started {
                 project: "atlas".into(),
-                agent: "made-up-agent".into()
+                agent: "made-up-agent".into(),
+                title: "Fix the timeout".into()
             })
         );
     }

@@ -550,7 +550,9 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         model,
         effort,
         mode: None,
-        gate_mode: None,
+        // The default a new session starts in is for the sessions the user starts: what an outside
+        // agent starts through this door keeps Auto, whatever the user chose.
+        gate_mode: Some("auto".to_owned()),
         role,
         message,
         images: Vec::new(),

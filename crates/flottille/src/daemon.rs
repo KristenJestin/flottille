@@ -1198,6 +1198,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        method if method.starts_with("travelled_folder.") => (
+            match crate::travelled_folder::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("workspaces_folder.") => (
             match crate::workspaces_folder::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
@@ -1256,6 +1263,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         "project.set_message_checks" => (
             match projects::set_message_checks(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        "project.list" => (
+            match projects::list(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
@@ -1478,7 +1492,7 @@ pub(crate) mod tests {
     }
 
     /// A daemon on a throwaway store with the agent `a`, and its bus when `bus` says so.
-    fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
+    pub(crate) fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
         let paths = Paths {
             runtime: dir.join("runtime"),
             state: dir.join("state"),

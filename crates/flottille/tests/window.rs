@@ -12951,6 +12951,79 @@ fn type_folder(
 }
 
 #[gpui_kit::test]
+fn the_folder_for_projects_from_other_machines_is_chosen_in_settings_general(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let atlas = project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("general", cx);
+    let section = settings.read_with(cx, |page, _| page.travelled_folder().clone());
+    until(&shell, cx, "the folder is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    settle(cx);
+    // The data folder, its field filled, nothing to save nor to undo.
+    let shown = section.read_with(cx, |s, _| s.shown().cloned()).unwrap();
+    assert_eq!(
+        shown.folder,
+        user.path("data/flottille/projects").to_str().unwrap()
+    );
+    assert!(shown.own.is_none());
+    cx.update(|window, _| {
+        assert!(window.find("travelled-folder-path").visible());
+        assert!(window.try_find("travelled-folder-save").is_none());
+        assert!(window.try_find("travelled-folder-default").is_none());
+        let made = window
+            .find("travelled-folder-made")
+            .label()
+            .unwrap()
+            .to_owned();
+        assert!(made.contains("nothing is moved"), "{made}");
+    });
+    let typed = |text: &str, cx: &mut VisualTestContext| {
+        let field = section
+            .read_with(cx, |section, _| section.field().cloned())
+            .expect("the field is made once the section is drawn");
+        field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+        settle(cx);
+    };
+
+    // A folder inside a project's is refused, under the field.
+    typed(atlas.join("others").to_str().unwrap(), cx);
+    cx.update(|window, cx| window.click("travelled-folder-save", cx));
+    until(&shell, cx, "the refusal", |cx| {
+        section.read_with(cx, |s, _| s.problem().is_some())
+    });
+    settle(cx);
+    let said = section.read_with(cx, |s, _| s.problem().unwrap().to_owned());
+    assert!(said.contains("the project atlas"), "{said}");
+    cx.update(|window, _| assert!(window.find("travelled-folder-problem").visible()));
+
+    // A folder of the user's: kept in its file, and the data folder offered back.
+    typed("~/from-others", cx);
+    cx.update(|window, cx| window.click("travelled-folder-save", cx));
+    until(&shell, cx, "the folder kept", |cx| {
+        section.read_with(cx, |s, _| s.shown().is_some_and(|s| s.own.is_some()))
+    });
+    settle(cx);
+    // The refusal folded away with the save that went through.
+    cx.update(|window, _| assert!(window.try_find("travelled-folder-problem").is_none()));
+    let text = std::fs::read_to_string(user.path("config/flottille/travelled.toml")).unwrap();
+    assert!(text.contains("from-others"), "{text}");
+    cx.update(|window, _| assert!(window.find("travelled-folder-default").visible()));
+
+    cx.update(|window, cx| window.click("travelled-folder-default", cx));
+    until(&shell, cx, "the data folder again", |cx| {
+        section.read_with(cx, |s, _| s.shown().is_some_and(|s| s.own.is_none()))
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("travelled-folder-default").is_none()));
+    assert!(!user.path("config/flottille/travelled.toml").exists());
+}
+
+#[gpui_kit::test]
 fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut TestAppContext) {
     use flottille_window::workspaces_folder::Place;
 
@@ -13048,20 +13121,24 @@ fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut Test
     );
     cx.update(|window, cx| window.click("workspaces-choice-atlas-own", cx));
     settle(cx);
-    type_folder(&own, "/srv/trees/<project>", cx);
+    // An absolute folder the daemon can make: under this test's own tree.
+    let trees = user.path("trees");
+    let folder = format!("{}/<project>", trees.display());
+    let made = format!("{}/atlas", trees.display());
+    type_folder(&own, &folder, cx);
     cx.update(|window, cx| window.click("workspaces-save-atlas", cx));
     until(&shell, cx, "the project's own folder is kept", |cx| {
-        own.read_with(cx, |s, _| s.folder() == Some("/srv/trees/atlas"))
+        own.read_with(cx, |s, _| s.folder() == Some(made.as_str()))
     });
     settle(cx);
     let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
     assert!(
-        text.contains("workspaces_root = \"/srv/trees/<project>\""),
+        text.contains(&format!("workspaces_root = \"{folder}\"")),
         "{text}"
     );
     assert_eq!(
         text_of("workspaces-folder-atlas", cx),
-        Some("Its workspaces are made in /srv/trees/atlas".to_owned())
+        Some(format!("Its workspaces are made in {made}"))
     );
 
     cx.update(|window, cx| window.click("workspaces-choice-atlas-data", cx));

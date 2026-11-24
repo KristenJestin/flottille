@@ -21,6 +21,8 @@ mod connections;
 mod mcp;
 #[path = "../remote_asks.rs"]
 mod remote_asks;
+#[path = "../remote_child.rs"]
+mod remote_child;
 #[path = "../remote_code.rs"]
 mod remote_code;
 #[path = "../remote_deliveries.rs"]
@@ -35,8 +37,14 @@ mod remote_hub_only;
 mod remote_keys;
 #[path = "../remote_launch.rs"]
 mod remote_launch;
+#[path = "../remote_led.rs"]
+mod remote_led;
 #[path = "../remote_link.rs"]
 mod remote_link;
+#[path = "../remote_listed_state.rs"]
+mod remote_listed_state;
+#[path = "../remote_project_needs.rs"]
+mod remote_project_needs;
 #[path = "../remote_phone.rs"]
 mod remote_phone;
 #[path = "../remote_project_travels.rs"]
@@ -59,6 +67,8 @@ mod remote_uploads;
 mod ssh_agent;
 #[path = "../ssh_files.rs"]
 mod ssh_files;
+#[path = "../tree_parity.rs"]
+mod tree_parity;
 #[path = "../vault.rs"]
 mod vault;
 #[path = "../vault_ask.rs"]

@@ -4856,7 +4856,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     let verify = job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
         ),
         "{verify}"
     );
@@ -5245,6 +5245,48 @@ binary(=families)"
     );
 }
 
+#[test]
+fn a_pull_request_that_changes_the_run_sandbox_runs_the_real_programs_test() {
+    // The other tests drive the sandbox with fakes, which read nothing as a real program does
+    // (#1303): a change of the sandbox, of the run tool or of what makes the system's files
+    // readable in it runs the test of real programs, and only that file of its group.
+    let mut base = grouped_crate();
+    base.push("crates/flottille/tests/real_programs.rs");
+    base.push("crates/flottille/src/mounts.rs");
+    base.push("crates/flottille/src/landlock.rs");
+    base.push("crates/flottille/src/ssh_owned.rs");
+    base.push("crates/flottille/src/runs.rs");
+    base.push("crates/flottille/src/gate.rs");
+    base[2] = "crates/flottille/tests/group/agents.rs::#[path = \"../real_programs.rs\"]\nmod real_programs;\n";
+    for sandbox in ["mounts", "landlock", "ssh_owned", "runs"] {
+        assert_eq!(
+            selected_tests(
+                &base,
+                &[&format!("crates/flottille/src/{sandbox}.rs")],
+                &[],
+                ""
+            ),
+            "--test group_agents -E binary(=group_agents)&(test(/^real_programs::/))",
+            "{sandbox}"
+        );
+    }
+    // Another file of the crate's sources selects nothing of it.
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/src/gate.rs"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn the_jobs_that_run_tests_have_the_programs_the_real_programs_test_runs() {
+    // `ubuntu-latest` has ssh, git, gh, curl, node and cargo; pnpm is the one it lacks. The test
+    // fails where `CI` is set and a program is missing, so that none is skipped there.
+    for name in ["test-selected", "test"] {
+        let job = ci_job(name);
+        assert!(job.contains("npm install --global pnpm"), "{name}: {job}");
+    }
+}
+
 /// The `#[path = "../<name>.rs"]` files each group main of `tests/group/` declares: `(group, file)`.
 fn declared_by_the_groups() -> Vec<(String, String)> {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -5575,7 +5617,7 @@ fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
     let verify = ci_job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
         ),
         "{verify}"
     );
@@ -5608,6 +5650,7 @@ fn every_job_that_compiles_links_with_mold() {
         "check",
         "build-tests",
         "test-selected",
+        "guards",
         "doc-tests",
         "build",
         "hub",
@@ -5630,6 +5673,7 @@ fn a_pull_request_passes_verify_on_its_checks_and_its_selected_tests() {
                     ("DOC", "skipped"),
                     ("TEST", "skipped"),
                     ("SELECTED", selected),
+                    ("GUARDS", "success"),
                     ("SUITE", suite),
                     ("RUST", "true"),
                 ],
@@ -5651,6 +5695,70 @@ fn a_pull_request_passes_verify_on_its_checks_and_its_selected_tests() {
     // The decision that failed (no `suite`) or says "whole": the selected tests are not the suite.
     for suite in ["", "true"] {
         assert!(!run(suite, "success", "success"), "suite: {suite:?}");
+    }
+}
+
+#[test]
+fn a_pull_request_runs_the_guards_whatever_it_changes() {
+    // The tests that hold a rule over the whole repository (every command has its section of the
+    // docs and its place in the window, every gap is a step of the scale, every child is spawned
+    // by the daemon) failed dev eleven times in two days (21-23 November 2026): no pull request
+    // selected them, as none changed their files. They run on every pull request the Rust suite
+    // runs for, beside the selected tests, whatever it selects.
+    let guards = ci_job("guards");
+    assert!(
+        guards.contains("needs: [verified-on-dev, changes]"),
+        "{guards}"
+    );
+    let condition = condition_of(&guards);
+    let context = |rust: &'static str, suite: &'static str| {
+        [
+            ("needs.verified-on-dev.outputs.verified", ""),
+            ("needs.changes.outputs.rust", rust),
+            ("needs.changes.outputs.suite", suite),
+        ]
+    };
+    assert!(holds(&condition, &context("true", "false")));
+    // The whole suite holds them already; a change of the Android app or the site alone does not
+    // build the Rust code.
+    assert!(!holds(&condition, &context("true", "")));
+    assert!(!holds(&condition, &context("false", "false")));
+    for guard in [
+        "--bin flottille",
+        "--test window_rules",
+        "--test group_daemon",
+        "test(/^window_parity::/)",
+    ] {
+        assert!(guards.contains(guard), "{guard}: {guards}");
+    }
+    assert!(guards.contains("--profile ci"), "{guards}");
+}
+
+#[test]
+fn verify_fails_a_pull_request_whose_guards_did_not_pass() {
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |guards: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", "success"),
+                    ("BUILD", "skipped"),
+                    ("DOC", "skipped"),
+                    ("TEST", "skipped"),
+                    ("SELECTED", "success"),
+                    ("GUARDS", guards),
+                    ("SUITE", "false"),
+                    ("RUST", "true"),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    assert!(run("success"));
+    for guards in ["failure", "cancelled", "skipped"] {
+        assert!(!run(guards), "guards: {guards}");
     }
 }
 
@@ -6310,6 +6418,77 @@ fn android_sign_runs_on_a_push_and_on_a_release_build_of_main_only() {
         ];
         assert!(!holds(&sign, &context), "android {result}");
     }
+}
+
+#[test]
+fn a_pull_request_writes_no_cache() {
+    // A pull request's cache is read by that pull request alone, and the repository holds 10 GB:
+    // the hub's and the build's of each pull request (1.3 GB) evicted dev's, which every run
+    // reads (10.7 GB held on 23 November 2026). A pull request reads dev's and writes none.
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let lines: Vec<&str> = workflow.lines().collect();
+    let mut caches = 0;
+    for (at, line) in lines.iter().enumerate() {
+        if !line.contains("uses: Swatinem/rust-cache@v2") && !line.contains("uses: actions/cache") {
+            continue;
+        }
+        caches += 1;
+        let step: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|l| !l.trim_start().starts_with("- "))
+            .copied()
+            .collect();
+        let step = step.join("\n");
+        if line.contains("actions/cache/restore") {
+            continue;
+        }
+        assert!(
+            !line.contains("uses: actions/cache@"),
+            "a cache that restores and saves in one step saves on a pull request: {line}"
+        );
+        if line.contains("actions/cache/save") {
+            let condition = condition_of(&format!("{line}\n{step}"));
+            let context = |event: &'static str| [("github.event_name", event)];
+            assert!(holds(&condition, &context("push")), "{condition}");
+            assert!(!holds(&condition, &context("pull_request")), "{condition}");
+            continue;
+        }
+        let save = step
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("save-if:"))
+            .unwrap_or_else(|| panic!("a rust-cache with no save-if, line {}: {step}", at + 1))
+            .trim();
+        assert!(
+            save == "false" || save == "${{ github.event_name != 'pull_request' }}",
+            "line {}: {save}",
+            at + 1
+        );
+    }
+    assert!(caches >= 6, "{caches} caches");
+}
+
+#[test]
+fn the_android_job_keeps_gradle_s_downloads_between_runs() {
+    // Maven Central answered the Robolectric jar's download with 429, Too Many Requests, three
+    // times in a row: the Android job failed dev six times in two days (21-23 November 2026).
+    // Gradle's downloads are kept from one run to the next: the jar is fetched once per version.
+    let android = ci_job("android");
+    let restore = android
+        .find("uses: actions/cache/restore@v4")
+        .expect("the downloads are restored");
+    let run = android
+        .find("apps/android/ci.sh")
+        .expect("the job runs ci.sh");
+    assert!(restore < run, "{android}");
+    let save = android
+        .find("uses: actions/cache/save@v4")
+        .expect("the downloads are kept");
+    assert!(run < save, "{android}");
+    assert_eq!(
+        android.matches("~/.gradle/caches/modules-2").count(),
+        2,
+        "the same folder restored and saved: {android}"
+    );
 }
 
 /// Every file under `dir`, folders walked.

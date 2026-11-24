@@ -177,9 +177,11 @@ and which judges a URL the agent built (`tools.md`, "The web").
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
-`agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
+`agent_launch`, and it cannot do anything the gate did not see (in Full, what a command it runs
+does is the user's own, §7.1). Nor can it drive the daemon from
 a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
-"Transport"). The agent's own permission
+"Transport"), but in Full, where nothing confines a command, one it runs can start a process
+that does not descend from it (`systemd-run --user`), which the daemon then accepts. The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
 ### 4.3 The tools an agent gets (first milestones)
@@ -231,8 +233,7 @@ Flottille's own tools:
   `led` and `handed`, for a root only, start a session in a workspace (existing or new) or its own
   place, judged, in the tree's mode, its first message the agent's and never the user's, base when
   that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
-  session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
-  ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
+  session is piloted by the caller, asks it its questions and wakes it at each end of its turns; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
   with the id. With `project`, a `led` or `handed` session is started in another registered
   project, held for the user every time, in every mode (§7.2): a full lead of that project, in its
   places, with its tools, settings and vault entries; a child never is.
@@ -359,8 +360,8 @@ ends: the line, the exit code, the duration and the last lines of the output, ma
 (`docs/tools.md`, "Commands").
 
 An agent that pilots a session (`agent_launch` with `kind: led`) is woken, between turns, by
-`session-turn-ended` when a turn of that session asked it a question (`ask`) or reported, and when
-the session ends or fails; a plain turn's end wakes nobody. The delivery names the session, says
+`session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
+the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
@@ -459,7 +460,7 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **A following** is a subscription whose source is a session the agent leads (`agent_launch`
   with `kind: led`): it has no deadline, and ends when the agent unsubscribes (`forge unsubscribe`
   with `session`), when the session ends or fails, or when the agent ends. It wakes the agent at
-  the end of a turn of the session that asked it or reported, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
+  each end of a turn of the session, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
   unless it says `follow: false`: the rounds of the items read it, and it wakes the agent once
   when it waits on a manual step and when it ends, which ends the following (`docs/forges.md`,
   "Following a run").
@@ -712,9 +713,10 @@ says what kind of call it is, and the session's **mode** says who answers it.
   every end of a line whose program the gate does not know, so that no wrapper turns them into
   calls to judge.
 
-Only a push the gate read and let through goes out: every run's environment rewrites push URLs
-to nowhere, but a run that is itself a `git push` the user, the judge or Full mode allowed (`docs/tools.md`,
-"Tasks and runs").
+Only a push the gate read and let through goes out: in Ask and Auto, every run's environment
+rewrites push URLs to nowhere, but a run that is itself a `git push` the user or the judge allowed
+(`docs/tools.md`, "Tasks and runs"). In Full a run has no such environment: a push from a script
+is neither walled nor checked (the gate still reads a `git push` that is a line of its own).
 
 What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
 a malformed call, a login printed, the daemon driven from a command.
@@ -722,11 +724,23 @@ a malformed call, a login printed, the daemon driven from a command.
 ### 7.1 The mode and the judge
 
 Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
-bar, the same in the composer that starts a session. A session the user starts starts in Auto
-unless the user chose another mode in that composer (or `flottille agent start --mode`), and the
-mode is the root's before its first message, so that even the first turn's calls follow it. That
-composer is back on Auto each time it is shown and after each start: a choice never carries over to
-the next session, so that Full is never on by mistake. A tree has one mode, its
+bar, the same in the composer that starts a session. A session the user starts starts in the
+mode the user chose for new sessions on that machine (Settings, "New sessions", Mode, or
+`flottille provider new-session --mode`; Auto until they choose, `new_session_mode` in
+`providers.toml`, `provider.set_new_session_mode`), unless the user chose another mode in that
+composer (or `flottille agent start --mode`), and the mode is the root's before its first message,
+so that even the first turn's calls follow it. That composer shows the machine's default before
+the first message, each time it is shown and after each start: a choice for one session never
+carries over to the next. The default is the user's alone, for the sessions the user starts: a
+session an agent starts, and a child, keep the rules below (a child follows its tree's mode, a
+session an agent starts in another project is in Auto, never above its launcher's tree's; the
+pilot door's `agent_start`, which an outside agent drives, starts in Auto; the session an
+extension starts for the user, a spec's writer or its developer, does not go through
+`agent.start` and stays in Auto; a launch from a tree in Full on another machine goes Auto there
+unless the user's signed switch raises it), so that a default of Full lends nothing to a tree that
+is not in Full. Choosing Full as the default
+says once, under the choice, what Full lends: a session's commands run as the user's, as in their
+terminal: nothing is held back, the vault included (§7.2). A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
@@ -751,15 +765,25 @@ with says so. Reading another session says the mode of that session's tree too.
   the first message of a session to another it did not start, whose leave only the user gives
   (§7.2), a tracker change that would send the worklog's token to another site or name
   another entry for it (`docs/tickets.md`, "Logging time"), and a worklog deleted
-  (`docs/tickets.md`, "Correcting a worklog"). Bare mode
-  stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
-  keep the user's logins and Flottille itself included. Each call it let through is recorded as
+  (`docs/tickets.md`, "Correcting a worklog"). **A command it runs is the user's own, as in
+  their terminal**: no namespace, no Landlock and the daemon's environment, as a command the user
+  typed, so that the real `git`, `gh`, `bkt`, `acli` and `ssh` work there. **Nothing is held
+  back from it**: their keys, SSH agent, display, sign-ins and keyring, and Flottille's own
+  folders, its vault and the key that signs as this device (`docs/vault.md`, `docs/remote.md`).
+  Flottille says so: in the mode's line, to the agent at the switch, and in the project's map.
+  Leaving Full confines the next command again, and the agent is told; a command started in Full
+  keeps what it started with (`docs/tools.md`, "In Full, a run is the user's own"). It is given
+  its project's map at its start and again at the switch: its repositories with their folder,
+  forge, remote, base branch and command line, its tracker and its place. Bare mode stays, the
+  sandbox does not: the agent has only Flottille's tools, `run` stays its only way, and every
+  refusal below stays a refusal of the gate, those that keep the user's logins and Flottille
+  itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
   and its step in the session says "allowed by Full mode". The control draws Full in the alarm
   colour, so that it is never on by mistake. A request made before the switch stays the user's to
   answer. **Its limit:** code the agent runs (an interpreter's inline code, a script it wrote) acts
-  with the user's rights, and the gate does not see what that code touches; only a sandbox would
-  close that. The refusals below protect the user from an agent's direct or accidental use of
+  with the user's rights, and the gate does not see what that code touches: in Full, no sandbox
+  closes that. A hardened Full (a filtered bus, the vault encrypted at rest) is not built. The refusals below protect the user from an agent's direct or accidental use of
   what must never be touched; they are **not a sandbox**: a program the agent runs may still do
   any of it on its own. The same holds for a connection's server (`extensions.md`,
   "Connections"): the gate sees the action called and its arguments, never what the server then
@@ -1085,8 +1109,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   machine of the user together (a session of another machine carries that machine's name on its
   second line, `server`, greyed with `server offline since 22:14` while it is off,
   `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
-  Add project choosing which, a page of another machine naming it once in its path line, `server /
-  Settings / Agents`, `docs/remote.md`, "Built (#1182)"). **Each project row says where it lives**: with
+  Add project choosing which, without anything else switching: the list stays this machine's, each
+  machine has its own connections, kept open, and a page of another machine reads that machine
+  only, `docs/remote.md`, "Built (#1271)"). **Each project row says where it lives**: with
   another machine paired, a mark after its name for every machine that has it (at the end of the row,
   before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
   included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
@@ -1097,13 +1122,36 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   name but other repositories stay two rows, the second saying its machine in small at the end
   of its row. A project that only machines that are off have is greyed and says `offline since
   14:02` under its row, its ink fading as the machine goes and comes back. The Projects header's
-  "⋯" (offered once there is another machine) holds **Group by machine**, a switch: the list
+  "⋯" holds **Group by machine**, a switch (off, with "One machine" as its reason, until there is
+  another machine; the menu is built once, so a machine that comes or goes never closes it): the list
   becomes one foldable section per machine (its icon, its name and its state, `this machine` for
   this one), each with the projects that machine has and its own sessions only, a project several
   machines have under each of them; switched off, the one list comes back, and the rows move
   between the two over the sidebar's motion. The choice and each section's fold are kept by the
   daemon with the sidebar's folds (`window.get`, `sidebar`: `by_machine`, `machines`,
-  `on_machines`), so every window of the machine shows the same arrangement. Sessions are sorted by
+  `on_machines`), so every window of the machine shows the same arrangement. **The list is the
+  user's to arrange** (#1229): a project row is dragged to its place (the row lifts and follows
+  the pointer over a dashed slot, the rows around slide aside, the dropped row settles; Escape, or
+  a drop beside the list, puts everything back). The Projects header's "⋯" (always there) holds
+  **New group…**, a dialog with one field: a group is a foldable heading with its name and its
+  count, made at the end of the groups and unfolded, which comes before the projects outside any
+  group. Projects are dragged into it (onto its heading: first place) and out of it, and groups
+  are dragged among themselves by their heading; a folded group says nothing of its rows but its
+  count (the strongest mark of its rows beside it comes with #1265). A group that is made unfolds
+  and fades in, with its space; the rows that go into it from the list slide there, and when the
+  stored arrangement reaches a window after its first rows they slide into their groups rather
+  than jump. A project that is new, or newly seen on a machine, is at the end of the list, outside
+  any group, and unfolds there. The order and the groups are the user's, so they are kept by the
+  daemon under their own key (`arrangement`: `order`, `groups`, `docs/protocol.md`), apart from the
+  sidebar's folds so that one window's fold never erases another's groups, read by a window when
+  it opens and again at each change it makes (applied to what the daemon holds, so that a window
+  that was open before another made a group does not erase it, but two windows changing it at the
+  very same instant can still lose one of the two changes: the daemon reads, then writes), never
+  in a project; a project is
+  dragged from its own row, never from the sessions and buttons it holds; New group… is not offered while the projects are shown by machine
+  (the entry says "Shown by machine"), and a project that a machine does not give for now keeps its
+  place and group for when it is back; Group by machine shows the sections instead of
+  them (the list folds away and fades) and switched off they come back as they were. Sessions are sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
@@ -1111,7 +1159,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   page, and one with no session is not in the sidebar. A session is titled by the title its agent
   gives it in its first turn (`session_title`, 3 to 8 words, `docs/tools.md`, "The session's
   title") or the user gives it (`Rename…` in its row's "⋯" menu and its header, a dialog with a
-  labelled field; the user's title always wins), and until then by the first line of
+  labelled field; the user's title always wins), a session an agent of another machine or an
+  extension launched by that launch's title (not one an agent of this machine launched, nor one
+  detached from it since), and until then by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
   is `agent <id>` until a later message of the user does); a new title fades in over the old one in
   the row and the header; a session an agent started says it in
@@ -1303,7 +1353,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   named "default". Choosing the recommended model of the first provider back clears the choice
   (`provider.set_new_session`, `docs/agents.md`, "Providers": the project's file first, then this choice, then the last
   pick in the composer, then what the provider proposes); a model or an effort its provider no
-  longer offers falls back to what it proposes, and one line under the select says so, once. It
+  longer offers falls back to what it proposes, and one line under the select says so, once. Under
+  it, **Mode**: a segmented choice, Ask, Auto or Full (Full in the alarm colour), with its hint
+  ("Sessions agents start, and children, keep their own rules."), which the machine keeps
+  (`provider.set_new_session_mode`) and the composer that starts a session shows before its first
+  message (§7.1); while Full is chosen, a note under it says once what Full lends ("In Full, a
+  session's commands run as yours, as in your terminal: nothing is held back, the vault included."),
+  which unfolds and fades in, and folds away with its gap. It
   enters with the page's other sections and its fold of the line fades in and out. **Rules for every project**
   ("What every agent is told, in every project. A project adds its own, or uses only its own."):
   its editor, Reset to default and Save once it changed; saving says in a toast that the agents
@@ -1659,8 +1715,9 @@ nothing built, in [`extensions.md`](extensions.md).
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- A session the user starts starts in Auto unless the user chose its mode in the composer that
-  starts it, which is back on Auto after each start, and a tree has one mode, its root's, read at
+- A session the user starts starts in the mode the user chose for new sessions on that machine
+  (Auto until they choose) unless the user chose its mode in the composer that
+  starts it, which is back on that default after each start, and a tree has one mode, its root's, read at
   each call; Auto without a judge asks the user as Ask does. Only the user chooses Full, at a
   session's start or later; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
   of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is

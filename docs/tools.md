@@ -554,6 +554,37 @@ pending requests.
     rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
+- **In Full, a run is the user's own, as in their terminal, and nothing is held back from it.**
+  A command an agent runs while its session is in Full (the mode read at the run's start: a
+  switch reaches the next run, never one that goes on) gets none of the above: the daemon's
+  environment as it is, then the place's variables, as a command the user typed (the SSH agent,
+  the session bus and so the keyring, the display, `XDG_RUNTIME_DIR`, the forge and tracker
+  command lines' sign-ins, the user's git settings and hooks), and no namespace and no Landlock,
+  so that `git`, `gh`, `bkt`, `acli` and the `ssh` git runs work as in the user's terminal, and so
+  do the user's own folders (`git config --global`, a file made in `~`). Flottille's own folders
+  are not kept from it either: its runtime folder (the daemon's socket, the bridges' tokens, the
+  pushes' folders), its state (the store, the connections' vault sockets, its keys, the device
+  key that signs as this machine, `docs/remote.md`), the agents' own folders, and the vault's
+  items in the keyring (`docs/vault.md`). Nor is the machine: a command can start a process
+  outside Flottille (`systemd-run --user`, the compositor, X11), which the daemon's socket then
+  accepts as any of the user's. Flottille says so where Full is chosen (the mode's line), to the
+  agent at the switch, and in the project's map, which asks it to take the care the user would.
+  A `git push` in Full is such a run too, never the lent push below: the project's message checks
+  and branch format still read it first, outside any sandbox. `run` stays the only way to start
+  a command, shell syntax stays refused, and the gate's refusals stay (a launcher such as `ssh`
+  named on the line, `ssh host command` included, a login printed): bare mode holds, the sandbox
+  does not (`docs/design.md` §7.1). **Leaving Full confines the next run again**, and each live
+  agent of the tree is told so, between turns; a command started in Full and still running, a
+  service or a watcher among them, keeps what it started with until it ends. What a run in Full
+  wrote outlives it (`~/.ssh`, `~/.gitconfig`, a file of `~/.config`): a later push in Ask or
+  Auto still judges those files each time, as below and in `docs/vault.md`, "The gaps". **A
+  `git config --global` in Full (run by a program, as the gate refuses it on a line) replaces
+  `~/.gitconfig`** (git writes a new file and renames it
+  over the old), which is no longer the file the daemon found at its start: from then on every
+  push over SSH in Ask or Auto is refused, saying so, until the daemon restarts, or the work is
+  done in Full (#1322). The tools
+  `forge` and `tickets` stay for what only they do: following checks and reviews, which wakes the
+  agent, the window's view of pull requests and tickets, and every write to Jira.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
@@ -563,8 +594,10 @@ pending requests.
   or a task the user runs) gets a runtime folder of its own,
   `$XDG_RUNTIME_DIR/flottille/display/run-<id>` (mode 0700), holding only a hard link of the
   session's Wayland socket, removed when the run ends; its `XDG_RUNTIME_DIR` is that folder and
-  `WAYLAND_DISPLAY` names the socket: no session bus, no keyring, no other socket, and Landlock
-  still keeps the real runtime folder out of reach. X11's `DISPLAY` (with `XAUTHORITY`) is given
+  `WAYLAND_DISPLAY` names the socket: in Ask and Auto, no session bus, no keyring, no other
+  socket, and Landlock still keeps the real runtime folder out of reach. **In Full the setting
+  changes nothing**: a run there is the user's own (above), with their display, session bus and
+  keyring, and no runtime folder of its own is made for it. X11's `DISPLAY` (with `XAUTHORITY`) is given
   only when the session has no Wayland, which the setting's help says: an X11 client can read the
   keys typed in other windows and type into them; Landlock then leaves every abstract socket of
   the session within the run's reach, X11's and a session bus `dbus-launch` put on one alike,
@@ -601,7 +634,8 @@ pending requests.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A run that is itself a `git push` (its own
-  line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
+  line, no wrapper) the user, the judge or a rule let through (in Full, a push is a run of the
+  user's own, above) does not get the
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
   environment and `core.hooksPath=/dev/null`, the user's own `ssh` command (never a
   repository's `core.sshCommand`) and git's own transports alone (never an `ext::` URL), and
@@ -808,7 +842,9 @@ judges its lines as it judges `gh`'s, by what they do, and lists its reads in th
   --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another
   action), or re-runs the failed jobs of its last
-  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
+  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `base` (the branch it
+  goes into, in place of the workspace's, which must exist on the forge; `docs/forges.md`, "A
+  workspace's base"), `reviewers`
   (each a person as the agent knows them, "People" below; added to the project's, none twice,
   and asked **when the pull request is opened, on GitHub (`gh pr create --reviewer`) and on
   Bitbucket (`bkt pr create --reviewer`) alike**: an agent adds none afterwards with `edit`,
@@ -1661,7 +1697,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?, project?, machine?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`machine`** starts it on another of the user's machines, a runner, judged by that machine's gate (`docs/remote.md`, "Starting a session on another machine"); left out, this machine, and nothing changes. Its description says it: the agent works on a copy of the caller's place there (its branch and its uncommitted changes are sent with it), and its commits come back on a branch of their own, `refs/flottille/machines/<machine>/<launch>/<branch>`, which the caller reviews and merges as a local child's work; nothing moves its branch. The daemons send the code, never the agent, which gets no tool or network for it; `workspace`, `new_workspace`, `repositories`, `branch`, `base` and `project` are refused with `machine`. The caller is answered with the agent started there, or the request waiting for the user there (`request #4 on server is waiting for the user`). **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it when it asks, reports or ends; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). **`project`**, for `led` and `handed`, is another registered project to start the session in, held for the user every time ("Sessions an agent starts", "In another project"); a child naming another project is refused before anything is asked. A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` what the user chose for new sessions when left out and that choice is for this provider (the project's model first), else the provider's defaults (`docs/agents.md`, "Providers"; a child, a led and a handed session alike): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`, or one branch for every repository taken) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). The one exception is an extension's: the pilot of a review launches its passes through `review`, never through this tool (`docs/design.md` §5.1). |
+| `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?, project?, machine?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`machine`** starts it on another of the user's machines, a runner, judged by that machine's gate (`docs/remote.md`, "Starting a session on another machine"); left out, this machine, and nothing changes. Its description says it: the agent works on a copy of the caller's place there (its branch and its uncommitted changes are sent with it), and its commits come back on a branch of their own, `refs/flottille/machines/<machine>/<launch>/<branch>`, which the caller reviews and merges as a local child's work; nothing moves its branch. The daemons send the code, never the agent, which gets no tool or network for it; `workspace`, `new_workspace`, `repositories`, `branch`, `base` and `project` are refused with `machine`. The caller is answered with the agent started there, or the request waiting for the user there (`request #4 on server is waiting for the user`). **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it at each end of its turns; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). **`project`**, for `led` and `handed`, is another registered project to start the session in, held for the user every time ("Sessions an agent starts", "In another project"); a child naming another project is refused before anything is asked. A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` what the user chose for new sessions when left out and that choice is for this provider (the project's model first), else the provider's defaults (`docs/agents.md`, "Providers"; a child, a led and a handed session alike): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`, or one branch for every repository taken) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). The one exception is an extension's: the pilot of a review launches its passes through `review`, never through this tool (`docs/design.md` §5.1). |
 | `session_send {session, project?, text}` (a root) | A message to a session, named by its id or its title ("Sessions that read each other"), the caller started (`agent_launch` with `led` or `handed`), to the agent that started the caller's session ("Sessions an agent starts", below), or to any other session, of its project or another, with the user's leave, asked once per pair, and across projects even for a session the caller started ("Sessions that talk to each other"). |
 | `session_read {session?, project?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session, of the caller's project or of another (`project`, "Sessions that read each other"), framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode. `session` is an id or a title ("Sessions that read each other", below). |
 | `session_title {title}` (a root) | Names the caller's session for the user: 3 to 8 words on one line, at most 60 characters ("The session's title", below). |
@@ -1716,7 +1752,7 @@ new_workspace?}`. The two kinds differ in who it answers to afterwards:
 
 - **`led`**: an autonomous job of its own that the agent pilots. The user sees it under its pilot
   and may talk to it like any session; it asks its pilot its questions (`ask`), and the pilot is
-  woken when it asks, reports or ends ("Following a session", below).
+  woken at each end of its turns, and when it ends ("Following a session", below).
 - **`handed`**: a session the agent starts for the user and then lets go. It is the user's; its
   questions go to the user, and the agent hears nothing more of it unless it writes to it with
   `session_send`.
@@ -1741,7 +1777,10 @@ Both are the same kind of session otherwise:
 - **No chain without the user.** The session keeps who started it (`launched_by`), led or handed.
   A session an agent started may start one in turn only as base, whatever its mode (`this agent
   is a session another agent started for the user, and a session it starts comes to the user,
-  …`): each step of a chain is the user's.
+  …`): each step of a chain is the user's. Across machines too: a session started here for an
+  agent of another machine is one an agent started, and a launch on another machine says its
+  caller was itself started (`launched`), which that machine's gate holds for its user the same
+  way (`remote.md`, "Starting a session on another machine").
 - **The session is the user's to talk to**: no parent, depth 0, in the project's tree list like
   any root (`agent.created` with no parent). **Its first message is the agent's, never the
   user's**: it is delivered as `[flottille:launched]`, under a line naming the agent that wrote it
@@ -1763,7 +1802,8 @@ Both are the same kind of session otherwise:
   it; the `agent_*` tools do not reach it. `agent.show` and the tree give `launched_by`, and
   `led_by` (its pilot's id, `null` for a handed session).
 - **The user talks to a led session directly**: what they write reaches it as from the window to
-  any session, and its pilot is neither asked nor woken by it.
+  any session: its pilot is not asked, and hears that turn's end like any other, the wake saying
+  the turn followed the user's own message, so that the pilot does not step into their talk.
 - **The pilot ends**: a led session is part of its pilot's job, so **it ends with it**. Ending a
   session for good (the window's End session, `agent.stop`, `flottille agent stop`, `agent_stop`)
   also ends the sessions it leads, in its project and in other projects, and those they lead in
@@ -1773,7 +1813,8 @@ Both are the same kind of session otherwise:
   real end does it: the end of a pilot's turn, a crash (its process starts again, or the pilot
   fails and may be resumed, its sessions staying led by it), a compaction and a restart of the
   daemon end nothing. The window's confirmation lists the sessions that end with it, by title and
-  project, each with the work its workspace holds that is not saved, read by `agent.ending`
+  project (and machine, for one it leads on another machine, which ends there with it), each with
+  the work its workspace holds that is not saved, read by `agent.ending`
   (`docs/protocol.md`): one confirmation for the whole end. The card of an `agent_stop` the user
   is asked about says the same, by the same read: one line for each led session that ends with
   the session named (its title, its project, and what it holds that is not saved), so that the
@@ -1830,15 +1871,18 @@ itself (`fs_*`, `run`, `workspace`, git stay its own project's); the session doe
 #### Following a session
 
 A pilot is woken by a delivery, `session-turn-ended`, between turns (`docs/design.md` §5.2), when
-its led session ends a turn in which it asked (`ask`) or reported (`report`), and when it ends or
-fails. **A plain turn's end wakes nobody.** The wake names the session (its title and id), says why
-(`it asked you a question with ask`, `it reported`, or, for the end of the session, `ended: <why>`
-or `failed: <why>`) and holds the session's last message, masked and cut at 2,000 characters, the
-cut said (`[cut: N more characters; session_read reads the rest]`). The questions it asked its
-pilot in that turn that still wait come before that last message (`Its question to you:`), masked
-and cut the same way, 4,000 characters of them at most in all, those past it counted (`[2 more
-questions; session_read reads them]`). A question asked in the middle of a long turn adds no wake
-of its own: the turn's end carries it, and `session_read` says it at once.
+its led session ends a turn, whether or not the turn asked (`ask`) or reported (`report`), and when
+it ends or fails. **Every end of a turn wakes it, once.** The wake names the session (its title and
+id), says why (`it asked you a question with ask`, `it reported`, `the turn failed`, nothing for a
+plain turn, or, for the end of the session, `ended: <why>` or `failed: <why>`), says when the turn
+followed the user's own message to the session, and holds the session's last message, masked and
+cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
+The questions it asked its pilot in that turn that still wait come before that last message
+(`Its question to you:`), masked and cut the same way, 4,000 characters of them at most in all,
+those past it counted (`[2 more questions; session_read reads them]`). A question asked in the
+middle of a long turn adds no wake of its own: the turn's end carries it, and `session_read` says it
+at once. A turn cancelled because a delivery was not taken in time wakes nobody: the turn that
+takes that delivery does, once.
 Its words are data, not instructions. Nothing reads the text of a message to find a question:
 Flottille recognizes nothing by its text.
 

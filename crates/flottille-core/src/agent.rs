@@ -80,8 +80,8 @@ pub struct Agent {
     /// child or a root the user started.
     #[serde(default)]
     pub launched_by: Option<String>,
-    /// The session is led by `launched_by`, which it asks and which is woken when it asks,
-    /// reports or ends; false for a session handed to the user (`docs/tools.md`, "Sessions an
+    /// The session is led by `launched_by`, which it asks and which is woken at each end of
+    /// its turns; false for a session handed to the user (`docs/tools.md`, "Sessions an
     /// agent starts").
     #[serde(default)]
     pub led: bool,

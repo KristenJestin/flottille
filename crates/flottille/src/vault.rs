@@ -294,6 +294,19 @@ struct ShareWith {
     machine: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FromFile {
+    project: String,
+    /// The file, by its path in the project.
+    path: String,
+    /// Left out, the name a launch that needs the file asks for (`travelled::entry_for`).
+    name: Option<String>,
+    /// Whether it takes the file again into the entry made of it before.
+    #[serde(default)]
+    replace: bool,
+}
+
 /// What a client that does not sign is answered for `vault.share`.
 pub const NOT_SIGNED: &str = "sharing a vault entry is signed by the user's device: ask it with `flottille vault share`, or from the window's Settings, Vault";
 
@@ -341,6 +354,15 @@ pub async fn call(
         "vault.share" => {
             let ShareWith { name, machine } = serde_json::from_value(params)?;
             share(&daemon, &name, &machine).await
+        }
+        "vault.from_file" => {
+            let FromFile {
+                project,
+                path,
+                name,
+                replace,
+            } = serde_json::from_value(params)?;
+            from_file(&daemon, &project, &path, name, replace).await
         }
         "vault.asks" => {
             let open = daemon.read(asks)?.open;
@@ -505,6 +527,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     };
     if let Some(secret) = &asked.secret {
         // Masked before it is kept anywhere, so that nothing written after can hold it.
+        mask_lines(secret, entry.bound.as_deref());
         secrets::add_vault_login(entry.username.as_deref(), secret);
         daemon
             .vault
@@ -529,6 +552,179 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         answered(daemon, request, Some(&entry));
     }
     Ok(entry.to_json())
+}
+
+/// The vault entry made from the file `path` of the project `project`, which its setup copies
+/// (`docs/remote.md`, "What travels"): the user's act, from a launch on another machine that
+/// lacks the file, so that it is shared with that machine through the vault, never as a file. The
+/// daemon reads the file only now: inside the project's folder, reached through no link, a text
+/// of `LARGEST_COPIED` bytes at most; its text is masked, line by line too, before it is kept,
+/// and nothing that is said of it holds a word of it. The entry is bound to the file
+/// (`uses::file_use`), the only entry a launch lays it from; an entry of that name is replaced
+/// only when it is that file's and `replace` says so, never another entry.
+async fn from_file(
+    daemon: &std::sync::Arc<Daemon>,
+    project: &str,
+    path: &str,
+    name: Option<String>,
+    replace: bool,
+) -> Result<Value, Failure> {
+    let found = crate::projects::load_project(daemon, project)?;
+    if !crate::travelled::fit_path(path) {
+        return Err(Failure::refused(format!(
+            "{:?} is not a path inside the project {project}",
+            path.chars().take(64).collect::<String>()
+        )));
+    }
+    let root = std::fs::canonicalize(&found.folder)
+        .map_err(|error| Failure::refused(format!("{}: {error}", found.folder.display())))?;
+    let file = root.join(path);
+    let cannot = |why: &str| Failure::refused(format!("{path} of {project} {why}"));
+    // Opened once, never through a link: what is checked is the file that is read, whatever is
+    // planted at the path between the two.
+    let mut opened = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&file)
+            .map_err(|error| match error.raw_os_error() {
+                _ if error.kind() == std::io::ErrorKind::NotFound => cannot("is not there"),
+                Some(libc::ELOOP) => {
+                    cannot("is not a file: a link or a folder is not made an entry")
+                }
+                _ => cannot("cannot be read"),
+            })?
+    };
+    let metadata = opened.metadata().map_err(|_| cannot("cannot be read"))?;
+    if !metadata.is_file() {
+        return Err(cannot(
+            "is not a file: a link or a folder is not made an entry",
+        ));
+    }
+    if std::fs::canonicalize(&file).map_or(true, |real| !real.starts_with(&root)) {
+        return Err(cannot("leads out of the project"));
+    }
+    if metadata.len() > crate::travelled::LARGEST_COPIED {
+        return Err(cannot(&format!(
+            "is more than {} KiB: a vault entry holds less",
+            crate::travelled::LARGEST_COPIED / 1024
+        )));
+    }
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut opened, crate::travelled::LARGEST_COPIED + 1),
+        &mut text,
+    )
+    .map_err(|_| cannot("cannot be read"))?;
+    if text.len() as u64 > crate::travelled::LARGEST_COPIED {
+        return Err(cannot("grew while it was read"));
+    }
+    let text = zeroize::Zeroizing::new(String::from_utf8(text).map_err(|_| cannot("is not text"))?);
+    let bound = uses::file_use(project, path);
+    mask_lines(&text, Some(&bound));
+    let name = name.unwrap_or_else(|| crate::travelled::entry_for(project, path));
+    let existing = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == name);
+    match existing.map(|entry| entry.bound) {
+        None => {}
+        Some(Some(own)) if own == bound => {
+            if !replace {
+                return Err(Failure::refused(format!(
+                    "the vault entry {name} holds {path} of {project} already: replace it to \
+                     take the file again"
+                )));
+            }
+        }
+        Some(own) => {
+            let what = own.as_deref().and_then(use_said).map_or_else(
+                || "holds another secret".to_owned(),
+                |said| format!("is for {said}"),
+            );
+            return Err(Failure::refused(format!(
+                "the vault entry {name} {what}: {path} of {project} is not made that entry; \
+                 remove it first, or give another name"
+            )));
+        }
+    }
+    let made = set(
+        daemon,
+        json!({"name": name, "secret": *text, "for": bound,
+            "description": format!("The file {path} of the project {project}, which its setup copies")}),
+    )
+    .await
+    .map_err(|failure| Failure {
+        message: masked_of(&failure.message, &text),
+        ..failure
+    })?;
+    eprintln!("flottille daemon: the vault entry {name} was made from {path} of {project}");
+    Ok(made)
+}
+
+/// Whether `entry` is the one a launch from the machine `from` lays its file from: named `name`,
+/// made of that very file (bound to `bound`, `uses::file_use`) and shared from `from`. Any other
+/// entry of this machine's, whatever its name, is never written into a file.
+pub(crate) fn lays_file(entry: &Entry, name: &str, bound: &str, from: &str) -> bool {
+    entry.name == name
+        && entry.bound.as_deref() == Some(bound)
+        && entry.shared_from.as_deref() == Some(from)
+}
+
+/// The secret of the entry `name`, for the file a launch's setup copies (`travelled::lay`): only
+/// the entry `lays_file` takes; none when this machine lacks it or its keyring cannot give it now.
+pub(crate) async fn of_file(
+    daemon: &Daemon,
+    name: &str,
+    bound: &str,
+    from: &str,
+) -> Option<zeroize::Zeroizing<String>> {
+    let entries = daemon.read(|store| store.vault_entries()).ok()?;
+    entries
+        .iter()
+        .find(|entry| lays_file(entry, name, bound, from))?;
+    let secret = daemon.vault.read(name).await.ok().flatten()?;
+    Some(zeroize::Zeroizing::new(secret))
+}
+
+/// Masks each line of a secret of several lines, or of any secret bound to a file (`file:`), and
+/// each line's value, from now on: a file's (`vault.from_file`), of which an agent may come
+/// across one line alone. A value is what follows
+/// a line's first `=` or `:` (`KEY=v`, `key: v`, `"key": "v",`), its quotes and final comma left
+/// out, and the password of an address's `user:password@`. A comment and a part too short to be
+/// told from an ordinary word are left.
+pub(crate) fn mask_lines(secret: &str, bound: Option<&str>) {
+    // A file of one line, with no final newline, is as much a file as any: an agent may read it
+    // from an offset.
+    if !secret.contains('\n') && !bound.is_some_and(|bound| bound.starts_with("file:")) {
+        return;
+    }
+    for line in secret.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        let value = line.find(['=', ':']).map_or(line, |at| {
+            line[at + 1..]
+                .trim()
+                .trim_end_matches(',')
+                .trim_end()
+                .trim_matches(['"', '\''])
+        });
+        for part in [line, value].into_iter().chain(password_in(line)) {
+            if part.chars().count() >= VAULT_SHORTEST {
+                secrets::add_vault_value(part);
+            }
+        }
+    }
+}
+
+/// The password of the first address of `line` that has one (`scheme://user:password@host`).
+fn password_in(line: &str) -> Option<&str> {
+    let after = &line[line.find("://")? + 3..];
+    let authority = &after[..after.find(['/', '"', '\'', ' ']).unwrap_or(after.len())];
+    let userinfo = &authority[..authority.rfind('@')?];
+    Some(&userinfo[userinfo.find(':')? + 1..])
 }
 
 /// The entry `name` sent to the user's machine `machine` (`docs/remote.md`, "Vault entries"): only
@@ -697,6 +893,7 @@ pub async fn receive(
         None => None,
     };
     // Masked before it is kept anywhere, so that nothing written after can hold it.
+    mask_lines(secret, entry.bound.as_deref());
     secrets::add_vault_login(entry.username.as_deref(), secret);
     daemon
         .vault
@@ -841,7 +1038,8 @@ fn bound_checked(
 ) -> Result<Option<String>, Failure> {
     let Some(said) = use_said(bound) else {
         return Err(Failure::refused(format!(
-            "an entry is bound to worklog:<project> or connection:<name>: {bound} is neither"
+            "an entry is bound to worklog:<project>, connection:<name> or file:<project>/<path>: \
+             {bound} is none of them"
         )));
     };
     if !crate::extensions::bound_possible(bound) {
@@ -1057,6 +1255,12 @@ struct Asks {
     open: Vec<Ask>,
 }
 
+/// The agents whose ask for a vault entry waits for the user (`vault.asks`): each session of
+/// theirs needs the user, as the window says it.
+pub(crate) fn asking(store: &Store) -> flottille_core::Result<Vec<String>> {
+    Ok(asks(store)?.open.into_iter().map(|ask| ask.agent).collect())
+}
+
 fn asks(store: &Store) -> flottille_core::Result<Asks> {
     let events = store.events_named(
         &["vault.asked", "vault.ask_joined", "vault.ask_answered"],
@@ -1173,6 +1377,7 @@ pub async fn load(daemon: &Daemon) {
                 for inner in crate::extensions::secrets_in(&secret) {
                     secrets::add_vault_value(&inner);
                 }
+                mask_lines(&secret, entry.bound.as_deref());
                 secrets::add_vault_login(entry.username.as_deref(), &secret);
             }
             Ok(None) => {}
@@ -1912,7 +2117,10 @@ mod tests {
                 "the vault entry notes is the project gone's, which is not on this machine: add \
                  the project here first",
             ),
-            (json!({"name": "odd", "for": "bogus"}), "bogus is neither"),
+            (
+                json!({"name": "odd", "for": "bogus"}),
+                "bogus is none of them",
+            ),
         ];
         for (entry, said) in cases {
             let refused = receive(&daemon, &entry, SHARED, "pc").await.unwrap_err();
@@ -2088,5 +2296,94 @@ mod tests {
         .unwrap_err();
         assert!(refused.message.contains("secret"), "{}", refused.message);
         assert!(listed(&daemon).await.is_empty(), "nothing was kept");
+    }
+
+    #[test]
+    fn a_file_s_lines_are_masked_whatever_their_format() {
+        mask_lines(
+            "token: plainyamlvalue\n  \"json_key\": \"plainjsonvalue\",\n\
+             url = https://alice:plainurlpassword@example.test/x\n\
+             DATABASE_URL=postgres://bob:plainpgpassword@db.example.test/ledger\n",
+            None,
+        );
+        let env = std::collections::BTreeMap::new();
+        for value in [
+            "plainyamlvalue",
+            "plainjsonvalue",
+            "plainurlpassword",
+            "plainpgpassword",
+        ] {
+            let said = secrets::mask(&format!("it is {value} now"), &env);
+            assert_eq!(said, "it is [masked] now", "{value}");
+        }
+    }
+
+    #[test]
+    fn a_one_line_file_s_value_is_masked_alone_without_a_final_newline() {
+        mask_lines("API_TOKEN=oneline-Value-41", Some("file:app/.env"));
+        let env = std::collections::BTreeMap::new();
+        let said = secrets::mask("it is oneline-Value-41 now", &env);
+        assert_eq!(said, "it is [masked] now");
+    }
+
+    #[tokio::test]
+    async fn a_new_secret_set_for_a_file_s_entry_is_masked_line_by_line_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "app-.env", "secret": "API_TOKEN=setfile-Value-52",
+                "for": "file:app/.env"}),
+        )
+        .await);
+        let env = std::collections::BTreeMap::new();
+        let said = secrets::mask("it is setfile-Value-52 now", &env);
+        assert_eq!(said, "it is [masked] now");
+    }
+
+    #[tokio::test]
+    async fn a_file_is_laid_only_from_its_own_entry_shared_by_the_launch_s_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        // The machine's own entry, of no use: never a file, whatever its name.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "github-token", "secret": "own-t0ken-Zr81"}),
+        )
+        .await);
+        // The file's entry, shared from another machine than the launch's.
+        receive(
+            &daemon,
+            &json!({"name": "app-.env", "for": "file:app/.env"}),
+            SHARED,
+            "laptop",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            of_file(&daemon, "github-token", "file:github/token", "pc")
+                .await
+                .is_none()
+        );
+        assert!(
+            of_file(&daemon, "app-.env", "file:app/.env", "pc")
+                .await
+                .is_none()
+        );
+        assert!(
+            of_file(&daemon, "app-.env", "file:app/other", "laptop")
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            of_file(&daemon, "app-.env", "file:app/.env", "laptop")
+                .await
+                .as_deref()
+                .map(String::as_str),
+            Some(SHARED)
+        );
     }
 }

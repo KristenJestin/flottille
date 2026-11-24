@@ -920,7 +920,7 @@ const FORGE_ONLY: [(&str, &[&str]); 16] = [
     ("reviewers_remove", &["edit"]),
     ("labels_add", &["edit"]),
     ("labels_remove", &["edit"]),
-    ("base", &["edit"]),
+    ("base", &["create", "edit"]),
     ("verdict", &["review"]),
     ("comments", &["review"]),
     ("query", &["people"]),
@@ -1679,7 +1679,7 @@ fn refusal(layer: &[String]) -> Option<String> {
         || prints_login(program, args)
     {
         return Some(format!(
-            "refused: {} reads or prints a login, and agents never see one, in any mode",
+            "refused: {} reads or prints a login, and `run` refuses it in any mode",
             shown_words(layer)
         ));
     }
@@ -1693,7 +1693,7 @@ fn refusal(layer: &[String]) -> Option<String> {
                 .into(),
         ),
         "gh" | "glab" if prints_token(args) => Some(format!(
-            "refused: {program} auth prints a login token, and agents never see one: auth status \
+            "refused: {program} auth prints a login token, which `run` refuses: auth status \
              says whether a login exists"
         )),
         "git" => git_refusal(args).or_else(|| {
@@ -1845,7 +1845,7 @@ fn git_refusal(args: &[String]) -> Option<String> {
     let rest = args.get(at + 1..).unwrap_or_default();
     if command == "credential" || command.starts_with("credential-") {
         return Some(format!(
-            "refused: git {command} reads or prints a login, and agents never see one, in any mode"
+            "refused: git {command} reads or prints a login, and `run` refuses it in any mode"
         ));
     }
     // The wall rewrites the URL a push goes to; these connect to the URL they are given.
@@ -5216,6 +5216,7 @@ mod tests {
                     home: Some(base.join("home")),
                 },
                 launched: false,
+                reads: None,
             };
             Fixture {
                 own: vec![base.join("xdg/data/flottille")],

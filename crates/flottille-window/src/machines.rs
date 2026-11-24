@@ -173,9 +173,17 @@ pub struct Member {
     /// How the list signs it; `None` for a member added before pair mode.
     pub icon: Option<String>,
     pub colour: Option<String>,
+    /// What the device said it is to the hub (`computer`, `phone`), once it did.
+    pub kind: Option<String>,
 }
 
 impl Member {
+    /// Whether the device could run agents if it were given the role: a phone's app has no
+    /// daemon, so what it said it is is the one fact that tells it, never its icon nor its name.
+    pub fn could_run_agents(&self) -> bool {
+        self.kind.as_deref() != Some("phone")
+    }
+
     /// Its icon and its colour, as words: what the list signs, else the defaults of its key (a
     /// desktop, and the colour its key proposes), as the command line draws it.
     pub fn look(&self) -> (String, String) {
@@ -234,6 +242,9 @@ pub struct Launched {
     pub heard: Option<String>,
     pub heard_at: Option<u64>,
     pub at: u64,
+    /// The project its machine made for it, by that machine's name of it: `None` when it runs in
+    /// one that machine had.
+    pub making: Option<String>,
 }
 
 impl Launched {
@@ -248,6 +259,10 @@ impl Launched {
             heard: value["heard"].as_str().map(str::to_owned),
             heard_at: value["heard_at"].as_u64(),
             at: value["at"].as_u64().unwrap_or_default(),
+            making: value["there"]["project"]
+                .as_str()
+                .filter(|_| value["there"]["made"] == true)
+                .map(str::to_owned),
         }
     }
 }
@@ -441,6 +456,15 @@ impl Machines {
 
     pub fn machine(&self, name: &str) -> Option<&Machine> {
         self.machines.iter().find(|machine| machine.name == name)
+    }
+
+    /// The session `launched` as its machine's light list says it now, when it lists it.
+    pub fn listed(&self, launched: &Launched) -> Option<&Listed> {
+        self.lists
+            .machines
+            .iter()
+            .find(|(name, _)| *name == launched.machine)
+            .and_then(|(_, listed)| listed.iter().find(|session| session.id == launched.agent))
     }
 
     /// When the member `name` was last seen, as its machine's state says it.
@@ -912,6 +936,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 machine: member["machine"].as_str().map(str::to_owned),
                 icon: member["icon"].as_str().map(str::to_owned),
                 colour: member["colour"].as_str().map(str::to_owned),
+                kind: member["kind"].as_str().map(str::to_owned),
             })
             .collect();
     }
@@ -1224,11 +1249,14 @@ pub fn narrowing(
     )
     .absolute()
     .size_full();
-    // Clipped only while it moves, so that a list the content opens is not.
+    // Clipped only while it moves, so that a list the content opens is not. A row, so that the
+    // content keeps its own width under the clip and the measure reads it whole: in a block it
+    // would shrink with the clip, and widen in again from nothing.
     let moving = t < 1.0;
     Some(
         div()
             .id(id)
+            .flex()
             .flex_none()
             .when(moving, |d| {
                 d.overflow_hidden().w(px(width.get() * t)).opacity(t)
@@ -1329,53 +1357,6 @@ pub fn holding(front: Option<&str>, machines: Option<&Machines>) -> Option<Holdi
 /// What [`Held`] says now.
 pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
     cx.try_global::<Held>().and_then(|held| held.0.clone())
-}
-
-/// The line at the top of a page of another machine that names it, then where the page is:
-/// `server / Settings / Agents`; nothing on this machine. It unfolds and fades in when another
-/// machine comes in front, and folds away with its words when this one comes back.
-pub fn where_line(
-    id: &'static str,
-    parts: &[&str],
-    cx: &gpui_kit::App,
-) -> gpui_design_system::PresenceOf {
-    use gpui_design_system::{Type as _, palette, presence_of};
-    use gpui_kit::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
-    use gpui_kit::{SharedString, StatefulInteractiveElement as _, TestSupportExt as _, div, px};
-    let p = palette(cx);
-    let said = shown_machine(cx).map(|machine| {
-        SharedString::from(
-            std::iter::once(machine.as_str())
-                .chain(parts.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" / "),
-        )
-    });
-    presence_of(format!("{id}-block"), said, move |said| {
-        let (machine, rest) = said.split_once(" / ").unwrap_or((said.as_ref(), ""));
-        div()
-            .id(id)
-            .aria_label(said.clone())
-            .flex()
-            .items_center()
-            .gap(gpui_design_system::space::XS)
-            .text_size(px(13.))
-            .child(
-                div()
-                    .medium()
-                    .text_color(p.text)
-                    .child(SharedString::from(machine.to_owned())),
-            )
-            .when(!rest.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_color(p.faint)
-                        .child(SharedString::from(format!("/ {rest}"))),
-                )
-            })
-            .test_support()
-            .into_any_element()
-    })
 }
 
 /// `page`, the controls of a page of the machine in front, held while [`Held`] says so: its ink
@@ -1592,6 +1573,7 @@ mod tests {
                 machine: None,
                 icon: None,
                 colour: None,
+                kind: None,
             }],
             ..Machines::default()
         }

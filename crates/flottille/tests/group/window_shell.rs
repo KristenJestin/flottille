@@ -33,8 +33,12 @@ mod window_connections;
 mod window_developer_reports;
 #[path = "../window_drafts.rs"]
 mod window_drafts;
+#[path = "../window_every_machine.rs"]
+mod window_every_machine;
 #[path = "../window_first_frame.rs"]
 mod window_first_frame;
+#[path = "../window_folds.rs"]
+mod window_folds;
 #[path = "../window_health_check.rs"]
 mod window_health_check;
 #[path = "../window_instance.rs"]
@@ -59,6 +63,8 @@ mod window_programs;
 mod window_project_images;
 #[path = "../window_project_machines.rs"]
 mod window_project_machines;
+#[path = "../window_project_order.rs"]
+mod window_project_order;
 #[path = "../window_project_page.rs"]
 mod window_project_page;
 #[path = "../window_project_sessions.rs"]

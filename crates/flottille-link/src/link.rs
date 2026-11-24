@@ -232,6 +232,25 @@ pub struct LaunchAsk {
     /// (`flottille_core::project::TRAVELLING`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
+    /// The caller is itself a session another agent started (`docs/tools.md`, "No chain without
+    /// the user"): a session it starts comes to the user there too. Left out when false, so that
+    /// a launch of any other caller reads as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub launched: bool,
+    /// The caller's depth in its tree, which a child takes plus one: the depth limit holds across
+    /// machines. Left out at 0, so that a machine of before reads the launch: only a root of such
+    /// a machine launches, so a launch without it is a root's.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub depth: u32,
+    /// The files the project's setup copies that the caller's machine has, by their paths in the
+    /// project: their names only, never what they hold. The receiver asks the user for those it
+    /// lacks (`docs/remote.md`, "What travels").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied: Vec<String>,
+}
+
+fn is_zero(depth: &u32) -> bool {
+    *depth == 0
 }
 
 /// What a repository is, whatever its folder: its root commits, and its remote's URL when it has

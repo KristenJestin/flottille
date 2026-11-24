@@ -151,12 +151,15 @@ composer, lists the project's commands, filtered as the user types; picking one 
 into `/name `, for the user to add what it is about, and Enter sends it. The commands are edited in
 the project's Settings, section Commands.
 
-**The environment.** An agent's runs get their environment without forge tokens, forge sign-in,
-SSH agent nor session bus, and with their pushes walled (`url.<nowhere>.pushInsteadOf`), so a
-script cannot push behind the gate (`docs/tools.md`). `git push` is a call to judge, and a forced
+**The environment.** In Ask and Auto, an agent's runs get their environment without forge
+tokens, forge sign-in, SSH agent nor session bus, and with their pushes walled
+(`url.<nowhere>.pushInsteadOf`), so a script cannot push behind the gate (`docs/tools.md`). In
+Full, none of this holds: a run is the user's own, as in their terminal, with their whole
+environment, no sandbox and nothing held back (`docs/tools.md`, "In Full, a run is the user's
+own"), and a push in Full is such a run. `git push` is a call to judge, and a forced
 one (even with a lease) is base. The gate judges; once a push goes, it runs as if the user had
-typed it: a run that is itself a `git push` (its own line, no wrapper) the user, the judge, a rule
-or Full mode let through runs **outside the sandbox**, with no Landlock and the daemon's own
+typed it: a run that is itself a `git push` (its own line, no wrapper) the user, the judge or a
+rule let through in Ask or Auto runs **outside the sandbox**, with no Landlock and the daemon's own
 environment, in the run's folder. It signs in the way the user's git does, whatever the remote
 (HTTPS or SSH) and the forge: their credential helper (`gh auth git-credential`, `libsecret`, Git
 Credential Manager), keyring or SSH agent. One thing is kept: no hook (below). The project's and
@@ -164,12 +167,34 @@ the workspace's variables are not applied to it: they are a file a run may write
 (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. The dry run the project's commit checks
 read before a push runs the same way.
 
-**No hook.** Every line an agent runs gets `core.hooksPath=/dev/null`, given through
+**SSH from a run.** A run's `git fetch`, `pull`, `ls-remote`, `clone` (anything that reaches an SSH
+remote) runs inside the sandbox with the user's `ssh` and its configuration, as their shell would.
+The run's user namespace maps the user's id alone, so a file root owns is seen there as owned by
+no one, and `ssh` refuses a configuration file it includes that is owned by neither root nor the
+user (`Bad owner or permissions on /etc/ssh/ssh_config.d/…`). So each root-owned file that the
+machine's `/etc/ssh/ssh_config` and the user's `~/.ssh/config` include (followed through their
+`Include`s) is copied, as it is when the run starts, into a file system the run's namespace
+makes, read-only, and put over the file at its own path: the same name and text, owned by the
+user in the run. The text is root's, which no run can write; nothing of it is logged or shown. A
+file `ssh` would refuse anyway, one its group or others may write, is not copied, so that `ssh`
+still refuses it. What a run can write steers none of it: the machine's configuration is followed
+only through root's files, the user's only inside `~/.ssh` (as the lent push reads it), and each
+file is opened without following a link or waiting on a FIFO, then judged on what was opened, up
+to 1 MB. A copy that cannot be made fails no command: it starts without the copies, `ssh` refuses
+as before, and the daemon's log says it once. Two
+other ways were weighed and set aside. Mapping root into the namespace too needs a setuid helper
+(`newuidmap`), which an unprivileged daemon does not have. Running a run's fetches outside the
+sandbox, as the push the gate let through, would read the repository's settings, which the run
+writes, with the user's sign-in and no judge: the push is lifted because the gate read it, a fetch
+is not judged.
+
+**No hook.** In Ask and Auto, every line an agent runs gets `core.hooksPath=/dev/null`, given through
 `GIT_CONFIG_COUNT` in its environment so that the agent's line is unchanged: the hooks are files of
 the repository or of its configured hooks folder, which the agent writes. The repository's own
 hooks (a commit message check) do not run for an agent's commits. What they check comes back as
 the repository's **commit checks**, the user's own lines, run before the agent's `git commit`
 without a shell (`docs/projects.md`, "Commit checks"); the hooks are only read to propose them.
+In Full, a line runs with the user's own git settings and hooks, as in their terminal.
 
 **Where the remote leads.** The remote is the user's to change, in their own clone, and a
 workspace holds nothing of where it led when it was made: a push goes where the repository's

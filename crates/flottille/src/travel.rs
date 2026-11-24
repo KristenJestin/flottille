@@ -724,7 +724,7 @@ async fn offered(
 /// The folders that lead to the repository at `path` of the project folder `root`, made one at a
 /// time: one that is there is taken only as a folder, never a link, so that none planted since
 /// the check leads what is made out of the project.
-fn folders_inside(root: &Path, path: &str) -> Result<(), String> {
+pub(crate) fn folders_inside(root: &Path, path: &str) -> Result<(), String> {
     let cannot =
         |at: &Path, why: &dyn std::fmt::Display| format!("cannot make {}: {why}", at.display());
     // The repository `.` is the project folder itself: the clone makes it.

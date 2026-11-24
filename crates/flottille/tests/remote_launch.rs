@@ -79,9 +79,11 @@ pub(crate) fn runner_user() -> User {
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
     let claude = user.path("home/.claude");
     let stopping = user.path("stopping");
+    let slow = user.path("slow-call");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_SLOW_CALL_FILE", slow.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
@@ -276,9 +278,19 @@ pub(crate) fn pc_and_server_as(
     server_user: User,
     server_project: Option<&str>,
 ) -> (TestHub, Machine, Machine) {
-    let hub = TestHub::new();
     let pc_user = runner_user();
     sign_in(&pc_user);
+    pc_and_server_with(pc_role, pc_user, server_user, server_project)
+}
+
+/// [`pc_and_server_as`], `pc` the machine of `pc_user`, who is signed in already.
+pub(crate) fn pc_and_server_with(
+    pc_role: &str,
+    pc_user: User,
+    server_user: User,
+    server_project: Option<&str>,
+) -> (TestHub, Machine, Machine) {
+    let hub = TestHub::new();
     let pc = Machine::of(pc_user);
     pair(&hub, &pc, "pc", pc_role);
     let server = Machine::of(server_user);
@@ -644,7 +656,7 @@ fn the_receiving_machine_s_gate_judges_the_launch_in_ask_and_auto() {
     let number = request["number"].as_u64().unwrap();
     assert!(
         text.contains(&format!(
-            "request #{number} on server is waiting for the user"
+            "Waiting for the user's approval, request #{number} on server."
         )),
         "{text}"
     );
@@ -812,6 +824,9 @@ pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
         repositories: vec![".".into()],
         identities: Vec::new(),
         settings: None,
+        launched: false,
+        depth: 0,
+        copied: Vec::new(),
     }
 }
 
@@ -1207,7 +1222,7 @@ fn a_launch_the_judge_denies_is_held_for_the_user_and_never_started() {
     );
 
     let text = done(&answer);
-    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(text.contains("Waiting for the user's approval"), "{text}");
     assert!(
         !server.user.judge_received().is_empty(),
         "no judge was asked"
@@ -1238,7 +1253,7 @@ fn a_launch_whose_judge_fails_is_held_for_the_user_and_never_started() {
     );
 
     let text = done(&answer);
-    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(text.contains("Waiting for the user's approval"), "{text}");
     assert!(
         !server.user.judge_received().is_empty(),
         "no judge was asked"
@@ -1344,16 +1359,7 @@ fn launches_sent_at_once_never_leave_more_held_than_the_cap() {
 fn removed_by_the_user(server: &Machine, agent: &Value) -> String {
     let id = agent["id"].as_str().unwrap();
     let name = agent["workspace"].as_str().unwrap().to_owned();
-    server
-        .user
-        .call("agent.stop", json!({"agent": id}))
-        .unwrap();
-    eventually("the agent ended", || {
-        matches!(
-            server.agent(id)["state"].as_str(),
-            Some("ended" | "stopped" | "failed")
-        )
-    });
+    // Its work kept first: once its agent ended, Flottille may remove the workspace at any time.
     let folder = folder_of(agent);
     let branch = server.git(&folder, &["branch", "--show-current"]);
     let kept = server.user.path(&format!("kept-{name}.git"));
@@ -1367,8 +1373,27 @@ fn removed_by_the_user(server: &Machine, agent: &Value) -> String {
     server.git(&folder, &["push", "--quiet", "kept", &branch]);
     server
         .user
-        .call("workspace.remove", json!({"project": "app", "name": name}))
+        .call("agent.stop", json!({"agent": id}))
         .unwrap();
+    eventually("the agent ended", || {
+        matches!(
+            server.agent(id)["state"].as_str(),
+            Some("ended" | "stopped" | "failed")
+        )
+    });
+    // Two removals of it may meet: Flottille's own of a launch that never started, once the
+    // ended agent's process let go, and the user's. Which one starts first is timing, not load:
+    // the one that comes second is refused while the first runs, and finds it gone after.
+    eventually("the workspace removed", || {
+        match server
+            .user
+            .call("workspace.remove", json!({"project": "app", "name": name}))
+        {
+            Ok(_) => true,
+            Err((_, why)) if why.contains("is being removed") => false,
+            Err((_, why)) => why.contains("no workspace") || panic!("{why}"),
+        }
+    });
     server.git(&server.folder(), &["branch", "-D", &branch]);
     name
 }
@@ -1546,7 +1571,10 @@ fn a_launch_with_an_unfit_title_caller_or_branch_is_refused() {
 
 #[test]
 fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
+    // The server's clock is thirteen hours ahead from its start: moved forward while it runs, it
+    // would be taken for a sleep, which loses its session to the hub and its links with it.
     let ahead = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
     let user = server_user(allowing()).with_env(
         "FLOTTILLE_TEST_WALL_AHEAD_FILE",
         ahead.path().to_str().unwrap(),
@@ -1560,19 +1588,17 @@ fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
     assert!(switched.status.success(), "{}", pc.log());
     done(&launched(
         &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Stale", "brief": "Two."}),
+    ));
+    assert_eq!(titled(&server, "Stale")["gate_mode"], "auto");
+
+    // The server's clock set back to the hour: the same switch counts there.
+    std::fs::write(ahead.path(), "0").unwrap();
+    done(&launched(
+        &mcp,
         json!({"kind": "led", "machine": "server", "title": "Fresh", "brief": "One."}),
     ));
     assert_eq!(titled(&server, "Fresh")["gate_mode"], "full");
-
-    // Thirteen hours later on the server's clock: the switch no longer counts there.
-    std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
-    pc.wait_for_offer("server", 12);
-    done(&launched(
-        &mcp,
-        json!({"kind": "led", "machine": "server", "title": "Stale", "brief": "Two."}),
-    ));
-
-    assert_eq!(titled(&server, "Stale")["gate_mode"], "auto");
 }
 
 #[test]
@@ -1607,4 +1633,554 @@ fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
     ));
 
     assert_eq!(titled(&server, "From the child")["gate_mode"], "full");
+}
+
+/// The request of `machine` held for its user, once there.
+fn held_there(machine: &Machine, name: &str) -> Value {
+    eventually(&format!("a request held for the user of {name}"), || {
+        !machine.requests().is_empty()
+    });
+    machine.requests()[0].clone()
+}
+
+/// Held as base, for the chain rule: never the judge's, in every mode but Full.
+fn held_for_the_chain(request: &Value) {
+    assert_eq!(request["class"], "base", "{request:#}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{request:#}"
+    );
+}
+
+#[test]
+fn a_session_an_agent_started_launches_on_another_machine_only_with_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    // A session the root started on pc, allowed by the user, then put in Auto.
+    let (_root, mcp) = pc.root("ask");
+    let opened = pc.user.received_requests("session/new").len();
+    launched(
+        &mcp,
+        json!({"kind": "handed", "title": "Second", "brief": "Go on with the docs."}),
+    );
+    let number = held_there(&pc, "pc")["number"].as_u64().unwrap();
+    pc.user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let (url, authorization) = server_of(&pc.user, opened);
+    let second = titled(&pc, "Second")["id"].as_str().unwrap().to_owned();
+    pc.user
+        .call("agent.mode", json!({"agent": second, "mode": "auto"}))
+        .unwrap();
+    let second = Mcp::initialize(&url, &authorization);
+
+    let answer = launched(
+        &second,
+        json!({"kind": "led", "machine": "server", "title": "Third",
+            "brief": "And the tests, there."}),
+    );
+
+    let text = done(&answer);
+    let request = held_there(&server, "server");
+    assert!(
+        text.contains(&format!(
+            "Waiting for the user's approval, request #{} on server",
+            request["number"]
+        )),
+        "{text}"
+    );
+    held_for_the_chain(&request);
+    assert!(
+        server.user.judge_received().is_empty(),
+        "the judge was asked"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("And the tests, there.")),
+        "a session started before the user allowed it"
+    );
+}
+
+#[test]
+fn a_led_session_from_another_machine_starts_a_session_only_with_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+    let opened = server.user.received_requests("session/new").len();
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Export",
+            "brief": "Finish the export."}),
+    ));
+    let led = titled(&server, "Export");
+    assert_eq!(led["gate_mode"], "auto", "{led:#}");
+    prompted(&server, "Finish the export.");
+    let (url, authorization) = server_of(&server.user, opened);
+    let led = Mcp::initialize(&url, &authorization);
+    let judged = server.user.judge_received().len();
+
+    let answer = launched(
+        &led,
+        json!({"kind": "handed", "title": "Third", "brief": "And the tests."}),
+    );
+
+    assert!(
+        !answer.text.contains("Started a session"),
+        "{}",
+        answer.text
+    );
+    held_for_the_chain(&held_there(&server, "server"));
+    assert_eq!(
+        server.user.judge_received().len(),
+        judged,
+        "the judge was asked"
+    );
+    assert!(
+        !server
+            .agents()
+            .iter()
+            .any(|agent| agent["title"] == "Third"),
+        "a session started before the user allowed it"
+    );
+}
+
+#[test]
+fn a_launch_of_a_caller_no_agent_started_reads_as_before() {
+    // Left out when false: a machine of before, which refuses any field it does not know, still
+    // takes such a launch.
+    let sent = serde_json::to_value(launch_ask("l1", "caller")).unwrap();
+    assert!(sent.get("launched").is_none(), "{sent:#}");
+    let before: LaunchAsk = serde_json::from_value(sent).unwrap();
+    assert_eq!(before, launch_ask("l1", "caller"));
+}
+
+/// A session pc's root (in Ask) handed on, allowed by the user: the root's MCP session, kept
+/// open, and the session's id and MCP session.
+fn handed_on_pc(pc: &Machine) -> (Mcp, String, Mcp) {
+    let (_root, mcp) = pc.root("ask");
+    let opened = pc.user.received_requests("session/new").len();
+    launched(
+        &mcp,
+        json!({"kind": "handed", "title": "Second", "brief": "Go on with the docs."}),
+    );
+    let number = held_there(pc, "pc")["number"].as_u64().unwrap();
+    pc.user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let (url, authorization) = server_of(&pc.user, opened);
+    let second = titled(pc, "Second")["id"].as_str().unwrap().to_owned();
+    (mcp, second, Mcp::initialize(&url, &authorization))
+}
+
+/// A session pc's root (in Auto) launched on the server as `kind`, started there: its id and
+/// its MCP session there, the root's kept open.
+fn launched_on_server(pc: &Machine, server: &Machine, kind: &str) -> (Mcp, String, Mcp) {
+    let (_root, mcp) = pc.root("auto");
+    let opened = server.user.received_requests("session/new").len();
+    done(&launched(
+        &mcp,
+        json!({"kind": kind, "machine": "server", "title": "Export",
+            "brief": "Finish the export."}),
+    ));
+    let there = titled(server, "Export")["id"].as_str().unwrap().to_owned();
+    prompted(server, "Finish the export.");
+    let (url, authorization) = server_of(&server.user, opened);
+    (mcp, there, Mcp::initialize(&url, &authorization))
+}
+
+/// What `machine`'s launches to other machines said of their caller (`launched`).
+fn sent_launched(machine: &Machine) -> Vec<Value> {
+    let store =
+        rusqlite::Connection::open(machine.user.path("state/flottille/flottille.db")).unwrap();
+    let mut statement = store
+        .prepare("SELECT asked FROM launches WHERE way = 'out'")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|asked| serde_json::from_str::<Value>(&asked.unwrap()).unwrap()["launched"].clone())
+        .collect()
+}
+
+#[test]
+fn a_session_this_machine_started_elsewhere_launches_back_only_with_the_user_whatever_it_says() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, led, _mcp) = launched_on_server(&pc, &server, "led");
+    let key = server.stand_in();
+
+    // The session pc started on the server launches back on pc, saying it was not launched:
+    // pc knows better, its own launch started it.
+    let mut ask = launch_ask("back", &led);
+    ask.kind = "handed".into();
+    ask.mode = "auto".into();
+    assert!(!ask.launched);
+    let answers = sent_with(&key, &pc, vec![MachineMessage::Launch(Box::new(ask))]);
+
+    // Held as base, for the chain: its request comes once its code is there, which a forged
+    // launch never sends, so the launch's record says it.
+    assert_eq!(answers[0], Ok(json!({"state": "held"})), "{answers:?}");
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let asked: String = store
+        .query_row("SELECT asked FROM launches WHERE way = 'in'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let asked: Value = serde_json::from_str(&asked).unwrap();
+    assert_eq!(asked["base"], true, "{asked:#}");
+    assert!(
+        asked["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{asked:#}"
+    );
+}
+
+#[test]
+fn a_led_session_from_another_machine_launches_back_only_with_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, _led, led) = launched_on_server(&pc, &server, "led");
+
+    let answer = launched(
+        &led,
+        json!({"kind": "handed", "machine": "pc", "title": "Back", "brief": "And the tests."}),
+    );
+
+    let text = done(&answer);
+    let request = held_there(&pc, "pc");
+    assert!(
+        text.contains(&format!(
+            "Waiting for the user's approval, request #{} on pc",
+            request["number"]
+        )),
+        "{text}"
+    );
+    held_for_the_chain(&request);
+    // The server said so itself: it knows the session was started for an agent of pc.
+    assert_eq!(sent_launched(&server), vec![json!(true)]);
+}
+
+#[test]
+fn a_chain_launch_under_the_user_s_signed_full_starts_as_it_does_here() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, second, mcp) = handed_on_pc(&pc);
+    let switched = server
+        .user
+        .run(&["--machine", "pc", "agent", "mode", &second, "full"]);
+    assert!(switched.status.success(), "{}", pc.log());
+
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Third",
+            "brief": "And the tests, there."}),
+    ));
+
+    assert_eq!(titled(&server, "Third")["gate_mode"], "full");
+    prompted(&server, "And the tests, there.");
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+    assert!(
+        server.user.judge_received().is_empty(),
+        "the judge was asked"
+    );
+}
+
+#[test]
+fn a_chain_launch_in_ask_is_held_as_base_with_its_reason() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, second, mcp) = handed_on_pc(&pc);
+    pc.user
+        .call("agent.mode", json!({"agent": second, "mode": "ask"}))
+        .unwrap();
+
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Third",
+            "brief": "And the tests, there."}),
+    ));
+
+    held_for_the_chain(&held_there(&server, "server"));
+}
+
+#[test]
+fn a_child_launch_across_machines_is_not_held_for_the_chain() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, second, mcp) = handed_on_pc(&pc);
+    pc.user
+        .call("agent.mode", json!({"agent": second, "mode": "auto"}))
+        .unwrap();
+
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Third",
+            "brief": "And the tests, there."}),
+    ));
+
+    prompted(&server, "And the tests, there.");
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn a_child_on_another_machine_is_refused_a_session_outright() {
+    // A child pc's root launched on the server counts there as a session another agent started
+    // (`launches::launched_from`), and is a child there (its depth, #1274): it has no tool to
+    // start a session, so a led launch is refused at once, never held for its parent nor the
+    // user, never the judge's.
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, _child, child) = launched_on_server(&pc, &server, "child");
+    let judged = server.user.judge_received().len();
+
+    let answer = launched(
+        &child,
+        json!({"kind": "led", "title": "Third", "brief": "And the tests."}),
+    );
+
+    assert!(
+        answer.text.starts_with("refused") && answer.text.contains("has no tool agent_launch"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(
+        server.user.judge_received().len(),
+        judged,
+        "the judge was asked"
+    );
+    assert!(server.requests().is_empty(), "a request was held");
+    a_while();
+    assert!(
+        !server
+            .agents()
+            .iter()
+            .any(|agent| agent["title"] == "Third"),
+        "a session started"
+    );
+}
+
+/// The states of the launches `pc` recorded on other machines, by launch name.
+fn launches_out(pc: &Machine) -> Vec<String> {
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let mut statement = store
+        .prepare("SELECT state FROM launches WHERE way = 'out' ORDER BY launch")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|state| state.unwrap())
+        .collect()
+}
+
+/// The rows `pc` shows under their pilots of the sessions its agents started on other machines.
+fn rows_under_pilots(pc: &Machine) -> Vec<Value> {
+    pc.user.call("remote.launches", json!({})).unwrap()["launches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The prompt `machine` was sent that holds `text`, once it was.
+fn prompt_with(machine: &Machine, text: &str) -> String {
+    prompted(machine, text);
+    machine
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains(text))
+        .unwrap()
+}
+
+#[test]
+fn a_held_launch_allowed_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Allowed there");
+    assert_eq!(launches_out(&pc), vec!["held"]);
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    // A prompt is its JSON: its quotes and line ends escaped.
+    assert!(
+        told.contains(&format!(
+            "Request #{number} on server (agent_launch) was approved by the user, and Flottille \
+             has now done it. Its result:"
+        )),
+        "{told}"
+    );
+    assert!(told.contains("Started a session led by you"), "{told}");
+    assert!(
+        told.contains("[flottille:session-turn-ended] wakes you at each end of its turns"),
+        "{told}"
+    );
+    assert!(told.contains("session_send"), "{told}");
+    eventually("the launch recorded as started", || {
+        launches_out(&pc) == vec!["started"]
+    });
+    let rows = rows_under_pilots(&pc);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["state"], "started", "{rows:#?}");
+}
+
+#[test]
+fn a_held_launch_refused_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused there");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server"));
+    assert!(
+        told.contains(&format!(
+            "Request #{number} on server (agent_launch) was refused by the user. Nothing was done."
+        )),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+}
+
+#[test]
+fn a_refused_launch_leaves_no_waiting_row_under_its_pilot() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "No row left");
+    let rows = rows_under_pilots(&pc);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0]["state"], "held", "{rows:#?}");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    eventually("no row left under the pilot", || {
+        rows_under_pilots(&pc).is_empty()
+    });
+}
+
+#[test]
+fn a_held_launch_on_another_machine_says_what_follows_once_allowed() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    let held = done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Child, held", "brief": "Do it."}),
+    ))
+    .to_owned();
+    assert!(!held.contains("told nothing more"), "{held}");
+    assert!(
+        held.contains("The answer will be handed to you when the user gives it."),
+        "{held}"
+    );
+    assert!(held.contains("on server in workspace"), "{held}");
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    // Once allowed, its answer says what follows, as a child launched here.
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(told.contains("Child, held"), "{told}");
+    assert!(told.contains("Its result:"), "{told}");
+    assert!(
+        told.contains("Its report, questions and failure come to you"),
+        "{told}"
+    );
+    assert!(told.contains("agent_send"), "{told}");
+}
+
+#[test]
+fn a_led_session_started_on_another_machine_says_what_follows() {
+    let (_hub, pc, _server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Started led", "brief": "Do it."}),
+    ))
+    .to_owned();
+
+    assert!(text.contains("Started a session led by you"), "{text}");
+    assert!(text.contains("[flottille:session-turn-ended]"), "{text}");
+    assert!(text.contains("at each end of its turns"), "{text}");
+    assert!(text.contains("session_send"), "{text}");
+}
+
+#[test]
+fn a_held_launch_whose_session_ends_there_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Ended while held");
+    let session = titled(&server, "Ended while held");
+
+    server
+        .user
+        .call("agent.stop", json!({"agent": session["id"]}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("its session there ended before the user of server decided"),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    assert!(rows_under_pilots(&pc).is_empty());
+}
+
+#[test]
+fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register("[[setup]]\nrun = \"false\"\n");
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Failing setup",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(&pc, "[flottille:child-failed]");
+    let all = pc.prompts().join("\n");
+    let allowed = all
+        .find(&format!(
+            "Request #{number} on server (agent_launch) was approved"
+        ))
+        .expect(&all);
+    let failed = all.find("[flottille:child-failed]").unwrap();
+    assert!(
+        allowed < failed,
+        "the failure came before the answer:\n{all}"
+    );
 }

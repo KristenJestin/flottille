@@ -33,7 +33,7 @@ use crate::model::ago;
 use crate::project::repository_label;
 use crate::project_settings::{Reveal, field_frame, styled_input};
 use crate::session::MarkdownText;
-use crate::shell::{Shell, now_ms};
+use crate::shell::now_ms;
 
 /// Which list a tab shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -478,7 +478,7 @@ impl Detail {
 /// The project page's Pull requests, Tickets and Specs tabs: the page draws the tabs, this the
 /// one chosen.
 pub struct ProjectItems {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     read: Option<Result<Read, String>>,
     tab: Kind,
@@ -527,7 +527,7 @@ struct CiMark {
 }
 
 impl ProjectItems {
-    pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String, cx: &mut Context<Self>) -> Self {
         let write_spec = {
             let (shell, project) = (shell.clone(), project.clone());
             cx.new(|_| WriteSpec::new(shell, project))

@@ -45,7 +45,6 @@ use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
-use crate::shell::Shell;
 use crate::skills::SkillsSection;
 use crate::tasks::TasksSection;
 use crate::vault::VaultEntry;
@@ -95,14 +94,16 @@ pub const SECTIONS: [(&str, &str); 6] = [
 ];
 
 /// What *Agents may open windows on my screen* says: what a run is given.
-pub const WINDOWS_HINT: &str = "Each run of its agents, a program it builds or starts, gets a \
-     runtime folder of its own holding your session's Wayland socket alone: never the session \
-     bus, the keyring nor your other sockets. Without Wayland it gets X11's display, and with X11 \
-     a program can read the keys you type in other windows and type into them, a terminal's \
-     included. On some Wayland compositors a client can capture the screen and the clipboard, \
-     and on wlroots ones (Hyprland among them) type into other windows too; with X11 a run can \
-     also reach the session's other abstract sockets, a session bus among them. Off, a run gets \
-     no display, though a program that names X11's socket itself may still reach it.";
+pub const WINDOWS_HINT: &str = "In Ask and Auto, each run of its agents, a program it builds or \
+     starts, gets a runtime folder of its own holding your session's Wayland socket alone: never \
+     the session bus, the keyring nor your other sockets. Without Wayland it gets X11's display, \
+     and with X11 a program can read the keys you type in other windows and type into them, a \
+     terminal's included. On some Wayland compositors a client can capture the screen and the \
+     clipboard, and on wlroots ones (Hyprland among them) type into other windows too; with X11 a \
+     run can also reach the session's other abstract sockets, a session bus among them. Off, a \
+     run gets no display, though a program that names X11's socket itself may still reach it. In \
+     Full, this setting changes nothing: a command runs as yours, with your own display, session \
+     bus and keyring.";
 
 /// What the Vault tab says it lists.
 pub const VAULT_SENTENCE: &str = "The secrets this project's agents can use: its own first, then \
@@ -406,7 +407,7 @@ impl Reveal {
 }
 
 pub struct ProjectSettingsPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// Where it was opened at, when it was.
     revealed: Option<Reveal>,
     /// The tab chosen: the index of its section in [`SECTIONS`]. Kept while the page is open.
@@ -496,7 +497,7 @@ pub struct ProjectSettingsPage {
 
 impl ProjectSettingsPage {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2744,8 +2745,9 @@ impl ProjectSettingsPage {
                                 "no-project-vault",
                                 Icon::Key,
                                 "No entry this project sees yet. Add a secret its agents need, \
-                                 such as a tracker's token: they use it through Flottille's tools \
-                                 and never see it.",
+                                 such as a tracker's token. In Ask and Auto they use it through \
+                                 Flottille's tools without seeing it. In Full, a command they run \
+                                 can read it.",
                             ),
                         )
                         .space(space::MD),
@@ -2933,11 +2935,6 @@ impl Render for ProjectSettingsPage {
         let header = div()
             .flex()
             .flex_col()
-            .child(crate::machines::where_line(
-                "project-settings-where",
-                &[&self.name, "Settings"],
-                cx,
-            ))
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)

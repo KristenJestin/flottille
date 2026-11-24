@@ -116,6 +116,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("tool_results.set", Drive),
     ("sessions.show", Read),
     ("sessions.set", Drive),
+    ("travelled_folder.show", Read),
+    ("travelled_folder.set", Drive),
     ("workspaces_folder.show", Read),
     ("workspaces_folder.set", Drive),
     // What the user left in the window is of the machine: a device that follows over a link reads
@@ -130,6 +132,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("vault.set", Drive),
     ("vault.remove", Drive),
     ("vault.share", Drive),
+    ("vault.from_file", Drive),
     ("vault.asks", Read),
     ("vault.ask_dismiss", Drive),
     ("remote.machines", Read),
@@ -256,6 +259,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("provider.disable", Drive),
     ("provider.set_judge", Drive),
     ("provider.set_new_session", Drive),
+    ("provider.set_new_session_mode", Drive),
     ("provider.judge_noticed", Drive),
     // A program's own sign-in (#1185): the list is a read, every step of a sign-in the user's.
     ("signin.list", Read),

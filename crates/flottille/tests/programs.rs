@@ -188,3 +188,18 @@ fn the_programs_of_a_project_are_checked_together_not_one_after_the_other() {
         "the checks added up: {took:?}"
     );
 }
+
+#[test]
+fn a_program_that_cannot_be_checked_says_why_and_offers_no_sign_in() {
+    let user = user_with_all();
+    shop(&user);
+    user.acli_script(json!({"status_fail": "✗ Error: Something went wrong"}));
+
+    let tracker = programs(&user)["tracker"].clone();
+
+    assert_eq!(tracker["signed_in"], Value::Null, "{tracker}");
+    assert_eq!(tracker["sign_in"], Value::Null, "{tracker}");
+    let problem = tracker["problem"].as_str().unwrap();
+    assert!(problem.contains("Something went wrong"), "{tracker}");
+    assert!(!problem.contains("not signed in"), "{tracker}");
+}

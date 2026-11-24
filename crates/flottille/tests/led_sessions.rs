@@ -364,21 +364,6 @@ fn a_led_session_s_question_wakes_its_pilot_not_the_user() {
 }
 
 #[test]
-fn a_led_session_s_plain_turn_end_does_not_wake_its_pilot() {
-    let user = User::with_fake_agent();
-    let (lead, mcp) = lead(&user);
-
-    let (session, _) = led(&user, &mcp, "Fix the login.");
-
-    eventually("its first turn", || turns(&user, &session) == 1);
-    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
-        .unwrap();
-    eventually("its second turn", || turns(&user, &session) == 2);
-    settle();
-    assert!(wakes(&user, &lead).is_empty());
-}
-
-#[test]
 fn a_led_session_s_report_and_end_wake_its_pilot() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
@@ -390,7 +375,10 @@ fn a_led_session_s_report_and_end_wake_its_pilot() {
 
     let (session, _) = led(&user, &mcp, "Fix the login.");
 
-    eventually("the report's wake", || wakes(&user, &lead).len() == 1);
+    eventually("the report's wake", || !wakes(&user, &lead).is_empty());
+    // One wake for a turn that reports and ends, never a second for its plain end.
+    settle();
+    assert_eq!(wakes(&user, &lead).len(), 1, "{:?}", wakes(&user, &lead));
     let woken = wakes(&user, &lead).remove(0);
     assert!(woken.contains("it reported"), "{woken}");
     user.call("agent.stop", json!({"agent": session})).unwrap();
@@ -590,14 +578,100 @@ fn the_user_talks_to_a_led_session_directly() {
             .iter()
             .any(|body| body.contains("Use the median."))
     );
-    settle();
-    // The pilot is neither asked nor woken.
-    assert!(wakes(&user, &lead).is_empty());
+    // The pilot is not asked; it hears the end of each turn, the user's included.
+    eventually("the pilot woken at both turns", || {
+        wakes(&user, &lead).len() == 2
+    });
     let pending = user.call("approval.list", json!({})).unwrap();
     assert!(
         pending["requests"].as_array().unwrap().is_empty(),
         "{pending}"
     );
+}
+
+#[test]
+fn a_wake_says_when_the_turn_followed_the_user_s_own_message() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led(&user, &mcp, "Fix the login.");
+    eventually("the wake of its first turn", || {
+        wakes(&user, &lead).len() == 1
+    });
+
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Use the median."}),
+    )
+    .unwrap();
+
+    eventually("the wake of the user's turn", || {
+        wakes(&user, &lead).len() == 2
+    });
+    let woken = wakes(&user, &lead);
+    let said = |woken: &&String| woken.contains("the user's own message");
+    assert_eq!(woken.iter().filter(said).count(), 1, "{woken:?}");
+    assert!(
+        woken.iter().find(said).unwrap().contains("do not step in"),
+        "{woken:?}"
+    );
+}
+
+#[test]
+fn a_turn_cancelled_to_take_a_delivery_wakes_its_pilot_once() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"wait": 60000}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led(&user, &mcp, "Fix the login.");
+    eventually("its long turn", || {
+        shown(&user, &session)["state"] == "working"
+    });
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Use the median."}),
+    )
+    .unwrap();
+
+    // What the 30 s fallback does to a turn that took no note: it is cancelled, and the delivery
+    // is sent as the next prompt.
+    user.call("agent.cancel", json!({"agent": session}))
+        .unwrap();
+
+    eventually("both turns ended", || turns(&user, &session) == 2);
+    settle();
+    let woken = wakes(&user, &lead);
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("the user's own message"), "{woken:?}");
+}
+
+#[test]
+fn the_lead_is_told_that_each_end_of_a_turn_wakes_it() {
+    let user = User::with_fake_agent();
+    let (_lead, mcp) = lead(&user);
+    let said = |text: &str| {
+        assert!(text.contains("each end of its turns"), "{text}");
+        for old in ["asks, reports or ends", "when it asks"] {
+            assert!(!text.contains(old), "{old}: {text}");
+        }
+    };
+
+    let described = mcp
+        .tools()
+        .into_iter()
+        .find(|tool| tool["name"] == "agent_launch")
+        .unwrap()["description"]
+        .clone();
+    said(described.as_str().unwrap());
+    let (answer, _session) = launch(
+        &user,
+        &mcp,
+        json!({"kind": "led", "title": "Login", "brief": "Fix the login."}),
+    );
+    said(&answer.text);
+    let refused = mcp.call("agent_launch", json!({"title": "No kind", "brief": "Go."}));
+    assert!(refused.error, "{}", refused.text);
+    said(&refused.text);
 }
 
 // A led session ends with its pilot (#1089, `docs/tools.md`, "The pilot ends").
@@ -815,6 +889,7 @@ fn detaching_ends_the_pilot_s_subscription_and_tells_it_once() {
     let (session, _) = led(&user, &mcp, "Fix the login.");
     eventually("its first turn", || turns(&user, &session) == 1);
     assert_eq!(subscriptions_of(&user, &lead).len(), 1);
+    eventually("the first turn's wake", || wakes(&user, &lead).len() == 1);
 
     detach(&user, &session);
 
@@ -829,7 +904,7 @@ fn detaching_ends_the_pilot_s_subscription_and_tells_it_once() {
     );
     settle();
     assert_eq!(delivered(&user, &lead, "detached").len(), 1);
-    assert!(wakes(&user, &lead).is_empty(), "{:?}", wakes(&user, &lead));
+    assert_eq!(wakes(&user, &lead).len(), 1, "{:?}", wakes(&user, &lead));
 }
 
 #[test]
@@ -841,6 +916,7 @@ fn a_detached_session_asks_the_user() {
     let (lead, mcp) = lead(&user);
     let (session, session_mcp) = led(&user, &mcp, "Fix the login.");
     eventually("its first turn", || turns(&user, &session) == 1);
+    eventually("the first turn's wake", || wakes(&user, &lead).len() == 1);
 
     detach(&user, &session);
     user.call(
@@ -853,7 +929,8 @@ fn a_detached_session_asks_the_user() {
         questions_in_inbox(&user, &session) == ["Ship it?"]
     });
     settle();
-    assert!(wakes(&user, &lead).is_empty());
+    // Detached, its pilot hears nothing of it any more.
+    assert_eq!(wakes(&user, &lead).len(), 1, "{:?}", wakes(&user, &lead));
     let ask = session_mcp
         .tools()
         .into_iter()

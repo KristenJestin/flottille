@@ -36,7 +36,8 @@ pub enum AgentAction {
         /// Its role: lead (default) or worker
         #[arg(long)]
         role: Option<String>,
-        /// The session's mode from its first message: ask, auto (default) or full
+        /// The session's mode from its first message: ask, auto or full (default: the one set for
+        /// new sessions, Auto unless set)
         #[arg(long)]
         mode: Option<String>,
         #[arg(long)]
@@ -145,7 +146,8 @@ pub enum AgentAction {
     },
     /// Set a session's mode: in ask, every call to judge comes to you; in auto, the judge you
     /// chose in Settings decides it; in full, nothing is asked: every call the gate would hold
-    /// passes, and what it refuses stays refused (`docs/design.md` §7)
+    /// passes, what it refuses stays refused, and a command it runs is unconfined, as yours
+    /// (`docs/design.md` §7)
     Mode {
         agent: String,
         /// ask, auto or full
@@ -875,6 +877,9 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
     if let Some(model) = agent["model"].as_str() {
         line.push_str(&format!(" ({model})"));
     }
+    if let Some(parent) = parent_afar(agent) {
+        line.push_str(&format!(", {parent}"));
+    }
     match entry {
         Some(entry) => {
             line.push_str(&format!(": {}", text(entry, "doing")));
@@ -898,6 +903,19 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
         None => line.push_str(&format!(": {}", text(agent, "state"))),
     }
     line
+}
+
+/// What is said of a child an agent of another machine launched here (`launched_from`): it is
+/// that agent's, whose parent it reports to, never a session of the user's.
+fn parent_afar(agent: &Value) -> Option<String> {
+    let from = &agent["launched_from"];
+    (from["kind"] == "child").then(|| {
+        format!(
+            "child of agent {} of {}",
+            text(from, "agent"),
+            text(from, "machine")
+        )
+    })
 }
 
 /// What is said of a session that did not take the tools its role gained.
@@ -949,6 +967,9 @@ fn show_text(shown: &Value) -> String {
             "  pending: {} (set before its next prompt)\n",
             pending_text(agent)
         ));
+    }
+    if let Some(parent) = parent_afar(agent) {
+        out.push_str(&format!("  {parent}: only its parent writes to it\n"));
     }
     if agent["tools_outdated"] == true {
         out.push_str(&format!("  {OUTDATED}\n"));
@@ -1026,6 +1047,26 @@ fn show_text(shown: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_launched_from_another_machine_is_said_as_a_child_by_the_cli() {
+        let agent = serde_json::json!({"id": "a2", "title": "Write the tests", "role": "worker",
+            "project": "app", "provider": "claude", "state": "working", "depth": 1,
+            "parent": null, "taken": {}, "chosen": {}, "pending": {},
+            "launched_from": {"machine": "pc", "agent": "b1", "kind": "child"}});
+        let listed = list_text(&serde_json::json!({"agents": [agent.clone()]}));
+        assert!(listed.contains("child of agent b1 of pc"), "{listed}");
+        let shown = show_text(&serde_json::json!({"agent": agent, "events": []}));
+        assert!(
+            shown.contains("child of agent b1 of pc: only its parent writes to it"),
+            "{shown}"
+        );
+        // A session another machine's agent leads is a session: nothing is said.
+        let led = serde_json::json!({"id": "a3", "role": "lead", "project": "app",
+            "provider": "claude", "state": "idle", "depth": 0,
+            "launched_from": {"machine": "pc", "agent": "b1", "kind": "led"}});
+        assert!(!list_text(&serde_json::json!({"agents": [led]})).contains("child of"));
+    }
 
     #[test]
     fn agent_answer_takes_an_answer_per_question_and_a_single_one_alone() {

@@ -706,6 +706,79 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
     Ok(answer)
 }
 
+/// The base of `repository` in the workspace moves to `to`, because the forge said where its
+/// pull request goes (`why`, in the words of the line that tells it): the record takes it,
+/// `workspace.base_changed` says so, and the sessions of the workspace are told, which is also the
+/// line in their history. The sentence said, or none when the base was `to` already or could not
+/// be recorded. Never called from what an agent or a remote says without the forge confirming.
+pub fn move_base(
+    daemon: &Arc<Daemon>,
+    workspace: &Workspace,
+    repository: &str,
+    to: &str,
+    why: &str,
+) -> Option<String> {
+    // Read and written in one transaction: a rename or another move in between is not undone.
+    let written = daemon.write(|store| {
+        let Some(fresh) = store.workspace(&workspace.project, &workspace.name)? else {
+            return Ok((None, None));
+        };
+        let mut repositories = fresh.repositories.clone();
+        let Some(worktree) = repositories.iter_mut().find(|w| w.path == repository) else {
+            return Ok((None, None));
+        };
+        if worktree.base.branch == to {
+            return Ok((None, None));
+        }
+        let was = std::mem::replace(&mut worktree.base.branch, to.to_owned());
+        // The tracking ref a review compares against follows the branch; a commit it started from
+        // is where it started, whatever its base is now.
+        if worktree.base.reference.starts_with("refs/remotes/") {
+            worktree.base.reference = format!("refs/remotes/{}/{to}", worktree.base.remote);
+        }
+        worktree.base.note = Some(format!("moved from {was}: {why}"));
+        let event = with(
+            about(&fresh),
+            json!({"repository": repository, "base": to, "was": was, "why": why}),
+        );
+        let event = store.set_workspace_repositories(
+            fresh.id,
+            &repositories,
+            ("workspace.base_changed", event),
+        )?;
+        Ok((Some(was), Some(event)))
+    });
+    let was = match written {
+        Ok(Some(was)) => was,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("flottille daemon: workspace.base_changed: {error}");
+            return None;
+        }
+    };
+    let said = format!(
+        "The base of {repository} in the workspace {} moved from {was} to {to}: {why}. Its pull \
+         requests go into {to} now.",
+        workspace.name
+    );
+    let sessions = daemon.read(|store| store.live_agents()).unwrap_or_default();
+    for agent in sessions.iter().filter(|agent| {
+        agent.parent.is_none()
+            && agent.project == workspace.project
+            && agent.workspace.as_deref() == Some(workspace.name.as_str())
+    }) {
+        crate::deliveries::deliver(
+            daemon,
+            &agent.id,
+            "workspace-base",
+            None,
+            &said,
+            flottille_core::approval::BETWEEN_TURNS,
+        );
+    }
+    Some(said)
+}
+
 // Creation.
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
@@ -811,6 +884,12 @@ pub async fn create_from(
             folder.display()
         )));
     }
+    // A root the daemon cannot make, or write in, fails here with its reason, before any fetch or
+    // record: the session that asked says it, and nothing half made is left to resume.
+    let root = project.workspaces_root.clone();
+    blocking(move || crate::workspaces_folder::usable(&root))
+        .await
+        .map_err(Failure::refused)?;
 
     let mut repositories = Vec::new();
     for path in &taken {
@@ -1436,6 +1515,31 @@ async fn local_base(
     )))
 }
 
+/// The setup of the workspace `id`, made of another machine's code while its launch was held,
+/// taken again from its project as the launch laid it, once allowed, before any of it ran.
+pub(crate) fn resnapshot(daemon: &Daemon, id: i64) -> Result<(), String> {
+    let workspace = daemon
+        .read(|store| store.workspace_by_id(id))
+        .map_err(|error| error.to_string())?;
+    let project =
+        crate::projects::load_project(daemon, &workspace.project).map_err(|f| f.message)?;
+    let taken: Vec<String> = workspace
+        .repositories
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    let mut steps = snapshot(&project, &taken);
+    steps.retain(|step| !matches!(step.action, Action::Worktree));
+    daemon
+        .write(|store| {
+            store
+                .replace_pending_steps(id, &steps)
+                .map(|replaced| (replaced, None))
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// The steps of a new workspace: a worktree per repository, then the setup as it is now, a step
 /// for each repository expanded into one per repository.
 fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
@@ -1935,7 +2039,7 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
 }
 
 /// What the globs match in `source`, file by file, relative to it.
-fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn copy_sources(source: &Path, globs: &[String]) -> Result<Vec<PathBuf>, String> {
     let cannot =
         |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
     let mut found = Vec::new();
