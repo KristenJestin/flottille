@@ -414,9 +414,24 @@ mod tests {
     fn a_name_is_taken_whatever_its_case_beyond_ascii() {
         let mut arrangement = Arrangement::default();
         add(&mut arrangement, "Équipe");
-        assert!(arrangement.names("équipe"));
-        assert!(arrangement.names(" ÉQUIPE "));
-        assert!(!arrangement.names("Equipe"));
+        assert!(arrangement.names("équipe", None));
+        assert!(arrangement.names(" ÉQUIPE ", None));
+        assert!(!arrangement.names("Equipe", None));
+    }
+
+    #[test]
+    fn a_group_may_take_its_own_name_again_but_not_another_s() {
+        let mut arrangement = Arrangement::default();
+        add(&mut arrangement, "Work");
+        add(&mut arrangement, "Home");
+        let work = arrangement.groups[0].id.clone();
+        assert!(!arrangement.names("WORK", Some(&work)));
+        assert!(arrangement.names("home", Some(&work)));
+        arrangement.apply(&Change::RenameGroup {
+            id: work,
+            name: " Office ".to_owned(),
+        });
+        assert_eq!(arrangement.groups[0].name, "Office");
     }
 
     #[test]
