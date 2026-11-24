@@ -2051,14 +2051,18 @@ mod removal {
             .find(|agent| agent["parent"] == root.as_str())
             .map(|agent| agent["id"].as_str().unwrap().to_owned())
             .expect("the child");
-        // The root's end alone, as a store left by an older version holds it.
+        // The root's end alone, as a store left by an older version holds it: the tree stopped,
+        // then the child written back as live, its process long gone.
+        user.call("agent.stop", json!({"agent": root})).unwrap();
+        eventually("the tree ends", || state(&user, &child) == "ended");
         let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
         db.execute(
-            "UPDATE agents SET state = 'ended', ended_at = updated_at WHERE id = ?1",
-            [&root],
+            "UPDATE agents SET state = 'working', ended_at = NULL WHERE id = ?1",
+            [&child],
         )
         .unwrap();
         drop(db);
+        assert_eq!(state(&user, &root), "ended");
         lose_the_file(&user, "app");
         assert_eq!(state(&user, &child), "working");
 
