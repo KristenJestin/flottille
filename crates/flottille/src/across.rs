@@ -2479,8 +2479,26 @@ pub(crate) fn removal_aimed(
     args: &Value,
 ) -> Option<Result<Launch, String>> {
     let machine = args.get("machine")?;
-    if tool != REMOVES || args["action"] != "remove" {
+    if tool != REMOVES {
         return None;
+    }
+    if args["action"] != "remove" {
+        return Some(Err(
+            "refused: with machine, workspace only removes the workspace there of a session or \
+             child you started: {\"action\": \"remove\", \"name\": \"<workspace>\", \
+             \"machine\": \"<machine>\"}; every other action is on this machine's workspaces, \
+             without machine"
+                .to_owned(),
+        ));
+    }
+    // As on one machine, the agent the user talks to manages workspaces, a child none.
+    let root = daemon
+        .read(|store| store.agent(caller))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0);
+    if !root {
+        return Some(Err(crate::actions::CHILD_WORKSPACES.to_owned()));
     }
     let (Some(machine), Some(name)) = (machine.as_str(), args["name"].as_str()) else {
         return Some(Err(
