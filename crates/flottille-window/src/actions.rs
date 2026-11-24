@@ -2142,7 +2142,7 @@ fn allow_sharing(
             return;
         }
     };
-    if !share_files(&needs, from_step, &here, on_from, &told) {
+    if !share_files(&needs, from_step, &here, on_from, told) {
         return;
     }
     if !told(None, Step::Allowing, None) {
