@@ -1303,10 +1303,15 @@ fn called(
                     }
                 };
                 crate::tree::stop_tree(daemon, &agent.id, &reason);
-                let stays = workspace_stays(daemon, &launch);
                 match child {
-                    true => format!("Stopped {} and its own children.{stays}", named(&agent)),
-                    false => format!("Ended the session {} with its tree.{stays}", named(&agent)),
+                    true => format!(
+                        "Stopped {} and its own children. Its workspace stays.",
+                        named(&agent)
+                    ),
+                    false => format!(
+                        "Ended the session {} with its tree. Its workspace stays.",
+                        named(&agent)
+                    ),
                 }
             }
         }
@@ -1314,24 +1319,6 @@ fn called(
         _ => unreachable!("the tools are checked above"),
     };
     Ok(json!({"text": text}))
-}
-
-/// What the caller of `launch` is told of the workspace made for it here, once its session or
-/// child ended: that it stays, and how that caller removes it.
-fn workspace_stays(daemon: &Daemon, launch: &Launch) -> String {
-    let workspace = launch
-        .workspace_id
-        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok());
-    // Only a root removes a workspace: a caller below one is told it stays.
-    let root = launch.asked["asked"]["depth"].as_u64().unwrap_or(0) == 0;
-    match (workspace, own_name(daemon)) {
-        (Some(workspace), Some(here)) if root => format!(
-            " Its commits come back to you; its workspace {} stays: workspace {{\"action\": \
-             \"remove\", \"name\": \"{}\", \"machine\": \"{here}\"}} removes it.",
-            workspace.name, workspace.name
-        ),
-        _ => " Its workspace stays.".to_owned(),
-    }
 }
 
 /// What the pilot of another machine of the led session `agent` said of its following of it: kept

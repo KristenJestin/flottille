@@ -1195,9 +1195,9 @@ parent, …`), each naming the ref they came into. A child that reported and end
 nothing more: its report did. What ends with its pilot or its parent sends nothing: nobody is left
 to be told.
 
-**The workspace there is removed as one here** (#1278). The answer of `agent_stop` names it and
-how: `Its commits come back to you; its workspace login stays: workspace {"action": "remove",
-"name": "login", "machine": "server"} removes it`. The `workspace` tool's `remove` takes the same
+**The workspace there is removed as one here** (#1278). The answer of the launch names it (`in
+workspace login there, …`), and `agent_stop` says it stays, as on one machine. The `workspace`
+tool's `remove` takes the same
 optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
 nothing here, to that machine, only for the workspace there of a session or child that very agent
 started (`refused: you started no session or child on server whose workspace is login: …`
