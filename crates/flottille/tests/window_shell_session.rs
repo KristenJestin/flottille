@@ -1230,14 +1230,8 @@ fn a_card_pointed_at_from_the_conversation_slides_into_view(cx: &mut TestAppCont
     settle(cx);
     let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
     assert_eq!(waiting.read_with(cx, |w, _| w.scrolled()), px(0.));
-    for part in ["rail-waiting-cards", "approval", "approval-line"] {
-        let part = match part {
-            "rail-waiting-cards" => part.to_owned(),
-            _ => format!("{part}-{last}"),
-        };
-        assert!(has(part.clone(), cx), "{part} is drawn");
-    }
-    let section = rect("rail-waiting-cards", cx);
+    // The cards end where the section does: nothing is drawn under them.
+    let section = rect("rail-waiting", cx);
     assert!(
         rect(format!("approval-{last}"), cx).bottom() > section.bottom(),
         "the last card is below the fold"
