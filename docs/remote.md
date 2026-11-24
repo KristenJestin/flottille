@@ -996,9 +996,11 @@ local child's work; nothing moves your branch.*
   names none), so it takes a child's tools at its next start, and each agent under it one depth
   below its parent, so that a stop ordered by depth ends them before it; a depth is only raised,
   never lowered. Such a child that had ended then was kept to be resumed, as a root: the next
-  sweep forgets its session and its images, as a child's are when it ends (#1368). An agent it starts here is a child of the tree of its parent's machine too: a
-  method the user's door refuses for a child names that tree's root, on that machine, as the one
-  the user writes to, and `agent.mode` is refused on it as on the remote child.
+  sweep forgets its session and its images, as a child's are when it ends (#1368); a child that
+  ends now keeps no `reopens`, so that the sweep never forgets it a second time (#1383). An agent
+  it starts here is a child of the tree of its parent's machine too: a method the user's door
+  refuses for a child names that tree's root, on that machine, as the one the user writes to, and
+  `agent.mode` is refused on it as on the remote child.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
