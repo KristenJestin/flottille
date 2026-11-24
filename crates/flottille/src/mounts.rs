@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
 const MOUNT_ATTR_RDONLY: u64 = 0x1;
 
 /// `struct mount_attr` of `mount_setattr(2)`, its first version.
@@ -28,6 +29,35 @@ struct MountAttr {
     attr_clr: u64,
     propagation: u64,
     userns_fd: u64,
+}
+
+/// `struct open_how` of `openat2(2)`.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// `path` opened with `flags` without following a link anywhere on its way: the descriptor, or
+/// -1 and `errno` (`ENOSYS` before Linux 5.6, `ELOOP` for a link). A system call alone, which a
+/// child may make before its program.
+pub(crate) fn open_unfollowed(path: &CStr, flags: libc::c_int) -> libc::c_long {
+    let how = OpenHow {
+        flags: (flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: libc::RESOLVE_NO_SYMLINKS,
+    };
+    // SAFETY: a C string and a structure alive for the call.
+    unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    }
 }
 
 /// The variable that plays a kernel refusing user namespaces, read by a test build only: the
@@ -128,6 +158,11 @@ pub fn sandbox() -> serde_json::Value {
     warnings.extend(bus_replaced().then_some(BUS_REPLACED_GAP));
     let unlent = crate::pushed::unlent();
     let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
+    // What a confined command's `ssh` refuses of the root-owned files its settings include.
+    if namespaces == Namespaces::Available {
+        warnings.extend(copies_failed());
+        warnings.extend(crate::ssh_owned::gaps());
+    }
     // Where no push is lifted, the agent's lending to one is moot.
     match crate::pushed::unlifted() {
         Some(why) => warnings.push(crate::pushed::unlifted_said(&why)),
@@ -189,11 +224,18 @@ struct Copies {
     files: Vec<Copy>,
     /// Where the child says why they were not given.
     failed: Option<&'static AtomicI32>,
+    /// A test's: the file system is not taken away, as when the kernel refuses it.
+    #[cfg(test)]
+    kept_up: bool,
 }
 
 struct Copy {
     staged: CString,
     target: CString,
+    /// The file read (device, inode): the copy covers a file with that identity, so not one put at
+    /// its path since. A reused inode would match: it is root's own old file, whose text a copy
+    /// holds, a harm to no one.
+    id: (u64, u64),
     text: Vec<u8>,
     tree: libc::c_int,
 }
@@ -357,30 +399,30 @@ impl Plan {
 
     /// The plan, which also puts a copy of each file, with its text, over it, read-only and owned
     /// by the user in the namespace (`ssh_owned.rs`). None where a path cannot be a C string.
-    pub fn giving(mut self, copies: Vec<(PathBuf, Vec<u8>)>) -> Option<Plan> {
+    pub fn giving(mut self, copies: Vec<crate::ssh_owned::Copied>) -> Option<Plan> {
         let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).ok();
+        // Said by every command, with copies or none: a failure lasts until one gets them.
+        self.copies.failed = failed();
         // Any folder that is there does to stage them: what it holds is hidden for that time only.
         let Some(staging) = copies
             .first()
-            .and_then(|(target, _)| target.parent())
+            .and_then(|copied| copied.path.parent())
             .map(Path::to_owned)
         else {
             return Some(self);
         };
         let mut files = Vec::new();
-        for (n, (target, text)) in copies.into_iter().enumerate() {
+        for (n, copied) in copies.into_iter().enumerate() {
             files.push(Copy {
                 staged: c(&staging.join(format!(".flottille-copy-{n}")))?,
-                target: c(&target)?,
-                text,
+                target: c(&copied.path)?,
+                id: copied.id,
+                text: copied.text,
                 tree: -1,
             });
         }
-        self.copies = Copies {
-            staging: Some(c(&staging)?),
-            files,
-            failed: failed(),
-        };
+        self.copies.staging = Some(c(&staging)?);
+        self.copies.files = files;
         Some(self)
     }
 }
@@ -520,12 +562,20 @@ impl Plan {
                 }
             }
             // At best: a command started without them meets the refusal of `ssh` alone, where
-            // failing its start would fail every command, git's and the daemon's too.
-            if let Some(staging) = &self.copies.staging
-                && let Err(error) = give(staging, &mut self.copies.files)
-                && let Some(failed) = self.copies.failed
-            {
-                failed.store(error.raw_os_error().unwrap_or(libc::EIO), Ordering::Relaxed);
+            // failing its start would fail every command, git's and the daemon's too. But never
+            // over a file system of the copies that stayed: it may be writable.
+            let given = give(&mut self.copies);
+            let errno = |error: &io::Error| error.raw_os_error().unwrap_or(libc::EIO);
+            let said = match &given {
+                Ok(()) => 0,
+                Err(Failed::Without(error)) => errno(error),
+                Err(Failed::Left(error)) => errno(error) | LEFT,
+            };
+            if let Some(failed) = self.copies.failed {
+                failed.store(said, Ordering::Relaxed);
+            }
+            if let Err(Failed::Left(error)) = given {
+                return Err(error);
             }
             for (kept, tree) in self.kept.iter().zip(self.trees.iter_mut()) {
                 let fd = libc::syscall(
@@ -610,14 +660,39 @@ impl Plan {
     }
 }
 
+/// Why the copies were not given.
+enum Failed {
+    /// The command starts without them.
+    Without(io::Error),
+    /// Their file system could not be taken away from over the folder it was mounted on: the
+    /// command must not start.
+    Left(io::Error),
+}
+
+/// Said with the error when their file system was left (`Failed::Left`).
+const LEFT: i32 = 1 << 30;
+
 /// Writes each copy into a file system of the namespace's own mounted on `staging`, makes it
 /// read-only, takes each file out of it, takes the file system away, and puts each file over its
-/// target. A target gone since the plan was made is not there to cover. Whatever fails, the file
-/// system does not stay over `staging`.
+/// target, opened without following a link on its way. A target gone since the plan was made, or
+/// whose device and inode are no longer those of the file read, is not covered. A file system that cannot be taken away fails
+/// the start (`Failed::Left`).
 ///
 /// # Safety
 /// In the child, before its program: plain system calls on what the plan allocated.
-unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
+unsafe fn give(given: &mut Copies) -> Result<(), Failed> {
+    #[cfg(test)]
+    let detach = match given.kept_up {
+        // Refused by the kernel: an expiry cannot be detached.
+        true => libc::MNT_DETACH | libc::MNT_EXPIRE,
+        false => libc::MNT_DETACH,
+    };
+    #[cfg(not(test))]
+    let detach = libc::MNT_DETACH;
+    let Some(staging) = given.staging.as_deref() else {
+        return Ok(());
+    };
+    let copies = &mut given.files[..];
     let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
     // SAFETY: as the function says.
     unsafe {
@@ -627,7 +702,8 @@ unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
             c"tmpfs".as_ptr(),
             flags,
             c"mode=0755".as_ptr().cast(),
-        ) as libc::c_long)?;
+        ) as libc::c_long)
+        .map_err(Failed::Without)?;
         let staged = stage(staging, copies, flags);
         if staged.is_err() {
             for copy in copies.iter_mut().filter(|copy| copy.tree >= 0) {
@@ -635,25 +711,51 @@ unsafe fn give(staging: &CStr, copies: &mut [Copy]) -> io::Result<()> {
             }
         }
         // What the staging folder held before, shown again, whatever came of the copies.
-        check(libc::umount2(staging.as_ptr(), libc::MNT_DETACH) as libc::c_long)?;
-        staged?;
+        check(libc::umount2(staging.as_ptr(), detach) as libc::c_long).map_err(Failed::Left)?;
+        staged.map_err(Failed::Without)?;
         for copy in copies.iter() {
-            let moved = libc::syscall(
-                libc::SYS_move_mount,
-                copy.tree,
-                c"".as_ptr(),
-                libc::AT_FDCWD,
-                copy.target.as_ptr(),
-                MOVE_MOUNT_F_EMPTY_PATH,
-            );
-            let error = io::Error::last_os_error();
+            let moved = cover(copy);
             libc::close(copy.tree);
-            if moved != 0 && error.raw_os_error() != Some(libc::ENOENT) {
-                return Err(error);
-            }
+            moved.map_err(Failed::Without)?;
         }
     }
     Ok(())
+}
+
+/// Moves `copy`'s file onto its target, opened without following a link on its way, when it is
+/// still the file read. A kernel without `openat2` (before Linux 5.6) covers none: the walk read
+/// none there either.
+///
+/// # Safety
+/// As `give`.
+unsafe fn cover(copy: &Copy) -> io::Result<()> {
+    // SAFETY: as the function says.
+    unsafe {
+        let target = open_unfollowed(&copy.target, libc::O_PATH);
+        if target < 0 {
+            let error = io::Error::last_os_error();
+            // Gone, or a link on its way now: not the file read, not covered.
+            return match error.raw_os_error() {
+                Some(libc::ENOENT | libc::ELOOP) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        let target = target as libc::c_int;
+        let mut stat: libc::stat = std::mem::zeroed();
+        let mut result = check(libc::fstat(target, &mut stat) as libc::c_long);
+        if result.is_ok() && (stat.st_dev, stat.st_ino) == copy.id {
+            result = check(libc::syscall(
+                libc::SYS_move_mount,
+                copy.tree,
+                c"".as_ptr(),
+                target,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ));
+        }
+        libc::close(target);
+        result
+    }
 }
 
 /// Writes each copy into the file system on `staging`, makes it read-only and takes each file out
@@ -733,11 +835,24 @@ fn failed() -> Option<&'static AtomicI32> {
     (page != 0).then(|| unsafe { &*(page as *const AtomicI32) })
 }
 
-/// Why a confined command started without the copies of the files `ssh` includes, the last time
-/// one did.
-pub fn copies_failed() -> Option<io::Error> {
-    let errno = failed()?.load(Ordering::Relaxed);
-    (errno != 0).then(|| io::Error::from_raw_os_error(errno))
+/// Why the last confined command started without the copies of the files `ssh` includes, or was
+/// refused its start for them, as `flottille doctor` and the daemon's log say it: none once one
+/// started with them.
+pub fn copies_failed() -> Option<String> {
+    let said = failed()?.load(Ordering::Relaxed);
+    let error = io::Error::from_raw_os_error(said & !LEFT);
+    match said {
+        0 => None,
+        _ if said & LEFT != 0 => Some(format!(
+            "a command was refused its start: the file system its ssh settings were copied in \
+             could not be taken away ({error}), and would have stayed writable over a folder ssh \
+             reads"
+        )),
+        _ => Some(format!(
+            "the ssh settings of a command could not be copied ({error}): its ssh refuses the \
+             files root owns that they include (Bad owner or permissions)"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -873,7 +988,11 @@ mod tests {
         let gone = temp.path().join("gone/ssh_config");
         let mut plan = plan(&[temp.path().to_owned()], &[], &[], None)
             .unwrap()
-            .giving(vec![(gone, b"Host *\n".to_vec())])
+            .giving(vec![crate::ssh_owned::Copied {
+                path: gone,
+                id: (0, 0),
+                text: b"Host *\n".to_vec(),
+            }])
             .unwrap();
         let mut command = std::process::Command::new("true");
         // SAFETY: as in `landlock::confine`.
@@ -885,5 +1004,190 @@ mod tests {
             status.as_ref().is_ok_and(|status| status.success()),
             "{status:?}"
         );
+    }
+
+    /// What a command run in `plan`'s namespace prints, or why it did not start.
+    fn printed(plan: Plan, program: &str, args: &[&std::ffi::OsStr]) -> io::Result<String> {
+        use std::os::unix::process::CommandExt;
+        let mut plan = plan;
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        // SAFETY: as in `landlock::confine`.
+        unsafe { command.pre_exec(move || plan.enter()) };
+        let output = command.output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// The copy of `target` with `text`, as `ssh_owned::copies` gives it.
+    fn copy_of(target: &Path, text: &str) -> Vec<crate::ssh_owned::Copied> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(target).unwrap();
+        vec![crate::ssh_owned::Copied {
+            path: target.to_owned(),
+            id: (meta.dev(), meta.ino()),
+            text: text.as_bytes().to_vec(),
+        }]
+    }
+
+    #[test]
+    fn a_copy_file_system_that_cannot_be_taken_away_fails_the_start() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The copies fail before their file system is read-only, and it cannot be taken away:
+        // a command started then would find a writable folder over the one `ssh` reads.
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.conf"), "a\n").unwrap();
+        std::fs::write(folder.join("b.conf"), "b\n").unwrap();
+        let mut plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(
+                [
+                    copy_of(&folder.join("a.conf"), "a\n"),
+                    copy_of(&folder.join("b.conf"), "b\n"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            )
+            .unwrap();
+        // The second copy staged where the first is: written, it fails.
+        plan.copies.files[1].staged = plan.copies.files[0].staged.clone();
+        plan.copies.kept_up = true;
+
+        let started = printed(plan, "true", &[]);
+
+        assert!(started.is_err(), "{started:?}");
+    }
+
+    #[test]
+    fn a_target_swapped_since_the_plan_is_not_covered() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // Another file renamed over the one read: the copy of the first does not cover it.
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir(&folder).unwrap();
+        let target = folder.join("config");
+        std::fs::write(&target, "read\n").unwrap();
+        let plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(copy_of(&target, "read\n"))
+            .unwrap();
+        std::fs::write(folder.join("other"), "other\n").unwrap();
+        std::fs::rename(folder.join("other"), &target).unwrap();
+
+        let shown = printed(plan, "cat", &[target.as_os_str()]).unwrap();
+
+        assert_eq!(shown, "other\n");
+    }
+
+    #[test]
+    fn a_link_on_the_way_to_a_target_is_not_followed() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The target's folder swapped for a link since the plan: the copy covers no file the
+        // link leads to.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("ssh")).unwrap();
+        std::fs::write(root.join("ssh/config"), "read\n").unwrap();
+        std::fs::create_dir(root.join("elsewhere")).unwrap();
+        std::fs::write(root.join("elsewhere/config"), "elsewhere\n").unwrap();
+        let plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(copy_of(&root.join("ssh/config"), "read\n"))
+            .unwrap();
+        std::fs::rename(root.join("ssh"), root.join("moved")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("ssh")).unwrap();
+
+        let shown = printed(plan, "cat", &[root.join("elsewhere/config").as_os_str()]).unwrap();
+
+        assert_eq!(shown, "elsewhere\n");
+    }
+
+    #[test]
+    fn a_copy_stays_read_only_to_a_namespace_the_command_makes_without_landlock() {
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        // The read-only layer alone: no Landlock refuses the mounts here, so a namespace of the
+        // command's own, where it is root, may make `/` private and try each of them.
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir(&folder).unwrap();
+        let target = folder.join("config");
+        std::fs::write(&target, "root's\n").unwrap();
+        let plan = plan(&[], &[], &[], None)
+            .unwrap()
+            .giving(copy_of(&target, "copy\n"))
+            .unwrap();
+        let nested = "import ctypes, errno, json, os, sys\n\
+             libc = ctypes.CDLL(None, use_errno=True)\n\
+             target = sys.argv[1]\n\
+             out = {'root': os.getuid() == 0}\n\
+             def call(name, result):\n\
+             \x20   out[name] = 'done' if result == 0 else errno.errorcode.get(ctypes.get_errno())\n\
+             MS_REMOUNT, MS_BIND = 32, 4096\n\
+             call('remount_bind_rw', libc.mount(None, target.encode(), None, MS_REMOUNT | MS_BIND, None))\n\
+             call('remount_rw', libc.mount(None, target.encode(), None, MS_REMOUNT, None))\n\
+             call('unmounted', libc.umount2(target.encode(), 2))\n\
+             try:\n\
+             \x20   open(target, 'a').write('planted\\n')\n\
+             \x20   out['write'] = 'done'\n\
+             except OSError as e:\n\
+             \x20   out['write'] = errno.errorcode.get(e.errno)\n\
+             out['text'] = open(target).read()\n\
+             print(json.dumps(out))\n";
+        let outer = "import errno, json, os, subprocess, sys\n\
+             target = sys.argv[1]\n\
+             out = {}\n\
+             def attempt(name, action):\n\
+             \x20   try:\n\
+             \x20       action()\n\
+             \x20       out[name] = 'done'\n\
+             \x20   except OSError as e:\n\
+             \x20       out[name] = errno.errorcode.get(e.errno)\n\
+             attempt('write', lambda: open(target, 'a').write('planted\\n'))\n\
+             attempt('mode', lambda: os.chmod(target, 0o666))\n\
+             nested = subprocess.run(['unshare', '-Urm', 'python3', '-c', sys.argv[2], target],\n\
+             \x20   capture_output=True, text=True)\n\
+             out['nested'] = json.loads(nested.stdout) if nested.returncode == 0 \\\n\
+             \x20   else nested.stderr[-500:]\n\
+             out['text'] = open(target).read()\n\
+             print(json.dumps(out))\n";
+
+        let shown = printed(
+            plan,
+            "python3",
+            &[
+                "-c".as_ref(),
+                outer.as_ref(),
+                target.as_os_str(),
+                nested.as_ref(),
+            ],
+        )
+        .unwrap();
+        let out: serde_json::Value =
+            serde_json::from_str(&shown).unwrap_or_else(|_| panic!("{shown}"));
+
+        assert_eq!(out["write"], "EROFS", "{out}");
+        assert_eq!(out["mode"], "EROFS", "{out}");
+        let nested = &out["nested"];
+        assert_eq!(nested["root"], true, "{out}");
+        for name in ["remount_bind_rw", "remount_rw", "unmounted", "write"] {
+            assert_ne!(nested[name], "done", "{name}: {out}");
+        }
+        assert_eq!(nested["text"], "copy\n", "{out}");
+        assert_eq!(out["text"], "copy\n", "{out}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "root's\n");
     }
 }
