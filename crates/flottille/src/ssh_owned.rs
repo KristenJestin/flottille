@@ -165,7 +165,7 @@ impl Walk<'_> {
             // Said when something past the limit is the owner's, as a copy past its limit is.
             let owned = file
                 .canonicalize()
-                .and_then(|path| std::fs::symlink_metadata(path))
+                .and_then(std::fs::symlink_metadata)
                 .is_ok_and(|meta| meta.is_file() && self.owns(&meta));
             if owned {
                 self.gap(format!(
