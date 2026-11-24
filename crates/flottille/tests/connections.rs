@@ -5905,6 +5905,10 @@ fn the_plugins_reason_is_read_up_to_a_kibibyte() {
 /// passed by default; a failure where CI's `real-browser` job sets it to `required`, so that a
 /// change of the browser's sandbox never passes with these tests skipped.
 fn real_browser_skip(why: &str, required: Option<&str>) {
+    assert!(
+        required != Some("required"),
+        "{why}, and FLOTTILLE_REAL_BROWSER=required forbids skipping"
+    );
     eprintln!("skipped: {why}");
 }
 
