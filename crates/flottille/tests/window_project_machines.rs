@@ -16,6 +16,8 @@ use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
+use flottille_window::project::{machine_block_id, machine_session_mark_id, session_row_id};
+use flottille_window::shell::Selection;
 use flottille_window::tree::{
     by_machine_id, group_header_id, machine_id, machine_mark_id, project_apart_id, project_id,
     project_mark_id, project_offline_id, projects_menu_id, session_id,
@@ -136,11 +138,13 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     }
 }
 
-fn present(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> bool {
+fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bool {
+    let id = id.into();
     cx.update(|window, _| window.try_find(id).is_some())
 }
 
-fn label(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> Option<String> {
+fn label(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> Option<String> {
+    let id = id.into();
     cx.update(|window, _| {
         window
             .try_find(id)
@@ -619,4 +623,279 @@ fn the_window_draws_no_frame_at_rest_with_marks_and_with_sections(cx: &mut TestA
         (0, 0),
         "sections: (drawn, asked)"
     );
+}
+
+// The shared project's page (#1266): its sessions of every machine, where a session starts, and
+// its settings' switch between the machines that have it.
+
+/// A user one of whose providers is ready, as the window sees it: a machine of theirs can run an
+/// agent, and its composer starts.
+fn ready_user() -> User {
+    let user = User::with_fake_providers();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// A hub, `pc` and `server`, each able to run an agent.
+fn ready_machines() -> (TestHub, Machine, Machine) {
+    pc_and_server_on(Machine::of(ready_user()), ready_user())
+}
+
+/// `pc` has been told the projects `names` of `machine`.
+fn told_by(pc: &Machine, machine: &str, names: &[&str]) {
+    eventually(&format!("pc is told {machine}'s projects"), || {
+        let lists = pc.user.call("remote.sessions", json!({})).unwrap();
+        let held: Vec<String> = lists["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|listed| listed["name"] == machine)
+            .flat_map(|listed| listed["projects"].as_array().cloned().unwrap_or_default())
+            .map(|p| p["name"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        names.iter().all(|name| held.iter().any(|h| h == name))
+    });
+}
+
+/// The window on `pc`, tall enough for the whole page, its machines read.
+fn page_window<'a>(
+    pc: &Machine,
+    others: &[&str],
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(pc, cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let others: Vec<String> = others.iter().map(|name| (*name).to_owned()).collect();
+    until(
+        &shell,
+        cx,
+        "the machines and this one's providers are read",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.providers().offered().next().is_some()
+                    && s.machines().read(cx).machines().is_some_and(|read| {
+                        others
+                            .iter()
+                            .all(|name| read.machine(name).is_some_and(|m| m.online()))
+                    })
+            })
+        },
+    );
+    settle(&shell, cx);
+    (shell, cx)
+}
+
+fn show(shell: &Entity<Shell>, selection: Selection, cx: &mut VisualTestContext) {
+    shell.update_in(cx, |s, window, cx| s.open(selection, window, cx));
+    settle(shell, cx);
+}
+
+fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    settle(shell, cx);
+}
+
+fn shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, _| s.machine_shown())
+}
+
+#[gpui_kit::test]
+fn its_page_lists_the_sessions_of_both_machines(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let here = session(&pc, "app", "Fix the pc part");
+    let there = session(&server, "app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "both sessions on the page", |cx| {
+        present(cx, session_row_id(&here)) && present(cx, session_row_id(&row))
+    });
+    assert_eq!(shown(&shell, cx), None, "this machine's page of it");
+    // The server's session is in the server's block, with the server's icon; this machine's in
+    // its place, as before.
+    assert!(present(cx, machine_block_id("server")));
+    assert!(!present(cx, machine_block_id("pc")));
+    let mark = label(cx, machine_session_mark_id(&row)).unwrap_or_default();
+    assert!(
+        mark.contains(" in "),
+        "the server's icon in its colour: {mark}"
+    );
+    assert_eq!(
+        label(cx, machine_block_id("server")).as_deref(),
+        Some("server · online")
+    );
+
+    // The server's page of it lists this machine's session the same way.
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-server", cx);
+    until(
+        &shell,
+        cx,
+        "the server's page with this machine's session",
+        |cx| {
+            shown(&shell, cx).as_deref() == Some("server")
+                && present(cx, machine_block_id("pc"))
+                && present(cx, session_row_id(&here))
+                && present(cx, session_row_id(&row))
+        },
+    );
+    let mark = label(cx, machine_session_mark_id(&here)).unwrap_or_default();
+    assert!(
+        mark.contains(" in "),
+        "this machine's icon in its colour: {mark}"
+    );
+    assert!(!present(cx, machine_block_id("server")));
+}
+
+#[gpui_kit::test]
+fn starting_a_session_runs_on_this_machine_when_it_can_else_asks(cx: &mut TestAppContext) {
+    let (hub, pc, server) = ready_machines();
+    let laptop = Machine::of(ready_user());
+    crate::remote::pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop", "online");
+    // `app` everywhere; `site` on the server only; `web` on the server and the laptop.
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    add(&laptop, "app", APP);
+    add(&server, "site", SITE);
+    add(&server, "web", "https://git.example/acme/web.git");
+    add(&laptop, "web", "https://git.example/acme/web.git");
+    told_by(&pc, "server", &["app", "site", "web"]);
+    told_by(&pc, "laptop", &["app", "web"]);
+
+    let (shell, cx) = page_window(&pc, &["server", "laptop"], cx);
+    // Where a session can start is what each machine offers over its link.
+    until(
+        &shell,
+        cx,
+        "the window knows what each machine offers",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.machines().read(cx).machines().is_some_and(|read| {
+                    read.has_project(Some("server"), "site")
+                        && read.has_project(Some("server"), "web")
+                        && read.has_project(Some("laptop"), "web")
+                })
+            })
+        },
+    );
+    // This machine has it and can run it: the session runs here, nothing asked.
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "app's composer", |cx| {
+        present(cx, "place-picker")
+    });
+    let providers = shell.read_with(cx, |s, _| {
+        let p = s.providers();
+        format!(
+            "known {} offered {} why {:?}",
+            p.known,
+            p.offered().count(),
+            p.why_none()
+        )
+    });
+    assert_eq!(shown(&shell, cx), None, "{providers}");
+    assert!(!present(cx, "composer-ask"));
+
+    // Not here, on one machine online: there, nothing asked.
+    show(&shell, Selection::Project("site".into()), cx);
+    until(&shell, cx, "site's page on the server", |cx| {
+        shown(&shell, cx).as_deref() == Some("server") && present(cx, "place-picker")
+    });
+    assert!(!present(cx, "composer-ask"));
+
+    // Not here, on two: the start asks which, and starts nothing before.
+    show(&shell, Selection::Project("web".into()), cx);
+    until(&shell, cx, "web's composer asks", |cx| {
+        present(cx, "composer-ask") && present(cx, "machine-picker")
+    });
+    let asked = label(cx, "composer-ask").unwrap_or_default();
+    assert!(
+        asked.contains("server") && asked.contains("laptop"),
+        "{asked}"
+    );
+    let can_start = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.composer_of("web")
+                .is_some_and(|composer| composer.read(cx).asks_where().is_none())
+        })
+    };
+    assert!(!can_start(&shell, cx));
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-laptop", cx);
+    until(&shell, cx, "web on the laptop, asked no more", |cx| {
+        shown(&shell, cx).as_deref() == Some("laptop") && !present(cx, "composer-ask")
+    });
+
+    // The choice is kept for the project: web opens on the laptop again, asking nothing, and the
+    // daemon keeps it with the window's own state.
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "app on this machine", |cx| {
+        shown(&shell, cx).is_none()
+    });
+    show(&shell, Selection::Project("web".into()), cx);
+    until(&shell, cx, "web on the laptop again", |cx| {
+        shown(&shell, cx).as_deref() == Some("laptop") && present(cx, "place-picker")
+    });
+    assert!(!present(cx, "composer-ask"));
+    eventually("the daemon keeps the choice", || {
+        pc.user
+            .call("window.get", json!({}))
+            .is_ok_and(|state| state["state"]["sidebar"]["starts"]["web"] == "laptop")
+    });
+}
+
+#[gpui_kit::test]
+fn its_settings_switch_between_the_machines_that_have_it(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    add(&pc, "site", SITE);
+    told(&pc, &["app"]);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    // A project on this machine only has no switch.
+    show(&shell, Selection::ProjectSettings("site".into()), cx);
+    until(&shell, cx, "site's settings", |cx| {
+        present(cx, "project-settings-header")
+    });
+    assert!(!present(cx, "project-settings-machine"));
+
+    show(&shell, Selection::ProjectSettings("app".into()), cx);
+    until(&shell, cx, "app's switch of machines", |cx| {
+        present(cx, "project-settings-machine")
+    });
+    assert_eq!(
+        label(cx, "project-settings-machine-field").as_deref(),
+        Some("Settings of")
+    );
+    click(&shell, "project-settings-machine", cx);
+    // This machine first, then the other one that has it.
+    let top = |cx: &mut VisualTestContext, id: &str| bounds(cx, id.to_owned()).origin.y;
+    until(&shell, cx, "both machines offered", |cx| {
+        present(cx, "project-settings-machine-here")
+            && present(cx, "project-settings-machine-server")
+    });
+    assert!(top(cx, "project-settings-machine-here") < top(cx, "project-settings-machine-server"));
+    click(&shell, "project-settings-machine-server", cx);
+    until(&shell, cx, "the server's settings of app", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::ProjectSettings("app".into()))
+            })
+            && present(cx, "project-settings-machine")
+    });
+    // And back to this machine's.
+    click(&shell, "project-settings-machine", cx);
+    click(&shell, "project-settings-machine-here", cx);
+    until(&shell, cx, "this machine's settings of app", |cx| {
+        shown(&shell, cx).is_none()
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::ProjectSettings("app".into()))
+            })
+    });
 }

@@ -468,6 +468,11 @@ pub enum Command {
     VaultDismiss {
         ask: u64,
     },
+    /// The agent's proposed edit `ask` of the vault entry `name` accepted from its card.
+    VaultAccept {
+        ask: u64,
+        name: String,
+    },
     /// The project's skills.
     Skills {
         project: String,
@@ -1405,6 +1410,12 @@ pub enum Outcome {
     /// The dismissal of a request for a vault entry was taken, or refused with why.
     VaultDismissed {
         ask: u64,
+        refused: Option<String>,
+    },
+    /// The proposed edit `ask` of the entry `name` was applied, or refused with why.
+    VaultAccepted {
+        ask: u64,
+        name: String,
         refused: Option<String>,
     },
     /// The answers from the card of the ask `seq` were taken, or refused with why.
@@ -3230,6 +3241,18 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::VaultDismissed { ask, refused }
+        }
+        Command::VaultAccept { ask, name } => {
+            let refused = match ask_alone(
+                connect,
+                "vault.ask_accept",
+                json!({"ask": ask}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::VaultAccepted { ask, name, refused }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);
