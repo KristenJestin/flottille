@@ -317,12 +317,11 @@ fn queued_by_the_parent(pc: &Machine, server: &Machine) -> (String, String) {
         json!({"agent_id": child, "message": "Cover the CSV export too."}),
     );
     assert!(!sent.error, "{}", sent.text);
-    let mut delivery = None;
     eventually("the parent's message queued", || {
-        delivery = queued(server, &child);
-        delivery.is_some()
+        queued(server, &child).is_some()
     });
-    (child, delivery.unwrap())
+    let delivery = queued(server, &child).unwrap();
+    (child, delivery)
 }
 
 /// The delivery `agent` waits on `server`, if any.
