@@ -717,5 +717,12 @@ fn a_kept_root_session_is_still_kept() {
     eventually("the child's session forgotten", || !forgotten.exists());
     assert!(kept.exists());
     assert!(reopens(&server, &own));
-    assert_eq!(server.agent(&own)["resumable"], true);
+    let listed = server.user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == own.as_str())
+        .unwrap()["resumable"]
+        .clone();
+    assert_eq!(listed, true);
 }
