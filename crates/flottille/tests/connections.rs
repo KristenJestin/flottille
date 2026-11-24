@@ -6767,10 +6767,11 @@ fn har_and_trace_are_off_at_the_first_pin() {
 }
 
 #[test]
-fn the_flow_and_capture_tools_are_off() {
+fn the_flow_tools_are_off() {
     // `flow save` keeps a recorded session in a file of agent-browser's own, and `flow steps`
     // lists what it recorded: the values a login types may be in them, where Flottille's masking
     // does not look. Off at the first pin, beside the HAR and the trace, and the user's to turn on.
+    // `capture` is an argument of `open`, not a tool: nothing of it is tested here.
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     for action in FLOWS {
