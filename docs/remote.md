@@ -887,7 +887,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `workspace` `remove` of the workspace made for it, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1213,9 +1213,17 @@ of its own agents' removals (`tools.md`, "The workspace"), its caller stood in f
 workspace's project there, in its tree's mode: held for its user as a removal of its own agents'
 is, its card saying what would be lost, refused while an agent works in it, and done only with nothing lost or
 by the user's answer to discard. Commits that went back count as kept, as commits another branch
-holds do: what the card names is only what never reached the caller. The user's answer comes back
-as an `approval` delivery, as any held call of another machine's. Only a root removes one, as on
-one machine; another machine's caller removes no other workspace, of any name.
+holds do: what the card names is only what never reached the caller. Nothing of it is done, not
+even the commits sent, before the call is found to be one that machine plays: its device's role
+(`refused: pc may only view: …` for a viewer), its words, its workspace that launch's. The user's
+answer comes back as an `approval` delivery, as any held call of another machine's, and is done for
+that launch's workspace alone, whatever another launch's workspace in another project is named. In
+Full, a removal that would lose anything waits for the user's word there, as a root's removal of
+the workspace it works in does. Only a root removes one, as on one machine (a child is told
+`refused: the agent the user talks to manages the project's workspaces; …`); another machine's
+caller removes no other workspace, of any name, and `machine` goes with no other action
+(`refused: with machine, workspace only removes the workspace there of a session or child you
+started: …`).
 
 **Built (#819), in the window.** While the window shows this machine, each led session and each
 child an agent of this machine started on another (`remote.launches`, `protocol.md`) has a row
@@ -2549,8 +2557,18 @@ on a real phone, by hand, and reported.
   learns where that work went. A removal asked from another machine sends the commits back on its
   own before it is judged, rather than refusing until an end brought them: the caller asks once.
   A removal that runs while an end's delivery is sending the same commits waits for it (one send
-  back at a time); if the removal goes first, that delivery may say its commits could not come
-  back, the workspace being gone, though the removal's answer named where they came.
+  back at a time for a launch, another launch's going on meanwhile); if the removal goes first,
+  that delivery says nothing of commits that all went back.
+- **In Full, a removal from another machine is held only when it would lose something** (#1278):
+  the caller works in no workspace there, so the rule of one machine (the removal of the workspace
+  an agent works in waits for the user's word, even in Full) does not apply as written. The removal
+  sends the commits back first; what it would still lose (work never committed, or commits that
+  could not go back) makes it wait for the user's word there, and a removal that loses nothing is
+  done as Full does any other.
+- **Two launches of one caller whose workspaces there have one name** (#1278), in two projects
+  there (a project made again for a branch of another root): the caller's daemon sends the removal
+  for the first of its launches holding that name, and the machine there removes that launch's
+  alone. Naming which, by its session, is a follow-up if the case is met.
 
 ## Open questions
 
