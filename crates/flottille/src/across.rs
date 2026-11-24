@@ -123,8 +123,8 @@ fn serving(remote: &Remote) -> Result<Arc<Daemon>, Refused> {
 }
 
 /// Whether a test plays a machine slow to record what its agent waits for once another machine
-/// answered its call or its launch: in a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE`
-/// names exists.
+/// answered its call or its launch, or slow to answer the End confirmation's `session_losses`: in
+/// a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE` names exists.
 pub(crate) fn playing_slow_call() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("FLOTTILLE_TEST_SLOW_CALL_FILE")
@@ -1700,6 +1700,9 @@ async fn losses_here(
     let launch = own_launch(daemon, remote, from, call)?;
     if launch.kind != "led" {
         return Err(format!("{LOSSES} reads only a session the caller leads").into());
+    }
+    while playing_slow_call() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let agent = daemon
         .read(|store| store.agent(&call.agent))
