@@ -1114,8 +1114,14 @@ local child's work; nothing moves your branch.*
   that card does both** (#1262), whichever machine the window runs on and shows: on `from`,
   reached through this machine's daemon as Settings of another machine is and signed with this
   device's key as a share is, it reads the vault's entries, then for each file in turn makes its
-  entry (unless one of that name is there already) and shares it with `to`, then allows the
-  launch; each step shows on the card, and the first that fails ends it, saying which file and
+  entry (unless the file's own is there already) and shares it with `to`, then allows the
+  launch. **An entry is shared only when it is the file's own**: named as the daemon names it
+  (`<project>-<path>`) and bound to that file (`file:<project>/<path>`); an entry of that name that
+  holds another secret is left to `vault.from_file`, which refuses it, and a card whose `needs`
+  names another entry for a file, or a `to` that is not the machine the launch is held on, is
+  refused before anything is asked, nothing shared (the daemon shown is not trusted with what
+  leaves `from`). The card names `from`, `to` and the project, so what the user consents to is
+  what is shared; each step shows on the card, and the first that fails ends it, saying which file and
   why, the launch still held, Try again resuming at that step. Allowed,
   the receiving machine makes each file from its vault entry in the project's folder, never over
   a file, readable by the user alone, before the setup runs, whose `copy` step then copies it as
@@ -1974,10 +1980,11 @@ on a real phone, by hand, and reported.
   saying so.
 - **The window orchestrates an Allow that shares files** (#1262): the receiving machine cannot
   read the caller's files, and a share is signed by a device of the user's, so no one method does
-  it all. It reads `vault.list` on `from` first and skips the making of an entry of that name
-  there (no `replace`): a Try again keeps what an Allow that failed further on made, and an entry
-  the user corrected by hand is never overwritten; an entry made a minute before keeps the file
-  as it was then.
+  it all. It reads `vault.list` on `from` first and skips the making of the file's own entry
+  there (of its name and bound to it; no `replace`): a Try again keeps what an Allow that failed
+  further on made, and an entry the user corrected by hand is never overwritten; an entry made a
+  minute before keeps the file as it was then. A `vault.list` that fails blames no file: the card
+  says it, its rows as they were.
 - **Allowed with its files, the card is the result** (#1262): no toast; its marks show a moment
   and it folds away, the request's line recording `Allowed · 2 files shared` where the page still
   shows it (the page of the launched session reads its conversation again once it starts, and that
@@ -1985,12 +1992,15 @@ on a real phone, by hand, and reported.
 - **After a failure the primary button says Try again** (#1262): the click resumes at the failed
   step instead of doing it all again, and its word says so.
 - **Deny after a partial share leaves the entries shared** (#1262): each is bound to its one file
-  (`file:<project>/<path>`) and laid only by a launch the user allows; the card's Details says so.
+  (`file:<project>/<path>`) and laid only by a launch the user allows; the card's Details says so
+  once a file is shared, and only then.
   No Remove from the other machine is offered.
 - **Allow and Deny are off while it runs** (#1262): stopping in the middle would need a share
   undone; the run takes seconds.
-- **A device that may only view signs no share** (#1262): Allow on such a card is off, its reason
-  in its tooltip (`This device may only view server`); the daemon's refusal stays the guard.
+- **A device that may only view signs no share** (#1262): the shares are signed for `from`, so
+  its rights on `from` are what count, whichever machine is in front: Allow on such a card is off,
+  its reason in its tooltip (`This device may only view pc`); the daemon's refusal stays the
+  guard.
 - **The steps are not capped on the card** (#1262): they are those of `copied`, which #1214 caps
   already; the section scrolls past its height as for any card.
 - **The class of the card stays the daemon's** (#1262): a launch that lays a file is held whatever
