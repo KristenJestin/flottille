@@ -2549,6 +2549,10 @@ impl Shell {
         &self.main
     }
 
+    pub fn sidebar(&self) -> &Entity<Sidebar> {
+        &self.sidebar
+    }
+
     /// The vault's section, whichever page is shown: its form is a dialog over that page.
     pub fn vault(&self, cx: &gpui_kit::App) -> Entity<VaultSection> {
         self.settings.read(cx).vault().clone()
