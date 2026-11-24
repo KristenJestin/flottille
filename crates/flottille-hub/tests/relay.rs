@@ -547,8 +547,9 @@ async fn a_packet_waits_for_nothing_the_hub_does() {
 }
 
 /// A phone paired with the hub of `place` as the app pairs it: a controller whose endpoint is
-/// declared as its machine, saying it is a phone. Its session.
-async fn phone(place: &Place, key: &DeviceKey, name: &str) -> Session {
+/// declared as its machine, saying it is a phone and, with `notices`, that it takes the notices.
+/// Its session.
+async fn phone(place: &Place, key: &DeviceKey, name: &str, notices: bool) -> Session {
     let endpoint = place.machine(name);
     let code: PairCode = place.served.with_hub(|hub| {
         hub.open_pairing(&url(place.served.address()), None)
@@ -571,6 +572,7 @@ async fn phone(place: &Place, key: &DeviceKey, name: &str) -> Session {
         .ask(Ask::About {
             device: "phone".to_owned(),
             system: "android".to_owned(),
+            notices,
         })
         .await
         .unwrap();
@@ -600,13 +602,14 @@ fn request_notice() -> Notice {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_runners_notice_goes_to_the_phones_only() {
     let place = Place::new().await;
-    let mut pixel = phone(&place, &device_key(4), "pixel").await;
+    let mut pixel = phone(&place, &device_key(4), "pixel", true).await;
     let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
     let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
     laptop_session
         .ask(Ask::About {
             device: "computer".to_owned(),
             system: "linux".to_owned(),
+            notices: false,
         })
         .await
         .unwrap();
@@ -628,8 +631,8 @@ async fn a_runners_notice_goes_to_the_phones_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_a_runners_machine_tells_the_phones() {
     let place = Place::new().await;
-    let pixel = phone(&place, &device_key(4), "pixel").await;
-    let mut other = phone(&place, &device_key(5), "other").await;
+    let pixel = phone(&place, &device_key(4), "pixel", true).await;
+    let mut other = phone(&place, &device_key(5), "other", true).await;
 
     let refused = pixel
         .ask(Ask::Notify {
@@ -643,5 +646,26 @@ async fn only_a_runners_machine_tells_the_phones() {
         "{refused}"
     );
     let told = notices_within(&mut other, Duration::from_millis(500)).await;
+    assert!(told.is_empty(), "{told:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_that_did_not_ask_for_notices_is_told_none() {
+    let place = Place::new().await;
+    // A phone of before #827: its session would end at a frame it does not know.
+    let mut older = phone(&place, &device_key(4), "older", false).await;
+    let mut newer = phone(&place, &device_key(5), "newer", true).await;
+
+    place
+        .pc_session
+        .ask(Ask::Notify {
+            notice: request_notice(),
+        })
+        .await
+        .unwrap();
+
+    let told = notices_within(&mut newer, Duration::from_secs(2)).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    let told = notices_within(&mut older, Duration::from_millis(500)).await;
     assert!(told.is_empty(), "{told:?}");
 }
