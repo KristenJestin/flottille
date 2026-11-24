@@ -702,15 +702,15 @@ const SERVED: [Definition; 33] = [
         title: "Launch a child, or start a session",
         description: "kind (required): child, a part of your own task, in your place, that reports \
             to you; led, an autonomous job of its own that you pilot, a real session the user \
-            sees under you, which asks you its questions and wakes you; handed, a session you \
+            sees under you, which asks you its questions and wakes you at each end of its turns; handed, a session you \
             start for the user and let go, of which you hear no more unless it writes. led and \
-            handed: a root only, judged, in workspace or new_workspace. Answered at once; never \
+            handed: a root only, in workspace or new_workspace. Answered at once; never \
             poll. The brief is all it knows: the task, what to read, the checks, the \
             deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \"brief\": \
             \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \"...\", \
             \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
             \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
-            machine: another of the user's machines, a copy of your place with your uncommitted \
+            machine: another machine, a copy of your place with your uncommitted \
             changes. project: another registered project, held for the user. new_workspace: \
             name its branch by the repository's convention.",
         read_only: false,
@@ -4585,10 +4585,10 @@ mod tests {
         // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
         // definition's size (2,915 characters, measured on that branch), before it is listed
         // short as the other rarely used families are. The roots list is measured with the
-        // tool `vault` (an entry exists) and `routine` whole: 58,035 characters of the 60,000,
-        // a margin of 1,965 (measured on this branch, round 3, 2026-11-24; child 46,873, leaf
+        // tool `vault` (an entry exists) and `routine` whole: 58,037 characters of the 60,000,
+        // a margin of 1,963 (measured on this branch, round 3, 2026-11-24; child 46,875, leaf
         // 40,525). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
-        // which made 60,060; `agent_launch` is listed short too, which gave 2,025 back. The limits
+        // which made 60,060; `agent_launch` is listed short too, which gave 2,023 back. The limits
         // are not raised, and no tool is trimmed.
         const ROUTINE: usize = 2_915;
         let mut biggest = 0;
