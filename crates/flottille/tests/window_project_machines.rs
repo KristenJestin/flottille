@@ -747,6 +747,21 @@ fn starting_a_session_runs_on_this_machine_when_it_can_else_asks(cx: &mut TestAp
     told_by(&pc, "laptop", &["app", "web"]);
 
     let (shell, cx) = page_window(&pc, &["server", "laptop"], cx);
+    // Where a session can start is what each machine offers over its link.
+    until(
+        &shell,
+        cx,
+        "the window knows what each machine offers",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.machines().read(cx).machines().is_some_and(|read| {
+                    read.has_project(Some("server"), "site")
+                        && read.has_project(Some("server"), "web")
+                        && read.has_project(Some("laptop"), "web")
+                })
+            })
+        },
+    );
     // This machine has it and can run it: the session runs here, nothing asked.
     show(&shell, Selection::Project("app".into()), cx);
     until(&shell, cx, "app's composer", |cx| {
