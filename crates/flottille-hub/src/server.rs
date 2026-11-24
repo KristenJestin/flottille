@@ -13,8 +13,8 @@
 //! `keepalive` when it has nothing to say, so that a reverse proxy does not close the session.
 //!
 //! What a runner's machine asks to tell the user's phones (`Ask::Notify`: a kind and ids) goes to
-//! every session of a member whose device said it is a phone, said to be from that machine
-//! (`docs/remote.md`, "Notifications"); nothing of it is kept.
+//! every member's session that asked for the notices (`Ask::About`'s `notices`, which the app
+//! says), said to be from that machine (`docs/remote.md`, "Notifications"); nothing of it is kept.
 //!
 //! A device that is no member yet may pair (`flottille_link::Pairing`) while pair mode is open:
 //! its proof is checked against the pair mode's secret, the device is paired, and its session is
@@ -469,6 +469,8 @@ async fn run<C: Clock + Send + 'static>(
     let pair_ends = tokio::time::Instant::now() + shared.waits.pair_idle;
     let mut relays = session.relays();
     let mut notices = shared.notices.subscribe();
+    // Whether this session asked for the notices (`Ask::About`).
+    let mut takes_notices = false;
     // Every session is told when this one closes, once it is no longer open to the links: this is
     // let go after `opened`.
     struct SayClosed<'a>(&'a watch::Sender<u64>);
@@ -573,9 +575,12 @@ async fn run<C: Clock + Send + 'static>(
                     Ok(asked) => asked,
                     Err(why) => return why,
                 };
+                let asks_notices = matches!(asked.ask, Ask::About { notices: true, .. });
                 let refused = handle(shared, &device, pinned, paired.as_ref(), asked.ask)
                     .err()
                     .map(|error| error.to_string());
+                // Said once a session; a phone of before never says it, and is sent none.
+                takes_notices |= asks_notices && refused.is_none();
                 let answer = ToDevice::Answer { id: asked.id, refused };
                 if session.send(&answer).await.is_err() {
                     return "it closed the connection".to_owned();
@@ -583,7 +588,9 @@ async fn run<C: Clock + Send + 'static>(
             }
             told = notices.recv() => {
                 let Ok((from, notice)) = told else { continue };
-                if !is_phone(&shared.hub.lock().unwrap(), &device, paired.as_ref()) {
+                if !takes_notices
+                    || member_of(&shared.hub.lock().unwrap(), &device, paired.as_ref()).is_none()
+                {
                     continue;
                 }
                 if let Err(error) = session.send(&ToDevice::Notice { from, notice }).await {
@@ -615,15 +622,6 @@ fn is_member<C: Clock>(hub: &Hub<C>, key: &PublicKey) -> bool {
             .get(key)
             .or_else(|| members.by_machine(key))
             .is_some()
-    })
-}
-
-/// Whether `device`'s session is a member's phone: its member said it is one (`Ask::About`).
-fn is_phone<C: Clock>(hub: &Hub<C>, device: &PublicKey, paired: Option<&PublicKey>) -> bool {
-    member_of(hub, device, paired).is_some_and(|member| {
-        hub.facts()
-            .iter()
-            .any(|facts| facts.key == member && facts.kind.as_deref() == Some("phone"))
     })
 }
 
@@ -697,6 +695,7 @@ fn handle<C: Clock>(
         Ask::About {
             device: kind,
             system,
+            ..
         } => match member {
             Some(member) => hub.about(&member, &kind, &system),
             None => Err(not_member()),

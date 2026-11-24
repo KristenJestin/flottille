@@ -106,14 +106,25 @@ impl Control {
         }
     }
 
-    /// What asks the hub, while a session to it is open.
-    pub fn asker_now(&self) -> Option<Asker> {
-        self.asker.borrow().clone()
+    /// What tells the hub the notices for the phones, while a session to a hub that takes them
+    /// is open: a hub of before them would close the session (`docs/remote.md`, "Notifications").
+    pub fn notifier(&self) -> Option<Asker> {
+        self.asker.borrow().clone().filter(Asker::takes_notices)
     }
 
-    /// The presence of the members' clients, as the hub last told it.
-    pub fn presence(&self) -> Vec<PresenceOf> {
-        self.presence.lock().unwrap().clone()
+    /// The presence of the clients of the members that are no phone, as the hub last told it: the
+    /// app says an input each time it opens its session (on another network, say), which is no
+    /// sign that the user is at a client (#828 may tell real inputs).
+    pub fn presence_at_clients(&self) -> Vec<PresenceOf> {
+        let facts = self.facts.lock().unwrap();
+        let phone = |key: &PublicKey| {
+            facts
+                .iter()
+                .any(|facts| facts.key == *key && facts.kind.as_deref() == Some("phone"))
+        };
+        let mut presence = self.presence.lock().unwrap().clone();
+        presence.retain(|told| !phone(&told.key));
+        presence
     }
 
     /// When a client of this machine last had an input, on the daemon's clock.
@@ -131,9 +142,10 @@ impl Control {
             *here = Some((focused, last));
             presence_ask(focused, last)
         };
-        if let (Some(asker), Ok(runtime)) =
-            (self.asker_now(), tokio::runtime::Handle::try_current())
-        {
+        if let (Some(asker), Ok(runtime)) = (
+            self.asker.borrow().clone(),
+            tokio::runtime::Handle::try_current(),
+        ) {
             runtime.spawn(async move {
                 let _ = tokio::time::timeout(ASK_WAIT, asker.ask(told)).await;
             });
@@ -813,6 +825,7 @@ async fn keep_session(
         let asked = about.ask(Ask::About {
             device: "computer".to_owned(),
             system: std::env::consts::OS.to_owned(),
+            notices: false,
         });
         let _ = tokio::time::timeout(ASK_WAIT, asked).await;
     });

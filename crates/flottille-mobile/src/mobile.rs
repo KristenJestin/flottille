@@ -1051,6 +1051,8 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         .ask(Ask::About {
             device: "phone".to_owned(),
             system: "android".to_owned(),
+            // This core reads a notice (drawn by #828): the hub may send them.
+            notices: true,
         })
         .await
         .map_err(said)?;

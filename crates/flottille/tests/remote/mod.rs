@@ -381,6 +381,7 @@ impl Phone {
                 .ask(Ask::About {
                     device: "phone".to_owned(),
                     system: "android".to_owned(),
+                    notices: true,
                 })
                 .await
                 .unwrap();

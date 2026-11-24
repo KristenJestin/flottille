@@ -94,14 +94,15 @@ fn control(daemon: &Daemon) -> Option<std::sync::Arc<crate::hub_session::Control
 }
 
 /// Whether no client of the user had an input in the last `AWAY_MS`, as this machine's clients
-/// said it and the hub told every other's. With no session to the hub, the user is away.
+/// said it and the hub told every other's but the phones'. With no session to the hub, the user
+/// is away.
 fn away(control: &crate::hub_session::Control, now: u64) -> bool {
     let recent = |at_ms: u64| now.saturating_sub(at_ms) < AWAY_MS;
     if control.local_input().is_some_and(recent) {
         return false;
     }
     !control
-        .presence()
+        .presence_at_clients()
         .iter()
         .any(|told| recent(told.last_input.saturating_mul(1000)))
 }
@@ -166,8 +167,8 @@ pub fn check(daemon: &Daemon) {
             state.decided.insert(row.id, notice);
         }
     }
-    // With no session to the hub, nothing is told and nothing waits for it.
-    let Some(asker) = control.and_then(|control| control.asker_now()) else {
+    // With no session to a hub that takes notices, nothing is told and nothing waits for it.
+    let Some(asker) = control.and_then(|control| control.notifier()) else {
         return;
     };
     for notice in told {
