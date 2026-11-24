@@ -216,9 +216,9 @@ fn the_session_rail_lists_the_ticket_above_the_pull_request(cx: &mut TestAppCont
 }
 
 /// A fact of the Workspace drawn besides the ticket and the pull request: where the workspace
-/// was made from, or the project folder.
+/// was made from.
 fn other_fact(cx: &mut VisualTestContext) -> &'static str {
-    ["rail-fact-From", "rail-fact-Place"]
+    ["rail-fact-From"]
         .into_iter()
         .find(|id| present(cx, id))
         .expect("a fact of the Workspace is drawn")
@@ -773,4 +773,40 @@ fn a_file_not_committed_disables_the_rail_s_removal_with_its_reason(cx: &mut Tes
         1,
         "the disabled button does nothing"
     );
+}
+
+// ── Where a session works, said by its icon (#1287) ──────────────────────────────────────────
+
+#[gpui_kit::test]
+fn the_side_panel_says_where_a_session_works_by_its_icon(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let in_folder = another_session(&user, None, "work in the project folder");
+    let folder = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap()["folder"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    // In a workspace: the branch icon says it, with the workspace's folder.
+    assert_eq!(
+        labelled(cx, "rail-repository-api-icon").as_deref(),
+        Some(format!("Works in a workspace of its own: {folder}").as_str()),
+    );
+    for row in ["rail-fact-Place", "rail-fact-Machine"] {
+        assert!(!present(cx, row), "{row} is not a row of the side panel");
+    }
+
+    // In the project folder: the folder icon says it.
+    cx.update(|window, cx| window.click(session_id(&in_folder), cx));
+    until(&shell, cx, "the project folder's side panel", |cx| {
+        labelled(cx, "rail-repository-api-icon").as_deref()
+            == Some("Works in the project folder itself")
+    });
+    settle(cx);
+    for row in ["rail-fact-Place", "rail-fact-Machine"] {
+        assert!(!present(cx, row), "{row} is not a row of the side panel");
+    }
 }
