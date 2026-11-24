@@ -1693,6 +1693,16 @@ pub(super) async fn branch_exists(forge: &Forge, name: &str) -> Result<(), Strin
         .map(|_| ())
 }
 
+/// The base of the merged pull request of `branch`, from the repository itself.
+pub(super) async fn merged_into(forge: &Forge, branch: &str) -> Result<Option<String>, String> {
+    let context = Contexts::default().of(forge).await?;
+    Ok(pulls(forge, &context, "MERGED")
+        .await?
+        .into_iter()
+        .find(|pull| pull.own && pull.branch == branch)
+        .map(|pull| pull.base))
+}
+
 /// `forge` `create`, `merge` and `checks` for a Bitbucket repository, once the gate let it
 /// through and the remote was found where the workspace was created: the same actions and the
 /// same checks as for GitHub, through `bkt`.

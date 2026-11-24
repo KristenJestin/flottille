@@ -372,7 +372,7 @@ const SERVED: [Definition; 33] = [
                 "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
                 "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
                 "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
-                "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
+                "base": {"type": "string", "description": "create: the branch it goes into, in place of the workspace's base (left out, a workspace whose base branch was merged and deleted opens it into where that went, and says so). edit: the branch it goes into; the workspace's base follows when it is the workspace's own pull request. It must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
                 "verdict": {"type": "string", "enum": crate::forge::REVIEW_VERDICTS, "description": "review: comment, approve or request_changes; the last two wait for the user in every mode."},
                 "comments": {"type": "array", "description": "review: comments on lines of the diff.", "items": {"type": "object", "properties": {
