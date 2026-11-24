@@ -611,13 +611,18 @@ those they include (`include.path`, `includeIf.*.path`, whatever their condition
 reads at every push, and the daemon reads its user's `core.sshCommand` from. Where one of those
 files is reached through a link (a dotfiles manager's), the folder that holds each link on the way
 is read-only too when it is a folder of its own below the home (`~/.config/git`), and so is the
-folder above the file the link leads to, the highest one over it that is one too (the dotfiles
-manager's own, which holds the versions it makes later): no run re-points the link, or writes a
-version made after the start. Not kept, a link there being refused when its settings are relinked
-(below): the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
+folder that holds the versions: the one above the folder of the file the link leads to
+(`~/dots/versions` for `~/dots/versions/a/git-config`), the nearest that holds the versions a
+dotfiles manager makes later beside it, never one higher: no run re-points the link, or writes a
+version made after the start. A kept folder is read-only with everything below it, the folders
+kept in place below it included. Not kept, a link there being refused when its settings are
+relinked (below), and nothing kept at all when it is the folder of the versions (a relink is then
+refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
+(their folders as the projects' files and the store say at the daemon's start, whatever their
+name, and the default folder of the workspaces), the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
 `~/.local`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the same way), the folders
-a user keeps projects in (`projects`, `workspaces`, `src`, `code`, `dev`, `repos`, `git`, `work`,
-`Documents`, `Downloads`, `Desktop` of the home), and Flottille's own: they hold every other
+a user keeps projects in by their usual names (`projects`, `workspaces`, `src`, `code`, `dev`,
+`repos`, `git`, `work`, `Documents`, `Downloads`, `Desktop` of the home), and Flottille's own: they hold every other
 program's files, which a run would lose. Each folder on the
 way to them that a command could rename or remove (its own folder is the user's, or one they may
 write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
@@ -776,7 +781,7 @@ The gaps, where the platform does not allow more:
   push by a rule of its own. A dotfiles update that moves the link to a new version is accepted
   only when **both** hold: each link on the way is in a folder kept read-only since the start
   (above) or that only root may change, **and the new file lies under a folder kept since the
-  start** (above: the one over the old version) or that only root may change, **with no other
+  start** (above: the one that holds the old version's folder) or that only root may change, **with no other
   hard link**. So no command could have written it between the link moving and the push, as a
   command may write any file of the home outside those folders; the push then reads it, every
   command started from then on has it read-only, its identity the one recorded then, and a hard
@@ -789,7 +794,10 @@ The gaps, where the platform does not allow more:
   relative include, which is a file of the new version folder) is refused as before, until a
   restart; the folders kept are those of the settings the daemon found, so a link that did not
   exist at the start is not kept; and a version made directly in one of the folders listed above
-  as not kept (`~/projects/<version>`, say) is refused, never trusted. A process a run of an
+  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that puts the
+  file deeper in its versions (`versions/<n>/git/config`) has `versions/<n>` kept, so a relink to
+  another version is refused, not trusted; and a project added after the daemon's start in a kept
+  folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
   older Flottille left behind, outside its session and without its marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before
