@@ -2228,7 +2228,7 @@ fn a_launch_held_elsewhere_is_withdrawn_when_its_caller_ends() {
 }
 
 #[test]
-fn a_launch_not_yet_answered_is_withdrawn_when_its_caller_ends() {
+fn a_launch_not_yet_answered_is_stopped_when_its_caller_ends() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
     let (root, mcp) = pc.root("auto");
@@ -2249,9 +2249,12 @@ fn a_launch_not_yet_answered_is_withdrawn_when_its_caller_ends() {
         pc.agent(&root)["state"] == "ended"
     });
     std::fs::remove_file(&slow).unwrap();
-    let _ = launching.join();
+    launching.join().expect("the launching thread ended");
 
     eventually("the child ended on server", || {
         server.agent(child["id"].as_str().unwrap())["state"] == "ended"
     });
+    // Stopped as the children of its parent are, not withdrawn as a held launch is.
+    let stopped = server.agent(child["id"].as_str().unwrap());
+    assert_eq!(stopped["state_reason"], "its parent stopped", "{stopped:#}");
 }
