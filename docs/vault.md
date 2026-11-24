@@ -608,7 +608,11 @@ private mount namespace of every command Flottille confines (above), `~/.ssh` is
 with what is below it, and so are the files of the user's own git settings found at the daemon's
 start (`GIT_CONFIG_GLOBAL` when set, else `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`) and
 those they include (`include.path`, `includeIf.*.path`, whatever their condition): those git
-reads at every push, and the daemon reads its user's `core.sshCommand` from. Each folder on the
+reads at every push, and the daemon reads its user's `core.sshCommand` from. Where one of those
+files is reached through a link (a dotfiles manager's), the folder that holds each link on the way
+is read-only too when it is a folder of its own below the home (`~/.config/git`, not the home
+nor `$XDG_CONFIG_HOME`, which hold every other program's files): no run re-points the link
+(below, "a settings file that leads elsewhere"). Each folder on the
 way to them that a command could rename or remove (its own folder is the user's, or one they may
 write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
 the way is renamed to put another file at the path. `~/.ssh` is the account's (the home of the
@@ -759,7 +763,20 @@ The gaps, where the platform does not allow more:
 - a file protected at the daemon's start is protected at the path it had then: a command started
   before the user replaced it (an editor that writes a new file, `git config --global`) still sees
   the new one writable, so the push is lent nothing until the daemon restarts, which ends every
-  run. A process a run of an older Flottille left behind, outside its session and without its
+  run (`flottille daemon stop`: the next command starts another, which finds the settings again).
+  **A settings file that leads elsewhere** is judged again at each push by the rule of the start,
+  one function for both (`pushed::settle`): the file no run can write, and no link on the way to
+  it that a run controls. A dotfiles update that moves the link to a new version folder is
+  accepted when each link on the way is in a folder kept read-only since the start (above) or
+  that only root may change: the push then reads the new file, which every command started from
+  then on has read-only, its identity the one recorded then. Refused, saying which rule failed,
+  when a link is in a folder a run can write (the home itself: put the link in a folder of its
+  own below it, `~/.config/git/config`) or when no link leads there at all (a file replaced in
+  its place); until the daemon restarts. What remains of the window: a command started before
+  the judgement has the new file writable, as it has a file replaced in its place, and may
+  write it between the judgement and the push's read; a settings file that includes a file not
+  found at the start (a relative include, which is a file of the new version folder) is refused
+  as before, until a restart; A process a run of an older Flottille left behind, outside its session and without its
   marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before
