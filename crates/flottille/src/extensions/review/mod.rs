@@ -1648,7 +1648,8 @@ fn tool_gate(_: &Daemon, _: &Grant, _: &Value) -> std::result::Result<(), String
 }
 
 fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called {
-    let (daemon, agent) = (daemon.clone(), grant.agent.clone());
+    let (daemon, grant) = (daemon.clone(), grant.clone());
+    let agent = grant.agent.clone();
     Box::pin(async move {
         let asked: ToolCall = match serde_json::from_value(args) {
             Ok(asked) => asked,
@@ -1718,7 +1719,11 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called 
                         )
                     })
                     .map_err(|failure| failure.message),
-                Some(id) => start_led(&daemon, &caller, &id).await,
+                // A session it leads on another machine: its review is started there.
+                Some(id) => match crate::across::review_led(&daemon, &grant, &caller, &id).await {
+                    Some(outcome) => return outcome,
+                    None => start_led(&daemon, &caller, &id).await,
+                },
             },
             "run_pass" => run_pass(&daemon, &caller, asked.pass, asked.brief).await,
             "report" => report(&daemon, &caller, asked).await,
