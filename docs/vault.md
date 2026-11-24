@@ -921,9 +921,11 @@ server uses the namespace, and a login checks, once its page is loaded, that eve
 answers runs in it. Which process answers is asked of the kernel, by connecting to each socket of
 the socket folder and of the folders in it, never through a link (`SO_PEERCRED`; a namespace puts
 a session's socket in a subfolder, and `--namespace` is refused to the login all the same). The
-connection does not wait for a daemon to accept: one that stops accepting counts as outside, never read from agent-browser's `<session>.pid` files: a socket
-whose process is gone counts as outside. The record is the holder's only while the process at its
-pid has the start time it records: a process that took the pid since is not the holder.
+connection does not wait for a daemon to accept, and a socket it cannot connect to, whatever the
+error, counts as outside: one that stops accepting, one whose path is too long for a socket address,
+one nobody listens on any more, and one whose process is gone. The pids are never read from
+agent-browser's `<session>.pid` files. The record is the holder's only while the process at its pid
+has the start time it records: a process that took the pid since is not the holder.
 
 **Chrome's profile is in the vault folder.** agent-browser makes the browser's profile (its
 cookies, Local Storage, History, and Chrome's `Default/Preferences`, which names a proxy) in the
@@ -982,9 +984,10 @@ its second ABI, the server still runs, its browser in the runs' network, and the
 to fill**, saying why and its remedy: "install passt (pasta) to let the agent's browser sign in",
 the user namespaces to allow, or the kernel to update. Every other action of the connection works.
 `flottille doctor` says whether the browser's isolation is available (`sandbox.browser_network`),
-with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as `passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces through AppArmor, which
-refuses Flottille's own namespaces, the browser's included, until the user lifts the restriction
-or allows Flottille.
+with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as
+`passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces
+through AppArmor, which refuses Flottille's own namespaces, the browser's included, until the user
+lifts the restriction or allows Flottille.
 
 ## The tests' keyring
 

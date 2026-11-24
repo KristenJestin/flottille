@@ -321,9 +321,10 @@ impl Adapter {
                 "its browser is shown on the screen: the server gets the session's display \
                  (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
                  holding the Wayland socket alone, never the user's, and the configuration sets \
-                 headed and gives its window the class flottille-browser (args); with X11 the browser can read the keys typed in other windows and type \
-                 into them (a terminal's included), and on some Wayland compositors a client can \
-                 capture the screen and the clipboard"
+                 headed and gives its window the class flottille-browser (args); with X11 the \
+                 browser can read the keys typed in other windows and type into them (a \
+                 terminal's included), and on some Wayland compositors a client can capture the \
+                 screen and the clipboard"
                     .to_owned(),
             );
         }
@@ -641,8 +642,9 @@ pub fn shown(
 }
 
 /// The browser's environment, applied after the connection's own variables (a connection's env
-/// never moves a folder of [`FOLDERS_OF_THE_BROWSER`]): no display of the daemon's own, never the session bus address,
-/// whether the browser is shown or not, and the display folder's variables (`shown`, a
+/// never moves a folder of [`FOLDERS_OF_THE_BROWSER`]): no display of the daemon's own, never the
+/// session bus address, whether the browser is shown or not, and the display folder's variables
+/// (`shown`, a
 /// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
 /// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
 /// name the connection's socket folder in its vault folder ([`sockets`]), so they reach the same
