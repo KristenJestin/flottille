@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use flottille_core::agent::Agent;
 use flottille_core::approval::{self, Request};
+use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{Launch, LaunchFilter, Outgoing, now_ms};
 use flottille_link::{Call, Deliver, LinkError, MachineMessage, Message, PublicKey, Received};
 use serde_json::{Value, json};
@@ -23,7 +24,7 @@ use serde_json::{Value, json};
 use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::link::Remote;
-use crate::mcp::{Grant, Outcome};
+use crate::mcp::{ERROR_LIMIT, Grant, Outcome, RESULT_LIMIT};
 use crate::place::Place;
 use crate::tree::named;
 
@@ -1911,9 +1912,9 @@ fn call_answered(
     sent: Result<Value, LinkError>,
     name: &str,
     agent: &str,
-    _place: &Place,
+    place: &Place,
 ) -> Outcome {
-    match sent {
+    let outcome = match sent {
         Ok(answer) if answer["later"].is_string() => Outcome::Refused(format!(
             "refused: {name} cannot answer now ({}): agent {agent} cannot be reached now. You \
              will be woken by what comes back from it.",
@@ -1930,7 +1931,8 @@ fn call_answered(
             "refused: {error}: agent {agent} cannot be reached now. You will be woken by what \
              comes back from it."
         )),
-    }
+    };
+    here(outcome, place)
 }
 
 // A session of another machine, the same as one of this machine (`docs/remote.md`, "A tree
@@ -2439,9 +2441,9 @@ fn unreached(aim: &Aim, why: String, again: &str) -> String {
 
 /// What the caller's agent is shown of `sent`, the answer of the machine of `aim` to a call
 /// aimed at it.
-fn answered(sent: Result<Value, LinkError>, aim: &Aim, _place: &Place) -> Outcome {
+fn answered(sent: Result<Value, LinkError>, aim: &Aim, place: &Place) -> Outcome {
     let name = aim.name;
-    match sent {
+    let outcome = match sent {
         Ok(answer) if answer["later"].is_string() => Outcome::Refused(unreached(
             aim,
             format!(
@@ -2471,7 +2473,56 @@ fn answered(sent: Result<Value, LinkError>, aim: &Aim, _place: &Place) -> Outcom
             error.to_string(),
             "cannot be reached now; call again in a moment",
         )),
+    };
+    here(outcome, place)
+}
+
+/// `outcome`, said by another machine, as this machine's agent is shown it, whatever it says
+/// (`docs/remote.md`): masked of this machine's secrets, and cut at the limit of its kind, as a
+/// local one is.
+fn here(outcome: Outcome, place: &Place) -> Outcome {
+    let known = Secrets::new(&std::env::vars_os().collect(), &place.secret_values());
+    let shown = |text: String, limit| masked_and_cut(&text, &known, limit);
+    match outcome {
+        Outcome::Done(text) => Outcome::Done(shown(text, RESULT_LIMIT)),
+        Outcome::Held(text) => Outcome::Held(shown(text, RESULT_LIMIT)),
+        Outcome::Failed(text) => Outcome::Failed(shown(text, ERROR_LIMIT)),
+        Outcome::Refused(text) => Outcome::Refused(shown(text, ERROR_LIMIT)),
+        Outcome::Invalid(text) => Outcome::Invalid(shown(text, ERROR_LIMIT)),
     }
+}
+
+/// `text` masked, then cut at `limit` saying so; and wherever either machine cut it, the start
+/// of a secret whose end the cut left out masked too: masking by the whole value cannot find it.
+fn masked_and_cut(text: &str, known: &Secrets, limit: usize) -> String {
+    let masked = cut_ends_masked(&known.mask(text), known);
+    if masked.chars().count() <= limit {
+        return masked;
+    }
+    // Masking the end it cuts lengthens it by the mask less the shortest secret at most.
+    let cut = crate::mcp::cut(
+        &masked,
+        limit - (secrets::MASK.len() - secrets::VAULT_SHORTEST),
+    );
+    cut_ends_masked(&cut, known)
+}
+
+/// `text` with the end of each piece a cut (`mcp::cut`, `‹+N chars›`) closes masked when it
+/// starts a secret.
+fn cut_ends_masked(text: &str, known: &Secrets) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut from = 0;
+    for (at, _) in text.match_indices("\u{2039}+") {
+        let rest = &text[at + "\u{2039}+".len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 || !rest[digits..].starts_with(" chars\u{203a}") {
+            continue;
+        }
+        shown.push_str(&known.mask_cut_end(&text[from..at]));
+        from = at;
+    }
+    shown.push_str(&text[from..]);
+    shown
 }
 
 /// The answer of request `request`, held for the user of this machine, of a caller of another
@@ -2584,8 +2635,6 @@ fn delivered_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::RESULT_LIMIT;
-    use flottille_core::secrets;
 
     /// A secret only the caller's machine knows, in a secret file of its agent's place.
     const SECRET: &str = "pc-only-token-7f3a9c";

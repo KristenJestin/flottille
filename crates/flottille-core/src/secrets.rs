@@ -202,6 +202,26 @@ impl Secrets {
         mask_tokens(&mask_login_fields(&mask_private_keys(&masked)))
     }
 
+    /// `text`, whose end a cut left out, with that end masked when it is the start of a value
+    /// this masks, of `VAULT_SHORTEST` bytes or more: a secret cut in half shows not even its
+    /// start. The rest of `text` is left as it is.
+    pub fn mask_cut_end(&self, text: &str) -> String {
+        let values = self.all();
+        let longest = values.first().map_or(0, String::len);
+        let start = (text.len().saturating_sub(longest)..=text.len())
+            .filter(|&at| text.is_char_boundary(at) && text.len() - at >= VAULT_SHORTEST)
+            .find(|&at| {
+                let end = &text[at..];
+                values
+                    .iter()
+                    .any(|value| value.len() > end.len() && value.starts_with(end))
+            });
+        match start {
+            Some(at) => format!("{}{MASK}", &text[..at]),
+            None => text.to_owned(),
+        }
+    }
+
     /// How much of `text`, a message still streaming, is settled: masked alone, it reads as it will
     /// once the message is whole, so it can be stored and shown now. The rest may still be part of
     /// a secret the next pieces complete: the last word, as long as the longest value known at
