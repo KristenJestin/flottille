@@ -1645,13 +1645,13 @@ way in:
   words before the program are read: agent-browser's own arguments are its own. It is checked
   before the server starts (at the review, on an edit, at every start and reconnection: nothing
   runs), at the accept, and again at each login, so an edit after the user accepted the
-  connection never starts it. A command that names agent-browser is checked before its first
+  connection never starts it. A command that names agent-browser (a layer runs it, or a word of
+  it is its name or its path, as in `setsid …/agent-browser mcp`) is checked before its first
   start too; one that does not (`node -e '…' mcp`) is refused when its server says it is
   agent-browser, before it starts with the adapter. **Its other options and variables are not
   judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as
-  written. What is not covered: the
-  variables of the daemon's own environment that send the session elsewhere (a `HTTP_PROXY` of the
-  user's session), which a run inherits too.
+  written. What is not covered: the variables of the daemon's own environment that send the
+  session elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
   give them.** An agent drives a browser for the user, who works in another window: a window that
   comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused
