@@ -253,8 +253,11 @@ fn removing_a_project_whose_configuration_is_gone_from_the_window(cx: &mut TestA
 
     cx.update(|window, cx| window.click("project-removal-action", cx));
     said(&shell, "The project app was removed", cx);
-
-    assert!(!present(cx, project_gone_id("app")), "the row folded away");
+    // The row folds away when the daemon's next list comes without the project, which the link
+    // brings on its own thread: the toast does not say it came.
+    until(&shell, cx, "the row folded away", |cx| {
+        !present(cx, project_gone_id("app"))
+    });
     assert_eq!(
         user.call("agent.show", json!({"agent": session})).unwrap()["agent"]["state"],
         "ended",
