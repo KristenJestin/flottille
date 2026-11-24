@@ -1632,16 +1632,24 @@ way in:
   agent-browser's, and removes `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is
   refused, naming the variable, while the connection's `env` names one of them or `HOME` (which
   moves where agent-browser looks for the Chrome it downloaded and where Chrome reads
-  `~/.pki/nssdb`), or its command holds a word `NAME=value` for one (`env
-  AGENT_BROWSER_SOCKET_DIR=… agent-browser mcp`, a shell's line). **The server's command names its
-  program directly**: one that starts with a launcher (`env`, a shell, `nohup`, `setsid`, `nice`,
-  `timeout`, `sudo`, `systemd-run`, `bwrap`…) or an assignment `NAME=value` would run agent-browser
-  with an environment of its choosing, after Flottille set it, so `login` is refused, naming the
-  launcher or the variable, never a value. Both are said at the review and checked again at each
-  login, so an edit after the user accepted the connection is refused as well. A package runner
-  (`npx`, `pnpm dlx`, `bunx`, `uvx`) is no launcher: it runs agent-browser with the environment it
-  was given. **Its other options and variables are not judged** (`AGENT_BROWSER_SESSION`,
-  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
+  `~/.pki/nssdb`). **The server's command runs agent-browser itself**: by its name or its path, or
+  through a chain of package runners (`npx`, `bunx`, `pnpm` or `yarn` with `dlx` or `exec`) with no
+  word but `-y` before it (`npx agent-browser mcp`, `pnpm dlx agent-browser mcp`). Anything else
+  between Flottille and agent-browser could set the environment after Flottille did, so it is an
+  allow list, not a list of launchers: a program before agent-browser (`env`, `envdir`, `chpst`,
+  `setpriv`, `flatpak run`, a shell, `node -e`…, also inside a runner, as in `pnpm exec env -u
+  AGENT_BROWSER_SOCKET_DIR agent-browser mcp`), a runner's other option (`-p`, `-c`,
+  `--node-options`…), or an assignment `NAME=value` before the program is refused, said by the
+  program's, the option's or the variable's name, never a value; one of the folder variables set
+  that way is said as itself. The command is unwrapped as the gate unwraps a line, and only the
+  words before the program are read: agent-browser's own arguments are its own. It is checked
+  before the server starts (at the review, on an edit, at every start and reconnection: nothing
+  runs), at the accept, and again at each login, so an edit after the user accepted the
+  connection never starts it. A command that names agent-browser is checked before its first
+  start too; one that does not (`node -e '…' mcp`) is refused when its server says it is
+  agent-browser, before it starts with the adapter. **Its other options and variables are not
+  judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as
+  written. What is not covered: the
   variables of the daemon's own environment that send the session elsewhere (a `HTTP_PROXY` of the
   user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
