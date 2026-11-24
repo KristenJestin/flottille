@@ -771,11 +771,24 @@ The gaps, where the platform does not allow more:
   `~/.local/share/fonts`**, since Chrome's `XDG_*` folders are the vault folder's: it may look
   plainer than the user's other windows, and a certificate authority the user added to their own
   certificate database (`~/.pki/nssdb`, `$XDG_DATA_HOME/pki/nssdb`) may not be trusted by it;
+- **another mount of the same files reaches the profiles.** The private mount namespace empties
+  `browsers/` at its path, and Landlock, where the kernel gives no namespace, denies that folder's
+  inode as it is reached there: the same files reached through another mount (an ostree
+  `/sysroot`, a Btrfs top level mounted elsewhere, a bind mount of the home) are neither emptied
+  nor denied, so a run that knows the other path reads the profile, the sign-ins' cookies with it;
+- **what the browser's server reads and writes is kept from the profile by its actions, not by
+  its paths.** The server reaches the profile, so an action that reads or writes a file by a path
+  the agent gives would follow a link a run planted to it; the adapter keeps those actions off or
+  refuses their path (`docs/extensions.md`, "Adapters"), and the cookies, storage and saved state
+  are no action's answer. A HAR or a trace the user turned on is written to agent-browser's own
+  folder under the home, which runs read and write: it holds the page's traffic, its cookies
+  among it;
 - **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
   can write what is the user's under the home: agent-browser itself where the user installed it
   there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
   `~/.agent-browser/browsers/`. A run that replaced that Chrome, or agent-browser, has its own
-  program run as the browser the login fills. Chrome's certificate database is in the vault folder
+  program run as the browser the login fills, and with the connection's profile and the sign-ins
+  it keeps. Chrome's certificate database is in the vault folder
   (`data/pki/nssdb`, above); a Chrome that still reads the older `~/.pki/nssdb`, where one is, would
   trust a certificate authority a run wrote there. Flottille does not
   check them: the owner is the user either way, and a hash recorded at first use could be taken
