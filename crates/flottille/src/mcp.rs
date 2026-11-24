@@ -712,7 +712,9 @@ const SERVED: [Definition; 33] = [
             \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
             \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
             \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
-            machine: another machine, in a copy of your place.",
+            machine: another of the user's machines, judged there, in a copy of your place \
+            (your uncommitted changes go with it). project: another registered project, always \
+            held for the user. new_workspace: name its branch by the repository's convention.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -1003,19 +1005,41 @@ const PROJECT_WHOLE: &str = "This project's settings. settings reads each reposi
     \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
     \"depends_on\": [\"lib\"]}]}.";
 
+/// The whole description of `agent_launch`, its guide (`docs/tools.md`, "Guides read on demand").
+const AGENT_LAUNCH_WHOLE: &str = "kind (required): child, a part of your own task, in your place, that you \
+    direct and that reports to you (no workspace; refused above the children cap); led, an \
+    autonomous job of its own that you pilot, a real session the user sees under you and \
+    may talk to, which asks you its questions and wakes you at each end of its turns; \
+    handed, a session you start for the user and let go, of which you hear nothing more \
+    unless it writes to you. led and handed: a root only, judged, in workspace (main is \
+    the project folder) or new_workspace; you and it write with session_send. Answered at \
+    once with its id; never poll. The brief is all it knows: the task, what to read, the \
+    checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
+    \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
+    \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+    \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
+    machine: another of the user's machines, judged there, in a copy of your place \
+    (your uncommitted changes go with it). project: another registered project, always \
+    held for the user. new_workspace: name its branch by the repository's convention. \
+    provider, model and effort are yours when left out, and role is worker.";
+
 /// The families an agent rarely calls, listed short: their whole description, with each
 /// argument's sentence, is their guide, read on demand (`docs/tools.md`, "Guides read on demand").
-const ON_DEMAND: [(&str, &str); 5] = [
+const ON_DEMAND: [(&str, &str); 6] = [
     ("services", SERVICES_WHOLE),
     ("setup", SETUP_WHOLE),
     ("project", PROJECT_WHOLE),
     ("connections", CONNECTIONS_WHOLE),
     ("vault", VAULT_WHOLE),
+    ("agent_launch", AGENT_LAUNCH_WHOLE),
 ];
 
 /// What a family read on demand says of its guide, after its short description.
 const GUIDE_SAID: &str = " Its guide, each action and each argument: {\"action\": \"guide\"}, or \
     with your first call.";
+
+/// What a family with no `action` to ask the guide with says of it: it comes with the first call.
+const GUIDE_SAID_FIRST: &str = " Each argument's sentence: its guide, with your first call.";
 
 /// The name of a family read on demand, as `ON_DEMAND` holds it.
 fn on_demand(name: &str) -> Option<&'static str> {
@@ -1150,8 +1174,10 @@ pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
         without_sentences(&mut schema);
         if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
             actions.push("guide".into());
+            description.push_str(GUIDE_SAID);
+        } else {
+            description.push_str(GUIDE_SAID_FIRST);
         }
-        description.push_str(GUIDE_SAID);
     }
     let mut tool = json!({
         "name": definition.name,
@@ -4424,6 +4450,10 @@ mod tests {
         }
     }
 
+    fn definition_schema_action(definition: &Definition) -> Value {
+        (definition.schema)()["properties"]["action"].clone()
+    }
+
     #[test]
     fn a_family_read_on_demand_keeps_its_whole_text_in_its_guide() {
         fn sentences(schema: &Value, found: &mut Vec<String>) {
@@ -4456,15 +4486,25 @@ mod tests {
                 description.contains("{\""),
                 "{family} has no example: {description}"
             );
-            assert!(description.ends_with(GUIDE_SAID), "{description}");
+            let has_action = !definition_schema_action(definition).is_null();
+            assert!(
+                description.ends_with(if has_action {
+                    GUIDE_SAID
+                } else {
+                    GUIDE_SAID_FIRST
+                }),
+                "{description}"
+            );
             assert!(description.len() < whole.len(), "{family}");
             let mut listed = Vec::new();
             sentences(&tool["inputSchema"], &mut listed);
             assert!(listed.is_empty(), "{family}: {listed:?}");
-            let actions = tool["inputSchema"]["properties"]["action"]["enum"]
-                .as_array()
-                .unwrap();
-            assert_eq!(actions.last().unwrap(), "guide", "{family}");
+            if has_action {
+                let actions = tool["inputSchema"]["properties"]["action"]["enum"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(actions.last().unwrap(), "guide", "{family}");
+            }
             assert!(guide_of(definition).is_some() && !guide.contains("[flottille:"));
         }
         assert!(guide_of(definition("forge").unwrap()).is_none());
@@ -4547,8 +4587,11 @@ mod tests {
         // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
         // definition's size (2,915 characters, measured on that branch), before it is listed
         // short as the other rarely used families are. The roots list is measured with the
-        // tool `vault` (an entry exists) and `routine` whole: 59,870 characters of the 60,000,
-        // a margin of 130 (measured on this branch, round 2, 2026-11-24). The limits are not raised.
+        // tool `vault` (an entry exists) and `routine` whole: 58,285 characters of the 60,000,
+        // a margin of 1,715 (measured on this branch, round 3, 2026-11-24; child 47,123, leaf
+        // 40,525). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
+        // which made 60,060; `agent_launch` is listed short too, which gave 1,775 back. The limits
+        // are not raised, and no tool is trimmed.
         const ROUTINE: usize = 2_915;
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
