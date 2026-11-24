@@ -1177,7 +1177,7 @@ impl Snapshot {
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(|by| across(agent, by)),
                     led_by: match &led_across {
-                        Some((machine, pilot)) => Some(format!("agent {pilot} of {machine}")),
+                        Some((machine, lead)) => Some(format!("agent {lead} of {machine}")),
                         None => agent["led_by"].as_str().map(|by| across(agent, by)),
                     },
                     runs: runs_on(&agent["runs_on"]),
