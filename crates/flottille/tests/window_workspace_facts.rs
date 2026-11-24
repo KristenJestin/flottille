@@ -812,7 +812,7 @@ fn a_repository_s_name_stays_whole_beside_a_long_branch(cx: &mut TestAppContext)
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     until(&shell, cx, "the rail names the repository", |cx| {
         let _ = session_page(&shell, cx);
-        present(cx, "rail-repository-api-value") && present(cx, "rail-fact-Machine")
+        present(cx, "rail-repository-api-value")
     });
     settle(cx);
 

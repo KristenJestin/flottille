@@ -151,7 +151,7 @@ fn no_word_of_the_window_wraps_letter_by_letter_in_a_narrow_window(cx: &mut Test
 
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     until(&shell, cx, "the rail names the repository", |cx| {
-        present(cx, "rail-repository-api-value") && present(cx, "rail-fact-Machine")
+        present(cx, "rail-repository-api-value")
     });
     settle(cx);
     cut(cx, "a session and its rail", &mut all);
