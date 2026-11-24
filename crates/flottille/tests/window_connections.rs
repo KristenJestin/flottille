@@ -2644,6 +2644,10 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         "{changed}"
     );
     assert!(changed.contains("--config"), "{changed}");
+    // Folded again: what it changed grows with each lock it names, and pushes the rows below out
+    // of view.
+    click(cx, "connection-review-adapter-changes");
+    assert_eq!(height(cx, "connection-review-adapter-changes-body"), 0.);
 
     // Its own logins cannot be turned on: the pill is disabled, and the unfolded row says why.
     click(cx, "connection-review-unchanged");
