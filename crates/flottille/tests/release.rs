@@ -5144,7 +5144,7 @@ fn the_real_browsers_job_installs_what_its_tests_drive_and_fails_on_a_skip() {
     // A skip is a failure in this job, and only in this one.
     assert!(job.contains("FLOTTILLE_REAL_BROWSER: required"), "{job}");
     let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
-    assert_eq!(workflow.matches("FLOTTILLE_REAL_BROWSER").count(), 1);
+    assert_eq!(workflow.matches("FLOTTILLE_REAL_BROWSER: ").count(), 1);
     for installed in ["passt", "weston", "FLOTTILLE_TEST_AGENT_BROWSER"] {
         assert!(job.contains(installed), "{installed}: {job}");
     }
