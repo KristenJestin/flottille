@@ -2095,6 +2095,23 @@ pub(crate) fn pilot_stand_in(
     }
 }
 
+/// What the pilot `pilot` of a session about to be written is told when its machine's cap has no
+/// room for it: a pilot whose sessions all ended counts again with this one. For the write that
+/// creates the session, in the same lock as the callers that are kept: two such writes, or one and
+/// a new caller, never pass the cap together. None for any other agent.
+pub(crate) fn pilot_refused(
+    store: &flottille_core::store::Store,
+    pilot: &str,
+) -> flottille_core::Result<Option<String>> {
+    if !is_stand_in(pilot) || store.stand_in_fits(pilot, MOST_STAND_INS)? {
+        return Ok(None);
+    }
+    let name = store.agent(pilot)?.and_then(|agent| agent.brief);
+    Ok(Some(stand_in_cap(
+        name.as_deref().unwrap_or("another machine"),
+    )))
+}
+
 /// A caller of the machine named `name` stood in for here as `id`.
 fn stand_in_agent(
     daemon: &Daemon,
