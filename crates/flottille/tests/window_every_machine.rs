@@ -1400,7 +1400,13 @@ fn a_read_of_the_server_that_comes_after_its_page_was_left_is_not_shown(cx: &mut
     relay.slow.lock().unwrap().push("project.list");
     relay.slow_by.store(3000, Ordering::SeqCst);
     let (shell, cx) = window(&pc, &relay, cx);
-    settle(&shell, cx);
+    // `app` is this machine's page only once this machine's list holds it: before, the project
+    // is the server's alone and its page opens there.
+    until(&shell, cx, "this machine's list holds app", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot().projects.iter().any(|p| p.name == "app")
+        })
+    });
 
     // The server's page asked, its read slow; this machine's page shown before it comes.
     relay.delay.store(1500, Ordering::SeqCst);
