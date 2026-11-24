@@ -8688,6 +8688,7 @@ impl Render for SessionRail {
                                     ))
                                     .flex_none()
                                     .whitespace_nowrap()
+                                    .aria_label(SharedString::from(name.clone()))
                                     .child(SharedString::from(name.clone()))
                                     .test_support(),
                             )
