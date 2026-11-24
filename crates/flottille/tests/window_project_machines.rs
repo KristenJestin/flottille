@@ -15,6 +15,7 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
+use flottille_window::machines::News;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{machine_block_id, machine_session_mark_id, session_row_id};
 use flottille_window::shell::Selection;
@@ -978,6 +979,19 @@ fn shared_page_settled(
             .call("agent.show", json!({"agent": running}))
             .is_ok_and(|shown| shown["agent"]["state"] == "idle")
     });
+    // The window's copy of the server's list says it too before the page is measured.
+    until(&shell, cx, "the server's list says no session runs", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines().read(cx).machines().is_some_and(|read| {
+                read.lists
+                    .machines
+                    .iter()
+                    .filter(|(name, _)| name == "server")
+                    .flat_map(|(_, listed)| listed)
+                    .all(|session| session.state == "idle")
+            })
+        })
+    });
     quiet(&shell, cx);
     (hub, pc, server, shell, cx)
 }
@@ -996,28 +1010,26 @@ fn a_shared_project_s_page_draws_nothing_at_rest(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_snapshot_of_another_machine_that_changes_nothing_draws_nothing(cx: &mut TestAppContext) {
-    let (_hub, pc, _server, shell, cx) = shared_page_settled(cx);
-    // This machine's daemon says the machines again with something the page does not show
-    // changed: the window reads them, and the page stays as it was.
+    let (_hub, _pc, _server, shell, cx) = shared_page_settled(cx);
+    // The machines' worker tells what it read again after each thing the window asked, whether it
+    // changed or not (`Remote::ask`): the same read, as the daemon says it, comes again.
+    let read = shell
+        .read_with(cx, |s, cx| s.machines().read(cx).machines().cloned())
+        .expect("the machines are read");
     cx.update(|window, _| window.reset_layout_stats());
-    pc.user
-        .call("remote.configure", json!({"notify": "always"}))
-        .unwrap();
     let mut asked = 0;
     let mut gone = Duration::ZERO;
-    let mut read = false;
-    let began = Instant::now();
-    while gone < Duration::from_secs(10) || !read {
-        assert!(began.elapsed() < WAIT, "the window never read the change");
+    while gone < Duration::from_secs(10) {
+        if gone.is_zero() || gone == Duration::from_millis(16 * 100) {
+            let again = read.clone();
+            shell.update_in(cx, |s, window, cx| {
+                s.machines().update(cx, |machines, cx| {
+                    machines.news(News::Read(Box::new(again)), window, cx)
+                })
+            });
+        }
         asked += step(&shell, Duration::from_millis(16), cx);
         gone += Duration::from_millis(16);
-        read = shell.read_with(cx, |s, cx| {
-            s.machines()
-                .read(cx)
-                .machines()
-                .is_some_and(|read| read.notify == "always")
-        });
-        std::thread::sleep(Duration::from_millis(5));
     }
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     assert_eq!((drawn, asked), (0, 0), "(drawn, asked)");
