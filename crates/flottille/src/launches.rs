@@ -997,10 +997,11 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
     });
 }
 
-/// Removes `workspace`, made of code that came, unless work other than that code is in it. What it
-/// holds is read first, then what the removal would lose, which it checks again: a file written
-/// between the two reads, even one said lost the same, differs from the first, and the workspace
-/// is kept. `between` runs after the first read.
+/// Removes `workspace`, made of code that came, unless something in it changes while it is read:
+/// the function does not tell the code that came from other work, it refuses only what moves
+/// between its two reads. What it holds is read first, then what the removal would lose, which it
+/// checks again: a file written between the two reads, even one said lost the same, differs from
+/// the first, and the workspace is kept. `between` runs after the first read.
 async fn remove_unless_work_came(
     daemon: &Arc<Daemon>,
     workspace: &flottille_core::workspace::Workspace,
