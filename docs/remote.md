@@ -1072,7 +1072,10 @@ local child's work; nothing moves your branch.*
   starts and is told so (`… was approved by the user, but nothing was done: it could not start
   there: Flottille stopped there while it was setting it up.`); a launch with no request number is
   named by its title (`Your launch "Docs" on server …`). The window keys a held session by its
-  request and its machine, each machine counting its own. A refused launch leaves no row under its
+  request and its machine (a name may hold spaces and dots), each machine counting its own, and says
+  a session started when the call itself answers that the user allowed it before it returned. A restart
+  there never stops a session that ran: an allowed launch whose workspace is ready and whose session
+  was briefed only has its answer settled again. A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
@@ -1730,6 +1733,9 @@ on a real phone, by hand, and reported.
   user's answer to a held launch, the caller is told nothing was done, while the launch there stays
   held until its session ends; the refusal that end sends is a second answer, which the caller's
   machine refuses.
+- **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
+  stored, only one whose workspace is still preparing or whose session was never briefed is refused;
+  one that ran is left running and its answer is stored again, since its caller was told approved.
 
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
