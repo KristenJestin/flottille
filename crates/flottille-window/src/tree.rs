@@ -1950,6 +1950,8 @@ fn kept_changed<T: 'static>(shell: &WeakEntity<Shell>, cx: &mut Context<T>) {
 /// folded until the user opens it.
 pub struct EndedNode {
     open: bool,
+    /// Why the ended sessions of a machine are not listed (one that is off), said once (#1280).
+    unlisted: Option<SharedString>,
     sessions: Entity<Level>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
@@ -1962,6 +1964,7 @@ impl EndedNode {
         let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), open));
         Self {
             open,
+            unlisted: None,
             sessions,
             fold,
             shell,
@@ -1970,6 +1973,16 @@ impl EndedNode {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// What its line says of the machines whose ended sessions are not listed.
+    pub fn unlisted(&self) -> Option<&str> {
+        self.unlisted.as_deref()
+    }
+
+    pub fn set_unlisted(&mut self, said: Option<String>, cx: &mut Context<Self>) {
+        self.unlisted = said.map(SharedString::from);
+        cx.notify();
     }
 
     /// Its sessions' rows, newest first.
@@ -1997,6 +2010,13 @@ impl EndedNode {
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         cx.notify();
         kept_changed(&self.shell, cx);
+        // Opened, it asks every other machine for its ended sessions (#1280).
+        if open {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, cx| shell.ended_opened(cx)).ok();
+            });
+        }
     }
 }
 
@@ -2009,12 +2029,29 @@ impl Render for EndedNode {
             .trailing(meta(count.to_string(), cx))
             .expanded(self.open)
             .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
+        let p = palette(cx);
         div()
             .flex()
             .flex_col()
             .flex_none()
             .child(row)
             .child(self.fold.clone())
+            .child(presence_of(
+                "ended-unlisted-line",
+                self.unlisted.clone().filter(|_| self.open),
+                move |line| {
+                    div()
+                        .id("ended-unlisted")
+                        .aria_label(line.clone())
+                        .px(space::LG)
+                        .pb(space::SM)
+                        .text_size(px(12.))
+                        .text_color(p.faint)
+                        .child(line)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
     }
 }
 
@@ -2268,6 +2305,11 @@ impl SessionRow {
                 })
                 .ok();
         });
+    }
+
+    /// What its meta says of its project (the "Ended" group).
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
     }
 
     /// Says its project in its meta (the "Ended" group), or stops.
@@ -2743,6 +2785,26 @@ impl SessionRow {
     /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
     /// under it, out of sight, and the name is cut with an ellipsis. The whole is in a tooltip.
     fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        // The line is swapped for another when the row's machine tag comes (its pilot's machine
+        // lists it after it was drawn), goes, or changes: the new one fades in, as the kit's
+        // `changing` fades words.
+        let kind = match (&self.elsewhere, &self.tag) {
+            (Some(there), _) if !there.listed => format!("machine {}", there.machine),
+            (_, Some(tag)) => format!("tag {tag}"),
+            _ => "place".to_owned(),
+        };
+        let swap = changed(
+            &ElementId::Name(format!("session-line-swap-{}", self.id).into()),
+            &SharedString::from(kind),
+            window,
+            cx,
+        );
+        let line = self.line_of(window, cx);
+        div().min_w_0().opacity(swap).child(line).into_any_element()
+    }
+
+    /// The line itself, [`SessionRow::second_line`] without its fade.
+    fn line_of(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
         let (name, icon, said) = match &self.place {
             None => ("main".to_owned(), Icon::Folder, "Project folder"),

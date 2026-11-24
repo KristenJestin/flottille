@@ -1343,11 +1343,47 @@ impl Snapshot {
             .collect()
     }
 
-    /// The sessions that ended, whatever their project, the most recent end first.
+    /// The sessions that ended, whatever their project and their machine, the most recent end
+    /// first.
     pub fn ended_sessions(&self) -> Vec<&Session> {
-        let mut ended: Vec<&Session> = self.sessions.iter().filter(|s| s.ended).collect();
+        let mut ended: Vec<&Session> = self
+            .sessions
+            .iter()
+            .chain(&self.elsewhere)
+            .filter(|s| s.ended)
+            .collect();
         ended.sort_by(|a, b| b.ended_at.cmp(&a.ended_at).then(a.id.cmp(&b.id)));
         ended
+    }
+
+    /// The sessions that ended in this read of the machine `machine`, as rows of this machine's
+    /// "Ended" (#1280): each one's id is that machine's, and it is under no row, as nothing that
+    /// machine says describes another's sessions.
+    pub fn ended_of(&self, machine: &str, look: Option<String>) -> Vec<Session> {
+        self.sessions
+            .iter()
+            .filter(|session| session.ended)
+            .map(|session| Session {
+                id: elsewhere_id(machine, &session.id),
+                resumable: false,
+                started_by: None,
+                led_by: None,
+                pilot: None,
+                led_from_elsewhere: false,
+                elsewhere: Some(Elsewhere {
+                    machine: machine.to_owned(),
+                    agent: session.id.clone(),
+                    state: "ended".to_owned(),
+                    listed: false,
+                    offline: false,
+                    look: look.clone(),
+                    here: false,
+                }),
+                tag: Some(machine.to_owned()),
+                child_of: None,
+                ..session.clone()
+            })
+            .collect()
     }
 
     pub fn session(&self, id: &str) -> Option<&Session> {
@@ -1578,9 +1614,41 @@ impl Snapshot {
         }
         self.elsewhere.extend(added);
         self.arrange(machines, front);
+        self.drop_pilot_loops();
         self.tie_across();
         self.projects.sort_by(|a, b| a.name.cmp(&b.name));
         self
+    }
+
+    /// Drops the pilot of a row that would close a loop, of any length, among the rows' pilots:
+    /// a machine of the list is untrusted, and two machines that disagree on who leads whom
+    /// would otherwise leave every row of the loop under another, with none to start from, so
+    /// none drawn. A row whose pilot is itself loses it too. The rows keep their order, and the
+    /// first edge of a loop to be read stays.
+    fn drop_pilot_loops(&mut self) {
+        let mut kept: HashMap<String, String> = HashMap::new();
+        for row in self.sessions.iter_mut().chain(&mut self.elsewhere) {
+            let Some(pilot) = row.pilot.clone() else {
+                continue;
+            };
+            // `kept` has no loop, so the walk ends.
+            let mut at = pilot.as_str();
+            let closes = loop {
+                if at == row.id {
+                    break true;
+                }
+                match kept.get(at) {
+                    Some(next) => at = next,
+                    None => break false,
+                }
+            };
+            match closes {
+                true => row.pilot = None,
+                false => {
+                    kept.insert(row.id.clone(), pilot);
+                }
+            }
+        }
     }
 
     /// The rows led by a session of another machine: one in its pilot's project row sits under
@@ -2005,6 +2073,104 @@ mod tests {
         for id in ["s1@server", "s2@server", "s3@server"] {
             assert_eq!(snapshot.elsewhere(id).unwrap().pilot, None, "{id}");
         }
+    }
+
+    /// A listed session `id`, said to be led by the session `by.1` of the machine `by.0`.
+    fn led_by(id: &str, by: (&str, &str)) -> crate::machines::Listed {
+        let mut led = listed(id, "app", 9);
+        led.pilot_elsewhere = Some((by.0.to_owned(), by.1.to_owned()));
+        led
+    }
+
+    /// How many steps each row of the snapshot's rows takes up its pilots to a root, `None` for
+    /// a row whose pilots never end: a loop no row of which is a root.
+    fn depths(snapshot: &Snapshot) -> Vec<(String, Option<usize>)> {
+        let rows: Vec<&Session> = snapshot
+            .sessions
+            .iter()
+            .chain(&snapshot.elsewhere)
+            .collect();
+        rows.iter()
+            .map(|row| {
+                let mut at = *row;
+                let mut steps = 0;
+                while let Some(pilot) = at.pilot.as_deref() {
+                    steps += 1;
+                    if steps > rows.len() {
+                        return (row.id.clone(), None);
+                    }
+                    match rows.iter().find(|other| other.id == pilot) {
+                        Some(next) => at = next,
+                        None => break,
+                    }
+                }
+                (row.id.clone(), Some(steps))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pilot_loop_across_machines_hides_no_row() {
+        // server's list says its s1 is led by lab's r1; lab's says its r1 is led by s1 of server.
+        // One of them lies: neither row may leave the sidebar of a third machine.
+        let snapshot = build(json!({"agents": []}), json!({}), &[]).with_lists(
+            &machines_listing(
+                "pc",
+                vec![
+                    ("server", vec![led_by("s1", ("lab", "r1"))]),
+                    ("lab", vec![led_by("r1", ("server", "s1"))]),
+                ],
+            ),
+            None,
+        );
+
+        let depths = depths(&snapshot);
+        assert!(
+            depths.iter().all(|(_, depth)| depth.is_some()),
+            "every row ends at a root: {depths:?}"
+        );
+        assert!(
+            depths.iter().any(|(_, depth)| *depth == Some(0)),
+            "{depths:?}"
+        );
+        let tied = ["s1@server", "r1@lab"]
+            .into_iter()
+            .filter(|id| snapshot.elsewhere(id).unwrap().pilot.is_some())
+            .count();
+        assert_eq!(
+            tied, 1,
+            "the edge that closes the loop is dropped, not both"
+        );
+    }
+
+    #[test]
+    fn a_pilot_loop_of_three_machines_hides_no_row() {
+        let snapshot = build(json!({"agents": []}), json!({}), &[]).with_lists(
+            &machines_listing(
+                "pc",
+                vec![
+                    ("server", vec![led_by("s1", ("lab", "r1"))]),
+                    ("lab", vec![led_by("r1", ("dock", "d1"))]),
+                    ("dock", vec![led_by("d1", ("server", "s1"))]),
+                ],
+            ),
+            None,
+        );
+
+        let depths = depths(&snapshot);
+        assert!(
+            depths.iter().all(|(_, depth)| depth.is_some()),
+            "every row ends at a root: {depths:?}"
+        );
+        assert!(
+            depths.iter().any(|(_, depth)| *depth == Some(0)),
+            "{depths:?}"
+        );
+        let tied = ["s1@server", "r1@lab", "d1@dock"]
+            .into_iter()
+            .filter(|id| snapshot.elsewhere(id).unwrap().pilot.is_some())
+            .count();
+        assert_eq!(tied, 2, "one edge of the three is dropped");
     }
 
     #[test]
@@ -3268,6 +3434,39 @@ mod tests {
         launched["led"] = json!(true);
         let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
         assert_eq!(snapshot.sessions[0].title, "Rework the login");
+    }
+
+    #[test]
+    fn an_ended_session_of_another_machine_is_keyed_by_it_and_under_no_row() {
+        // What another machine answers names its own sessions: a pilot it claims is no row here.
+        let mut ended = agent("r1", None, "ended", None);
+        ended["launched_by"] = json!("r0");
+        let read = build(
+            json!({"agents": [ended, agent("r2", None, "idle", None)]}),
+            json!({}),
+            &[],
+        );
+        let rows = read.ended_of("server", Some("server in teal".into()));
+        assert_eq!(rows.len(), 1, "the ended root only");
+        assert_eq!(rows[0].id, "r1@server");
+        assert_eq!(rows[0].pilot, None);
+        assert_eq!(rows[0].led_by, None);
+        assert!(!rows[0].resumable);
+        let there = rows[0].elsewhere.as_ref().unwrap();
+        assert_eq!(
+            (there.machine.as_str(), there.agent.as_str()),
+            ("server", "r1")
+        );
+        assert!(!there.listed && !there.here);
+        // Among this machine's ended sessions, in "Ended".
+        let mut here = build(json!({"agents": []}), json!({}), &[]);
+        here.elsewhere.extend(rows);
+        let listed: Vec<&str> = here
+            .ended_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(listed, ["r1@server"]);
     }
 
     #[test]

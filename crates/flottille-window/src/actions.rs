@@ -878,7 +878,7 @@ pub enum Reading {
 }
 
 impl Reading {
-    fn params(&self) -> Value {
+    pub(crate) fn params(&self) -> Value {
         match self {
             Reading::Ids(ids) => json!({"ids": ids}),
             Reading::Session(session) => json!({"session": session}),

@@ -3537,7 +3537,7 @@ pub(crate) mod tests {
             if at < between {
                 daemon
                     .write(|store| {
-                        let event = store.append_event("remote.machine_changed", json!({}))?;
+                        let event = store.append_event("remote.connected", json!({}))?;
                         Ok(((), Some(event)))
                     })
                     .unwrap();

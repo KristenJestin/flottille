@@ -370,6 +370,22 @@ pub struct Shell {
     /// What was read of each other machine whose project pages were shown, kept current by its
     /// own link: a project's page there reads that machine's projects and sessions.
     copies: HashMap<String, Copied>,
+    /// Each other machine's bell link and what it last read of that machine's notification
+    /// centre: the bell holds every machine's (#1280).
+    bells: HashMap<String, Bell>,
+    /// The device key read for the bells, while it is read.
+    key_reading: Option<Task<()>>,
+    /// Whether the device key could not be read for the bells, which was said once.
+    key_failed: bool,
+    /// The sessions that ended on each other machine, as it last answered (#1280).
+    ended_there: HashMap<String, Vec<crate::model::Session>>,
+    /// Why a machine's ended sessions are not listed, by machine: "Ended" says it once.
+    unlisted: std::collections::BTreeMap<String, String>,
+    /// The notifications of other machines asked to be marked read, once each.
+    marked_there: HashSet<(String, u64)>,
+    /// How many connections each other machine's bell links made, and how many reads of its
+    /// ended sessions were started: what a test counts of what is asked there.
+    asked_there: HashMap<String, (Arc<std::sync::atomic::AtomicUsize>, usize)>,
     /// The pages of other machines' sessions last shown, one a machine, still following their
     /// session: coming back shows it at once.
     kept_pages: HashMap<String, Entity<SessionPage>>,
@@ -429,6 +445,26 @@ struct Pages {
     details_of: Option<(String, Work)>,
     /// Its Settings, its Features and its connections were read once.
     read: bool,
+}
+
+/// Another machine's bell link (#1280): its connection, which the bell's reads and "Ended" use
+/// too, and what it last read of that machine's notification centre.
+struct Bell {
+    connect: link::Connect,
+    /// Dropped, its link ends.
+    _end: link::End,
+    read: Option<Snapshot>,
+    /// Whether its ended sessions are being read: one read at a time.
+    ending: bool,
+}
+
+/// What "Ended" says of a runner that is off.
+fn off_line(machine: &crate::machines::Machine) -> String {
+    off_words(&machine.name, &machine.state_words())
+}
+
+fn off_words(machine: &str, state: &str) -> String {
+    format!("{machine} is {state}: its ended sessions are not listed")
 }
 
 /// What was read of another machine for its projects' pages, by a link of its own.
@@ -939,6 +975,13 @@ impl Shell {
             key: None,
             sides: HashMap::new(),
             copies: HashMap::new(),
+            bells: HashMap::new(),
+            key_reading: None,
+            key_failed: false,
+            ended_there: HashMap::new(),
+            unlisted: std::collections::BTreeMap::new(),
+            marked_there: HashSet::new(),
+            asked_there: HashMap::new(),
             kept_pages: HashMap::new(),
             heard: true,
             silent: None,
@@ -998,6 +1041,7 @@ impl Shell {
             .update(cx, |section, cx| section.news(news, window, cx));
         self.say_held(cx);
         self.forget_gone_machines(window, cx);
+        self.follow_bells(window, cx);
         if let Some(lists) = self.machines.read(cx).machines().map(|read| &read.lists) {
             // Listed by its machine, or never in a while: its row is the machine's, or none.
             let now = now_ms();
@@ -1049,6 +1093,8 @@ impl Shell {
             .keys()
             .flatten()
             .chain(self.copies.keys())
+            .chain(self.bells.keys())
+            .chain(self.ended_there.keys())
             .chain(self.front.iter())
             .chain(kept.iter())
             .filter(|machine| read.machine(machine).is_none())
@@ -1081,6 +1127,11 @@ impl Shell {
                     .update(cx, |modals, cx| modals.forget(&owners, cx));
             }
             self.copies.remove(&machine);
+            let rang = self.bells.remove(&machine).is_some();
+            if self.ended_there.remove(&machine).is_some() || rang {
+                self.ring(cx);
+            }
+            self.unlisted.remove(&machine);
             if self.connection_request.read(cx).machine() == Some(machine.as_str()) {
                 self.connection_request
                     .update(cx, |dialog, cx| dialog.forget(cx));
@@ -1119,7 +1170,336 @@ impl Shell {
         merged
             .elsewhere
             .retain(|session| !self.closing.contains(&session.id));
+        // What ended on another machine, as it answered: a row of "Ended" only, never one its
+        // list or a launch here already has.
+        let mut machines: Vec<&String> = self.ended_there.keys().collect();
+        machines.sort();
+        for machine in machines {
+            for session in &self.ended_there[machine] {
+                if merged.elsewhere(&session.id).is_none() {
+                    merged.elsewhere.push(session.clone());
+                }
+            }
+        }
         merged
+    }
+
+    /// A bell link for each other machine that runs sessions and is online, made once its key is
+    /// read: the bell holds what waits there too (#1280). One that goes off has its link ended, its
+    /// notifications and its ended sessions taken out, and "Ended" says so once; it is followed
+    /// again once it is back.
+    fn follow_bells(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(read) = self
+            .machines
+            .read(cx)
+            .machines()
+            .filter(|read| read.off.is_none())
+            .cloned()
+        else {
+            return;
+        };
+        let runners = || {
+            read.machines
+                .iter()
+                .filter(|machine| machine.role.as_deref() == Some("runner"))
+        };
+        let followed =
+            |name: &str| runners().any(|machine| machine.name == name && machine.online());
+        let gone: Vec<String> = self
+            .bells
+            .keys()
+            .filter(|name| !followed(name))
+            .cloned()
+            .collect();
+        let mut changed = !gone.is_empty();
+        for name in gone {
+            self.bells.remove(&name);
+            self.ended_there.remove(&name);
+            self.marked_there.retain(|(machine, _)| *machine != name);
+            if let Some(off) = read.machine(&name).filter(|machine| !machine.online()) {
+                self.unlisted.insert(name, off_line(off));
+            }
+        }
+        for machine in runners() {
+            // Back: what it ended is read again once its bell reads it; still off, what it says
+            // is kept current.
+            let said = (!machine.online()).then(|| off_line(machine));
+            match said {
+                Some(said)
+                    if self
+                        .unlisted
+                        .get(&machine.name)
+                        .is_some_and(|was| *was != said) =>
+                {
+                    self.unlisted.insert(machine.name.clone(), said);
+                    changed = true;
+                }
+                None if self.unlisted.remove(&machine.name).is_some() => changed = true,
+                _ => {}
+            }
+        }
+        if changed {
+            self.say_unlisted(cx);
+            self.show_merged(window, cx);
+            self.ring(cx);
+        }
+        let wanted: Vec<String> = runners()
+            .filter(|machine| machine.online())
+            .map(|machine| machine.name.clone())
+            .filter(|name| !self.bells.contains_key(name))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(key) = self.key.clone() else {
+            if self.key_reading.is_none() {
+                // Read once, off the UI thread, as a page of another machine reads it; not read,
+                // it is said once and read again at the next news of the machines.
+                let remote = self.remote.clone();
+                self.key_reading = Some(cx.spawn_in(window, async move |this, cx| {
+                    let key = cx.background_spawn(async move { remote.key() }).await;
+                    this.update_in(cx, |shell, window, cx| {
+                        shell.key_reading = None;
+                        match key {
+                            Ok(key) => {
+                                shell.key.get_or_insert(Arc::new(key));
+                                shell.follow_bells(window, cx);
+                            }
+                            Err(why) if !shell.key_failed => {
+                                shell.key_failed = true;
+                                gpui_design_system::toast(
+                                    gpui_design_system::Toast::failure(
+                                        "The bell cannot follow your other machines",
+                                    )
+                                    .detail(why),
+                                    cx,
+                                );
+                            }
+                            Err(_) => {}
+                        }
+                    })
+                    .ok();
+                }));
+            }
+            return;
+        };
+        for name in wanted {
+            let aim = crate::machines::Aim::default();
+            aim.set(Some((name.clone(), key.clone())));
+            let aimed = aim.connect(self.local.clone());
+            let dials = self.asked_there.entry(name.clone()).or_default().0.clone();
+            let connect: link::Connect = Arc::new(move || {
+                dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                aimed()
+            });
+            let (updates, end) = link::Updates::from(self.sender.clone()).of(&name).ending();
+            link::spawn_bell_into(connect.clone(), updates);
+            self.bells.insert(
+                name,
+                Bell {
+                    connect,
+                    _end: end,
+                    read: None,
+                    ending: false,
+                },
+            );
+        }
+    }
+
+    /// Another machine's notification centre, as its bell link read it. Its first read asks it
+    /// for its ended sessions too, so that "Ended" holds them before it is first opened.
+    fn bell_read(&mut self, machine: String, read: Snapshot, cx: &mut Context<Self>) {
+        let Some(bell) = self.bells.get_mut(&machine) else {
+            return;
+        };
+        let first = bell.read.is_none();
+        bell.read = Some(read);
+        self.ring(cx);
+        if first {
+            self.ask_ended_of(&machine);
+        }
+    }
+
+    /// "Ended" was opened: each other machine followed is asked for its ended sessions, unless
+    /// it is being asked, and a runner that is off is said so, once (#1280).
+    pub fn ended_opened(&mut self, cx: &mut Context<Self>) {
+        let mut names: Vec<String> = self.bells.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            self.ask_ended_of(&name);
+        }
+        let off: Vec<(String, String)> = self
+            .machines
+            .read(cx)
+            .machines()
+            .into_iter()
+            .flat_map(|read| &read.machines)
+            .filter(|machine| machine.role.as_deref() == Some("runner") && !machine.online())
+            .map(|machine| (machine.name.clone(), off_line(machine)))
+            .collect();
+        let mut changed = false;
+        for (name, said) in off {
+            if self.unlisted.get(&name) != Some(&said) {
+                self.unlisted.insert(name, said);
+                changed = true;
+            }
+        }
+        if changed {
+            self.say_unlisted(cx);
+        }
+    }
+
+    /// Asks `machine` for its ended sessions, off the UI thread, on its bell link's connection.
+    fn ask_ended_of(&mut self, machine: &str) {
+        let Some(bell) = self.bells.get_mut(machine).filter(|bell| !bell.ending) else {
+            return;
+        };
+        bell.ending = true;
+        self.asked_there.entry(machine.to_owned()).or_default().1 += 1;
+        let (connect, updates) = (
+            bell.connect.clone(),
+            link::Updates::from(self.sender.clone()).of(machine),
+        );
+        let spawned = std::thread::Builder::new()
+            .name("flottille-ended".into())
+            .spawn(move || {
+                let read = link::read_ended(&connect, link::NOT_ANSWERING);
+                let _ = updates.unbounded_send(Update::EndedThere(read));
+            });
+        if let Err(error) = spawned {
+            eprintln!("flottille: the ended sessions of {machine} cannot be read: {error}");
+        }
+    }
+
+    /// What `machine` answered of its ended sessions: its rows of "Ended", or why there are none.
+    fn ended_read(
+        &mut self,
+        machine: String,
+        read: Result<Snapshot, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bell) = self.bells.get_mut(&machine) else {
+            return;
+        };
+        bell.ending = false;
+        match read {
+            Ok(read) => {
+                let look = self
+                    .machines
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.members.iter().find(|m| m.name == machine))
+                    .map(crate::machines::Member::look_words);
+                self.ended_there
+                    .insert(machine.clone(), read.ended_of(&machine, look));
+                self.unlisted.remove(&machine);
+            }
+            Err(why) => {
+                self.ended_there.remove(&machine);
+                let off = self
+                    .machines
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.machine(&machine))
+                    .filter(|found| !found.online())
+                    .map(|found| found.state_words());
+                let said = match off {
+                    Some(state) => off_words(&machine, &state),
+                    None => format!("{machine}'s ended sessions are not listed: {why}"),
+                };
+                self.unlisted.insert(machine.clone(), said);
+            }
+        }
+        self.say_unlisted(cx);
+        self.show_merged(window, cx);
+        self.ring(cx);
+    }
+
+    /// Shows what was last read here merged with what other machines said, when that changed.
+    fn show_merged(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(last) = self.read.clone() {
+            let merged = self.with_elsewhere(last, cx);
+            if merged != self.snapshot {
+                self.show(merged, window, cx);
+            }
+        }
+    }
+
+    /// The machines whose ended sessions are not listed, in one line of "Ended".
+    fn say_unlisted(&mut self, cx: &mut Context<Self>) {
+        let said = (!self.unlisted.is_empty()).then(|| {
+            self.unlisted
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" · ")
+        });
+        if let Some(group) = self.ended.clone()
+            && group.read(cx).unlisted() != said.as_deref()
+        {
+            group.update(cx, |group, cx| group.set_unlisted(said, cx));
+        }
+    }
+
+    /// The bell's items of every machine: this one's as they are, another's keyed and tied to its
+    /// row by that machine's name (`n-3@server`, the session `a1@server`), with that machine.
+    fn bell_items(&self) -> Vec<(Option<&str>, BellItem)> {
+        let mut items: Vec<(Option<&str>, BellItem)> = self
+            .snapshot
+            .bell
+            .iter()
+            .map(|item| (None, item.clone()))
+            .collect();
+        let mut machines: Vec<&String> = self.bells.keys().collect();
+        machines.sort();
+        for machine in machines {
+            let Some(read) = &self.bells[machine].read else {
+                continue;
+            };
+            for item in &read.bell {
+                let mut item = item.clone();
+                item.key = format!("{}@{machine}", item.key);
+                item.session = item
+                    .session
+                    .map(|agent| crate::model::elsewhere_id(machine, &agent));
+                items.push((Some(machine.as_str()), item));
+            }
+        }
+        items
+    }
+
+    /// Whether the bell and "Ended" have read `machine` once.
+    pub fn bell_reached(&self, machine: &str) -> bool {
+        self.bells
+            .get(machine)
+            .is_some_and(|bell| bell.read.is_some())
+            && (self.ended_there.contains_key(machine) || self.unlisted.contains_key(machine))
+    }
+
+    /// How many connections the bell links of `machine` made.
+    pub fn bell_dials(&self, machine: &str) -> usize {
+        self.asked_there.get(machine).map_or(0, |(dials, _)| {
+            dials.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    /// How many reads of the ended sessions of `machine` were started.
+    pub fn ended_reads(&self, machine: &str) -> usize {
+        self.asked_there.get(machine).map_or(0, |(_, reads)| *reads)
+    }
+
+    /// Asks `machine` to mark notifications read, on its bell link's connection; the link reads
+    /// its centre again on the event that follows.
+    /// `ids` are those it marks, put in `marked_there` until it says they were not.
+    fn read_there(&mut self, machine: &str, reading: Reading, ids: Vec<u64>) {
+        let Some(bell) = self.bells.get(machine) else {
+            return;
+        };
+        let updates = link::Updates::from(self.sender.clone()).of(machine);
+        link::read_there(bell.connect.clone(), reading.params(), ids.clone(), updates);
+        self.marked_there
+            .extend(ids.into_iter().map(|id| (machine.to_owned(), id)));
     }
 
     /// Opens the session `agent` of `machine`: its page is that machine's, read on its own
@@ -3103,6 +3483,13 @@ impl Shell {
         }
         match update {
             Update::Snapshot(read, _) => self.copied(machine, read, window, cx),
+            Update::Bell(read) => self.bell_read(machine, read, cx),
+            Update::EndedThere(read) => self.ended_read(machine, read, window, cx),
+            Update::NotReadThere(ids) => {
+                for id in ids {
+                    self.marked_there.remove(&(machine.clone(), id));
+                }
+            }
             Update::Session { .. } => self.take(update, window, cx),
             // What fills its pages (its answers, its events) goes to them, wherever they wait.
             update if of_this_machine_s_pages(&update) => {
@@ -3118,7 +3505,11 @@ impl Shell {
         match update {
             // What a page of a machine no longer in front asked: its page is gone.
             Update::Done(outcome) if !self.pages_shown() && of_a_page(&outcome) => {}
-            Update::Machine { .. } => {}
+            // Another machine's alone, said of it ([`Shell::apply_of`]).
+            Update::Machine { .. }
+            | Update::Bell(_)
+            | Update::EndedThere(_)
+            | Update::NotReadThere(_) => {}
             Update::Machines(news) => self.machines_news(*news, window, cx),
             Update::Closed {
                 machine,
@@ -5060,11 +5451,17 @@ impl Shell {
             if row.read(cx).draft() != held {
                 row.update(cx, |row, cx| row.set_draft(held, cx));
             }
-            // Ended, it sits among other projects' sessions: its row says whose it is.
-            let scope = session.ended.then_some(session.project.as_str());
+            // Ended, it sits among other projects' sessions: its row says whose it is, and the
+            // machine of one of another machine (#1280).
+            let scope = session.ended.then(|| {
+                match session.elsewhere.as_ref().filter(|there| !there.here) {
+                    Some(there) => format!("{} on {}", session.project, there.machine),
+                    None => session.project.clone(),
+                }
+            });
             let pull = self.pull_of(session, &session.place).cloned();
             row.update(cx, |row, cx| {
-                row.set_scope(scope, cx);
+                row.set_scope(scope.as_deref(), cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
                 // A session another machine lists is closed from here, through this machine's
@@ -5337,7 +5734,8 @@ impl Shell {
         let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
         let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
-        let present = !rows.is_empty();
+        // A machine whose ended sessions are not listed is said by the group, rows or none.
+        let present = !rows.is_empty() || !self.unlisted.is_empty();
         if self.ended.is_none() && present {
             let open = self.kept.ended.unwrap_or(false);
             self.ended = Some(cx.new(|cx| EndedNode::new(this.clone(), open, cx)));
@@ -5349,6 +5747,7 @@ impl Shell {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
+        self.say_unlisted(cx);
         match grouped {
             true => {
                 // The user's list folds away as it was, and its rows come back when it does: the
@@ -5595,31 +5994,39 @@ impl Shell {
                 row.update(cx, |row, cx| row.set_unread(said, cx));
             }
         }
-        // What waits on another machine says which: the inbox is that machine's.
-        let there = self.front.clone();
+        // What waits on another machine says which (#1280).
         let snapshot = &self.snapshot;
-        let rows: Vec<BellRow> = snapshot
-            .bell
-            .iter()
-            .map(|item| {
-                let found = item.session.as_deref().and_then(|id| snapshot.session(id));
+        let rows: Vec<BellRow> = self
+            .bell_items()
+            .into_iter()
+            .map(|(machine, item)| {
+                let found = item.session.as_deref().and_then(|id| match machine {
+                    None => snapshot.session(id),
+                    Some(_) => snapshot.elsewhere(id),
+                });
                 let mut title = found
                     .map(|s| match &s.started_by {
                         Some(by) => format!("{} · started by {by}", s.title),
                         None => s.title.clone(),
                     })
                     .unwrap_or_else(|| "Flottille".to_owned());
-                if let Some(machine) = &there {
+                if let Some(machine) = machine {
                     title = format!("{title} · on {machine}");
                 }
                 BellRow {
-                    item: item.clone(),
-                    title,
                     project: found.map(|s| s.project.clone()).unwrap_or_default(),
+                    item,
+                    title,
                 }
             })
             .collect();
-        let counts = snapshot.unread;
+        let counts = self
+            .bells
+            .values()
+            .filter_map(|bell| bell.read.as_ref())
+            .fold(snapshot.unread, |(needs, new), read| {
+                (needs + read.unread.0, new + read.unread.1)
+            });
         if self.top.read(cx).counts() != counts {
             self.top.update(cx, |top, cx| top.set_counts(counts, cx));
         }
@@ -5634,6 +6041,28 @@ impl Shell {
 
     /// Asks the daemon to mark a session's unread notifications read, once for each.
     fn read_session(&mut self, session: &str) {
+        let there: Vec<(String, u64)> = self
+            .bell_items()
+            .into_iter()
+            .filter_map(|(machine, item)| Some((machine?.to_owned(), item)))
+            .filter(|(_, item)| !item.read && item.session.as_deref() == Some(session))
+            .map(|(machine, item)| (machine, item.id))
+            .filter(|marked| !self.marked_there.contains(marked))
+            .collect();
+        if let Some((machine, _)) = there.first() {
+            let agent = session
+                .strip_suffix(&format!("@{machine}"))
+                .unwrap_or(session)
+                .to_owned();
+            let machine = machine.clone();
+            let ids = there
+                .into_iter()
+                .filter(|(of, _)| *of == machine)
+                .map(|(_, id)| id)
+                .collect();
+            self.read_there(&machine, Reading::Session(agent), ids);
+            return;
+        }
         let unread: Vec<u64> = self
             .snapshot
             .bell
@@ -5662,6 +6091,24 @@ impl Shell {
         if !unread.is_empty() {
             self.marked.extend(unread);
             self.perform_here(Command::ReadNotifications(Reading::All));
+        }
+        let mut there: Vec<(String, u64)> = self
+            .bell_items()
+            .into_iter()
+            .filter_map(|(machine, item)| Some((machine?.to_owned(), item)))
+            .filter(|(_, item)| !item.read)
+            .map(|(machine, item)| (machine, item.id))
+            .collect();
+        there.sort();
+        let mut asked: Vec<String> = there.iter().map(|(machine, _)| machine.clone()).collect();
+        asked.dedup();
+        for machine in asked {
+            let ids = there
+                .iter()
+                .filter(|(of, _)| *of == machine)
+                .map(|(_, id)| *id)
+                .collect();
+            self.read_there(&machine, Reading::All, ids);
         }
     }
 
@@ -6437,15 +6884,27 @@ impl Shell {
     /// Opens what a bell item is about: its session, which marks its notifications read; one
     /// that is no session's is marked read by itself.
     pub fn choose(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self
-            .snapshot
-            .bell
-            .iter()
-            .find(|item| item.key == key)
-            .cloned()
+        let Some((machine, item)) = self
+            .bell_items()
+            .into_iter()
+            .find(|(_, item)| item.key == key)
+            .map(|(machine, item)| (machine.map(str::to_owned), item))
         else {
             return;
         };
+        // Another machine's: its session opens on that machine's page, which reads it there.
+        if let Some(machine) = machine {
+            match item.session {
+                Some(session) if self.snapshot.elsewhere(&session).is_some() => {
+                    self.open(Selection::Session(session), window, cx)
+                }
+                _ if !item.read && !self.marked_there.contains(&(machine.clone(), item.id)) => {
+                    self.read_there(&machine, Reading::Ids(vec![item.id]), vec![item.id])
+                }
+                _ => {}
+            }
+            return;
+        }
         match item.session {
             Some(session) if self.snapshot.session(&session).is_some() => {
                 self.open(Selection::Session(session), window, cx)
@@ -6960,6 +7419,11 @@ impl BellList {
             .collect()
     }
 
+    /// What needs the user and what is new, every machine's.
+    pub fn counts(&self) -> (usize, usize) {
+        self.counts
+    }
+
     /// The panel's order: each session's key, then the keys of its notifications.
     pub fn order(&self) -> Vec<String> {
         grouped(&self.rows)
@@ -7268,7 +7732,7 @@ fn nested(
     cx: &mut Context<Shell>,
 ) -> Vec<Entity<SessionRow>> {
     // The place of each session's pilot among them, when it is one of them.
-    let pilots: Vec<Option<usize>> = live
+    let mut pilots: Vec<Option<usize>> = live
         .iter()
         .map(|session| {
             let pilot = session.pilot.as_deref().filter(|p| *p != session.id)?;
@@ -7284,7 +7748,17 @@ fn nested(
         .filter(|&at| pilots[at].is_none())
         .map(|at| (at, true, None))
         .collect();
-    while let Some((at, shown, tie)) = stack.pop() {
+    loop {
+        let Some((at, shown, tie)) = stack.pop() else {
+            // A row no walk reached sits in a loop of pilots, which the model drops; if one got
+            // here, it is a root, so that no row of the project is ever left out.
+            let Some(at) = (0..live.len()).find(|at| !placed.contains(at)) else {
+                break;
+            };
+            pilots[at] = None;
+            stack.push((at, true, None));
+            continue;
+        };
         if !placed.insert(at) {
             continue;
         }
