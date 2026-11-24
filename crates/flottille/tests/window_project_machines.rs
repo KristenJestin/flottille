@@ -1003,6 +1003,65 @@ fn two_projects_of_the_same_name_with_other_remotes_are_not_one(cx: &mut TestApp
     assert!(!present(cx, "project-settings-machine"));
 }
 
+// A row only another machine has opens that machine's project, by the name the sidebar grouped
+// it by, never one of this machine's that the row does not hold (#1410): the same repository
+// cloned twice there, and a project with no remote on both machines.
+
+#[gpui_kit::test]
+fn a_row_of_another_machine_alone_opens_that_machine_s_project(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&pc, "notes", "");
+    add(&server, "app", APP);
+    add(&server, "app2", APP);
+    add(&server, "notes", "");
+    told(&pc, &["app", "app2", "notes"]);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    until(&shell, cx, "the server's rows", |cx| {
+        present(cx, project_id("app2")) && present(cx, project_id("notes@server"))
+    });
+    assert_eq!(homes(&shell, "app", cx), ["pc", "server"]);
+    assert_eq!(homes(&shell, "app2", cx), ["server"], "a clone of its own");
+    assert_eq!(homes(&shell, "notes", cx), ["pc"]);
+    assert_eq!(homes(&shell, "notes@server", cx), ["server"]);
+
+    // The same repository cloned twice on the server: `app2` is the server's, not this `app`.
+    show(&shell, Selection::Project("app2".into()), cx);
+    until(&shell, cx, "the server's page of app2", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::Project("app2".into()))
+            })
+            && present(cx, "place-picker")
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, "machine-picker"), "only the server has it");
+
+    // No remote on either machine: `notes@server` is the server's `notes`, not this one's.
+    show(&shell, Selection::Project("notes@server".into()), cx);
+    until(&shell, cx, "the server's page of notes", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::Project("notes".into()))
+            })
+            && present(cx, "place-picker")
+    });
+    settle(&shell, cx);
+    assert!(
+        !present(cx, "machine-picker"),
+        "the switch follows the sidebar's rows"
+    );
+    // Nor does its settings switch offer this machine's `notes`.
+    show(&shell, Selection::ProjectSettings("notes".into()), cx);
+    until(&shell, cx, "the server's settings of notes", |cx| {
+        present(cx, "project-settings-header")
+    });
+    settle(&shell, cx);
+    assert_eq!(shown(&shell, cx).as_deref(), Some("server"));
+    assert!(!present(cx, "project-settings-machine"));
+}
+
 // The shared project's page at rest (#1411): nothing is drawn once it settled, whatever the other
 // machines hold, and a read of them that changes nothing on it draws nothing.
 
