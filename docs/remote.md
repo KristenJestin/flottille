@@ -27,7 +27,8 @@ to the ports of a run's server (#829), a vault entry shared with another machine
 connection shared the same way (#833), the window's machines, in Settings, Machines
 (#814), one list of the sessions of every machine in the window, with the close of a session
 of a machine that is off kept until it is back (#1150, its points 1 to 3), and the pictures and
-videos a session showed, sent to any device (#1165). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
+videos a session showed, sent to any device (#1165), and the runner's and the hub's side of the
+phone's notifications, with the window's presence and **Notify the phone** (#827). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
 what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
@@ -1556,6 +1557,43 @@ recreated.
 - When the hub is unreachable, nothing reaches the phone: it says so in its permanent notification
   ("Not connected to your hub") and reconnects with a backoff.
 
+**Built (#827), the runner's and the hub's side.** The runner reads its notification centre
+(`docs/protocol.md`, `notifications.list`): a row of kind `request`, `question`, `report` or
+`failure` (the centre makes them for a request held for the user, a question to the user, a root's
+report and a root's failure) is decided once, 30 seconds after it was made, on the daemon's clock
+(`crates/flottille/src/phone.rs`). Unless it was read or answered by then (`read_at`), it is told
+when **Notify the phone** says `always` or when no client of the user had an input in the last 2
+minutes: an input at a client of this machine, as the daemon stamped it, or any member's that is no
+phone as the hub last told it (the app says an input each time it opens its session, on another
+network say: it would silence the next notices). An input said to come more than a minute after
+the runner's clock is not counted: a clock ahead would silence the phone until then. Otherwise it
+is dropped, and does not ring later. A row told that is then read, answered or gone tells
+`dismissed`; a row never sent (no session then) is never dismissed, and what is told is queued in
+order, so that a `dismissed` never overtakes its notice. What came before the daemon started is
+never told, and with no session to the hub nothing is told and nothing is kept for later.
+
+- **Presence**: the window says `client.presence {focused, input}` to its daemon when its focus
+  changes and at an input (a key, a click, the wheel, every 20 seconds at most); the daemon stamps the input
+  and tells the hub `{"ask": {"kind": "presence", "active", "last_input"}}` (seconds since 1970), at
+  once and again at each new session; the hub tells the runners every member's (`{"presence":
+  […]}`), as before.
+- **What the runner asks**: `{"ask": {"id": n, "kind": "notify", "notice": N}}`, with
+  `N = {"kind": "request" | "question" | "report" | "failure" | "dismissed", "notification": <the
+  row's number on the runner>, "session": <the root agent's id>}`; `session` is left out when the
+  row has none. An id is 1 to 64 letters, digits, `-` or `_`, and a notice with any other field is
+  refused, on both sides: no title, excerpt, path or command can ride in it. The hub takes it from a
+  runner's machine only (`only a runner's machine tells the phones`, otherwise) and keeps nothing of
+  it.
+- **What the phone listens to** (#828): on its session to the hub, `{"notice": {"from": <the
+  runner's machine key>, "notice": N}}`, `Pushed::Notice { from, notice }` in the core. The hub
+  sends it to every open session of a member that asked for the notices (`{"kind": "about",
+  "device": "phone", "system", "notices": true}`), and to no other. The phone finds the runner among the members by its machine key, links to it, reads
+  the row (`notifications.list`) or the session's request (`approval.list`) and draws its
+  notification; on `dismissed` for the same `from` and `notification` it removes it.
+- **The setting**: `[remote] notify = "away" | "always"` in `daemon.toml`, `remote.settings` and
+  `remote.configure {notify}` (`docs/protocol.md`), and Settings, Machines, **Phone**: **Notify the
+  phone**, **When I am away** or **Always**.
+
 ## Tunnels
 
 - **A tunnel carries one run's port** of a machine to a client: the client listens on
@@ -2649,6 +2687,29 @@ on a real phone, by hand, and reported.
   says to call again once that machine is back, and does not promise a wake-up, as nothing comes
   back from a review that was not started. A machine not updated yet (it answers that `review` is
   no tool another machine calls) is told to the lead as a machine to update.
+
+- **A thing to notify is decided once, at its 30 seconds** (#827): told then, or dropped when a
+  client had an input in the last 2 minutes; it does not ring later if the user then goes away. A
+  row the user has not read is still in the window's bell and the phone's list. What is decided is
+  kept in memory: after a restart of the daemon, what came before is never told.
+- **Only an input counts as the user being there** (#827): a window that is focused and untouched
+  for 2 minutes is away, as the issue says it ("had an input"); the focus is told to the hub
+  (`active`) and not read by the runners.
+- **The phones told are the sessions that asked for the notices** (#827), in the `about` the app
+  tells the hub; no role or icon decides it. A `viewer`'s phone is told too, and draws no Allow or
+  Deny (#828). This app's core asks for them already, and ignores them until #828 draws them.
+- **Neither side of before #827 loses its session while the other is updated** (#827): a hub of
+  before closes the session of a runner that asks `notify`, and a phone of before ends its session
+  at a `notice`. So each says it takes them, with no new protocol number: the hub's welcome says
+  `{"welcome": {"notices": true}}`, and a runner asks `notify` only on a session whose welcome said
+  it (with a hub of before, nothing reaches the phone until the hub is updated); the app says
+  `"notices": true` in its `about`, and the hub sends `notice` only to the sessions that said it (a
+  phone of before is told none until it is updated). Both fields are read as `false` when absent,
+  and a side of before ignores them.
+- **The phones' presence is not counted** (#827): the app says an input each time it opens its
+  session, so a phone that changes network would silence the next notices. A runner counts the
+  presence of the members whose device says it is no `phone`; the app may tell its real inputs
+  later (#828).
 
 ## Open questions
 

@@ -59,6 +59,7 @@ mod notifications;
 mod notifications_command;
 mod opencode;
 mod people;
+mod phone;
 mod pictures;
 mod pilot;
 mod place;
