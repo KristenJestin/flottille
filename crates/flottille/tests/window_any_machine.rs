@@ -92,13 +92,16 @@ pub fn window<'a>(
     let (shell, cx) =
         cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
     cx.simulate_resize(size(px(1280.), px(2400.)));
-    until(&shell, cx, "the server is read online", |cx| {
+    // This machine's own read as well: before it, the shell knows of no project here, and a
+    // project the server has too opens on the server (#1421).
+    until(&shell, cx, "both machines read", |cx| {
         shell.read_with(cx, |s, cx| {
-            s.machines()
-                .read(cx)
-                .machines()
-                .and_then(|read| read.machine("server"))
-                .is_some_and(|server| server.online())
+            s.main().read(cx).read()
+                && s.machines()
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.machine("server"))
+                    .is_some_and(|server| server.online())
         })
     });
     settle(&shell, cx);

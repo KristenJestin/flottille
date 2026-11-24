@@ -241,6 +241,11 @@ fn window<'a>(
                 .is_some_and(|server| server.online())
         })
     });
+    // The bell and "Ended" read the server once, by links of their own: before what a test
+    // counts of what its pages ask there.
+    until(&shell, cx, "the bell and Ended read the server", |cx| {
+        shell.read_with(cx, |s, _| s.bell_reached("server"))
+    });
     settle(&shell, cx);
     (shell, cx)
 }
@@ -1395,8 +1400,18 @@ fn a_read_of_this_machine_queued_before_the_server_s_page_does_not_fill_it(
 fn a_read_of_the_server_that_comes_after_its_page_was_left_is_not_shown(cx: &mut TestAppContext) {
     let (_hub, pc, _server, _here, _there) = two_machines();
     let relay = Relay::default();
+    // This machine's own list is the slow one to come, as on a loaded runner: the window is
+    // shown before it holds `app`.
+    relay.slow.lock().unwrap().push("project.list");
+    relay.slow_by.store(3000, Ordering::SeqCst);
     let (shell, cx) = window(&pc, &relay, cx);
-    settle(&shell, cx);
+    // `app` is this machine's page only once this machine's list holds it: before, the project
+    // is the server's alone and its page opens there.
+    until(&shell, cx, "this machine's list holds app", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot().projects.iter().any(|p| p.name == "app")
+        })
+    });
 
     // The server's page asked, its read slow; this machine's page shown before it comes.
     relay.delay.store(1500, Ordering::SeqCst);
