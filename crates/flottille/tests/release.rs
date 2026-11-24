@@ -5245,6 +5245,48 @@ binary(=families)"
     );
 }
 
+#[test]
+fn a_pull_request_that_changes_the_run_sandbox_runs_the_real_programs_test() {
+    // The other tests drive the sandbox with fakes, which read nothing as a real program does
+    // (#1303): a change of the sandbox, of the run tool or of what makes the system's files
+    // readable in it runs the test of real programs, and only that file of its group.
+    let mut base = grouped_crate();
+    base.push("crates/flottille/tests/real_programs.rs");
+    base.push("crates/flottille/src/mounts.rs");
+    base.push("crates/flottille/src/landlock.rs");
+    base.push("crates/flottille/src/ssh_owned.rs");
+    base.push("crates/flottille/src/runs.rs");
+    base.push("crates/flottille/src/gate.rs");
+    base[2] = "crates/flottille/tests/group/agents.rs::#[path = \"../real_programs.rs\"]\nmod real_programs;\n";
+    for sandbox in ["mounts", "landlock", "ssh_owned", "runs"] {
+        assert_eq!(
+            selected_tests(
+                &base,
+                &[&format!("crates/flottille/src/{sandbox}.rs")],
+                &[],
+                ""
+            ),
+            "--test group_agents -E binary(=group_agents)&(test(/^real_programs::/))",
+            "{sandbox}"
+        );
+    }
+    // Another file of the crate's sources selects nothing of it.
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/src/gate.rs"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn the_jobs_that_run_tests_have_the_programs_the_real_programs_test_runs() {
+    // `ubuntu-latest` has ssh, git, gh, curl, node and cargo; pnpm is the one it lacks. The test
+    // fails where `CI` is set and a program is missing, so that none is skipped there.
+    for name in ["test-selected", "test"] {
+        let job = ci_job(name);
+        assert!(job.contains("npm install --global pnpm"), "{name}: {job}");
+    }
+}
+
 /// The `#[path = "../<name>.rs"]` files each group main of `tests/group/` declares: `(group, file)`.
 fn declared_by_the_groups() -> Vec<(String, String)> {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");

@@ -426,6 +426,9 @@ Parameters that do not fit a method are answered `invalid-params`.
 No parameters. The result is `{"projects": [...], "errors": [...]}`: the projects by name, and the
 files that cannot be used, each `{"name", "file", "message"}` (`file` is `projects/<name>.toml`, the
 message starts with the key at fault). A file with an error does not hide the other projects.
+It also holds `unconfigured`: the projects with no file at all that the store still holds live
+sessions or workspaces of, each `{"name", "sessions", "workspaces"}` (the sessions are every agent
+not ended, a child whose root ended included). `project.remove` removes them as any project ("Removing a project", `docs/projects.md`).
 
 #### `project.show`
 
@@ -503,6 +506,11 @@ The result says what was done:
  "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
  "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
 ```
+
+A project whose file was gone when the removal began has no file to remove, and one that came
+back during the wait (put back by hand, or by `project.add`) is kept with its file: the result is
+then `{"removed": null, "project_kept": "…", "stopped", "workspaces"}`, what was asked of the agents,
+runs and workspaces done.
 
 `branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
 touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,

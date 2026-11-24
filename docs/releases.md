@@ -204,7 +204,9 @@ about five minutes, not twenty.
   `tools/` (the tests that read `ci.yml` or run `package.sh` judge a change of them), and those
   listed on a line of its description, `Tests: <name> <name>…`, a binary's name or a grouped
   file's (the developing agent lists those it ran; the description is read when the jobs run, so
-  running them again picks up a line written after the push). When it selects no binary, it runs the unit tests of the crates whose
+  running them again picks up a line written after the push). A change of the run sandbox
+  (`mounts.rs`, `landlock.rs`, `ssh_owned.rs`, `runs.rs`) runs `real_programs`, which runs real
+  programs (`ssh`, `git`, `gh`, `cargo`, `node`, `pnpm`, `curl`) through it. When it selects no binary, it runs the unit tests of the crates whose
   `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
   to build for that). `.github/scripts/pr-tests.sh` decides, from the files and the description,
   nothing else. A pull request that touches no test and no such source runs `check` alone.

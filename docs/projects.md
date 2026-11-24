@@ -108,6 +108,20 @@ The project is marked from the start: meanwhile no agent, workspace or command r
 and its file is not edited, each refused with "project <name> is being removed". The folder and the checkouts of its
 repositories are never touched: only the worktrees and the branches Flottille made.
 
+**A project whose file is gone.** Its file may disappear while Flottille still holds what it made
+for the project (a session, a workspace kept because it held work). Such a project is not known,
+but it is not forgotten: `project.list` names it under `unconfigured` with what it holds, the
+command line's `project list` says so, and `project.remove` (and `project.removal` before it) works
+on it as on any project, in the same order and with the same rule, so that a workspace holding work
+is kept, and the result says why. There is no file to remove, and its folder is never touched. The
+daemon never removes it by itself, at start or when the file goes: a start deleting what the user
+may still want is not Flottille's to decide; and the list a machine sends to the others holds only
+the sessions of the projects it knows ("One list of every machine", `docs/remote.md`). A project
+with nothing left but ended sessions is not listed: they are history. `project add` with the name
+of such a project takes over the sessions and workspaces it holds, as they were. If its file comes
+back while its removal waits for the agents to stop, the project and its file stay, and the result
+says so.
+
 A failure partway (an agent still running after the wait, a workspace git could not remove)
 stops there and leaves the project known; the refusal says what failed and what was done
 already, and asking again goes on from there. A workspace kept is not a failure: the project is
