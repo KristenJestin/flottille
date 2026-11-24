@@ -355,13 +355,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let waited = agent.waiting_on_answer;
             let failed = (agent.state == AgentState::Failed)
                 .then(|| agent.state_reason.clone().unwrap_or_default());
-            let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
-                Some((agent, event)) => Ok((Some(agent), Some(event))),
-                None => Ok((None, None)),
-            })?;
-            let agent = resumed.ok_or_else(|| {
-                Failure::refused(format!("agent {} was resumed already", agent.id))
-            })?;
+            let agent = resume_write(daemon, &agent)?;
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
@@ -1178,15 +1172,46 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     Ok(agent)
 }
 
+/// Starts the ended `agent` again on its own session: the write of `agent.resume`. The room of
+/// its pilot in its machine's cap is checked in this very write, as for a new session
+/// ([`write_new`]): a pilot whose sessions all ended counts again with this one.
+pub(crate) fn resume_write(daemon: &Arc<Daemon>, agent: &Agent) -> Result<Agent, Failure> {
+    let pilot = agent.launched_by.as_ref().or(agent.detached_from.as_ref());
+    let resumed = daemon.write(|store| {
+        if let Some(pilot) = pilot
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Err(why), None));
+        }
+        match store.resume_agent(&agent.id)? {
+            Some((agent, event)) => Ok((Ok(Some(agent)), Some(event))),
+            None => Ok((Ok(None), None)),
+        }
+    })?;
+    resumed
+        .map_err(Failure::refused)?
+        .ok_or_else(|| Failure::refused(format!("agent {} was resumed already", agent.id)))
+}
+
 /// Writes the agent `made` made.
 pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
     let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
         "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
         "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
-    daemon.write(|store| {
+    // The pilot's room in its machine's cap is checked in this very write: one session that makes
+    // it count again, and another caller, never pass the cap together.
+    let refused = daemon.write(|store| {
+        if let Some(pilot) = &agent.launched_by
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Some(why), None));
+        }
         let event = store.create_agent(agent, ("agent.created", data.clone()))?;
-        Ok(((), event))
+        Ok((None, Some(event)))
     })?;
+    if let Some(why) = refused {
+        return Err(Failure::refused(why));
+    }
     crate::extensions::heard(daemon, &[("agent.created", data)]);
     Ok(())
 }

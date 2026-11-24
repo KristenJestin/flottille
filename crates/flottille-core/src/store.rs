@@ -1552,6 +1552,24 @@ impl Store {
         Ok(event)
     }
 
+    /// Records the repositories of the workspace as they are now (a base that moved), with its
+    /// event, in one transaction.
+    pub fn set_workspace_repositories(
+        &mut self,
+        workspace: i64,
+        repositories: &[crate::workspace::Worktree],
+        event: (&str, Value),
+    ) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE workspaces SET repositories = ?2 WHERE id = ?1",
+            params![workspace, serde_json::to_string(repositories)?],
+        )?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
     /// Forgets a workspace and its steps, with its event, in one transaction.
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;

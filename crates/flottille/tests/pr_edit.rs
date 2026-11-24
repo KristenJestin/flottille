@@ -1372,10 +1372,6 @@ fn an_edit_that_changes_nothing_is_refused_and_misplaced_arguments_before_the_ga
              create",
         ),
         (
-            json!({"action": "create", "title": "T", "base": "main"}),
-            "refused: forge create takes no base: base is for edit",
-        ),
-        (
             json!({"action": "edit", "number": 12, "title": "T", "delete_branch": true}),
             "refused: forge edit takes no delete_branch: delete_branch is for close and merge",
         ),

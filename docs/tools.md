@@ -844,7 +844,9 @@ judges its lines as it judges `gh`'s, by what they do, and lists its reads in th
   --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another
   action), or re-runs the failed jobs of its last
-  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
+  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `base` (the branch it
+  goes into, in place of the workspace's, which must exist on the forge; `docs/forges.md`, "A
+  workspace's base"), `reviewers`
   (each a person as the agent knows them, "People" below; added to the project's, none twice,
   and asked **when the pull request is opened, on GitHub (`gh pr create --reviewer`) and on
   Bitbucket (`bkt pr create --reviewer`) alike**: an agent adds none afterwards with `edit`,

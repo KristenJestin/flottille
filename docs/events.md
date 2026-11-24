@@ -550,6 +550,21 @@ in it, or `workspace.rename_branch`), and the record took it ([`workspaces.md`](
 | `branch` | The branch it is on now. |
 | `was` | The branch recorded before. |
 
+### `workspace.base_changed`
+
+The base of one repository of the workspace moved: its pull request was moved onto another
+branch on the forge by the workspace's own `forge edit`, or its base branch was merged and
+deleted on the forge and the workspace goes where it went ([`forges.md`](forges.md), "A
+workspace's base").
+
+| Field | |
+|---|---|
+| `project`, `workspace` | |
+| `repository` | The repository's path in the project. |
+| `base` | The base now. |
+| `was` | The base recorded before. |
+| `why` | One line, in words. |
+
 ### `workspace.removed`
 
 The workspace's worktrees, folder and record are gone. Its local branches whose work landed are
