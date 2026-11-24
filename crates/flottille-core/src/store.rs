@@ -1111,6 +1111,13 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE routines ADD COLUMN made_by TEXT;
 "#,
     ),
+    (
+        "routine_edited_by",
+        r#"
+    -- The session of the agent that edited a routine last with the tool `routine` (#1129).
+    ALTER TABLE routines ADD COLUMN edited_by TEXT;
+"#,
+    ),
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its

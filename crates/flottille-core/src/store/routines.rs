@@ -7,7 +7,7 @@ use crate::routine::{Left, ResultItem, Routine, Run};
 use crate::{Error, Result};
 
 const ROUTINE: &str = "id, name, project, prompt, provider, model, effort, schedule, zone, mode, \
-    rings, paused, missed_hours, next_at, delayed, created_at, updated_at, event, made_by";
+    rings, paused, missed_hours, next_at, delayed, created_at, updated_at, event, made_by, edited_by";
 /// The most events held for a routine: the newest, the earlier ones only counted.
 pub const HELD: usize = 20;
 const EARLIER_START: &str = "(and ";
@@ -60,6 +60,7 @@ fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
             .get::<_, Option<String>>(17)?
             .and_then(|text| serde_json::from_str(&text).ok()),
         made_by: row.get(18)?,
+        edited_by: row.get(19)?,
     })
 }
 
@@ -140,23 +141,24 @@ impl Store {
             r.created_at,
             r.updated_at,
             event,
-            r.made_by
+            r.made_by,
+            r.edited_by
         ];
         match new {
             true => self.connection.execute(
                 &format!(
                     "INSERT INTO routines ({ROUTINE}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
-                     ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
+                     ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"
                 ),
                 fields,
             )?,
-            // Who made it is said once, when it is made: no edit changes it.
+            // Who made it is said once, when it is made: no edit changes it (`?19` is unused).
             false => self.connection.execute(
                 "UPDATE routines SET name = ?2, project = ?3, prompt = ?4, provider = ?5, \
                  model = ?6, effort = ?7, schedule = ?8, zone = ?9, mode = ?10, rings = ?11, \
                  paused = ?12, missed_hours = ?13, next_at = ?14, delayed = ?15, \
-                 created_at = ?16, updated_at = ?17, event = ?18 WHERE id = ?1",
-                &fields[..18],
+                 created_at = ?16, updated_at = ?17, event = ?18, edited_by = ?20 WHERE id = ?1",
+                fields,
             )?,
         };
         Ok(())
