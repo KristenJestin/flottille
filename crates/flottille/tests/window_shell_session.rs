@@ -1129,3 +1129,128 @@ fn the_session_page_with_its_rail_draws_nothing_at_rest(cx: &mut TestAppContext)
         "nothing moves once the card folded back"
     );
 }
+
+// ── The motion of the "Waiting for you" cards (#1430) ───────────────────────────────────────────
+
+/// One frame of the clock and of drawing.
+fn a_frame(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn a_card_s_error_unfolds_and_fades_in(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let number = hold(&shell, &mcp, cx);
+    let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
+    let before = rect(format!("approval-{number}"), cx).size.height;
+
+    waiting.update(cx, |w, cx| {
+        w.answered(number, Some("the daemon said no".into()), cx)
+    });
+    let block = format!("approval-error-block-{number}");
+    let mut heights = Vec::new();
+    for _ in 0..40 {
+        a_frame(cx);
+        if has(block.clone(), cx) {
+            heights.push(rect(block.clone(), cx).size.height);
+        }
+    }
+    assert!(
+        !heights.is_empty(),
+        "the error is drawn in a block that unfolds"
+    );
+    let (first, last) = (heights[0], *heights.last().unwrap());
+    assert!(first < last, "the line unfolds: {heights:?}");
+    assert!(
+        heights.iter().any(|h| *h > first && *h < last),
+        "it moves over frames, it does not jump: {heights:?}"
+    );
+    assert_eq!(
+        label(format!("approval-error-{number}"), cx).as_deref(),
+        Some("the daemon said no")
+    );
+    let after = rect(format!("approval-{number}"), cx).size.height;
+    assert!(after > before, "the card grew with its error and its gap");
+}
+
+#[gpui_kit::test]
+fn a_card_s_error_folds_and_fades_out_when_it_goes(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let number = hold(&shell, &mcp, cx);
+    let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
+    waiting.update(cx, |w, cx| {
+        w.answered(number, Some("the daemon said no".into()), cx)
+    });
+    settle(cx);
+    let card = format!("approval-{number}");
+    let full = rect(card.clone(), cx).size.height;
+
+    waiting.update(cx, |w, cx| w.answered(number, None, cx));
+    a_frame(cx);
+    assert!(
+        has(format!("approval-error-{number}"), cx),
+        "the line is still drawn while it folds away"
+    );
+    let mut heights = Vec::new();
+    for _ in 0..40 {
+        a_frame(cx);
+        heights.push(rect(card.clone(), cx).size.height);
+    }
+    assert!(
+        heights
+            .iter()
+            .any(|h| *h < full && *h > *heights.last().unwrap()),
+        "the card folds over frames, it does not jump: {heights:?}"
+    );
+    assert!(
+        !has(format!("approval-error-{number}"), cx),
+        "and the line is gone once folded"
+    );
+}
+
+#[gpui_kit::test]
+fn a_card_pointed_at_from_the_conversation_slides_into_view(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let numbers: Vec<u64> = [".env", ".env.a", ".env.b", ".env.c", ".env.d", ".env.e"]
+        .into_iter()
+        .map(|path| held_number(mcp.call("fs_read", json!({"path": path}))))
+        .collect();
+    let last = *numbers.last().unwrap();
+    until(&shell, cx, "every card is in the rail", |cx| {
+        has(format!("allow-{last}"), cx)
+    });
+    settle(cx);
+    let waiting = session_page(&shell, cx).read_with(cx, |p, cx| p.waiting(cx));
+    assert_eq!(waiting.read_with(cx, |w, _| w.scrolled()), px(0.));
+    // The cards end where the section does: nothing is drawn under them.
+    let section = rect("rail-waiting", cx);
+    assert!(
+        rect(format!("approval-{last}"), cx).bottom() > section.bottom(),
+        "the last card is below the fold"
+    );
+
+    cx.update(|window, cx| window.click(format!("approval-line-{last}"), cx));
+    let mut at = Vec::new();
+    for _ in 0..40 {
+        a_frame(cx);
+        at.push(waiting.read_with(cx, |w, _| w.scrolled()));
+    }
+    let end = *at.last().unwrap();
+    assert!(end > px(0.), "the section moved to the card: {at:?}");
+    assert!(
+        at.iter().any(|y| *y > px(0.) && *y < end),
+        "it slides over frames, it does not jump: {at:?}"
+    );
+    assert!(
+        rect(format!("approval-{last}"), cx).bottom() <= section.bottom() + px(1.),
+        "the card is in view once it arrived"
+    );
+}

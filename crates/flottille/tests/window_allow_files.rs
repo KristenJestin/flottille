@@ -507,6 +507,156 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
     allowed_whole(&shell, (&pc, &server), (&agent, number), cx);
 }
 
+/// The bounds of the element `name`, as the last frame drew them.
+fn bounds_of(
+    cx: &mut VisualTestContext,
+    name: String,
+) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    cx.update(|window, _| window.try_find(id(name)).map(|found| found.bounds()))
+}
+
+/// Whether the element `name` is drawn inside the "Waiting for you" section, the part of the
+/// cards the user sees.
+fn in_the_section(cx: &mut VisualTestContext, name: String) -> bool {
+    let section = bounds_of(cx, "rail-waiting".to_owned());
+    let found = cx.update(|window, _| {
+        window
+            .try_find(id(name))
+            .map(|found| (found.visible(), found.bounds()))
+    });
+    match (section, found) {
+        (Some(section), Some((visible, at))) => {
+            visible && at.top() >= section.top() && at.bottom() <= section.bottom()
+        }
+        _ => false,
+    }
+}
+
+/// A server whose own entry of that name refuses the second file: Allow fails on it, the card
+/// listing its error and Try again.
+fn server_refusing_the_second_file(server: &Machine) {
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "app-config-local.toml", "secret": "of-the-server-own"}),
+        )
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_failed_allow_brings_its_error_and_buttons_into_view(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (agent, number) = held_on_server(&pc, &server);
+    server_refusing_the_second_file(&server);
+    let (shell, cx) = window(&server, cx);
+    open_page(&shell, &agent, cx);
+    the_card_lists_its_files(&shell, number, cx);
+    // The user scrolled to Allow, as the card is taller than the section.
+    scroll_cards_down(&shell, number, cx);
+    cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
+    until(&shell, cx, "the failure on the card", |cx| {
+        label(cx, format!("approval-error-{number}")).is_some()
+    });
+    // The section moves to the error over `PANEL`: it is not at it at once, then it is.
+    let mut at = Vec::new();
+    for _ in 0..40 {
+        advance(cx, Duration::from_millis(16));
+        at.extend(bounds_of(cx, format!("allow-{number}")).map(|found| found.top()));
+    }
+    settle(&shell, cx);
+    assert_eq!(
+        label(cx, format!("allow-{number}")).as_deref(),
+        Some("Try again")
+    );
+    for part in ["approval-error", "deny", "allow"] {
+        assert!(
+            in_the_section(cx, format!("{part}-{number}")),
+            "{part} is not in view: {:?} in {:?}",
+            bounds_of(cx, format!("{part}-{number}")),
+            bounds_of(cx, "rail-waiting".to_owned())
+        );
+    }
+    let (first, last) = (at.first().unwrap(), at.last().unwrap());
+    assert!(
+        at.iter().any(|y| y != first && y != last),
+        "the section jumped: {at:?}"
+    );
+}
+
+/// How far the cards of "Waiting for you" are scrolled.
+fn scrolled(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    let page = page_of(shell, cx).expect("the session's page");
+    cx.update(|_, cx| {
+        let waiting = page.read(cx).waiting(cx);
+        waiting.read(cx).scrolled()
+    })
+}
+
+#[gpui_kit::test]
+fn a_successful_allow_scrolls_nothing(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (agent, number) = held_on_server(&pc, &server);
+    let (shell, cx) = window(&server, cx);
+    open_page(&shell, &agent, cx);
+    the_card_lists_its_files(&shell, number, cx);
+    scroll_cards_down(&shell, number, cx);
+    let before = scrolled(&shell, cx);
+    cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
+    // Each step reaches the page: the section stays where the user put it while it goes.
+    let deadline = Instant::now() + WAIT;
+    while !pending(&server).is_empty() {
+        step(&shell, cx);
+        assert_eq!(
+            scrolled(&shell, cx),
+            before,
+            "the section scrolled while the steps went"
+        );
+        assert!(Instant::now() < deadline, "the launch was never allowed");
+    }
+    for _ in 0..20 {
+        advance(cx, Duration::from_millis(16));
+        assert_eq!(
+            scrolled(&shell, cx),
+            before,
+            "the section scrolled once allowed"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn the_user_s_own_scroll_after_a_failed_allow_is_left_alone(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (agent, number) = held_on_server(&pc, &server);
+    server_refusing_the_second_file(&server);
+    let (shell, cx) = window(&server, cx);
+    open_page(&shell, &agent, cx);
+    the_card_lists_its_files(&shell, number, cx);
+    scroll_cards_down(&shell, number, cx);
+    cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
+    until(&shell, cx, "the failure on the card", |cx| {
+        label(cx, format!("approval-error-{number}")).is_some()
+    });
+    settle(&shell, cx);
+    let in_view = scrolled(&shell, cx);
+
+    // The user scrolls back up to read the files: the section stays where they put it.
+    let section = bounds_of(cx, "rail-waiting".to_owned()).unwrap();
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: section.center(),
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(200.))),
+        ..Default::default()
+    });
+    settle(&shell, cx);
+    let moved = scrolled(&shell, cx);
+    assert!(
+        moved < in_view,
+        "the user scrolled up: {moved:?} {in_view:?}"
+    );
+    advance(cx, Duration::from_secs(2));
+    assert_eq!(scrolled(&shell, cx), moved, "the section was brought back");
+}
+
 /// A daemon that lists `files` (path and entry) for the card `number`, whatever it listed before:
 /// the list the window gets, set on its waiting section as a poll would, with no poll after it.
 fn list_files(
@@ -658,7 +808,7 @@ fn allow_never_shares_a_hand_made_entry_of_the_file_s_name(cx: &mut TestAppConte
     let (shell, cx) = window(&server, cx);
     open_page(&shell, &agent, cx);
     the_card_lists_its_files(&shell, number, cx);
-    open_details(&shell, number, cx);
+    scroll_cards_down(&shell, number, cx);
     scroll_cards_down(&shell, number, cx);
     cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
     until(&shell, cx, "the refusal on the card", |cx| {

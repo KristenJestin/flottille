@@ -369,9 +369,14 @@ fn notes_that_cannot_be_fetched_are_said(cx: &mut TestAppContext) {
 
     click(cx, "sidebar-whats-new");
 
-    until(&shell, cx, "the page says it", |cx| {
-        visible(cx, "whats-new-failed")
-    });
+    // The line and its button are one block that unfolds: the line is seen a frame or two before
+    // the button, so the test waits for both.
+    until(
+        &shell,
+        cx,
+        "the page says it and offers to read again",
+        |cx| visible(cx, "whats-new-failed") && visible(cx, "whats-new-again"),
+    );
     assert!(
         label(cx, "whats-new-failed").is_some_and(|said| said.contains("could not be read")),
         "{:?}",
