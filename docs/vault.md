@@ -423,6 +423,27 @@ push the gate let through, and its checks' dry run, are the exception (below):
   nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
   process still starts in its namespace, or fails to start.
 
+**The browsers' profiles stay out of every run.** A connection's browser keeps its profile (its
+cookies, the sign-ins the user made by hand or through a vault login) in
+`$XDG_STATE_HOME/flottille/browsers/<connection>/profile` (`docs/extensions.md`, "Adapters").
+Chrome without a session bus encrypts its cookies with a key every Chrome knows, so whoever reads
+the file takes the sign-in. The daemon makes `browsers/` at its start (mode 0700), and every
+process it confines is kept out of it: the private mount namespace empties it as it empties the
+runtime folders, and only the connection's own folder is put back, for its server and its login
+(and its reload of the page), the folder the daemon made for that connection, never one a
+variable or a request names. The folders on the way to `browsers/` that the user may change
+(the state folder, the home…) are kept where they are in the namespace, as the ones on the way to
+`~/.ssh` (below): a run that renamed one would have the next run, whose namespace empties the
+path found at the daemon's start, open the profiles under the new name; the rename fails. It is made once and never made again while a browser may run (the
+inode Landlock and the mount hold, #1040), and removed with its connection, once the browser is
+closed. The gate holds `browsers/` for a login's place, as Flottille's keys (`docs/tools.md`,
+"The gate"), so a line that names a path in it is refused in every mode, also where the kernel
+gives no namespace. Where it gives none, Landlock denies the folder itself (its second ABI or
+later) and gives the connection's server and login their own folder back. Only then, because a
+Landlock rule grants and never takes away: the folders on the way to a denied one (the home
+among them) get no rule of their own, so a confined process cannot make, remove or rename an
+entry directly in them, nor write a file made there after it started (below, "The gaps").
+
 **A run in Full is the exception, and nothing is held back from it** (`docs/tools.md`, "In
 Full, a run is the user's own"): it has the daemon's environment, no namespace and no Landlock,
 as a command in the user's terminal. **In Full, the vault and the device key are reachable by
@@ -784,6 +805,13 @@ The gaps, where the platform does not allow more:
   cannot list it nor read the login's token or agent-browser's configuration, and agent-browser's
   daemon's socket is in a folder of a random name it cannot guess, but it can connect to the
   login's socket, whose name it can guess and which refuses a request without the token;
+- where the kernel refuses user namespaces, Landlock denies the browsers' profiles
+  (`$XDG_STATE_HOME/flottille/browsers`) itself, and the folders on the way to it, the home
+  among them, lose the right to make, remove or rename an entry directly in them, for every
+  confined process: a program that writes a new file at the top of the home (a history file, a
+  lock beside `~/.gitconfig`) fails there. Default taken, to confirm: the sign-ins are kept out
+  rather than the top of the home left open. Without Landlock either (below its second ABI), a
+  run that does not name the path reaches the profiles: only the gate keeps them out;
 - **a browser of a connection is in the runs' network where it cannot have its own** ("The
   browser's network", below): agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`,
   so Chrome's DevTools listens on the loopback, on a port of its choice, with no token, and

@@ -1070,6 +1070,13 @@ pub(crate) fn dropped_text(data: &Value) -> String {
         }
     };
     if let Some(why) = data["unkept"].as_str() {
+        // The answer to a held call is kept under the request's number; its body is never said.
+        if let Some(number) = data["launch"]
+            .as_str()
+            .and_then(|launch| launch.strip_prefix("request-"))
+        {
+            return format!("The answer to request #{number} for {machine} was not sent: {why}.");
+        }
         return format!("{what} of {machine} was not sent: {why}.");
     }
     match data["refused"].as_str() {
@@ -3334,10 +3341,17 @@ pub(crate) fn answer_back(daemon: &Arc<Daemon>, request: &Request, body: &str) -
         urgency: approval::URGENT.to_owned(),
         ended: false,
     }));
-    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false, false) {
+    // The user decided once: kept beyond the most as a launch's approval is (#1385), and past the
+    // ceiling, or when the store cannot keep it, dropped with its inbox entry, never silently.
+    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false, true) {
         eprintln!(
             "flottille daemon: the answer of request #{} for {name} is dropped: {why}",
             request.number
+        );
+        let outgoing = outgoing(machine, &launch, &name, String::new(), &message, false);
+        let _ = daemon.emit(
+            "remote.delivery_dropped",
+            dropped(daemon, &outgoing, None, Some(&why)),
         );
     }
     true

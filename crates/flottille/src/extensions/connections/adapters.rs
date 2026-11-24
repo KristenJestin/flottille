@@ -54,6 +54,9 @@ pub struct Adapter {
     pub actions: &'static [Own],
     /// Flottille's line, added to what the agent reads with the server's instructions.
     pub line: &'static str,
+    /// The action that opens its browser and takes `headed`, and what Flottille says of it
+    /// beside the server's own description: the agent chooses per call whether to show it.
+    pub shows: Option<(&'static str, &'static str)>,
 }
 
 /// An action of Flottille's own in a connection's tool.
@@ -131,12 +134,24 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         schema: login_schema,
     }],
     line: "To sign in to a site, use the action login with the name of a vault entry; \
-           agent-browser's own logins are off.",
+           agent-browser's own logins are off. The browser is headless: agent_browser_open takes \
+           headed, true to show it on the user's screen, only when the user must act in the page \
+           (sign in, a captcha) or see it, never to read a page; left out or false it runs \
+           headless, and the next open without headed hides it again. The browser keeps its \
+           profile when it changes.",
+    shows: Some((OPEN, SHOWS)),
 };
 
 const ALL: &[&Adapter] = &[&AGENT_BROWSER];
 
 pub(super) const LOGIN: &str = "login";
+/// agent-browser's action that opens the browser, and takes `headed`.
+const OPEN: &str = "agent_browser_open";
+/// What Flottille says of `headed` beside the server's own words.
+const SHOWS: &str = "headed: true shows the browser on the user's screen, and only when the user \
+    must act in the page (sign in, a captcha) or see it; never to read a page. Left out or false \
+    it runs headless. Changing it restarts the browser and keeps its profile (cookies, sign-ins), \
+    so the user can sign in shown and you then go on headless.";
 /// What Flottille is called in the configuration it writes for agent-browser.
 const PLUGIN: &str = "flottille";
 const PROTOCOL: &str = "agent-browser.plugin.v1";
@@ -250,6 +265,18 @@ impl Adapter {
             .collect()
     }
 
+    /// Whether a call of `action` asks to show the browser: `headed` of the action that opens it
+    /// (false when left out), nothing for any other action, which goes on in the mode that runs.
+    pub fn headed(&self, action: &str, arguments: &Map<String, Value>) -> Option<bool> {
+        let (opens, _) = self.shows?;
+        (action == opens).then(|| {
+            arguments
+                .get("headed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+    }
+
     /// Why a call of `action` with `arguments` is refused: a `url` that is no web address, such
     /// as a `javascript:` or a `data:` one, which runs in the page.
     pub fn refuses_url(&self, action: &str, arguments: &Value) -> Option<String> {
@@ -264,9 +291,8 @@ impl Adapter {
         ))
     }
 
-    /// What it changes, a sentence each, as the review says it; `headed` says whether its browser
-    /// is shown.
-    pub fn changed(&self, config: &Path, headed: bool) -> Vec<String> {
+    /// What it changes, a sentence each, as the review says it.
+    pub fn changed(&self, config: &Path) -> Vec<String> {
         let mut said = vec![format!(
             "{} run a script in the page, which no gate can judge: they are off at the first \
              review, and the user may turn them on",
@@ -316,18 +342,19 @@ impl Adapter {
              to fill"
                 .to_owned(),
         );
-        if headed {
-            said.push(
-                "its browser is shown on the screen: the server gets the session's display \
-                 (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
-                 holding the Wayland socket alone, never the user's, and the configuration sets \
-                 headed and gives its window the class flottille-browser (args); with X11 the \
-                 browser can read the keys typed in other windows and type into them (a \
-                 terminal's included), and on some Wayland compositors a client can capture the \
-                 screen and the clipboard"
-                    .to_owned(),
-            );
-        }
+        said.push(
+            "its browser runs headless; the agent chooses, at each agent_browser_open, to show \
+             it on the screen with headed: when it does, the server gets the session's display \
+             (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
+             holding the Wayland socket alone, never the user's, and the configuration sets \
+             headed and gives its window the class flottille-browser (args); with X11 the \
+             browser can read the keys typed in other windows and type into them (a terminal's \
+             included), and on some Wayland compositors a client can capture the screen and the \
+             clipboard; its profile (cookies, sign-ins) is kept from one browser to the next in a \
+             folder of the connection's own, which no other command Flottille runs reaches, \
+             unless its command keeps it to some domains"
+                .to_owned(),
+        );
         said
     }
 
@@ -585,7 +612,18 @@ pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<Strin
 /// file (a flag after `mcp` is not theirs). Flottille's own runs pass the same file. It is in the
 /// vault folder: a run that rewrote it while a login starts would have its own program run as the
 /// plugin, by a browser that reaches the vault.
-pub fn start_options(vault: &crate::display::Folder, headed: bool) -> Result<Vec<String>, String> {
+///
+/// It names the browser's profile too, in the folder of the connection's browser (`browsers.rs`),
+/// which no other command Flottille runs reaches: each browser started in the other mode is a
+/// new one, and agent-browser's own profile of a browser is gone when it closes; with it the user
+/// signs in shown and the agent goes on headless, signed in. A command kept to some domains gets
+/// none: agent-browser refuses `--allowed-domains` beside a profile.
+pub fn start_options(
+    declaration: &Declaration,
+    vault: &crate::display::Folder,
+    browser: &crate::browsers::Folder,
+    headed: bool,
+) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
@@ -594,6 +632,9 @@ pub fn start_options(vault: &crate::display::Folder, headed: bool) -> Result<Vec
         "args": ["vault", "provide", socket_file(vault)],
         "capabilities": ["credential.read"],
     }]});
+    if !kept_to_domains(declaration) {
+        config["profile"] = json!(browser.profile());
+    }
     // agent-browser's launch arguments, separated by commas.
     config["args"] = json!(CACHE_ARG);
     if headed {
@@ -609,17 +650,32 @@ pub fn start_options(vault: &crate::display::Folder, headed: bool) -> Result<Vec
     Ok(vec!["--config".into(), file.display().to_string()])
 }
 
-/// The display of the browser of `declaration` when the user shows it: a runtime folder of its
-/// own holding the session's Wayland socket alone (`display.rs`), kept while the `owner` that
-/// uses it runs, and while the browser started with it does. When it cannot be made the browser
-/// runs headless, never with the user's real runtime folder: the daemon says why on its stderr and
-/// the reason is returned, for the server's record to keep (the window says it under the switch).
+/// Whether the user's command keeps the browser to some domains (`--allowed-domains`, or its
+/// variable in the connection's `env`).
+fn kept_to_domains(declaration: &Declaration) -> bool {
+    let Reach::Command(words) = &declaration.reach else {
+        return false;
+    };
+    words
+        .iter()
+        .any(|word| word == "--allowed-domains" || word.starts_with("--allowed-domains="))
+        || declaration
+            .env
+            .contains_key("AGENT_BROWSER_ALLOWED_DOMAINS")
+}
+
+/// The display of the browser of `declaration` when the agent's call shows it (`headed`): a
+/// runtime folder of its own holding the session's Wayland socket alone (`display.rs`), kept
+/// while the `owner` that uses it runs, and while the browser started with it does. When it cannot
+/// be made the browser runs headless, never with the user's real runtime folder: the daemon says
+/// why on its stderr and the reason is returned, for the server's record to keep.
 pub fn shown(
     daemon: &Daemon,
     declaration: &Declaration,
     owner: &str,
+    headed: bool,
 ) -> (Option<crate::display::Shown>, Option<String>) {
-    if !declaration.headed {
+    if !headed {
         return (None, None);
     }
     // The browser that runs was confined with its folder, which Landlock holds by its inode: one
@@ -1193,6 +1249,14 @@ pub(super) fn command_line(declaration: &Declaration) -> Option<Vec<String>> {
     (at > 0).then(|| words[..at].to_vec())
 }
 
+/// What a login's commands are given back of what every confined command is kept out of: the
+/// display folder of the browser that is shown, if one is, the connection's vault folder, and the
+/// folder of its browser.
+struct Reached<'a> {
+    folders: Vec<&'a crate::display::Folder>,
+    browser: crate::browsers::Folder,
+}
+
 /// One login: the entry it may give, to whom.
 #[derive(Clone)]
 struct Login {
@@ -1204,7 +1268,7 @@ struct Login {
 /// Loads the entry's page (`agent-browser open`), then runs `agent-browser auth login
 /// --no-navigate` on it with Flottille as its credential provider, and answers the plugin's
 /// request for this run alone: what it printed, or why it failed. `served` is the display of the
-/// server that runs, if it shows its browser.
+/// server that runs, if it shows its browser, else the display of the browser that runs, if any.
 async fn run(
     daemon: &Arc<Daemon>,
     declaration: &Declaration,
@@ -1220,10 +1284,12 @@ async fn run(
     // made under its name, the same path the server's next start makes again.
     let shown = match served {
         Some(served) => Some(served),
-        None => shown(daemon, declaration, &declaration.name).0,
+        // A login never shows a browser by itself: it goes on in the one that is shown, if any.
+        None => super::client::browser_display(daemon, &declaration.name),
     };
     let vault = super::client::vault_of(daemon, &declaration.name)?;
-    let options = start_options(&vault, shown.is_some())?;
+    let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
+    let options = start_options(declaration, &vault, &given, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }
@@ -1242,13 +1308,16 @@ async fn run(
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
     // The folders the login's commands may reach: the daemon's own, never what a variable of the
     // connection (the vault's, below) names. The browser they may start runs the plugin, which
-    // reaches the token and the socket in the vault's.
-    let reached: Vec<&crate::display::Folder> = shown
-        .as_ref()
-        .map(|shown| &shown.folder)
-        .into_iter()
-        .chain([&vault])
-        .collect();
+    // reaches the token and the socket in the vault's, and keeps its profile in its own folder.
+    let reached = Reached {
+        folders: shown
+            .as_ref()
+            .map(|shown| &shown.folder)
+            .into_iter()
+            .chain([&vault])
+            .collect(),
+        browser: given,
+    };
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
@@ -1300,9 +1369,10 @@ async fn run(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     network.entered(&mut command);
-    let mut child = crate::children::spawn(crate::landlock::confined_given(
+    let mut child = crate::children::spawn(crate::landlock::confined_browser(
         crate::children::in_own_session(&mut command),
-        &reached,
+        &reached.folders,
+        &reached.browser,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
@@ -1399,7 +1469,7 @@ async fn reloaded(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: &[&crate::display::Folder],
+    reached: &Reached<'_>,
     folder: &Path,
     url: &str,
     network: &Network,
@@ -1416,7 +1486,7 @@ async fn reload(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
-    reached: &[&crate::display::Folder],
+    reached: &Reached<'_>,
     folder: &Path,
     url: &str,
     network: &Network,
@@ -1434,9 +1504,10 @@ async fn reload(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     network.entered(&mut command);
-    let mut child = crate::children::spawn(crate::landlock::confined_given(
+    let mut child = crate::children::spawn(crate::landlock::confined_browser(
         crate::children::in_own_session(&mut command),
-        reached,
+        &reached.folders,
+        &reached.browser,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();

@@ -823,7 +823,8 @@ line names, every program a wrapper or a runner runs included:
   `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
   `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
   `/etc/sudoers.d`; Flottille's keys, the folder `remote/` of its state folder, in any case
-  (`docs/remote.md`, "Identity and keys"); the agents' own folders of the home (`~/.claude`,
+  (`docs/remote.md`, "Identity and keys"), and its browsers' profiles, the folder `browsers/`
+  beside it (`docs/vault.md`, "The runtime folder"); the agents' own folders of the home (`~/.claude`,
   `~/.claude.json` and its copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where
   the path leads included (a link to them, a project that is the home folder); a file of a
   revision named `rev:path` (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git

@@ -1961,6 +1961,14 @@ on a real phone, by hand, and reported.
   need a new field of the link; keeping the answer needs none, and a caller of the release before
   gains from it too. A store that cannot keep the answer at all still
   drops it, said in the inbox.
+- **The user's answer to a held call of another machine's agent is kept the same way** (#1405):
+  the answer to a request of a caller of another machine (`request-<n>`) is kept beyond the 100
+  as a launch's is, to the same 104, and past it, or when the store cannot keep it, is dropped
+  with an inbox entry that says which request's answer it was and for which machine (`The answer
+  to request #12 for pc was not sent: …`), never its text. It used to be dropped with a line on
+  the daemon's stderr only, and the agent that called never heard what the user decided. The
+  answer is still cut to 64,000 characters, without the marker a launch's answer has: the simpler
+  of the two, which a call's answer never needed.
 - **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
   stored, only one whose workspace is still preparing or whose session was never briefed is refused;
   one that ran is left running and its answer is stored again, since its caller was told approved.
@@ -2300,8 +2308,8 @@ on a real phone, by hand, and reported.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
 - At most 100 messages wait for one machine: one more `agent_send` or `session_send` is refused at
   once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
-  an inbox entry (`dropped`), but the user's answer to a launch, kept beyond up to 104 in all. A
-  message of more
+  an inbox entry (`dropped`), but the user's answer to a launch or to a held call of another
+  machine's agent, kept beyond up to 104 in all. A message of more
   than 64,000 characters is refused on the sender, as the receiver would; that answer is cut
   instead, and so is a review's result to a pilot of another machine, the cut said with the `session_read` that reads the rest there. The kinds a machine takes are the
   session's own and a review's (`review`), no other extension's name.
