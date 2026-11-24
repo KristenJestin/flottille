@@ -2080,3 +2080,262 @@ fn a_dialog_opened_while_another_machine_is_reached_sends_to_its_own_machine(
         listed.to_string().contains("pc-token")
     });
 }
+
+/// An agent of `machine` asking `connections` with `args`, held for the user: its number there.
+fn a_request_held_on(machine: &Machine, args: Value) -> u64 {
+    let opened = machine.user.received_requests("session/new").len();
+    machine
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "Add the notes server"}),
+        )
+        .unwrap();
+    let (url, authorization) = common::mcp::server_of(&machine.user, opened);
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let answer = mcp.call("connections", args);
+    answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text))
+}
+
+#[gpui_kit::test]
+fn a_connection_request_s_new_entry_and_review_stay_on_its_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, _server, _here, _there) = two_machines();
+    // This PC's connection waits for its review; its agents ask to add one whose header carries
+    // an entry not made yet, and to set the one awaiting review.
+    a_connection_to_review(&pc, "almanac");
+    let bearer = a_request_held_on(
+        &pc,
+        json!({"action": "add", "name": "notes", "about": "Notes elsewhere.",
+            "url": "https://notes.example.com/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "notes-key"}]}),
+    );
+    let set = a_request_held_on(
+        &pc,
+        json!({"action": "set", "name": "almanac", "settings": {"search": "passes"}}),
+    );
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    let (vault, connections, dialog) = shell.read_with(cx, |s, cx| {
+        (
+            s.vault(cx),
+            s.connections(cx),
+            s.connection_request().clone(),
+        )
+    });
+
+    // This PC's request, opened over its page, waits for its entry; the server comes in front.
+    shell.update(cx, |s, cx| s.open_connection_request(bearer, cx));
+    until(&shell, cx, "the request is read", |cx| {
+        present(cx, "connection-request-accept")
+    });
+    settle(&shell, cx);
+    click(cx, "connection-request-accept");
+    until(&shell, cx, "the button for the entry", |cx| {
+        present(cx, "connection-request-new-entry-notes-key")
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
+    until(&shell, cx, "the server is in front", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    relay.take();
+
+    // New entry… is this PC's vault, and the dialog it returns to is this PC's request.
+    click(cx, "connection-request-new-entry-notes-key");
+    let front = shell.read_with(cx, |s, cx| s.vault(cx));
+    until(&shell, cx, "a vault's dialog opens", |cx| {
+        vault.read_with(cx, |v, _| v.is_open()) || front.read_with(cx, |v, _| v.is_open())
+    });
+    assert!(
+        vault.read_with(cx, |v, _| v.is_open()),
+        "the entry's dialog is the server's vault"
+    );
+    settle(&shell, cx);
+    let secret = vault.read_with(cx, |v, _| v.secret_field().unwrap().clone());
+    cx.update(|window, cx| {
+        secret.update(cx, |f, cx| {
+            f.set_value("an-invented-test-value", window, cx)
+        })
+    });
+    click(cx, "save-vault-entry");
+    eventually("this PC's vault has the entry", || {
+        let listed = pc.user.call("vault.list", json!({})).unwrap();
+        listed.to_string().contains("notes-key")
+    });
+    until(&shell, cx, "the request's dialog is back", |cx| {
+        present(cx, "connection-request-accept") && !vault.read_with(cx, |v, _| v.is_open())
+    });
+    settle(&shell, cx);
+    assert!(!the_server_was_asked(&relay, "vault.set"));
+    assert_eq!(
+        dialog.read_with(cx, |d, _| d.machine().map(str::to_owned)),
+        None
+    );
+    assert!(
+        !the_server_was_asked(&relay, "connection.proposed"),
+        "the dialog reopened as the server's"
+    );
+    cx.update(|_, cx| dialog.update(cx, |d, cx| d.close(cx)));
+    settle(&shell, cx);
+
+    // Review on this PC's request opens this PC's review, the server in front.
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
+    until(&shell, cx, "this machine is in front", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).is_none()
+    });
+    settle(&shell, cx);
+    shell.update(cx, |s, cx| s.open_connection_request(set, cx));
+    until(&shell, cx, "the review is offered first", |cx| {
+        present(cx, "connection-request-review")
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
+    until(&shell, cx, "the server is in front again", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    relay.take();
+    click(cx, "connection-request-review");
+    until(&shell, cx, "a review opens", |cx| {
+        connections.read_with(cx, |c, _| c.review_is_open())
+            || the_server_was_asked(&relay, "connection.review")
+    });
+    assert!(
+        !the_server_was_asked(&relay, "connection.review"),
+        "the review is the server's"
+    );
+}
+
+#[gpui_kit::test]
+fn another_machine_s_pull_request_stays_on_its_row_after_a_refresh(cx: &mut TestAppContext) {
+    let pc_user = fake_user();
+    pc_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": REPLY}]}]}));
+    let server_user = fake_user().with_fake_gh();
+    server_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": REPLY}]}]}));
+    let (_hub, pc, server) = pc_and_server_on(Machine::of(pc_user), server_user);
+    project(&pc.user, "app");
+    project(&server.user, "harbor");
+    // A workspace of the server's alone, whose branch has a pull request.
+    let folder = server.user.path("work/harbor");
+    server.user.git(
+        &folder,
+        &["remote", "add", "origin", "git@github.com:acme/harbor.git"],
+    );
+    server
+        .user
+        .call(
+            "project.set_settings",
+            json!({"name": "harbor", "repositories": [
+                {"path": ".", "forge": {"kind": "github", "repository": "acme/harbor"}}]}),
+        )
+        .unwrap();
+    server
+        .user
+        .call(
+            "workspace.create",
+            json!({"project": "harbor", "name": "login"}),
+        )
+        .unwrap();
+    eventually("the workspace is ready", || {
+        server
+            .user
+            .call(
+                "workspace.show",
+                json!({"project": "harbor", "name": "login"}),
+            )
+            .unwrap()["state"]
+            == "ready"
+    });
+    server
+        .user
+        .gh_script(json!({"pulls": {"acme/harbor": {"harbor/login": {
+        "number": 12, "title": "A change", "state": "OPEN", "isDraft": false,
+        "headRefOid": "aaaaaaa1", "baseRefName": "main",
+        "url": "https://github.com/acme/harbor/pull/12",
+        "statusCheckRollup": [], "comments": [], "reviews": []}}}}));
+    let started = server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "harbor", "workspace": "login", "message": "Fix the login"}),
+        )
+        .unwrap();
+    let there = started["agent"]["id"].as_str().unwrap().to_owned();
+    let row = elsewhere_id("server", &there);
+    let pull = gpui_kit::ElementId::Name(format!("session-pull-{row}").into());
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+
+    // The server's page of harbor reads its workspaces' pull requests.
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "harbor", window, cx)
+    });
+    until(
+        &shell,
+        cx,
+        "the server's pull request is on its row",
+        |cx| present(cx, pull.clone()),
+    );
+    settle(&shell, cx);
+
+    // This machine's list is read again: the server's workspace is not in it.
+    let before = snapshots(&shell, cx);
+    session(&pc.user, "app", "Tidy the readme");
+    until(&shell, cx, "this machine's list is read again", |cx| {
+        snapshots(&shell, cx) > before
+    });
+    settle(&shell, cx);
+    assert!(
+        present(cx, pull),
+        "the server's pull request left its row at the refresh"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, _server, here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's page of app is drawn", |cx| {
+        present(cx, "composer-field")
+            && shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    until(&shell, cx, "the server's draft of app is read", |_| {
+        the_server_was_asked(&relay, "draft.get")
+    });
+    settle(&shell, cx);
+
+    // Typed on the server's page, left before the draft is written.
+    click(cx, "composer-field");
+    cx.simulate_input("Plan the release");
+    click(cx, session_id(&here));
+    run_for(Duration::from_secs(1), cx);
+    until(&shell, cx, "the draft is written somewhere", |_| {
+        the_server_was_asked(&relay, "draft.set")
+            || pc
+                .user
+                .call("draft.get", json!({"kind": "project", "target": "app"}))
+                .is_ok_and(|draft| draft.to_string().contains("Plan the release"))
+    });
+    let written = relay
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(method, params)| method == "draft.set" && params["text"] == "Plan the release");
+    assert!(written, "the server's draft went to this machine");
+}
