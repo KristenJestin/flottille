@@ -70,6 +70,10 @@ const LONGEST: usize = 64_000;
 
 /// How many messages wait for one machine at most: one more is refused.
 const MOST_KEPT: usize = 100;
+/// How many wait for one machine at most, the user's answer to a launch kept beyond `MOST_KEPT`
+/// included: one answer for each launch the user may hold at once, so that a machine that stays
+/// linked and never takes what waits for it fills no disk either.
+const MOST_KEPT_WITH_ANSWERS: usize = MOST_KEPT + crate::launches::MOST_HELD;
 /// The callers of one other machine stood in for here at most (`stand_in`): each is a row of the
 /// store, with its leaves, kept until it is idle for `KEPT_FOR`.
 const MOST_STAND_INS: usize = 64;
@@ -581,12 +585,12 @@ pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, st
 /// Tells the agent of another machine that asked the allowed `launch`, which may have heard it was
 /// approved already, that it never ran: as the end of the session it started, which it takes
 /// whether that answer reached it or not, where it refuses a second answer (#1374). A handed
-/// session's caller hears only the user's answer.
+/// session's caller, which hears nothing of the session that ran, hears this end as a led one's
+/// does: it was told the session started (#1385).
 pub(crate) fn tell_stopped(daemon: &Arc<Daemon>, launch: &Launch, body: &str) {
     let kind = match launch.kind.as_str() {
         "child" => "child-failed",
-        "led" => crate::subscriptions::TURN_ENDED,
-        _ => return tell_decided(daemon, launch, body, false),
+        _ => crate::subscriptions::TURN_ENDED,
     };
     kept_for_caller(
         daemon,
@@ -636,12 +640,20 @@ fn kept_for_caller(
             flottille_core::agent::new_id().unwrap_or_default()
         )
     });
+    // The user's answer is kept beyond the most, up to `MOST_KEPT_WITH_ANSWERS`: an end that came
+    // without it would tell the caller its session never ran (#1385). Cut rather than refused.
+    let answer = kind == "approval";
+    let body = match answer {
+        true => crate::mcp::cut(body, LONGEST),
+        false => body.to_owned(),
+    };
+    let length = body.chars().count();
     let message = MachineMessage::Deliver(Box::new(Deliver {
         id: id.clone(),
         launch: launch.launch.clone(),
         agent: launch.caller.clone(),
         kind: kind.to_owned(),
-        body: body.to_owned(),
+        body,
         urgency: urgency.to_owned(),
         ended,
     }));
@@ -649,7 +661,6 @@ fn kept_for_caller(
         .as_str()
         .unwrap_or("another machine")
         .to_owned();
-    let length = body.chars().count();
     let kept = match length > LONGEST {
         true => Err(format!(
             "a delivery to another machine is {LONGEST} characters at most, this one {length}"
@@ -662,6 +673,7 @@ fn kept_for_caller(
             id,
             &message,
             back,
+            answer,
         ),
     };
     if let Err(why) = kept {
@@ -702,7 +714,9 @@ fn outgoing(
 }
 
 /// Keeps `message` of `launch` (or of the request it answers) for the machine of key `machine`,
-/// and sends it when it can; refused when as many wait for that machine as may.
+/// and sends it when it can; refused when as many wait for that machine as may, but `beyond`, which
+/// stops at `MOST_KEPT_WITH_ANSWERS`.
+#[allow(clippy::too_many_arguments)]
 fn keep(
     daemon: &Arc<Daemon>,
     machine: &str,
@@ -711,20 +725,40 @@ fn keep(
     id: String,
     message: &MachineMessage,
     back: bool,
+    beyond: bool,
 ) -> Result<(), String> {
     let outgoing = outgoing(machine, launch, name, id, message, back);
     let waiting = daemon
         .read(|store| store.outgoing(Some(machine)))
         .map_err(|error| format!("it cannot be kept: {error}"))?
         .len();
-    if waiting >= MOST_KEPT {
-        return Err(format!("{MOST_KEPT} messages wait for {name} already"));
+    let waiting = waiting.max(playing_kept_full().unwrap_or(0));
+    let most = if beyond {
+        MOST_KEPT_WITH_ANSWERS
+    } else {
+        MOST_KEPT
+    };
+    if waiting >= most {
+        return Err(format!("{most} messages wait for {name} already"));
     }
     daemon
         .write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None)))
         .map_err(|error| format!("it cannot be kept: {error}"))?;
     send_kept(daemon, machine);
     Ok(())
+}
+
+/// How many messages a test plays waiting for another machine, once: in a test build, when the
+/// file `FLOTTILLE_TEST_KEPT_FULL_FILE` names exists, which it removes, the number it holds, or
+/// `MOST_KEPT` when it is empty.
+fn playing_kept_full() -> Option<usize> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let file = std::env::var_os("FLOTTILLE_TEST_KEPT_FULL_FILE")?;
+    let held = std::fs::read_to_string(&file).ok()?;
+    std::fs::remove_file(&file).ok()?;
+    Some(held.trim().parse().unwrap_or(MOST_KEPT))
 }
 
 /// The id under which the close of `agent` of the machine of key `machine` is kept: one close
@@ -1623,6 +1657,7 @@ fn keep_call(
         id,
         &message,
         false,
+        false,
     )
 }
 
@@ -2190,6 +2225,7 @@ pub(crate) async fn call(
                 &name,
                 format!("call-{id}"),
                 &message(format!("call-{id}")),
+                false,
                 false,
             );
             if let Err(why) = kept {
@@ -3298,7 +3334,7 @@ pub(crate) fn answer_back(daemon: &Arc<Daemon>, request: &Request, body: &str) -
         urgency: approval::URGENT.to_owned(),
         ended: false,
     }));
-    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false) {
+    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false, false) {
         eprintln!(
             "flottille daemon: the answer of request #{} for {name} is dropped: {why}",
             request.number
