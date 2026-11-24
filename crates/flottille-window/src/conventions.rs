@@ -11,14 +11,13 @@ use gpui_design_system::{
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, Styled, Subscription, TestSupportExt as _, WeakEntity,
-    Window, div, px,
+    ParentElement, Render, SharedString, Styled, Subscription, TestSupportExt as _, Window, div,
+    px,
 };
 
 use crate::actions::Command;
 use crate::commands::perform_later;
 use crate::project_settings::{field_frame, styled_input};
-use crate::shell::Shell;
 
 /// Which convention a section edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +117,7 @@ impl Text {
 }
 
 pub struct Convention {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     kind: Kind,
     field: Option<Text>,
@@ -132,7 +131,7 @@ pub struct Convention {
 }
 
 impl Convention {
-    pub fn new(shell: WeakEntity<Shell>, project: String, kind: Kind) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String, kind: Kind) -> Self {
         Self {
             shell,
             project,

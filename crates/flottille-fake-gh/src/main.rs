@@ -21,7 +21,11 @@
 //!  "fail": {"acme/api": "HTTP 502: Bad Gateway"}}
 //! ```
 //!
-//! `signed_in: false` makes `gh auth status` end with 1. `pulls` gives, by repository and branch,
+//! `signed_in: false` makes `gh auth status` end with 1, saying it is not logged in; `status_fail`
+//! (`"error connecting to api.github.com"`) makes it end with 1 in the shape gh prints for any
+//! failure of its API call (`X Failed to log in…`, `- The token in keyring is invalid.`, `- Error:`
+//! then that text), as a check that could not reach the service does (#1315); the fake `glab` prints
+//! it as `x gitlab.com: API call failed: <text>`. `pulls` gives, by repository and branch,
 //! the object `gh pr view --json` answers (`gh pr list --json` answers the fields it asks that the
 //! object has); a branch with none has no pull request. `fail` makes every `pr` call on that
 //! repository end with 1, saying its text. `issues` gives, by repository and number, the object
@@ -117,6 +121,12 @@
 //!
 //! `view_fail_after_write` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `pr view` of that
 //! repository fail that way once such a write was received.
+//!
+//! `branch_fail` (`{"acme/app": {"fix/1404-x": "Get \"https://api.github.com/…\": i/o timeout"}}`)
+//! makes the `api repos/<owner>/<name>/branches/<branch>` of that branch alone fail that way, as a
+//! network that drops does; a branch the script's `branches` does not list is `Not Found (HTTP
+//! 404)`, and the path is percent-decoded as a server does (`%25` is a `%` of the name; a `%`
+//! that starts no escape is `Bad Request (HTTP 400)`).
 //!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
@@ -216,6 +226,17 @@ fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
     let code = match words.as_slice() {
         ["auth", "status", ..] => {
             wait(script);
+            // `status_fail` is the cause of a failed check; gh prints every failure of its API call
+            // but a timeout in the shape of a bad token (cli/cli, `auth/status/status.go`), the
+            // cause last, whether it is a refused connection, a 502 or a 401.
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!(
+                    "github.com\n  X Failed to log in to github.com account {} (keyring)\n  - \
+                     Active account: true\n  - The token in keyring is invalid.\n  - Error: {why}",
+                    login_name(script)
+                );
+                return Some(1);
+            }
             if !sign_in::signed_in(dir, script) {
                 eprintln!(
                     "You are not logged into any GitHub hosts. To log in, run: gh auth login"
@@ -277,6 +298,11 @@ fn glab(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["auth", "status", ..] => {
+            // As glab prints a check whose API call failed: a lowercase `x`, the host, the cause.
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!("gitlab.com\n  x gitlab.com: API call failed: {why}");
+                return 1;
+            }
             if sign_in::signed_in(dir, script) {
                 eprintln!("gitlab.com\n  ✓ Logged in to gitlab.com as someone");
                 0
@@ -844,8 +870,18 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             let (repository, branch) = path["repos/".len()..]
                 .split_once("/branches/")
                 .unwrap_or_default();
+            // A server decodes the path (`%25` is a `%` of the branch's name) and answers a bad
+            // escape with a 400.
+            let Some(branch) = percent_decoded(branch) else {
+                eprintln!("gh: Bad Request (HTTP 400)");
+                return 1;
+            };
+            if let Some(failure) = script["branch_fail"][repository][&branch].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
             let known = match script["branches"][repository].as_array() {
-                Some(branches) => branches.iter().any(|b| b == branch),
+                Some(branches) => branches.iter().any(|b| *b == branch),
                 None => true,
             };
             if !known {
@@ -1321,4 +1357,22 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// `text` with its `%XX` escapes decoded, none when one is not an escape.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = text.get(at + 1..at + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }

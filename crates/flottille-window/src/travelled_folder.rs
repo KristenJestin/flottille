@@ -14,13 +14,12 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::perform_later;
-use crate::shell::Shell;
 
 /// What the section says of which projects a change reaches.
 pub const REACH: &str = "A change applies to the projects made from now on. The ones that exist \
@@ -49,7 +48,7 @@ impl Shown {
 }
 
 pub struct TravelledFolder {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// Made when first drawn, since a text field needs a window.
     field: Option<Entity<InputState>>,
     shown: Option<Shown>,
@@ -61,7 +60,7 @@ pub struct TravelledFolder {
 }
 
 impl TravelledFolder {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: crate::commands::ShellOf) -> Self {
         Self {
             shell,
             field: None,

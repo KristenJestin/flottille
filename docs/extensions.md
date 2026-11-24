@@ -984,7 +984,6 @@ command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
-headed  = false                      # an adapter's browser shown on the screen ("Adapters")
 ```
 
 **On, it is given to every agent of every project**, and off to none, **except the projects its
@@ -1368,8 +1367,9 @@ is followed and what is left out): `flottille connection login <name>`, or the c
 **Sign in** in the window (#672), which opens the sign-in address only when it is `https://`,
 or `http://` on this machine, and says why in a toast otherwise. The daemon reads the server's challenge, its protected resource
 metadata (RFC 9728) and its authorization server's metadata (RFC 8414, OpenID Connect discovery);
-it uses the `client_id` the user declared, or registers itself (RFC 7591) when the authorization
-server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
+it uses the `client_id` the user declared, else Flottille's own client metadata document (an
+`https://` address that serves as its client id, when the authorization server takes them: nothing
+is registered), else registers itself (RFC 7591) when the authorization server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
 (RFC 8707) to a one-shot loopback redirect on `127.0.0.1` and a port the system picks, which waits
 five minutes; a redirect with another `state` is refused and its code never exchanged. The
 browser is opened by the client the user asked from, with the system's default handler.
@@ -1489,21 +1489,82 @@ way in:
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
   So are `agent_browser_connect` and `agent_browser_state_load`: they bring a browser, or a
   session, that someone else controls, and a login would type into it.
+- **The browser's profile is never the agent's to read** (#1326). It lasts from one browser to
+  the next and keeps the sign-ins, made by hand in the shown window or through the vault, so a
+  session cookie or a token of a page's storage is a credential. `agent_browser_cookies_get`,
+  `_storage_get`, `_state_save` and `_state_show` are off and stay off: their answers are not
+  masked to names instead, since a site's cookie is no secret Flottille knows and saved state is a
+  file. So are the actions that cannot run without a file's path, which the server follows into
+  the profile however the path is made (a link a run planted under a name built in a script,
+  which the gate never sees, and swapped after any check): `upload`, `download`, `pdf`,
+  `cookies_set_curl`, `record_start`, `record_restart`. Those whose path is optional run without
+  one, a call that gives it refused: `path` and `screenshotDir` of `screenshot`, `path` of
+  `wait_for_download`, `network_har_stop`, `trace_stop` and `profiler_stop`, `output` of
+  `flow_save`, `baseline` of `diff_snapshot`, `baseline` and `output` of `diff_screenshot`. A
+  screenshot and a download given no path go to `screenshots/` and `downloads/` of the
+  connection's vault folder (`AGENT_BROWSER_SCREENSHOT_DIR`, `AGENT_BROWSER_DOWNLOAD_PATH`), out of
+  every run's reach and emptied once the browser ended: agent-browser's own default is under the
+  home. A small screenshot still comes back to the agent as an image. And the arguments
+  agent-browser takes on every action though no schema says them are refused on each:
+  `restore` and `restoreSave` (they save the cookies and storage to a file under the home),
+  `caCert` (a file the server reads and trusts), `namespace` (it moves the daemon's socket, as at
+  the start), `extraArgs` (any of agent-browser's options, `--restore` and `--screenshot-dir`
+  among them) and `capture` (`"flow"` records the session, what a login types included, for
+  `flow_save` to write under the home). Default taken, to confirm: locked outright rather than
+  confined to a folder of the server's alone, which agent-browser 0.43 cannot be told to keep to
+  for an upload.
+- **Nothing else reaches the profile, or what a page sends** (#1326, the review of its pull
+  request). `network_requests` and `network_request` are off and stay off: a request's details
+  hold its headers and body, the `Authorization: Bearer` a page builds from a token in its storage,
+  the `Cookie` it sends and the `Set-Cookie` it gets; not masked instead, as a cookie's value is no
+  secret Flottille knows. So are `batch` and `flow_run`: `batch` runs any command of
+  agent-browser's (`cookies get`, `state save`, `upload`, `get cdp-url`…), which no lock of
+  Flottille's follows, and `flow_run` replays a flow, a file under the home a run can plant; off
+  at the first pin alone, the user turning one on would open every lock. So are `chat`
+  (agent-browser's own model, which drives agent-browser through its own command function, past
+  every lock, as `batch` does), `install` (with `withDeps` it runs the package manager as root,
+  through sudo) and `upgrade` (it moves the server out of 0.43.x, after which an accepted review
+  makes the connection generic: no lock, no refusal of a url or a file). And `inspect` and
+  `dashboard_start`, as `get_cdp_url`: DevTools and the dashboard drive the browser from a local
+  port no token guards. `stream_enable` is locked too, but its lock changes nothing: 0.43.0
+  streams always ("Streaming is always enabled"), so the port `stream_status` hands out is there
+  whatever is set; what protects it is the browser's network namespace (above), not the lock,
+  and the lock's reason says so. `network_unroute`'s `url` is a pattern, as `wait_for_url`'s, not
+  an address that is opened. An `idleTimeout` is refused unless it is a number above 0: 0 keeps
+  the browser alive, so the `screenshots/` and `downloads/` folders, emptied only once the browser
+  ended, are never emptied. Checked on 0.43.0's own words
+  (no run): `webmcp_invoke` takes `params` as an object, which the server gives agent-browser as
+  JSON, never in the `@file` form its command line reads a file with, and 0.43.0's server has no
+  `add_init_script` (its init scripts are the global option `--init-script <path>`, which only
+  `extraArgs` and `batch` would carry, both refused).
+- **A tool the adapter does not know comes in off.** The adapter lists every tool of 0.43.0's
+  `tools/list --tools all`; one in none of its lists, which a 0.43 patch adds, may read what the
+  locked ones read. It is off at the review it comes in with, the first pin or any later one, and
+  the user may turn it on there: the review says it is new to the adapter.
+  The tools that are off by design (the scripts and the files below) are off at every pin alike:
+  a connection switched from agent-browser's default `core` tools to `--tools all` (same 0.43.0)
+  brings `network_har_start` and `har_stop` in off, as a first pin does, never judged. Only a
+  setting the user kept for an unchanged tool stays.
 - **`login` is offered beside every other action**, as agent-browser's own login restricts
   nothing after it: what keeps the secret is that it never reaches the model's context (Flottille's
   own `auth login` run fills it), the masking of the outputs, and the secret given only to a page of
   its entry's own site (below). The actions that run a script in the page, which no gate can judge, are **off at
-  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `batch` and `flow_run` (which
-  run or replay the others), `network_route` (which serves a body of its own for the page's
-  requests) and `chat` (agent-browser's own model, through an external gateway). So are those that
-  write the page's traffic to a file, which no masking reaches: `network_har_start`,
-  `network_har_stop`, `trace_start`, `trace_stop`. Both are the user's to turn on; every other
+  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `network_route` (which serves a
+  body of its own for the page's requests). `eval`, once the user turns it on, reads the page's storage
+  (`localStorage`) and the part of `document.cookie` that is not `HttpOnly`: the tokens of a site
+  of the profile, which the locks above keep from every other action, so turning it on gives them
+  to the agent. So are those that
+  write the page's traffic, or what was typed in it, to a file, which no masking reaches:
+  `network_har_start`, `network_har_stop`, `trace_start`, `trace_stop`, and `flow_save` and
+  `flow_steps` (a session recorded to be saved as a flow: `open` and `tab_new` take `capture`, and
+  it is saving that writes the file). Both are the user's to turn on; every other
   action is judged at the first pin, as any server's. A connection accepted with one of the first
   on (`eval`) gets `login` beside it with no new review: the review says so (`agent_browser_eval
   is on: a page script can read what login types`).
-- **A `url` is a web address.** While the adapter applies, a call whose `url` argument is not
-  `http` or `https` with a host is refused before the server sees it (`open`, `tab_new`,
-  `pushstate`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
+- **A `url` is a web address.** While the adapter applies, a call whose `url` argument, or any
+  argument whose name starts with `url` (`url1` and `url2` of `diff_url`), is not `http` or
+  `https` with a host is refused before the server sees it (`open`, `tab_new`, `pushstate`,
+  `diff_url`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
   open, the login form among them, and a `file:` one reads this machine. `wait_for_url` and
   `network_route` are left out: their `url` is a pattern matched against an address, never opened.
 - **Every output of the connection's tools is masked** for the vault's secrets, those of the
@@ -1518,8 +1579,8 @@ way in:
   into what another action reads, a show-password toggle shows the secret on a screenshot (pixels
   are not masked), a selector can test a field's `value` attribute one guess at a time, an action
   that reads the page (`snapshot`, `get_value`, `eval`…) right after a login may see the secret in
-  a form other than those masked, and **a page saved to a file** (`pdf`, `download`, a HAR or a
-  trace the user turned on) is not masked: Flottille masks what the tools answer, not the files
+  a form other than those masked, and **a page saved to a file** (a HAR or a trace the user
+  turned on, written under the home since its path is refused) is not masked: Flottille masks what the tools answer, not the files
   the browser writes. Each call of these actions is judged by the gate, which is what stands
   against them; the user turns off what they do not want.
 - **The browser is open; the secret is kept to its site.** Flottille keeps the browser to no list
@@ -1543,12 +1604,17 @@ way in:
   sub-resources, WebSocket, EventSource, `sendBeacon` and WebRTC to other domains); a page an
   agent opens on any host can try to make the browser act against the entry's site with the
   signed-in session. The secret itself is typed only into a page of its site.
-- **The browser can be shown.** A connection's server runs with the environment of a run, without
-  `XDG_RUNTIME_DIR` nor the display variables, so its browser is headless and `--headed` fails
-  (no runtime folder, no Wayland display). `headed = true` (`flottille connection edit --headed`
-  or `--headless`, the connection's form in the window, a toggle *Show the browser*, off by
-  default) has the adapter write `"headed": true` in the configuration file it writes and gives
-  the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
+- **The browser can be shown, and the agent chooses at each opening.** A connection's server runs
+  with the environment of a run, without `XDG_RUNTIME_DIR` nor the display variables, so its
+  browser is **headless by default**, always: no setting of the connection shows it (the key
+  `headed` of an older `extensions.toml` is read and ignored, as `sites` is; a connection that was
+  shown is pinned for another declaration, so its review is due once more). The action that opens
+  the browser, `agent_browser_open`, takes `headed` (agent-browser's own argument, a boolean):
+  `false` or left out runs it headless, `true` shows it. The tool's words (`help`, the action's
+  own description, and the line given with the server's instructions) say **when**: when the user
+  must act in the page (sign in, a captcha) or see it; never to read a page. A call with
+  `headed: true` has the adapter write `"headed": true` in the configuration file it writes and
+  gives the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
   session bus, hence the keyring, and the user's other sockets): the daemon makes a runtime folder
   of the connection's own, `$XDG_RUNTIME_DIR/flottille/display/<connection>` (mode 0700, removed
   when the browser started with it is closed), holding a hard link of the session's Wayland
@@ -1560,31 +1626,69 @@ way in:
   private mount namespace, with its display folder alone put back in it, so no process of its
   connects to the bus by its path (`docs/vault.md`, "The runtime folder"). When the folder cannot be made
   (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
-  daemon says why, in its log and in the form, under the switch (kept there while a call runs),
-  never with the real folder. Off, the server gets no display variable of the daemon's; **whether
+  daemon says why, in its log, in the answer of the call that asked (`Flottille: the browser is
+  not shown, it runs headless: …`) and in the connection's `headless` (kept there while a call
+  runs), never with the real folder, and asking again starts nothing. Headless, the server gets no
+  display variable of the daemon's; **whether
   the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
-  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
-  (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
-  same browser and the removal of a display folder never takes a live socket. One browser per
-  connection, in the mode the switch says: a login uses the server's display folder (the running
-  server's own, else made under the connection's name for the time of the login), and the browser
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's **socket folder**, the
+  one folder of its vault folder (below), of a random name (`browser-<random>`, made the first
+  time and found again by listing it; agent-browser puts its daemon's socket there, else under
+  `$XDG_RUNTIME_DIR`, named after its session, `default`, which anyone can tell), so they reach
+  the same browser, the removal of a display folder never takes a live socket, and a run does not
+  reach that socket, which drives the browser with no gate (an init script, a route, the filled
+  password field read). **The server, its login, its reload and `close` run agent-browser in the
+  browser's network namespace** (`docs/vault.md`, "The browser's network"): agent-browser 0.43
+  starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens on the loopback, on
+  a port of its choice, with no token, and agent-browser's daemon on another port; in a network of
+  their own neither is on the runs' loopback, while the browser still reaches the internet and the
+  host's local servers (`localhost:<port>`) through passt's `pasta`. **Without pasta, or where the
+  kernel refuses user namespaces, the browser runs in the runs' network, where a run that finds
+  the port drives it, and the login refuses to fill**, saying to install passt; the rest of the
+  connection works, and `flottille doctor` says the gap. The adapter keeps `get_cdp_url`, which
+  says the address, off. One browser per
+  connection, in the mode of the last `agent_browser_open` (any other action goes on in the mode
+  that runs, and a call that asks the other mode **restarts the server and closes the browser**,
+  its profile kept: the user signs in shown, the agent goes on headless). **Flottille keeps the
+  profile itself**: the configuration file it writes names `profile`, a folder of the
+  connection's own (`$XDG_STATE_HOME/flottille/browsers/<connection>/profile`), so the lasting
+  cookies and sign-ins of one browser are the next one's whatever the user's command says
+  (without it, agent-browser starts each browser on a profile of its own that is gone when it
+  closes). A cookie of the browser's session (one with no `Max-Age` nor `Expires`) and the
+  pages' `sessionStorage` are not kept: they are gone with the browser that closes at each
+  switch, as when the user quits their own. **No other command Flottille runs reaches that
+  folder** (a run, another connection's server, a project's service): it is a login's place for
+  the gate and out of every confined process's reach, but the connection's server and its login
+  (`docs/vault.md`, "The runtime folder"); it is removed with the connection, once its browser is
+  closed, so a connection made again under the same name starts signed out. A `--profile` in the
+  command, which agent-browser puts above its configuration, is the user's choice of another
+  kept profile, where they chose it: Flottille neither moves nor hides it. A command with `--allowed-domains` gets none, since
+  agent-browser refuses a profile beside it (a page restored before its containment is in
+  place); for the same reason agent-browser refuses a call's own `allowedDomains` while the
+  profile is set, so a limit to domains is the user's, in the command. The `headed` of the call reaches the server as the mode that runs: `false`
+  when the browser could not be shown, so agent-browser opens the page headless instead of
+  failing for want of a display. A login never shows a browser by itself, it goes on in the display folder of the
+  shown browser when one runs (the running server's, else the one a stopped server left) and is
+  headless otherwise, and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
   server's, an idle server's included), keeps the folder it was started with: the next server or
   login is given that folder again, never one made again at its path, which Landlock, holding a
   folder by its inode, would keep out of the browser's reach (#1040). It is closed (`agent-browser close`, on
-  that socket folder) when the server is stopped (an edit of what trust is given to, the switch included, turning it off, removing it) and when
-  the daemon stops; one a daemon that died left (an update that killed it, a crash) is closed the
-  same way when the next daemon starts, before it serves any tool call, since the folder it was
-  confined with is made again out of its reach; the next start, of the server or of a login, starts a browser in the mode the
-  switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
+  that socket folder) when the server is stopped (an edit of what trust is given to, turning it off, removing it), when a call asks the other mode and when
+  the daemon stops; one a daemon that died left (an update that killed it, a crash), shown or
+  not, is closed the same way when the next daemon starts, before it serves any tool call (one
+  whose socket folder holds anything), since the display folder it was confined with is made
+  again out of its reach and it keeps the vault folder within its reach; the next start, of the
+  server or of a login, starts a browser in the mode asked.
+  **Showing the browser has a risk, said in the review**: with
   X11 the browser can read the keys typed in other windows and type into them (a terminal's
   included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
   removes every display folder when it starts, under its lock, and makes the last folder of a
   connection itself, never taking one over. The folder is
-  made by one function (`display.rs`), which a run that opens windows reuses. It is the user's
-  alone (an agent's request sets no `headed`), **part of what trust is given to** and said in the
-  review, and the user's own edit stops the running server at once, the next start applying it,
-  as an edit of the command does; an edit made in the file waits for its review. **The options that can send a
+  made by one function (`display.rs`), which a run that opens windows reuses. It is the
+  agent's, at each call, **within what trust is given to** (the review says that the browser may be
+  shown and what it risks): an agent's request to add or edit a connection sets no `headed`, and
+  the call is judged by the gate as any call of the server is. **The options that can send a
   signed-in session, and the password a login types, elsewhere** are refused too, in the server's
   command or as their variables in the connection's `env`: a proxy (`--proxy`,
   `AGENT_BROWSER_PROXY`, and `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in either case, which
@@ -1595,26 +1699,67 @@ way in:
   `AGENT_BROWSER_EXECUTABLE_PATH`) and a script run in every page (`--init-script`,
   `AGENT_BROWSER_INIT_SCRIPTS`): through them the password would reach more than the entry's site.
   While one is set, `login` is refused, naming the option or the variable alone and saying to take
-  it out, and the review says it; the server starts as the user wrote it. The options agent-browser
-  refuses beside a domain list (`--cdp`, `--auto-connect`, `--profile`, `--state`, `--restore`,
-  `-p`/`--provider`, `--args`, `--session-name`, `--allowed-domains`, and their variables) no
-  longer refuse `login`: with no list of Flottille's they are the user's, and `login` types into
-  the browser the user's command chose. **Its other
-  options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
-  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
-  variables of the daemon's own environment, which a run inherits.
+  it out, and the review says it; the server starts as the user wrote it. **The options
+  agent-browser itself calls unsafe** (those its `--allowed-domains` rejects) refuse `login` the
+  same way: another profile (`--profile`, `AGENT_BROWSER_PROFILE`), a saved or restored session
+  (`--state`, `--restore`, `--session-name`, and their variables), a browser reached over CDP or
+  found running (`--cdp`, `--auto-connect`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`), a
+  browser of a provider's (`-p`/`--provider`, `AGENT_BROWSER_PROVIDER`), and launch arguments of
+  the command's (`--args`, `AGENT_BROWSER_ARGS`, which could carry a `--proxy-server` or another
+  profile folder), a plugin registry (`--plugins`, `AGENT_BROWSER_PLUGINS`, which could replace
+  Flottille's credential plugin, run with the vault's access) and a namespace (`--namespace`,
+  `AGENT_BROWSER_NAMESPACE`, which puts the daemon's socket in a subfolder): `login` would type into
+  a browser, a profile or a network that is not the one Flottille made. These are looked for in the
+  server's command, the connection's `env`, and the environment the daemon itself started with,
+  which agent-browser inherits; no configuration file of the user's is read (agent-browser reads the
+  one `--config` Flottille names, and only it). **The connection's `env` never moves the browser's
+  folders**: Flottille sets `AGENT_BROWSER_SOCKET_DIR`, `TMPDIR`, `XDG_CONFIG_HOME`,
+  `XDG_CACHE_HOME` and `XDG_DATA_HOME` last, on every start of the server and of a command of
+  agent-browser's, and removes `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is
+  refused, naming the variable, while the connection's `env` names one of them or `HOME` (which
+  moves where agent-browser looks for the Chrome it downloaded and where Chrome reads
+  `~/.pki/nssdb`). **The server's command runs agent-browser itself**, in one of these forms
+  and no other: `agent-browser`, by its name, which the system finds on the `PATH` the server is
+  given; an **absolute path** that resolves (links and `..` followed) to the very file named
+  `agent-browser` on that `PATH` (a relative path, a path to another file, or one whose `PATH` is
+  set by the connection's `env`, is refused: the folder it is read from is not known); or a chain
+  of package runners (`npx`, `bunx`, `pnpm` or `yarn` with `dlx` or `exec`) with no word but `-y`
+  or `--yes` before the package, which is exactly `agent-browser` or `agent-browser@<version or
+  tag>` (`npx agent-browser mcp`, `pnpm dlx agent-browser@0.43.0 mcp`, `bunx agent-browser@latest
+  mcp`). A package name that ends in `agent-browser` is not it: a scope (`@someone/agent-browser`),
+  a GitHub shorthand (`someone/agent-browser`), a URL, a path (`./agent-browser`), an alias
+  (`agent-browser@npm:another`), a source (`agent-browser@github:…`, `@file:…`, `@git+…`) or
+  any `/`, `:` or second `@` after the `@` are refused, said without echoing the spec. Anything else
+  between Flottille and agent-browser could set the environment after Flottille did, so it is an
+  allow list, not a list of launchers: a program before agent-browser (`env`, `envdir`, `chpst`,
+  `setpriv`, `flatpak run`, a shell, `node -e`…, also inside a runner, as in `pnpm exec env -u
+  AGENT_BROWSER_SOCKET_DIR agent-browser mcp`), a runner's other option (`-p`, `-c`,
+  `--node-options`…), or an assignment `NAME=value` before the program is refused, said by the
+  program's, the option's or the variable's name, never a value; one of the folder variables set
+  that way is said as itself. The command is unwrapped as the gate unwraps a line, and only the
+  words before the program are read: agent-browser's own arguments are its own. It is checked
+  before the server starts (at the review, on an edit, at every start and reconnection: nothing
+  runs), at the accept, and again at each login, so an edit after the user accepted the
+  connection never starts it. A command that names agent-browser (a layer runs it, or a word of
+  it is its name or its path, as in `setsid …/agent-browser mcp`) is checked before its first
+  start too; one that does not (`node -e '…' mcp`) is refused when its server says it is
+  agent-browser, before it starts with the adapter. **Its other options and variables are not
+  judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as
+  written. What is not covered: the variables of the daemon's own environment that send the
+  session elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
   give them.** An agent drives a browser for the user, who works in another window: a window that
   comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused
   window (Hyprland with `misc:focus_on_activate` and cursor warps), the mouse. Flottille never
   writes the user's desktop configuration, so it does two things and says the third:
-  - **The browser has a window identity of its own.** The configuration the adapter writes gives
-    the shown browser the launch argument `--class=flottille-browser` (`args`; a browser nobody
-    sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
-    sets the window's `WM_CLASS` class on X11 and, for a browser window (not an app window), the
-    `app_id` Chrome gives `xdg_toplevel` on Wayland, so `--class` is the one flag, and the desktop
-    tells this browser from the user's own by that class or app id. It was not run on a real
-    compositor by Flottille's tests, which never open a window.
+  - **The browser has a window identity of its own.** The configuration the adapter writes gives the
+    shown browser the launch argument `--class=flottille-browser` (`args`, beside
+    `--disk-cache-size`, which every browser gets, `docs/vault.md`, "The browser's network"; a
+    browser nobody sees has no window to name). Read in Chromium's source: `--class` is the switch
+    `class`, which sets the window's `WM_CLASS` class on X11 and, for a browser window (not an app
+    window), the `app_id` Chrome gives `xdg_toplevel` on Wayland, so `--class` is the one flag, and
+    the desktop tells this browser from the user's own by that class or app id. It was not run on a
+    real compositor by Flottille's tests, which never open a window.
   - **No action of agent-browser 0.43.x exists only to raise the window**: its tools (read from
     the server's own list) have no `bring_to_front`, so there is none to keep off. Three actions
     can ask Chrome to activate a window as a side effect (the binary holds the CDP calls
@@ -1644,8 +1789,10 @@ way in:
     The Hyprland lines are the wiki's forms for each version (the Lua one is the form of the
     default `hyprland.lua` of 0.56), not run by Flottille's tests either. The window's switch *Show
     the browser* says it, in a sentence that names this section.
-- **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
-  written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
+- **Its start** gains `--config $XDG_RUNTIME_DIR/flottille/vault/<name>/agent-browser.json`,
+  written by Flottille in the connection's vault folder (below), which no run reaches: a run that
+  rewrote it while a login starts would have its own program run as the plugin, by a browser that
+  reaches the vault. It is one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
   user's own. agent-browser reads **the first `--config`** of a command line (and never the form
   `--config=<file>`), and `AGENT_BROWSER_CONFIG` only when no `--config` is given: a configuration
@@ -1686,21 +1833,42 @@ way in:
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
   or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has. **A login that
   fails** (or runs out of time) is followed by Flottille's own `open <the entry's URL>`, on the same
-  command line, folder, environment (without the token) and session: the page is loaded afresh, so
+  command line, folder, environment and session: the page is loaded afresh, so
   a secret typed into its form does not stay there (a browser does not restore a password field).
   It is Flottille's call, not an agent's, so it does not need `open` on. If it fails too, the
   login's error is still returned, masked, and says that the page could not be loaded again.
 - **The plugin is Flottille.** The daemon refuses every client that descends from it, so the
   login does not go through its socket: for that run alone the daemon listens on
-  `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
-  and gives the run a **one-time token** in `FLOTTILLE_VAULT_TOKEN`. `flottille vault provide` (hidden, needs no
-  folder of Flottille's) reads agent-browser's request on its standard input, sends the token and
-  the item and the URL agent-browser asks for to that socket, and writes the answer on its
-  standard output. The daemon answers **only** the token of the run it started, **once**, only
-  for a URL of the entry's own host, and only for the entry that run is for, bound
-  to this connection; without the token the plugin is refused before anything is asked. The
-  secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or
-  the store, and what agent-browser prints is masked and framed as a third party's.
+  `vault.sock` in the connection's **vault folder**, `$XDG_RUNTIME_DIR/flottille/vault/<name>`
+  (removed when the run ends), and gives the run a **one-time token** in `vault.token` beside it
+  (written once the page is loaded, temporary file and rename, removed when the run ends). A file
+  and not a variable: agent-browser's session daemon, not the login's command line, starts the
+  plugin, with the environment it was started with. The vault folder is in the user's runtime
+  folder, which no run reaches (`docs/vault.md`, "The runtime folder"): a run of an agent that
+  waits for the login cannot read the token nor reach the socket, where a folder of the user's
+  under the state folder would give both to any of its processes. Only the connection's server,
+  its login's commands, `agent-browser close` and the browser they start are given it (as a
+  display folder is). It is **kept**: made once, never made again, not even by a daemon that
+  starts after one died: agent-browser's daemon outlives the server, the login and Flottille's
+  daemon, confined with the folder's inode, and is found again by its socket there (one made
+  again would be out of its reach, and its browser left running). A daemon that starts removes
+  what a login killed with its daemon left in it (`vault.token`, `vault.sock`, `vault.why`),
+  keeping the socket folder, and the configuration and plugin socket an earlier Flottille wrote
+  in the connection's state folder; the folder is removed with the connection, once its browser
+  is closed. `flottille vault provide` (hidden, needs no folder of
+  Flottille's) reads agent-browser's request on its standard input, sends the token and the item
+  and the URL agent-browser asks for to that socket, and writes the answer on its standard output.
+  agent-browser says of a plugin that failed only that it "exited unsuccessfully": the plugin also
+  writes why in `vault.why` of the vault folder (temporary file and rename: a link at its name is
+  replaced, never written through), and the login's error says it (masked) when the daemon did not
+  refuse the request itself, read without following a link and up to 1 KiB. Each request on the
+  socket is answered on its own, its question awaited 5 seconds at most, so one that says nothing
+  holds no other; a request after the token was spent is refused and is not taken for why the login
+  failed. The daemon answers **only** the token of the run it started, **once**, only for a URL of
+  the entry's own host, and only for the entry that run is for, bound to this connection; without
+  the token the plugin is refused before anything is asked. The secret goes from the keyring to the
+  page's form: never to an agent, an event, a log, an error or the store, and what agent-browser
+  prints is masked and framed as a third party's.
 
 **Examples.** The first two are invented; the others are public programs, the first cases of
 0.3.

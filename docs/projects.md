@@ -108,6 +108,32 @@ The project is marked from the start: meanwhile no agent, workspace or command r
 and its file is not edited, each refused with "project <name> is being removed". The folder and the checkouts of its
 repositories are never touched: only the worktrees and the branches Flottille made.
 
+**A project whose file is gone.** Its file may disappear while Flottille still holds what it made
+for the project (a session, a workspace kept because it held work). Such a project is not known,
+but it is not forgotten: `project.list` names it under `unconfigured` with what it holds, the
+command line's `project list` says so, and `project.remove` (and `project.removal` before it) works
+on it as on any project, in the same order and with the same rule, so that a workspace holding work
+is kept, and the result says why. There is no file to remove, and its folder is never touched. The
+daemon never removes it by itself, at start or when the file goes: a start deleting what the user
+may still want is not Flottille's to decide; and the list a machine sends to the others holds only
+the sessions of the projects it knows ("One list of every machine", `docs/remote.md`). A project
+with nothing left but ended sessions is not listed: they are history. `project add` with the name
+of such a project takes over the sessions and workspaces it holds, as they were. If its file comes
+back while its removal waits for the agents to stop, the project and its file stay, and the result
+says so.
+
+The window shows such a project on its own machine only, after the user's list, with its sessions
+and the words "settings file missing" under its name. It has no page (its click folds and unfolds
+its sessions) and its menu offers Remove… alone, with the confirmation of any project, which says
+what is kept and why. Its row folds away once the daemon no longer lists it: a workspace kept
+because it holds work keeps the row.
+
+Another machine may have a project of the same name. That one is its own row (the group of the
+project, as any), and this machine's project with no file is a row of its own beside it, with
+this machine's name said after the title: the sessions of each are under its own row, an answer
+of the other machine (its removal, its page) never reaches this machine's row, and this row is
+not dragged into the user's groups.
+
 A failure partway (an agent still running after the wait, a workspace git could not remove)
 stops there and leaves the project known; the refusal says what failed and what was done
 already, and asking again goes on from there. A workspace kept is not a failure: the project is
@@ -465,7 +491,7 @@ run.
   the commits checked at commit time are not the only ones: those of `git cherry-pick`,
   `git am`, `git rebase`, `git pull`, a stash, a raw commit object moved onto the branch, a
   script calling git, or whose message git changed after the checks (`--cleanup`, `--trailer`,
-  `--signoff`) are checked here. Every other push is walled: `git push` inside another line or a
+  `--signoff`) are checked here. In Ask and Auto every other push is walled: `git push` inside another line or a
   script goes nowhere, and `git send-pack`, `git http-push` and git's transport helpers, which
   would push past the wall, are refused in every mode (`docs/tools.md`).
 - **What they do not see**: a commit the agent makes and never pushes stays unchecked; a ref

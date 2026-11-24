@@ -135,6 +135,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("vault.from_file", Drive),
     ("vault.asks", Read),
     ("vault.ask_dismiss", Drive),
+    ("vault.ask_accept", Drive),
     ("remote.machines", Read),
     ("remote.members", Read),
     ("remote.launches", Read),
@@ -149,6 +150,9 @@ pub const METHODS: &[(&str, Class)] = &[
     // device (a link could turn the machine off from afar).
     ("remote.settings", Local),
     ("remote.configure", Local),
+    // What the window says of the user, told to the hub for the phones (`docs/remote.md`,
+    // "Notifications"): this machine's own clients only.
+    ("client.presence", Local),
     // It opens a port on the client's machine for a run's port on this one: a user's act.
     ("tunnel.open", Drive),
     // What a machine's daemon carries is its own: the listeners are here, never over a link.
@@ -270,6 +274,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("provider.disable", Drive),
     ("provider.set_judge", Drive),
     ("provider.set_new_session", Drive),
+    ("provider.set_new_session_mode", Drive),
     ("provider.judge_noticed", Drive),
     // A program's own sign-in (#1185): the list is a read, every step of a sign-in the user's.
     ("signin.list", Read),

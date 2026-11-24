@@ -24,7 +24,8 @@ use std::time::Duration;
 
 use flottille_link::{
     Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
-    MemberList, Members, PairCode, Paired, Proposed, PublicKey, Pushed, Role, Session, Tls,
+    MemberList, Members, PairCode, Paired, PresenceOf, Proposed, PublicKey, Pushed, Role, Session,
+    Tls,
 };
 use serde_json::{Value, json};
 
@@ -73,6 +74,12 @@ pub struct Control {
     list: tokio::sync::watch::Sender<MemberList>,
     /// What the hub last told of each member's device.
     facts: Mutex<Vec<Facts>>,
+    /// What the hub last told of the presence of the members' clients (`docs/remote.md`,
+    /// "Notifications"): sent to a runner.
+    presence: Mutex<Vec<PresenceOf>>,
+    /// What this machine's clients last said of the user: whether one is focused, and when the
+    /// last input was (the daemon's clock, in milliseconds), told to the hub in each session.
+    here: Mutex<Option<(bool, Option<u64>)>>,
     pairing: tokio::sync::Mutex<Option<Pairing>>,
     emit: Emit,
 }
@@ -92,8 +99,56 @@ impl Control {
             asker: tokio::sync::watch::Sender::new(None),
             list: tokio::sync::watch::Sender::new(MemberList::default()),
             facts: Mutex::new(Vec::new()),
+            presence: Mutex::new(Vec::new()),
+            here: Mutex::new(None),
             pairing: tokio::sync::Mutex::new(None),
             emit,
+        }
+    }
+
+    /// What tells the hub the notices for the phones, while a session to a hub that takes them
+    /// is open: a hub of before them would close the session (`docs/remote.md`, "Notifications").
+    pub fn notifier(&self) -> Option<Asker> {
+        self.asker.borrow().clone().filter(Asker::takes_notices)
+    }
+
+    /// The presence of the clients of the members that are no phone, as the hub last told it: the
+    /// app says an input each time it opens its session (on another network, say), which is no
+    /// sign that the user is at a client (#828 may tell real inputs).
+    pub fn presence_at_clients(&self) -> Vec<PresenceOf> {
+        let facts = self.facts.lock().unwrap();
+        let phone = |key: &PublicKey| {
+            facts
+                .iter()
+                .any(|facts| facts.key == *key && facts.kind.as_deref() == Some("phone"))
+        };
+        let mut presence = self.presence.lock().unwrap().clone();
+        presence.retain(|told| !phone(&told.key));
+        presence
+    }
+
+    /// When a client of this machine last had an input, on the daemon's clock.
+    pub fn local_input(&self) -> Option<u64> {
+        self.here.lock().unwrap().and_then(|(_, input)| input)
+    }
+
+    /// What a client of this machine says of the user (`client.presence`): kept, and told to
+    /// the hub now when a session is open, else at the next one. `input` is when the user gave it
+    /// an input, on the daemon's clock; `None` keeps the last.
+    pub fn tell_presence(&self, focused: bool, input: Option<u64>) {
+        let told = {
+            let mut here = self.here.lock().unwrap();
+            let last = input.or(here.and_then(|(_, last)| last));
+            *here = Some((focused, last));
+            presence_ask(focused, last)
+        };
+        if let (Some(asker), Ok(runtime)) = (
+            self.asker.borrow().clone(),
+            tokio::runtime::Handle::try_current(),
+        ) {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(ASK_WAIT, asker.ask(told)).await;
+            });
         }
     }
 
@@ -720,6 +775,14 @@ impl Awake {
     }
 }
 
+/// The presence the hub is told: the last input in seconds since 1970, 0 when there was none.
+fn presence_ask(focused: bool, last_input_ms: Option<u64>) -> Ask {
+    Ask::Presence {
+        active: focused,
+        last_input: last_input_ms.map_or(0, |at| at / 1000),
+    }
+}
+
 enum Ended {
     Stopping,
     /// A pairing wrote another hub: start from it.
@@ -762,9 +825,18 @@ async fn keep_session(
         let asked = about.ask(Ask::About {
             device: "computer".to_owned(),
             system: std::env::consts::OS.to_owned(),
+            notices: false,
         });
         let _ = tokio::time::timeout(ASK_WAIT, asked).await;
     });
+    // What this machine's clients said, told again to each session.
+    let here = *control.here.lock().unwrap();
+    if let Some((focused, last)) = here {
+        let present = asker.clone();
+        telling.spawn(async move {
+            let _ = tokio::time::timeout(ASK_WAIT, present.ask(presence_ask(focused, last))).await;
+        });
+    }
     loop {
         tokio::select! {
             pushed = session.next() => {
@@ -793,8 +865,13 @@ async fn keep_session(
                             continue;
                         }
                     },
-                    // Read by the notifications, later (`docs/remote.md`, "Notifications").
-                    Pushed::Presence(_) => continue,
+                    // Read when the phones are told (`crate::phone`).
+                    Pushed::Presence(presence) => {
+                        *control.presence.lock().unwrap() = presence;
+                        continue;
+                    }
+                    // Told to the phones only.
+                    Pushed::Notice { .. } => continue,
                     Pushed::Facts(facts) => {
                         control.told_facts(facts);
                         continue;

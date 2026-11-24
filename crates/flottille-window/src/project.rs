@@ -9,10 +9,27 @@
 //! neither.
 
 mod ended;
+mod machine;
 mod place;
 
 pub use ended::EndedRuns;
+pub use machine::{MachineBlock, MachineSessions};
 pub use place::{PlaceBlock, block_id, session_end_id, session_menu_id, session_row_id};
+
+/// The block of the sessions of the machine `machine` on a shared project's page.
+pub fn machine_block_id(machine: &str) -> ElementId {
+    ElementId::Name(format!("machine-block-{machine}").into())
+}
+
+/// The time ago of the row of the session `id` of another machine.
+pub fn machine_session_ago_id(id: &str) -> ElementId {
+    ElementId::Name(format!("machine-session-ago-{id}").into())
+}
+
+/// The machine's icon on the row of the session `id` of another machine.
+pub fn machine_session_mark_id(id: &str) -> ElementId {
+    ElementId::Name(format!("machine-session-mark-{id}").into())
+}
 
 use std::collections::HashMap;
 
@@ -27,7 +44,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, point, px,
+    Subscription, TestSupportExt as _, Window, div, point, px,
 };
 
 use crate::actions::{Command, Details, RepositoryStatus};
@@ -39,7 +56,7 @@ use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
 use crate::routines::RoutinesTab;
 use crate::runs::{CommandRow, arrange};
-use crate::shell::{Selection, Shell};
+use crate::shell::Selection;
 use crate::tasks::{ProjectTasks, TaskInfo};
 
 /// A session as its place lists it.
@@ -88,6 +105,9 @@ pub struct ProjectData {
     pub places: Vec<PlaceData>,
     /// It declares a tracker: its Progress tab shows.
     pub tracked: bool,
+    /// Its sessions on the other machines that have it, one block a machine, this machine first
+    /// when another machine's page of it is shown (#1266).
+    pub machines: Vec<MachineSessions>,
 }
 
 /// A repository's name on the page: the project's own name for the folder itself.
@@ -137,7 +157,7 @@ struct ListsSaid {
 }
 
 pub struct ProjectPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     name: String,
     folder: String,
     repositories: Vec<String>,
@@ -148,6 +168,10 @@ pub struct ProjectPage {
     places: Vec<Place>,
     /// The blocks as drawn: one that comes unfolds, one that goes folds away.
     place_rows: gpui_design_system::Listing<Place>,
+    /// The blocks of its other machines' sessions, and their machines as drawn.
+    machine_blocks: HashMap<String, Entity<MachineBlock>>,
+    machines: Vec<String>,
+    machine_rows: gpui_design_system::Listing<String>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
     /// Its tasks and runs, and the run drawer.
@@ -180,7 +204,7 @@ pub struct ProjectPage {
 
 impl ProjectPage {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         name: String,
         composer: Entity<Composer>,
         new_workspace: Entity<NewWorkspace>,
@@ -229,6 +253,9 @@ impl ProjectPage {
             blocks: Vec::new(),
             places: Vec::new(),
             place_rows: gpui_design_system::Listing::default(),
+            machine_blocks: HashMap::new(),
+            machines: Vec::new(),
+            machine_rows: gpui_design_system::Listing::default(),
             composer,
             new_workspace,
             tasks,
@@ -247,6 +274,11 @@ impl ProjectPage {
             _subscriptions: subscriptions,
             renders: 0,
         }
+    }
+
+    /// The machine the page is of (`None`: this one).
+    pub fn machine(&self) -> Option<&str> {
+        self.shell.machine()
     }
 
     pub fn name(&self) -> &str {
@@ -378,6 +410,42 @@ impl ProjectPage {
         }
     }
 
+    /// The blocks of the other machines' sessions, each unfolding as its machine comes to have
+    /// the project and folding away as it goes.
+    fn machine_items(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        self.machine_rows.sync(
+            self.machines
+                .iter()
+                .map(|name| (name.clone(), name.clone())),
+            at,
+            reduce,
+        );
+        // A block that leaves keeps its sessions until it has folded away.
+        let drawn: Vec<String> = self.machine_rows.rows().map(|r| r.key.to_owned()).collect();
+        self.machine_blocks.retain(|name, _| drawn.contains(name));
+        self.machine_rows
+            .rows()
+            .filter_map(|row| {
+                let block = self.machine_blocks.get(row.key)?.clone();
+                Some(
+                    gpui_design_system::Item::new(
+                        ElementId::Name(format!("machine-item-{}", row.key).into()),
+                        row.placement,
+                        block,
+                    )
+                    .gap(space::SM)
+                    .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    /// The blocks of the other machines' sessions, by machine.
+    pub fn machine_block(&self, machine: &str) -> Option<&Entity<MachineBlock>> {
+        self.machine_blocks.get(machine)
+    }
+
     /// Brings the page up to `data`; a block whose data did not change is not drawn again.
     pub fn set(&mut self, data: ProjectData, cx: &mut Context<Self>) {
         let mut changed = self.folder != data.folder || self.repositories != data.repositories;
@@ -413,6 +481,19 @@ impl ProjectPage {
             blocks.push(block);
         }
         self.blocks = blocks;
+        let machines: Vec<String> = data.machines.iter().map(|m| m.machine.clone()).collect();
+        changed |= self.machines != machines;
+        self.machines = machines;
+        for sessions in data.machines {
+            match self.machine_blocks.get(&sessions.machine) {
+                Some(block) => block.update(cx, |block, cx| block.set(sessions, cx)),
+                None => {
+                    let (shell, name) = (self.shell.clone(), sessions.machine.clone());
+                    let block = cx.new(|_| MachineBlock::new(shell, sessions));
+                    self.machine_blocks.insert(name, block);
+                }
+            }
+        }
         self.runs_moved(cx);
         if changed {
             cx.notify();
@@ -524,6 +605,17 @@ impl ProjectPage {
                 block.update(cx, |_, cx| cx.notify());
             }
         }
+        for block in page
+            .read(cx)
+            .machine_blocks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if block.read(cx).times_changed(now) {
+                block.update(cx, |_, cx| cx.notify());
+            }
+        }
     }
 }
 
@@ -542,6 +634,9 @@ impl Render for ProjectPage {
             }
         }
         let pad = if self.narrow { space::LG } else { space::XXL };
+        // Synced on every frame, also while another tab is shown, so that a block that left
+        // meanwhile does not fold away when Work comes back.
+        let machine_items = self.machine_items(cx);
         let key = |part: &str| ElementId::Name(format!("enter-{}-{part}", self.name).into());
         let new_workspace = self.new_workspace.clone();
         // A project of one repository has no chip: its folder is its repository.
@@ -574,11 +669,6 @@ impl Render for ProjectPage {
         let header = {
             let (shell, name) = (self.shell.clone(), self.name.clone());
             let mut header = PageHeader::new("project-header", self.name.clone())
-                .crumb(crate::machines::where_line(
-                    "project-where",
-                    &[&self.name],
-                    cx,
-                ))
                 .path(home_relative(&self.folder))
                 .action(
                     "project-settings",
@@ -693,6 +783,7 @@ impl Render for ProjectPage {
                         )
                         .gap(space::SM)
                     }))
+                    .children(machine_items)
                     .child(self.ended.clone())
                     .test_support()
                     .into_any_element()
@@ -842,7 +933,7 @@ const PREVIEW_AFTER: std::time::Duration = std::time::Duration::from_millis(300)
 /// branch, and a button that creates it, as `flottille workspace create` does (the command line
 /// keeps `--offline`; the window always fetches).
 pub struct NewWorkspace {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     open: bool,
     name: Entity<InputState>,
@@ -875,9 +966,14 @@ pub struct NewWorkspace {
 }
 
 impl NewWorkspace {
+    /// The shell as the form's machine asks it: its project's page is of the same machine.
+    pub fn shell(&self) -> &crate::commands::ShellOf {
+        &self.shell
+    }
+
     /// The form of one project: a name asked in it is answered in it.
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         project: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1059,9 +1155,7 @@ impl NewWorkspace {
                         project: this.project.clone(),
                         ticket: typed,
                     };
-                    this.shell
-                        .update(cx, |shell, _| shell.perform(command))
-                        .ok();
+                    this.shell.perform(command, cx);
                 }
             })
             .ok();
@@ -1155,9 +1249,7 @@ impl NewWorkspace {
             branch: (!branch.is_empty()).then_some(branch),
             bases,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
         cx.notify();
     }
 

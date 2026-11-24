@@ -32,6 +32,9 @@ const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 const ACCEPT_FAILURES: usize = 10;
 /// The longest answer read from an authorization server or a browser.
 const LONGEST: usize = 64 * 1024;
+/// Flottille's client id: the address of its Client ID Metadata Document, published from
+/// `site/oauth/client.json`. A change makes every authorization server see a new client.
+const CLIENT_ID_URL: &str = "https://kristenjestin.github.io/flottille/oauth/client.json";
 
 /// What a sign-in keeps, as the secret of the vault entry `<name>.oauth`.
 #[derive(Clone, Serialize, Deserialize)]
@@ -611,7 +614,8 @@ async fn authorization_metadata(issuer: &str) -> Result<Value, String> {
     ))
 }
 
-/// The client id (and secret) the sign-in uses: the one the user declared, or one registered.
+/// The client id (and secret) the sign-in uses, in the specification's order: the one the user
+/// declared, Flottille's metadata document, or one registered.
 async fn client(
     declaration: &Declaration,
     metadata: &Value,
@@ -619,6 +623,11 @@ async fn client(
 ) -> Result<(String, Option<String>), String> {
     if let Some(id) = &declaration.client_id {
         return Ok((id.clone(), None));
+    }
+    // The authorization server fetches the document itself: nothing is registered, and a public
+    // client has no secret.
+    if metadata["client_id_metadata_document_supported"] == true {
+        return Ok((CLIENT_ID_URL.to_owned(), None));
     }
     let Some(endpoint) = metadata["registration_endpoint"].as_str() else {
         return Err(format!(
@@ -654,6 +663,12 @@ async fn client(
         secrets::add_vault_value(secret);
     }
     Ok((id.to_owned(), secret))
+}
+
+/// The loopback redirect of a sign-in on `port`: what the client sends, and what the published
+/// document's `redirect_uris` must cover.
+fn redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/callback")
 }
 
 // ── The sign-in ──────────────────────────────────────────────────────────────────────────────
@@ -751,7 +766,7 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
-    let redirect = format!("http://127.0.0.1:{port}/callback");
+    let redirect = redirect_uri(port);
     let (client_id, client_secret) = client(declaration, &metadata, &redirect).await?;
     let scope = scope.or(scopes);
     let verifier = random(32)?;
@@ -1107,6 +1122,39 @@ mod tests {
         )
         .await;
         assert_eq!(taken.unwrap(), "a browser");
+    }
+
+    #[test]
+    fn the_published_document_agrees_with_the_client() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../site/oauth/client.json");
+        let text = std::fs::read_to_string(path).expect("site/oauth/client.json is published");
+        let document: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(document["client_id"], CLIENT_ID_URL);
+        assert_eq!(document["client_name"], "Flottille");
+        assert_eq!(document["token_endpoint_auth_method"], "none");
+        assert_eq!(document["application_type"], "native");
+        assert_eq!(document["response_types"], json!(["code"]));
+        assert_eq!(
+            document["grant_types"],
+            json!(["authorization_code", "refresh_token"])
+        );
+        // The port varies (RFC 8252, 7.3): the document names the loopback redirect without one,
+        // and the one the client sends, whatever its port, is that one.
+        let sent = url::Url::parse(&redirect_uri(54321)).unwrap();
+        let covered = document["redirect_uris"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|named| {
+                let named = url::Url::parse(named.as_str().unwrap()).unwrap();
+                named.scheme() == sent.scheme()
+                    && named.host_str() == sent.host_str()
+                    && named.path() == sent.path()
+                    && named.query().is_none()
+                    // A port in the document would hold the server to that one port only.
+                    && named.port().is_none()
+            });
+        assert!(covered, "no redirect_uris covers {sent}: {document}");
     }
 
     #[test]

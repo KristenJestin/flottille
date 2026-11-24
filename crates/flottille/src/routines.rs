@@ -692,6 +692,7 @@ fn session(
             launched_by: None,
             led: false,
             launched: None,
+            remote_parent_depth: None,
         },
     )
     .map_err(|f| f.message)?;

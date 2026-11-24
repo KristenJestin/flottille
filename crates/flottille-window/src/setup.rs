@@ -16,7 +16,7 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 use serde_json::{Value, json};
 
@@ -25,7 +25,6 @@ use crate::commands::{
     boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
 };
 use crate::project::repository_label;
-use crate::shell::Shell;
 
 /// A step of `setup.list`, without the number the daemon adds; `None` for one this window cannot
 /// read.
@@ -290,7 +289,7 @@ struct Form {
 }
 
 pub struct SetupSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     listed: Option<Vec<SetupStep>>,
     /// The rows as drawn: a removed step folds away and a moved one slides before it settles.
@@ -313,7 +312,7 @@ pub struct SetupSection {
 }
 
 impl SetupSection {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,

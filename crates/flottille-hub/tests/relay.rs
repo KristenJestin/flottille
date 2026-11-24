@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use flottille_hub::{Hub, RELAY_BURST, RELAY_RATE, Served, SystemClock, Waits};
 use flottille_link::{
     Action, Ask, Change, Colour, Device, DeviceKey, Hello, Icon, Keyring, KeyringError, MachineKey,
-    PairCode, Paired, Proposed, PublicKey, RelayPort, Role, Session, Tls,
+    Notice, NoticeKind, PairCode, Paired, Proposed, PublicKey, Pushed, RelayPort, Role, Session,
+    Tls,
 };
 use zeroize::Zeroizing;
 
@@ -543,4 +544,128 @@ async fn a_packet_waits_for_nothing_the_hub_does() {
     let got = received_within(&mut server_port, Duration::from_secs(1)).await;
     assert_eq!(got.len(), 5, "the links waited for the hub");
     busy.await.unwrap();
+}
+
+/// A phone paired with the hub of `place` as the app pairs it: a controller whose endpoint is
+/// declared as its machine, saying it is a phone and, with `notices`, that it takes the notices.
+/// Its session.
+async fn phone(place: &Place, key: &DeviceKey, name: &str, notices: bool) -> Session {
+    let endpoint = place.machine(name);
+    let code: PairCode = place.served.with_hub(|hub| {
+        hub.open_pairing(&url(place.served.address()), None)
+            .unwrap()
+            .1
+    });
+    let proposed = Proposed {
+        key: key.public(),
+        name: name.to_owned(),
+        role: Role::Controller,
+        icon: Icon::Phone,
+        colour: Colour::of(&key.public()),
+    };
+    let mut paired = Device::pair(&code, proposed, &endpoint, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    let (pinned, _) = paired.listed().await.unwrap();
+    let session = declare(pinned, paired, key, &endpoint).await;
+    session
+        .ask(Ask::About {
+            device: "phone".to_owned(),
+            system: "android".to_owned(),
+            notices,
+        })
+        .await
+        .unwrap();
+    session
+}
+
+/// The notices `session` is told within `wait`, each with the key it is from.
+async fn notices_within(session: &mut Session, wait: Duration) -> Vec<(PublicKey, Notice)> {
+    let mut told = Vec::new();
+    let until = tokio::time::Instant::now() + wait;
+    while let Ok(Some(pushed)) = tokio::time::timeout_at(until, session.next()).await {
+        if let Pushed::Notice { from, notice } = pushed {
+            told.push((from, notice));
+        }
+    }
+    told
+}
+
+fn request_notice() -> Notice {
+    Notice {
+        kind: NoticeKind::Request,
+        notification: 7,
+        session: Some("3f2a91bc0d4e".parse().unwrap()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runners_notice_goes_to_the_phones_only() {
+    let place = Place::new().await;
+    let mut pixel = phone(&place, &device_key(4), "pixel", true).await;
+    let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
+    let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
+    laptop_session
+        .ask(Ask::About {
+            device: "computer".to_owned(),
+            system: "linux".to_owned(),
+            notices: false,
+        })
+        .await
+        .unwrap();
+
+    place
+        .pc_session
+        .ask(Ask::Notify {
+            notice: request_notice(),
+        })
+        .await
+        .unwrap();
+
+    let told = notices_within(&mut pixel, Duration::from_secs(2)).await;
+    assert_eq!(told, [(place.pc_machine.public(), request_notice())]);
+    let told = notices_within(&mut laptop_session, Duration::from_millis(500)).await;
+    assert!(told.is_empty(), "a computer is told no notice: {told:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_runners_machine_tells_the_phones() {
+    let place = Place::new().await;
+    let pixel = phone(&place, &device_key(4), "pixel", true).await;
+    let mut other = phone(&place, &device_key(5), "other", true).await;
+
+    let refused = pixel
+        .ask(Ask::Notify {
+            notice: request_notice(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        refused.to_string().contains("only a runner's machine"),
+        "{refused}"
+    );
+    let told = notices_within(&mut other, Duration::from_millis(500)).await;
+    assert!(told.is_empty(), "{told:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_that_did_not_ask_for_notices_is_told_none() {
+    let place = Place::new().await;
+    // A phone of before #827: its session would end at a frame it does not know.
+    let mut older = phone(&place, &device_key(4), "older", false).await;
+    let mut newer = phone(&place, &device_key(5), "newer", true).await;
+
+    place
+        .pc_session
+        .ask(Ask::Notify {
+            notice: request_notice(),
+        })
+        .await
+        .unwrap();
+
+    let told = notices_within(&mut newer, Duration::from_secs(2)).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    let told = notices_within(&mut older, Duration::from_millis(500)).await;
+    assert!(told.is_empty(), "{told:?}");
 }

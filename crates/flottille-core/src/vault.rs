@@ -46,6 +46,22 @@ pub fn file_use(project: &str, path: &str) -> String {
     format!("file:{project}/{path}")
 }
 
+/// The vault entry the file `path` of the project `project` is offered as: `<project>-<path>`,
+/// each `/` a `-` and each character an entry's name cannot hold a `_`, 64 at most. Two files may
+/// have one name (`a/b` and `a-b`): the entry is bound to the one it was made of
+/// ([`file_use`]), which alone it is laid as, and the other is refused it.
+pub fn entry_for(project: &str, path: &str) -> String {
+    format!("{project}-{path}")
+        .chars()
+        .map(|c| match c {
+            '/' => '-',
+            c if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') => c,
+            _ => '_',
+        })
+        .take(64)
+        .collect()
+}
+
 /// What the daemon says when the server of a connection asks to be signed in (a `401`), and the
 /// part of what it says when the authorization server refused to refresh its tokens: the window
 /// knows a sign-in is what is missing by them, and offers its button instead of a command.

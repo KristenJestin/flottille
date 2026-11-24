@@ -71,6 +71,11 @@ impl ShownFiles {
             copies: Arc::default(),
         }
     }
+
+    /// The machine of the page shown is reached by `connect` from now on.
+    pub fn reach_with(&mut self, connect: Connect) {
+        self.connect = connect;
+    }
 }
 
 impl Drop for ShownFiles {
