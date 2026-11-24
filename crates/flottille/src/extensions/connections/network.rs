@@ -520,4 +520,27 @@ mod tests {
             .expect("the check is held by a daemon that does not accept");
         assert_eq!(found, vec![0]);
     }
+
+    #[test]
+    fn a_socket_that_cannot_be_reached_counts_as_outside() {
+        // Fails closed on every error, not on "would block" alone: a socket whose path is too
+        // long for a socket address, and one nobody listens on any more, are sockets the check
+        // cannot tell, so none is skipped.
+        let sockets = tempfile::tempdir().unwrap();
+        // A socket in a folder whose path is longer than a socket address holds: it is bound by
+        // a short path through the folder's descriptor, and listed by its long one.
+        let mut deep = sockets.path().to_owned();
+        while deep.as_os_str().len() < 140 {
+            deep.push("a-folder-of-a-long-name");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let folder = std::fs::File::open(&deep).unwrap();
+        let by_descriptor = format!("/proc/self/fd/{}/default.sock", folder.as_raw_fd());
+        let _listener = std::os::unix::net::UnixListener::bind(&by_descriptor).unwrap();
+        assert_eq!(daemons(sockets.path()), vec![0], "a path too long");
+        // Its listener gone: the file stays, and a connect is refused.
+        let gone = tempfile::tempdir().unwrap();
+        drop(listening(&gone.path().join("default.sock")));
+        assert_eq!(daemons(gone.path()), vec![0], "a socket nobody listens on");
+    }
 }
