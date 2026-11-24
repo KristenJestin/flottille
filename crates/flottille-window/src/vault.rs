@@ -457,10 +457,14 @@ impl VaultSection {
         self.request_back = Some(number);
     }
 
-    /// The request whose dialog reads it again, once the entry made for it is saved.
-    pub fn take_request_return(&mut self) -> Option<u64> {
+    /// The request whose dialog reads it again, once the entry made for it is saved, and its
+    /// machine: this vault's (`None`: this one).
+    pub fn take_request_return(&mut self) -> Option<(u64, Option<String>)> {
         match self.form {
-            Form::Closed => self.request_back.take(),
+            Form::Closed => self
+                .request_back
+                .take()
+                .map(|number| (number, self.shell.machine().map(str::to_owned))),
             Form::Editing(_) => None,
         }
     }

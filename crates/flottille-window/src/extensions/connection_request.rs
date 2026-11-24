@@ -505,9 +505,10 @@ impl ConnectionRequest {
         let Some(number) = self.number else {
             return;
         };
+        let machine = self.machine.clone();
         self.shell
             .update(cx, |shell, cx| {
-                shell.add_vault_entry_for_request(number, &entry, host, window, cx)
+                shell.add_vault_entry_for_request(number, machine, &entry, host, window, cx)
             })
             .ok();
         cx.notify();
@@ -516,8 +517,11 @@ impl ConnectionRequest {
     /// "Review": the connection's review opens over the page, first: the request stays held.
     fn review(&mut self, name: String, cx: &mut Context<Self>) {
         self.open = false;
+        let machine = self.machine.clone();
         self.shell
-            .update(cx, |shell, cx| shell.review_connection(&name, cx))
+            .update(cx, |shell, cx| {
+                shell.review_connection_on(machine, &name, cx)
+            })
             .ok();
         cx.notify();
     }

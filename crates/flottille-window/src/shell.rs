@@ -3580,9 +3580,11 @@ impl Shell {
                 section.update(cx, |section, cx| section.written(refused, window, cx));
                 // An entry made for an agent's request to write a connection: its dialog, still
                 // open under the entry's, reads the request again.
-                if let Some(number) = section.update(cx, |section, _| section.take_request_return())
+                // The request is the vault's machine's, whichever machine is in front.
+                if let Some((number, machine)) =
+                    section.update(cx, |section, _| section.take_request_return())
                 {
-                    self.open_connection_request(number, cx);
+                    self.open_connection_request_on(number, machine, cx);
                 }
             }
             Outcome::Update { method, answer } if method.starts_with("whatsnew.") => {
@@ -5370,12 +5372,19 @@ impl Shell {
     pub fn add_vault_entry_for_request(
         &mut self,
         number: u64,
+        machine: Option<String>,
         name: &str,
         host: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let vault = self.vault(cx);
+        // The vault of the request's machine, whichever machine is in front (#1271).
+        let Some(vault) = self
+            .settings_on(&machine)
+            .map(|page| page.read(cx).vault().clone())
+        else {
+            return;
+        };
         vault.update(cx, |vault, cx| {
             vault.add_for_request(number, name, host, window, cx)
         });
@@ -5399,6 +5408,16 @@ impl Shell {
     /// It reads and answers the request on the machine of the pages that open it.
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
         let machine = self.pages_machine();
+        self.open_connection_request_on(number, machine, cx);
+    }
+
+    /// Opens the dialog of the request `number` of `machine` (`None`: this one).
+    fn open_connection_request_on(
+        &mut self,
+        number: u64,
+        machine: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.connection_request
             .update(cx, |dialog, cx| dialog.open(number, machine, cx));
     }
@@ -5410,6 +5429,34 @@ impl Shell {
         section.update(cx, |section, cx| {
             section.open_review_after_request(name, cx)
         });
+    }
+
+    /// "Review" on a request's dialog: the review of the connection `name` of the request's
+    /// `machine`, whichever machine is in front.
+    pub fn review_connection_on(
+        &mut self,
+        machine: Option<String>,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(section) = self
+            .settings_on(&machine)
+            .map(|page| page.read(cx).connections().clone())
+        else {
+            return;
+        };
+        section.update(cx, |section, cx| {
+            section.open_review_after_request(name, cx)
+        });
+    }
+
+    /// The Settings of `machine` (`None`: this one), in front or aside: none of a machine the
+    /// window holds no pages of.
+    fn settings_on(&self, machine: &Option<String>) -> Option<Entity<SettingsPage>> {
+        match *machine == self.pages_machine() {
+            true => Some(self.settings.clone()),
+            false => self.sides.get(machine).map(|pages| pages.settings.clone()),
+        }
     }
 
     /// The dialog of an agent's request to write a connection.
@@ -5430,14 +5477,10 @@ impl Shell {
     ) {
         // The form of the request's machine (`None`: this one), whichever machine is in front:
         // the dialog says which, as it is being updated.
-        let section = match machine == self.front {
-            true => Some(self.connections(cx)),
-            false => self
-                .sides
-                .get(&machine)
-                .map(|pages| pages.settings.read(cx).connections().clone()),
-        };
-        let Some(section) = section else {
+        let Some(section) = self
+            .settings_on(&machine)
+            .map(|page| page.read(cx).connections().clone())
+        else {
             return;
         };
         section.update(cx, |section, cx| {
