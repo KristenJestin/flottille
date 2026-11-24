@@ -444,9 +444,16 @@ impl Adapter {
 
     /// Whether `action` is in one of its lists: one it was checked on.
     pub fn knows(&self, action: &str) -> bool {
-        [self.locked, self.scripts, self.files, self.others]
-            .iter()
-            .any(|list| list.contains(&action))
+        [
+            self.locked,
+            self.scripts,
+            self.files,
+            self.patterns,
+            self.others,
+        ]
+        .iter()
+        .any(|list| list.contains(&action))
+            || self.file_arguments.iter().any(|(name, _)| *name == action)
     }
 
     /// The setting of a new action at the first pin, if the adapter sets one.
