@@ -97,6 +97,8 @@ mod window_sign_in;
 mod window_switcher;
 #[path = "../window_tunnels.rs"]
 mod window_tunnels;
+#[path = "../window_unconfigured.rs"]
+mod window_unconfigured;
 #[path = "../window_update.rs"]
 mod window_update;
 #[path = "../window_vault.rs"]

@@ -75,6 +75,21 @@ pub fn project_offline_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-offline-{name}").into())
 }
 
+/// The words on the row of a project whose settings file is gone.
+pub fn project_unconfigured_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-unconfigured-{name}").into())
+}
+
+/// The menu of the row of a project whose settings file is gone.
+pub fn project_menu_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-menu-{name}").into())
+}
+
+/// Remove, in that menu.
+pub fn project_remove_id(name: &str) -> ElementId {
+    ElementId::Name(format!("project-remove-{name}").into())
+}
+
 /// The element id of a machine's section header (Group by machine).
 pub fn machine_id(machine: &str) -> ElementId {
     ElementId::Name(format!("machine-{machine}").into())
