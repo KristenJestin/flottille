@@ -1139,7 +1139,11 @@ local child's work; nothing moves your branch.*
   request and its machine (a name may hold spaces and dots), each machine counting its own, and says
   a session started when the call itself answers that the user allowed it before it returned. A restart
   there never stops a session that ran: an allowed launch whose workspace is ready and whose session
-  was briefed only has its answer settled again. A refused launch leaves no row under its
+  was briefed only has its answer settled again. One a restart cut after its caller may have heard
+  it approved (its answer settled `started`) tells that caller its stop as the end of the session it
+  started (`child-failed`, or `session-turn-ended` for a led one), which its machine takes whether the
+  approval reached it or not, and records `ended`, or `refused` when the approval had not reached it
+  (#1374). A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
@@ -1835,6 +1839,13 @@ on a real phone, by hand, and reported.
   user's answer to a held launch, the caller is told nothing was done, while the launch there stays
   held until its session ends; the refusal that end sends is a second answer, which the caller's
   machine refuses.
+- **A launch a restart cut after it was told approved is stopped, its caller told it ended** (#1374):
+  when the store could not keep the user's answer, the caller may have heard "approved" while the
+  daemon there, started again, finds the launch's setup cut and stops it. Its stop goes as the end of
+  the session (`child-failed`, `session-turn-ended`), which the caller's machine takes, rather than
+  as a second answer, which it refuses. Keeping the launch and resuming its setup instead could come
+  later; stopping it is the simpler, and the rule that a launch is answered once stays whole. A
+  handed launch's caller still hears only the user's answer.
 - **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
   stored, only one whose workspace is still preparing or whose session was never briefed is refused;
   one that ran is left running and its answer is stored again, since its caller was told approved.

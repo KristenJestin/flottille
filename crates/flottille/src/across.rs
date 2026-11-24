@@ -578,6 +578,28 @@ pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, st
     );
 }
 
+/// Tells the agent of another machine that asked the allowed `launch`, which may have heard it was
+/// approved already, that it never ran: as the end of the session it started, which it takes
+/// whether that answer reached it or not, where it refuses a second answer (#1374). A handed
+/// session's caller hears only the user's answer.
+pub(crate) fn tell_stopped(daemon: &Arc<Daemon>, launch: &Launch, body: &str) {
+    let kind = match launch.kind.as_str() {
+        "child" => "child-failed",
+        "led" => crate::subscriptions::TURN_ENDED,
+        _ => return tell_decided(daemon, launch, body, false),
+    };
+    kept_for_caller(
+        daemon,
+        launch,
+        None,
+        kind,
+        body,
+        approval::URGENT,
+        false,
+        true,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tell_with(
     daemon: &Arc<Daemon>,
@@ -1124,11 +1146,15 @@ fn delivered(
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     } else if deliver.ended {
+        // A session that ended there before the user's answer reached this machine never ran
+        // for it: refused, as that answer would have said (#1374).
         daemon
             .write(|store| {
-                store
-                    .end_launch(&machine, &launch.launch)
-                    .map(|()| ((), None))
+                match undecided(&launch) {
+                    true => store.decide_launch(&machine, &launch.launch, "refused"),
+                    false => store.end_launch(&machine, &launch.launch),
+                }
+                .map(|()| ((), None))
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     }
