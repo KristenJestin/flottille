@@ -2036,7 +2036,7 @@ on a real phone, by hand, and reported.
   `session_losses` `call` of the launch, all such machines at once, its answer awaited 3 seconds at
   most, masked and cut here as any answer of another machine; `unknown (on server)` when it is
   off, does not answer in time or cannot (a machine of before). A `following`, a
-  `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
+  `pilot-ended`, a `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
   caller, never for a handed launch; a `following` only for a led one, its state `on`, `paused`
   or `ended`. The light list does not name a pilot of another machine (its
   `pilot` is a session of the same list): drawing it under its pilot on every window is the
