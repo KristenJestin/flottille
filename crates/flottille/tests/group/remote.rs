@@ -73,6 +73,8 @@ mod tree_parity;
 mod vault;
 #[path = "../vault_ask.rs"]
 mod vault_ask;
+#[path = "../vault_propose.rs"]
+mod vault_propose;
 #[path = "../vault_share.rs"]
 mod vault_share;
 #[path = "../web.rs"]

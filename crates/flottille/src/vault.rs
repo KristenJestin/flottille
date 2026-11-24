@@ -1873,6 +1873,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepting_a_proposal_keeps_the_secret_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "example-dev-login", "secret": "r3alm-l0gin-passw0rd",
+                "url": "https://id.example.invalid/realms/dev/"}),
+        )
+        .await);
+        // An agent's proposal, as the tool writes it.
+        let proposed = daemon
+            .write(|store| {
+                let event = store.append_agent_event(
+                    "agent-1",
+                    "vault.asked",
+                    json!({"agent": "agent-1", "project": "app", "name": "example-dev-login",
+                        "why": "the root shows no form", "every": true,
+                        "url": "https://id.example.invalid/realms/dev/account",
+                        "edit": {"url": {"before": "https://id.example.invalid/realms/dev/",
+                            "after": "https://id.example.invalid/realms/dev/account"}}}),
+                    false,
+                )?;
+                Ok((event.seq, event))
+            })
+            .unwrap();
+        // The keyring refuses every store: an Accept that wrote the secret again would fail.
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            "backend = \"memory\"\nfail_stores = 1000\n",
+        )
+        .unwrap();
+        ok(call(daemon.clone(), "vault.ask_accept", json!({"ask": proposed})).await);
+        assert_eq!(
+            listed(&daemon).await[0].url.as_deref(),
+            Some("https://id.example.invalid/realms/dev/account")
+        );
+        // The same item, the same secret.
+        assert_eq!(
+            secret(&daemon, "any", "worklog:any", "example-dev-login")
+                .await
+                .unwrap(),
+            "r3alm-l0gin-passw0rd"
+        );
+    }
+
+    #[tokio::test]
     async fn editing_an_entry_with_a_secret_replaces_it() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
