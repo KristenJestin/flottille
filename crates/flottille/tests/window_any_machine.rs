@@ -55,9 +55,12 @@ fn repository(user: &User, at: &str) -> std::path::PathBuf {
     folder
 }
 
-/// The project `name` of `user`'s machine, its repository at `home/code/<name>`.
+/// The project `name` of `user`'s machine, its repository at `home/code/<name>`. Its remote is
+/// the name's, so that projects of one name on two machines are one shared project (#1410).
 pub fn project(user: &User, name: &str) {
     let folder = repository(user, &format!("code/{name}"));
+    let remote = format!("https://git.example/acme/{name}.git");
+    user.git(&folder, &["remote", "add", "origin", &remote]);
     user.call("project.add", json!({"folder": folder, "name": name}))
         .unwrap();
 }
