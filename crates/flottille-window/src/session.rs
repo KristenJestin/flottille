@@ -8684,8 +8684,9 @@ impl Render for SessionRail {
                                     .aria_label(place_said.clone())
                                     .w(px(FACT_ICON))
                                     .flex_none()
-                                    .child(icon(place_icon).size(px(FACT_ICON)).text_color(p.faint))
-                                    .test_support(),
+                                    .child(
+                                        icon(place_icon).size(px(FACT_ICON)).text_color(p.faint),
+                                    ),
                                 place_said.clone(),
                                 FACT_ICON,
                                 window,
