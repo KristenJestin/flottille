@@ -2584,6 +2584,150 @@ fn delivered_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::RESULT_LIMIT;
+    use flottille_core::secrets;
+
+    /// A secret only the caller's machine knows, in a secret file of its agent's place.
+    const SECRET: &str = "pc-only-token-7f3a9c";
+
+    fn place_with_secret(dir: &std::path::Path) -> Place {
+        std::fs::write(dir.join(".env"), format!("API_TOKEN={SECRET}\n")).unwrap();
+        Place {
+            project: "app".into(),
+            workspace: None,
+            root: dir.into(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        }
+    }
+
+    fn aim() -> Aim<'static> {
+        Aim {
+            machine: "00",
+            name: "server",
+            agent: "ab12",
+            launch: "",
+            session: "agent ab12".to_owned(),
+            woken: true,
+        }
+    }
+
+    fn text_of(outcome: Outcome) -> String {
+        match outcome {
+            Outcome::Done(text)
+            | Outcome::Held(text)
+            | Outcome::Failed(text)
+            | Outcome::Refused(text)
+            | Outcome::Invalid(text) => text,
+        }
+    }
+
+    /// No piece of the secret, at least as long as the shortest value masked, is in `text`.
+    fn holds_no_piece_of_the_secret(text: &str) {
+        for at in 0..=SECRET.len() - secrets::VAULT_SHORTEST {
+            let piece = &SECRET[..SECRET.len() - at];
+            assert!(!text.contains(piece), "{piece:?} in {text}");
+        }
+    }
+
+    #[test]
+    fn a_secret_of_this_machine_cut_in_half_by_the_other_machine_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // Cut there by `mcp::cut`: the secret's end left out, its start ends what was kept.
+        let text = format!(
+            "{}The token is {}\u{2039}+1200 chars\u{203a}",
+            "x".repeat(1_500),
+            &SECRET[..9]
+        );
+
+        for outcome in ["ok", "refused", "failed", "held"] {
+            let answer = json!({"outcome": outcome, "text": text});
+            let shown = text_of(answered(Ok(answer.clone()), &aim(), &place));
+            assert!(shown.contains("The token is [masked]"), "{outcome}");
+            holds_no_piece_of_the_secret(&shown);
+            let shown = text_of(call_answered(Ok(answer), "server", "ab12", &place));
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_refusal_or_a_cannot_answer_now_of_another_machine_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        let declined = || {
+            Err(LinkError::Declined {
+                peer: "server".into(),
+                reason: format!("the request {SECRET} is not known"),
+            })
+        };
+        let later = || Ok(json!({"later": format!("busy with {SECRET}")}));
+
+        for outcome in [
+            call_answered(declined(), "server", "ab12", &place),
+            call_answered(later(), "server", "ab12", &place),
+            answered(declined(), &aim(), &place),
+            answered(later(), &aim(), &place),
+        ] {
+            let Outcome::Refused(text) = outcome else {
+                panic!("not refused");
+            };
+            assert!(text.contains("server"), "{text}");
+            assert!(text.contains("[masked]"), "{text}");
+            holds_no_piece_of_the_secret(&text);
+        }
+    }
+
+    #[test]
+    fn an_answer_without_an_outcome_is_refused_saying_its_daemon_needs_updating_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+
+        // An older daemon answers with a text alone.
+        let answer = json!({"text": format!("Night lead said {SECRET}.")});
+        let outcome = answered(Ok(answer), &aim(), &place);
+
+        let Outcome::Refused(text) = outcome else {
+            panic!("not refused");
+        };
+        assert!(
+            text.starts_with("refused: the daemon of server needs updating"),
+            "{text}"
+        );
+        assert!(text.contains("Night lead said [masked]."), "{text}");
+        holds_no_piece_of_the_secret(&text);
+    }
+
+    #[test]
+    fn an_answer_of_another_machine_longer_than_the_result_limit_is_cut_here_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        // The secret straddles where this machine cuts: its start would end what is kept.
+        let text = format!(
+            "{}{SECRET}{}",
+            "x".repeat(RESULT_LIMIT - 20),
+            "y".repeat(60_000)
+        );
+        let answer = || json!({"outcome": "ok", "text": text});
+
+        for outcome in [
+            answered(Ok(answer()), &aim(), &place),
+            call_answered(Ok(answer()), "server", "ab12", &place),
+        ] {
+            let Outcome::Done(shown) = outcome else {
+                panic!("not done");
+            };
+            assert!(shown.chars().count() <= RESULT_LIMIT, "{}", shown.len());
+            assert!(
+                shown.ends_with(" chars\u{203a}"),
+                "{}",
+                &shown[shown.len() - 40..]
+            );
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
 
     #[test]
     fn a_text_too_long_for_another_machine_is_cut_saying_where_to_read_it() {
