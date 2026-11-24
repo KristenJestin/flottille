@@ -4592,11 +4592,12 @@ mod tests {
         // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
         // definition's size (2,915 characters, measured on that branch), before it is listed
         // short as the other rarely used families are. The roots list is measured with the
-        // tool `vault` (an entry exists) and `routine` whole: 58,037 characters of the 60,000,
-        // a margin of 1,963 (measured on this branch, round 3, 2026-11-24; child 46,875, leaf
-        // 40,525). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
-        // which made 60,060; `agent_launch` is listed short too, which gave 2,023 back. The limits
-        // are not raised, and no tool is trimmed.
+        // tool `vault` (an entry exists) and `routine` whole: 58,155 characters of the 60,000,
+        // a margin of 1,845 (measured on this branch, round 3, 2026-11-24; child 46,993, leaf
+        // 40,643). Round 2 left 130, and `workspace` took 190 with its `machine` argument (#1371),
+        // which made 60,060; `agent_launch` is listed short too, which gave 2,023 back, and the
+        // `propose` action of `vault` (listed short too) took 118. The limits are not raised, and
+        // no tool is trimmed.
         const ROUTINE: usize = 2_915;
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
