@@ -3016,6 +3016,7 @@ impl Shell {
                                 exchanged_at: now_ms(),
                                 created_at: now_ms(),
                                 pilot: None,
+                                pilot_elsewhere: None,
                             },
                         ));
                         row

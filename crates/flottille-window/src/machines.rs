@@ -280,6 +280,10 @@ pub struct Listed {
     pub created_at: u64,
     /// The session of the agent that leads it, on the same machine.
     pub pilot: Option<String>,
+    /// The agent of another machine that leads it, as its machine says it: that machine's name
+    /// and the agent's id there. Its row goes under that agent's only where the window can tell
+    /// that row is that machine's (`Snapshot::with_lists`).
+    pub pilot_elsewhere: Option<(String, String)>,
 }
 
 impl Listed {
@@ -292,6 +296,10 @@ impl Listed {
             exchanged_at: value["exchanged_at"].as_u64().unwrap_or_default(),
             created_at: value["created_at"].as_u64().unwrap_or_default(),
             pilot: value["pilot"].as_str().map(str::to_owned),
+            pilot_elsewhere: value["pilot_elsewhere"]["machine"]
+                .as_str()
+                .zip(value["pilot_elsewhere"]["agent"].as_str())
+                .map(|(machine, agent)| (machine.to_owned(), agent.to_owned())),
         }
     }
 
@@ -1582,6 +1590,7 @@ mod tests {
             exchanged_at: 1,
             created_at: 1,
             pilot: None,
+            pilot_elsewhere: None,
         }
     }
 
