@@ -2774,3 +2774,199 @@ fn a_dry_run_that_forces_a_ref_the_line_did_not_name_is_refused() {
     let pushed = line(&user, &mcp, "git push --force origin");
     assert_ne!(remote_main(), before, "{}", pushed.text);
 }
+
+/// The user's git settings as a dotfiles manager keeps them: `text` in the file of the version
+/// `name` of a folder it versions (`home/dots/versions/<name>/git-config`).
+fn version(user: &User, name: &str, text: &str) -> PathBuf {
+    let file = user.path(&format!("home/dots/versions/{name}/git-config"));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// What a dotfiles update does to `link`: a new link renamed over it, to `target`, the version it
+/// led to gone.
+fn relink(link: &Path, target: &Path, gone: &Path) {
+    let new = link.with_extension("new");
+    std::os::unix::fs::symlink(target, &new).unwrap();
+    std::fs::rename(&new, link).unwrap();
+    std::fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+}
+
+/// The user's git settings, a link at `link` to the version `a`, and their own `ssh` command in
+/// the version `b` that a dotfiles update then brings: its marker file says it ran.
+fn dotfiles(user: User, link: &Path) -> (User, PathBuf, PathBuf) {
+    let own = user.path("home/.ssh/own-b");
+    marker(&user, &own);
+    let a = version(&user, "a", "[user]\n\tname = Test\n");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&a, link).unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", link.to_str().unwrap());
+    (user, a, own)
+}
+
+/// The dotfiles update: the version `b` made, with the user's own `ssh` command `own` in it, the
+/// link at `link` moved to it and the version `a` removed.
+fn update(user: &User, link: &Path, a: &Path, own: &Path) {
+    let b = version(
+        user,
+        "b",
+        &format!("[core]\n\tsshCommand = {}\n", own.display()),
+    );
+    relink(link, &b, a);
+}
+
+#[test]
+fn a_dotfiles_update_that_relinks_the_git_config_keeps_the_push_lent() {
+    let (user, _agent, _bus) = user();
+    // A link in a folder of its own, which no run can change: the settings of the user's
+    // dotfiles manager, its folder below the home.
+    let link = user.path("home/gitlink/config");
+    let (user, a, own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+    let first = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/before"}),
+    ));
+    assert!(first.contains("exited with code 0"), "{first}");
+
+    update(&user, &link, &a, &own);
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/after"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "after"), "{pushed}");
+    let reached = format!("reached {}", socket(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+    // The settings the push read are the new version's.
+    assert!(user.path("home/.ssh/own-b-ran").exists(), "{pushed}");
+}
+
+#[test]
+fn a_git_config_a_run_can_write_is_still_refused_after_a_change() {
+    let (user, _agent, _bus) = user();
+    // The settings are a file of the user's, in a folder a run can write.
+    let settings = user.path("home/.gitconfig");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "[user]\n\tname = Test\n").unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+    // Replaced, as `git config --global` writes it: a new file renamed over the old.
+    let new = user.path("home/.gitconfig.new");
+    std::fs::write(&new, "[user]\n\tname = Someone\n").unwrap();
+    std::fs::rename(&new, &settings).unwrap();
+
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/replaced"}),
+    );
+
+    assert!(!remote_has(&user, "replaced"), "{}", pushed.text);
+    assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("a file a run can write"),
+        "the rule that failed is not said: {}",
+        pushed.text
+    );
+    assert!(
+        pushed.text.contains("flottille daemon stop"),
+        "the way to restart is not said: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_relinked_git_config_in_the_home_folder_is_refused_saying_why() {
+    let (user, _agent, _bus) = user();
+    // A link in the home folder itself, which a run can replace: no folder of its own to keep.
+    let link = user.path("home/.gitconfig");
+    let (user, a, own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+
+    update(&user, &link, &a, &own);
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/relinked"}),
+    );
+
+    assert!(!remote_has(&user, "relinked"), "{}", pushed.text);
+    assert!(
+        !user.path("home/.ssh/own-b-ran").exists(),
+        "{}",
+        pushed.text
+    );
+    assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("a link a run can replace"),
+        "the rule that failed is not said: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_restart_clears_a_changed_git_config_refusal() {
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/.gitconfig");
+    let (user, a, own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+    update(&user, &link, &a, &own);
+    let refused = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/before-restart"}),
+    );
+    assert!(!remote_has(&user, "before-restart"), "{}", refused.text);
+    assert!(refused.text.contains("lent to no push"), "{}", refused.text);
+    assert!(
+        refused.text.contains("flottille daemon stop"),
+        "the way to restart is not said: {}",
+        refused.text
+    );
+
+    // The restart the refusal names: the daemon stops, the next command starts another.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let mcp = agent(&user);
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/after-restart"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "after-restart"), "{pushed}");
+    assert!(user.path("home/.ssh/own-b-ran").exists(), "{pushed}");
+}
+
+#[test]
+fn a_run_cannot_re_point_the_link_of_the_git_settings() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/gitlink/config");
+    let (user, a, _own) = dotfiles(user, &link);
+    let mcp = session(&user, SSH_REMOTE);
+
+    // A run plants a file of its own and re-points the link at it, as a dotfiles update would.
+    let planted = user.path("work/app/planted-config");
+    std::fs::write(&planted, "[core]\n\tsshCommand = /bin/false\n").unwrap();
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "link = {link:?}\n\
+             try:\n\
+             \x20   os.symlink({planted:?}, link + '.new')\n\
+             \x20   os.rename(link + '.new', link)\n\
+             \x20   print('outcome=replaced')\n\
+             except OSError as e:\n\
+             \x20   print('outcome=' + type(e).__name__)\n",
+            link = link.to_str().unwrap(),
+            planted = planted.to_str().unwrap(),
+        ),
+    );
+
+    assert!(!said.contains("outcome=replaced"), "{said}");
+    assert_eq!(std::fs::read_link(&link).unwrap(), a);
+}
