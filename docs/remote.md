@@ -1140,7 +1140,8 @@ local child's work; nothing moves your branch.*
   was briefed only has its answer settled again. One a restart cut after its caller may have heard
   it approved (its answer settled `started`) tells that caller its stop as the end of the session it
   started (`child-failed`, or `session-turn-ended` for a led one), which its machine takes whether the
-  approval reached it or not, and records `ended` (#1374). A refused launch leaves no row under its
+  approval reached it or not, and records `ended`, or `refused` when the approval had not reached it
+  (#1374). A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):

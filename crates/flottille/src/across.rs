@@ -1145,11 +1145,15 @@ fn delivered(
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     } else if deliver.ended {
+        // A session that ended there before the user's answer reached this machine never ran
+        // for it: refused, as that answer would have said (#1374).
         daemon
             .write(|store| {
-                store
-                    .end_launch(&machine, &launch.launch)
-                    .map(|()| ((), None))
+                match undecided(&launch) {
+                    true => store.decide_launch(&machine, &launch.launch, "refused"),
+                    false => store.end_launch(&machine, &launch.launch),
+                }
+                .map(|()| ((), None))
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     }
