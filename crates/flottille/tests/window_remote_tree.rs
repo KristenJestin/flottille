@@ -657,7 +657,7 @@ fn the_question_cards_of_another_machine_name_it(cx: &mut TestAppContext) {
     let (shell, cx) = window(&pc, cx);
     settle(&shell, cx);
 
-    // Its page is the server's, from its row of the one list; the bell stays this machine's.
+    // Its page is the server's, from its row of the one list.
     let row = flottille_window::model::elsewhere_id("server", &id);
     let page = open_page(&shell, &row, cx);
     until(&shell, cx, "the question's card", |cx| {
@@ -1519,12 +1519,24 @@ fn an_ended_session_of_another_machine_is_in_ended(cx: &mut TestAppContext) {
         label(cx, session_id(&row)).as_deref(),
         Some("Fix the export of the report")
     );
-    let said = label(cx, session_machine_id(&row)).unwrap_or_default();
-    assert!(said.starts_with("server"), "{said}");
+    let scope = shell.read_with(cx, |s, cx| {
+        s.session(&row)
+            .and_then(|found| found.read(cx).scope().map(str::to_owned))
+    });
+    assert_eq!(scope.as_deref(), Some("app on server"));
 
     // Off, it says so once when the group is opened again, and its sessions are not listed.
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     pc.wait_for("server", "offline");
+    until(&shell, cx, "the window sees server off", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| !server.online())
+        })
+    });
     toggle_ended(&shell, cx);
     settle(&shell, cx);
     toggle_ended(&shell, cx);

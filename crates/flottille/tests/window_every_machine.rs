@@ -241,6 +241,11 @@ fn window<'a>(
                 .is_some_and(|server| server.online())
         })
     });
+    // The bell and "Ended" read the server once, by links of their own: before what a test
+    // counts of what its pages ask there.
+    until(&shell, cx, "the bell and Ended read the server", |cx| {
+        shell.read_with(cx, |s, _| s.bell_reached("server"))
+    });
     settle(&shell, cx);
     (shell, cx)
 }

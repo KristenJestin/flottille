@@ -1308,11 +1308,47 @@ impl Snapshot {
         live
     }
 
-    /// The sessions that ended, whatever their project, the most recent end first.
+    /// The sessions that ended, whatever their project and their machine, the most recent end
+    /// first.
     pub fn ended_sessions(&self) -> Vec<&Session> {
-        let mut ended: Vec<&Session> = self.sessions.iter().filter(|s| s.ended).collect();
+        let mut ended: Vec<&Session> = self
+            .sessions
+            .iter()
+            .chain(&self.elsewhere)
+            .filter(|s| s.ended)
+            .collect();
         ended.sort_by(|a, b| b.ended_at.cmp(&a.ended_at).then(a.id.cmp(&b.id)));
         ended
+    }
+
+    /// The sessions that ended in this read of the machine `machine`, as rows of this machine's
+    /// "Ended" (#1280): each one's id is that machine's, and it is under no row, as nothing that
+    /// machine says describes another's sessions.
+    pub fn ended_of(&self, machine: &str, look: Option<String>) -> Vec<Session> {
+        self.sessions
+            .iter()
+            .filter(|session| session.ended)
+            .map(|session| Session {
+                id: elsewhere_id(machine, &session.id),
+                resumable: false,
+                started_by: None,
+                led_by: None,
+                pilot: None,
+                led_from_elsewhere: false,
+                elsewhere: Some(Elsewhere {
+                    machine: machine.to_owned(),
+                    agent: session.id.clone(),
+                    state: "ended".to_owned(),
+                    listed: false,
+                    offline: false,
+                    look: look.clone(),
+                    here: false,
+                }),
+                tag: Some(machine.to_owned()),
+                child_of: None,
+                ..session.clone()
+            })
+            .collect()
     }
 
     pub fn session(&self, id: &str) -> Option<&Session> {
@@ -3241,6 +3277,39 @@ mod tests {
         launched["led"] = json!(true);
         let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
         assert_eq!(snapshot.sessions[0].title, "Rework the login");
+    }
+
+    #[test]
+    fn an_ended_session_of_another_machine_is_keyed_by_it_and_under_no_row() {
+        // What another machine answers names its own sessions: a pilot it claims is no row here.
+        let mut ended = agent("r1", None, "ended", None);
+        ended["launched_by"] = json!("r0");
+        let read = build(
+            json!({"agents": [ended, agent("r2", None, "idle", None)]}),
+            json!({}),
+            &[],
+        );
+        let rows = read.ended_of("server", Some("server in teal".into()));
+        assert_eq!(rows.len(), 1, "the ended root only");
+        assert_eq!(rows[0].id, "r1@server");
+        assert_eq!(rows[0].pilot, None);
+        assert_eq!(rows[0].led_by, None);
+        assert!(!rows[0].resumable);
+        let there = rows[0].elsewhere.as_ref().unwrap();
+        assert_eq!(
+            (there.machine.as_str(), there.agent.as_str()),
+            ("server", "r1")
+        );
+        assert!(!there.listed && !there.here);
+        // Among this machine's ended sessions, in "Ended".
+        let mut here = build(json!({"agents": []}), json!({}), &[]);
+        here.elsewhere.extend(rows);
+        let listed: Vec<&str> = here
+            .ended_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(listed, ["r1@server"]);
     }
 
     #[test]
