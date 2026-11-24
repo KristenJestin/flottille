@@ -355,13 +355,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let waited = agent.waiting_on_answer;
             let failed = (agent.state == AgentState::Failed)
                 .then(|| agent.state_reason.clone().unwrap_or_default());
-            let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
-                Some((agent, event)) => Ok((Some(agent), Some(event))),
-                None => Ok((None, None)),
-            })?;
-            let agent = resumed.ok_or_else(|| {
-                Failure::refused(format!("agent {} was resumed already", agent.id))
-            })?;
+            let agent = resume_write(daemon, &agent)?;
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
@@ -1176,6 +1170,15 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         titled_by: None,
     };
     Ok(agent)
+}
+
+/// Starts the ended `agent` again on its own session: the write of `agent.resume`.
+pub(crate) fn resume_write(daemon: &Arc<Daemon>, agent: &Agent) -> Result<Agent, Failure> {
+    let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
+        Some((agent, event)) => Ok((Some(agent), Some(event))),
+        None => Ok((None, None)),
+    })?;
+    resumed.ok_or_else(|| Failure::refused(format!("agent {} was resumed already", agent.id)))
 }
 
 /// Writes the agent `made` made.

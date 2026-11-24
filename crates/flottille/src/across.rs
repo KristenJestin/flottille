@@ -2725,6 +2725,46 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_session_led_by_a_stand_in_at_the_cap_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS, &["old"]);
+        let ended = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+
+        let refused = crate::agents::resume_write(&daemon, &ended).err().unwrap();
+
+        assert!(
+            refused
+                .message
+                .contains("64 agents calling this machine's sessions already"),
+            "{}",
+            refused.message
+        );
+        // Still ended: nothing was written, and its pilot still counts for nothing.
+        let after = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+        assert!(after.state.is_final());
+    }
+
+    #[test]
+    fn a_resumed_session_led_by_a_stand_in_under_the_cap_counts_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS - 1, &["old"]);
+        let ended = daemon
+            .read(|store| store.agent("old-old"))
+            .unwrap()
+            .unwrap();
+
+        let resumed = crate::agents::resume_write(&daemon, &ended).ok().unwrap();
+
+        assert!(!resumed.state.is_final());
+    }
+
+    #[test]
     fn two_ended_pilots_launching_at_the_cap_never_make_it_pass() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = pilots_of_aa(dir.path(), MOST_STAND_INS - 1, &["x", "y"]);
