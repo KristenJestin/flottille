@@ -900,6 +900,24 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   a session of another machine shows its page, read on that machine's own connection, every request
   signed for it and carried by this machine's daemon, its conversation watched live as a request carried
   is ("Requests from another machine's clients").
+- **Led from another machine.** A session led by an agent of another machine (`agent_launch`
+  `led` with `machine`) shows under its pilot's row, with its machine's mark, on every window, as a
+  led session of the same machine does (#1340). The list's `pilot` is a session of the same list
+  only (an id of another machine there would make every machine of before refuse the whole list,
+  whose fields are closed), so a runner tells its peers these pilots in a message of its own,
+  `pilots`, after its sessions and whenever they change: each led session's id, its pilot's
+  machine by name and the pilot's id there. A machine of before refuses that message alone, as
+  it refuses `projects`, and goes on taking the sessions: there such a session stays a root of its
+  machine, as before; a list that comes without `pilots` draws as before too. A receiver keeps it
+  beside the sessions and takes it only for what it is: a pilot is said of a session of the
+  sender's own list, of a member machine other than the sender, and a window puts the row under
+  it only when the machine named lists that pilot. On the pilot's machine the window takes its own
+  launches for it and none of these claims: a list never puts a row under a session of the machine
+  that reads it. On the session's machine the window reads it from the session itself (its
+  `led_by`, the stand-in of its pilot, and its `launched_from`). A row whose pilot is in another
+  project row, or is no row, stays among its own project's and says who leads it (`led by agent
+  r1 of pc`), as a session led from another project does. A session detached is the user's: under
+  no row.
 - **A machine that is off.** Its sessions stay in the list, greyed, with `server offline since
   22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
   machine's list for this: each live root session's title, project, state and last exchange, never
@@ -936,11 +954,12 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch, and `session_losses`, the machine's own, which reads what a led session's workspace holds that is not saved for its pilot's End confirmation; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine").
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch, `workspace` `remove` of the workspace made for it, and `session_losses`, the machine's own, which reads what a led session's workspace holds that is not saved for its pilot's End confirmation; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine").
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `pilots` | The pilots of another machine of a runner's led sessions: for each session of its `sessions` led by an agent of another machine, that machine's name and the agent's id there; 500 at most, each session once, every id 1 to 64 letters, digits, dashes or underscores. Sent after the sessions and again when they change, kept by the receiver beside them ("One list of every machine"). A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link. |
 | `projects` | A runner's projects, each one's name and the normalised remotes of its repositories (`github.com/acme/app`), 1024 at most, 64 remotes of 256 characters at most each; sent after the sessions and again when they change, kept by the receiver beside them. A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link ("One list of every machine"). |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
@@ -996,9 +1015,11 @@ local child's work; nothing moves your branch.*
   names none), so it takes a child's tools at its next start, and each agent under it one depth
   below its parent, so that a stop ordered by depth ends them before it; a depth is only raised,
   never lowered. Such a child that had ended then was kept to be resumed, as a root: the next
-  sweep forgets its session and its images, as a child's are when it ends (#1368). An agent it starts here is a child of the tree of its parent's machine too: a
-  method the user's door refuses for a child names that tree's root, on that machine, as the one
-  the user writes to, and `agent.mode` is refused on it as on the remote child.
+  sweep forgets its session and its images, as a child's are when it ends (#1368); a child that
+  ends now keeps no `reopens`, so that the sweep never forgets it a second time (#1383). An agent
+  it starts here is a child of the tree of its parent's machine too: a method the user's door
+  refuses for a child names that tree's root, on that machine, as the one the user writes to, and
+  `agent.mode` is refused on it as on the remote child.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
@@ -1275,8 +1296,38 @@ those past what the caller's machine sent or already has; the caller's machine v
 fetches it into `refs/flottille/machines/<machine>/<launch>/<branch>`, and the delivery names that
 ref: two launches from one branch come back to two refs, neither overwriting the other.
 Nothing moves the user's branch: the agent or the user reviews and merges it (a `git merge` run,
-judged as any), as a local child's work. The pilot of a led session on another machine stops it
-and removes its workspace as today, through `call`.
+judged as any), as a local child's work.
+
+**An end brings the rest back** (#1278). A session or child that ends there with commits made
+since its last report sends them back first, the same way: a led session's end
+(`session-turn-ended` saying it ended, whoever ended it), a child's failure (`child-failed`), and a
+child stopped but by its parent's own end (`child-ended`, `Your child … ended: stopped by its
+parent, …`), each naming the ref they came into. A child that reported and ends after it sends
+nothing more: its report did. What ends with its pilot or its parent sends nothing: nobody is left
+to be told.
+
+**The workspace there is removed as one here** (#1278). The answer of the launch names it (`in
+workspace login there, …`), and `agent_stop` says it stays, as on one machine. The `workspace`
+tool's `remove` takes the same optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
+nothing here, to that machine, only for the workspace there of a session or child that very agent
+started (`refused: you started no session or child on server whose workspace is login: …`
+otherwise, nothing sent). That machine checks again that the workspace is the one it made for
+that launch of that caller, sends that launch's commits back first, then plays the removal as one
+of its own agents' removals (`tools.md`, "The workspace"), its caller stood in for in the
+workspace's project there, in its tree's mode: held for its user as a removal of its own agents'
+is, its card saying what would be lost, refused while an agent works in it, and done only with nothing lost or
+by the user's answer to discard. Commits that went back count as kept, as commits another branch
+holds do: what the card names is only what never reached the caller. Nothing of it is done, not
+even the commits sent, before the call is found to be one that machine plays: its device's role
+(`refused: pc may only view: …` for a viewer), its words, its workspace that launch's. The user's
+answer comes back as an `approval` delivery, as any held call of another machine's, and is done for
+that launch's workspace alone, whatever another launch's workspace in another project is named. In
+Full, a removal that would lose anything waits for the user's word there, as a root's removal of
+the workspace it works in does. Only a root removes one, as on one machine (a child is told
+`refused: the agent the user talks to manages the project's workspaces; …`); another machine's
+caller removes no other workspace, of any name, and `machine` goes with no other action
+(`refused: with machine, workspace only removes the workspace there of a session or child you
+started: …`).
 
 **Built (#819), in the window.** While the window shows this machine, each led session and each
 child an agent of this machine started on another (`remote.launches`, `protocol.md`) has a row
@@ -1306,6 +1357,17 @@ its question cards say `· on server` after their time.
   answer (`{"later": why}`): the sender keeps it, in its place, and sends it again on the next
   link, the next message kept, or 30 seconds later. Only a refusal is final: the message is then
   dropped.
+- **A delivery from another machine is masked as its answers are** (a report, a question, a led
+  session's turn, the answer to an approval): on the machine that takes it, before it is stored or
+  shown, of that machine's secrets and of those of the secret files of the place of the agent it
+  is for, the whole first, then both halves of a secret a cut of the other machine split (its
+  `[cut: N more characters; …]` marker, and the end of a body of 64,000 characters, where the
+  answer to a request is cut without a marker). So is every other text of another machine an
+  agent here is shown: a message of its parent or pilot (`agent_send`, `session_send`), the reason
+  of a denial, the brief of a session started for it. A place that cannot be read any more (its
+  workspace or project was removed) holds nothing back: the text is masked of the daemon's, the
+  vault's and what is left of the place's secrets, and delivered; a delivery for an agent that is
+  not here is refused for good. Only a store that cannot be read is refused for now and sent again.
 
 ### Where a question goes when the parent is off
 
@@ -2127,8 +2189,9 @@ on a real phone, by hand, and reported.
   `pilot-ended`, a `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
   caller, never for a handed launch; a `following` only for a led one, its state `on`, `paused`
   or `ended`. The light list does not name a pilot of another machine (its
-  `pilot` is a session of the same list): drawing it under its pilot on every window is the
-  window's part.
+  `pilot` is a session of the same list): the message `pilots` says it beside the list, and
+  every window draws it under its pilot ("One list of every machine", "Led from another
+  machine").
 - **A parent's end stops its tree on other machines** (#1277). An agent that ends for good (it is
   stopped, reports, or ends with its own parent or pilot) stops each child it started on another
   machine there (`its parent stopped`), and one that fails stops them too (`its parent failed`),
@@ -2741,6 +2804,26 @@ on a real phone, by hand, and reported.
   session, so a phone that changes network would silence the next notices. A runner counts the
   presence of the members whose device says it is no `phone`; the app may tell its real inputs
   later (#828).
+
+- **What an end sends back, and the removal of a workspace there** (#1278): a child stopped by
+  its parent is told `child-ended`, with its commits, though it was its parent that stopped it:
+  the delivery is the only way commits travel, and a parent that stops a child with work in it
+  learns where that work went. A removal asked from another machine sends the commits back on its
+  own before it is judged, rather than refusing until an end brought them: the caller asks once.
+  A removal that runs while an end's delivery is sending the same commits waits for it (one send
+  back at a time for a launch, another launch's going on meanwhile); if the removal goes first,
+  that delivery says nothing of commits that all went back.
+- **In Full, a removal from another machine is held only when it would lose something** (#1278):
+  the caller works in no workspace there, so the rule of one machine (the removal of the workspace
+  an agent works in waits for the user's word, even in Full) does not apply as written. The removal
+  sends the commits back first; what it would still lose (work never committed, or commits that
+  could not go back) makes it wait for the user's word there, and a removal that loses nothing is
+  done as Full does any other, unless work came after its card: what it finds then is refused,
+  never discarded unseen.
+- **Two launches of one caller whose workspaces there have one name** (#1278), in two projects
+  there (a project made again for a branch of another root): the caller's daemon sends the removal
+  for the first of its launches holding that name, and the machine there removes that launch's
+  alone. Naming which, by its session, is a follow-up if the case is met.
 
 ## Open questions
 

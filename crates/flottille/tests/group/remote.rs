@@ -51,6 +51,8 @@ mod remote_project_needs;
 mod remote_project_travels;
 #[path = "../remote_relay.rs"]
 mod remote_relay;
+#[path = "../remote_removal.rs"]
+mod remote_removal;
 #[path = "../remote_requests.rs"]
 mod remote_requests;
 #[path = "../remote_session_tools.rs"]

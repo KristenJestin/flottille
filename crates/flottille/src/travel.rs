@@ -287,6 +287,11 @@ async fn send_place<'a>(
 /// repositories, a bundle of the commits of its branch past what was sent and what came back
 /// already, fetched there into `refs/flottille/machines/<this machine>/<launch>/<branch>`.
 pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, String> {
+    // One at a time for a launch: an end's delivery and a removal may send the same commits back
+    // together, and the second must find them gone already, never fail on the first's transfer.
+    // Another launch's waits on none of it.
+    let lock = sending(launch);
+    let _one = lock.lock().await;
     let remote = remote_of(daemon)?;
     let travels = stored(daemon.read(|store| store.travels("in", None, launch)))?;
     let Some(first) = travels.first() else {
@@ -298,8 +303,14 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
     let (Some(name), Some(there)) = (&first.workspace, &first.there) else {
         return Err(format!("launch {launch} has no workspace here"));
     };
-    let workspace = stored(daemon.read(|store| store.workspace(&first.project, name)))?
-        .ok_or_else(|| format!("the workspace {name} of launch {launch} is gone"))?;
+    let Some(workspace) = stored(daemon.read(|store| store.workspace(&first.project, name)))?
+    else {
+        // Gone once all of it went back, by its removal or the user's: nothing to say of it.
+        if travels.iter().all(|travel| travel.returned.is_some()) {
+            return Ok(json!({"repositories": []}));
+        }
+        return Err(format!("the workspace {name} of launch {launch} is gone"));
+    };
     let key: PublicKey = serde_json::from_value(json!(first.machine))
         .map_err(|_| "the machine of the launch is not a key".to_owned())?;
     let machine = remote
@@ -326,6 +337,24 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
         let file = scratch.path().join("bundle");
         let reference = format!("refs/heads/{there}");
         if bundle::returning(&folder, there, &has, &file).await? == bundle::Bundled::NothingNew {
+            // All of it is there already: what a removal and a later end are told of.
+            if travel.returned.is_none() {
+                let tip = git::output(&folder, &["rev-parse", "--verify", &reference], Class::Read)
+                    .await?
+                    .trim()
+                    .to_owned();
+                stored(daemon.write(|store| {
+                    store
+                        .set_travel_returned(
+                            "in",
+                            &travel.machine,
+                            launch,
+                            &travel.repository,
+                            &tip,
+                        )
+                        .map(|()| ((), None))
+                }))?;
+            }
             back.push(json!({"path": travel.repository, "commits": 0}));
             continue;
         }
@@ -365,6 +394,39 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
         }));
     }
     Ok(json!({"machine": machine, "repositories": back}))
+}
+
+/// The lock the sends back of `launch` take, one at a time: kept while a send holds it or waits.
+fn sending(launch: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static SENDING: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    let mut locks = SENDING.lock().unwrap();
+    // A lock no send holds or waits on any more is only this map's.
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    locks.entry(launch.to_owned()).or_default().clone()
+}
+
+/// The commits of `workspace` that went back already to the machine whose launch it was made
+/// for: each repository's path with the last tip sent. Nothing for a workspace no launch made.
+pub(crate) fn returned(
+    daemon: &Daemon,
+    workspace: &flottille_core::workspace::Workspace,
+) -> Vec<(String, String)> {
+    let launches = daemon
+        .read(|store| store.launches("in", None, flottille_core::store::LaunchFilter::All))
+        .unwrap_or_default();
+    launches
+        .iter()
+        .filter(|launch| {
+            launch.workspace_id == Some(workspace.id) && launch.project == workspace.project
+        })
+        .flat_map(|launch| {
+            daemon
+                .read(|store| store.travels("in", Some(&launch.machine), &launch.launch))
+                .unwrap_or_default()
+        })
+        .filter_map(|travel| Some((travel.repository, travel.returned?)))
+        .collect()
 }
 
 /// Sends a `git` message on `link`, and gives its answer; the other side's refusal as it said it.
@@ -1015,6 +1077,16 @@ fn corrupted(file: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_launch_s_send_back_waits_on_no_other_launch_s() {
+        let one = sending("one");
+        let _held = one.lock().await;
+
+        // The same launch's next send waits; another launch's goes.
+        assert!(sending("one").try_lock().is_err());
+        assert!(sending("two").try_lock().is_ok());
+    }
 
     #[test]
     fn a_bundle_is_read_only_by_the_machine_it_is_offered_to() {
