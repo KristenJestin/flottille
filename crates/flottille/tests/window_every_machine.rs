@@ -2125,6 +2125,21 @@ fn a_dialog_opened_while_another_machine_is_reached_sends_to_its_own_machine(
     });
 }
 
+/// What an agent asks to edit the connection `name` that [`a_connection_to_review`] added, its
+/// server announcing one more action from now on: accepted, the connection waits for its review.
+fn an_edit_giving_an_action(machine: &Machine, name: &str) -> Value {
+    let script = machine.user.path(&format!("{name}-script.json"));
+    let mut announced: Value =
+        serde_json::from_str(&std::fs::read_to_string(&script).unwrap()).unwrap();
+    announced["tools"].as_array_mut().unwrap().push(json!({
+        "name": "link", "description": "Links two notes.", "inputSchema": {"type": "object"}}));
+    std::fs::write(&script, announced.to_string()).unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    json!({"action": "edit", "name": name, "command": format!(
+        "{} --script {} --verbose", fake.display(), script.display())})
+}
+
 /// An agent of `machine` asking `connections` with `args`, held for the user: its number there.
 fn a_request_held_on(machine: &Machine, args: Value) -> u64 {
     let opened = machine.user.received_requests("session/new").len();
@@ -2152,6 +2167,10 @@ fn a_connection_request_s_new_entry_and_review_stay_on_its_machine(cx: &mut Test
     // This PC's connection waits for its review; its agents ask to add one whose header carries
     // an entry not made yet, and to set the one awaiting review.
     a_connection_to_review(&pc, "almanac");
+    let edit = a_request_held_on(&pc, an_edit_giving_an_action(&pc, "almanac"));
+    pc.user
+        .call("approval.approve", json!({"number": edit}))
+        .unwrap();
     let bearer = a_request_held_on(
         &pc,
         json!({"action": "add", "name": "notes", "about": "Notes elsewhere.",
