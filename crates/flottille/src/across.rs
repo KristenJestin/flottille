@@ -892,6 +892,16 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
     else {
         return message;
     };
+    let lines = came_lines(name, came);
+    if !lines.is_empty() {
+        deliver.body = format!("{}\n{}", deliver.body, lines.join("\n"));
+    }
+    serde_json::to_value(MachineMessage::Deliver(deliver)).unwrap_or(message)
+}
+
+/// Where the commits that went back from `name` came, `came` as `travel::send_back` answered, a
+/// line each.
+fn came_lines(name: &str, came: Result<Value, String>) -> Vec<String> {
     let mut lines = Vec::new();
     match came {
         Ok(came) => {
@@ -909,10 +919,7 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
             "Its commits could not come back from {name}: {why}."
         )),
     }
-    if !lines.is_empty() {
-        deliver.body = format!("{}\n{}", deliver.body, lines.join("\n"));
-    }
-    serde_json::to_value(MachineMessage::Deliver(deliver)).unwrap_or(message)
+    lines
 }
 
 /// What the inbox says of a message dropped: for whom, what, since when, and why: refused by the
@@ -1158,13 +1165,23 @@ pub(crate) async fn serve_call(
         Err(refused) => Err(refused),
         // A session its agent did not start: served as a call of this machine's agents is.
         Ok(daemon) if call.launch.is_empty() && call.tool != "approval_answer" => {
-            session_call(&daemon, &remote, &from, *call, None).await
+            session_call(&daemon, &remote, &from, *call, None, false).await
+        }
+        // The removal of the workspace of a session or child its agent started here: judged by
+        // the same gate and done by the same tool as one of this machine's agents' removals.
+        Ok(daemon) if call.tool == "workspace" => {
+            match own_launch(&daemon, &remote, &from, &call) {
+                Ok(launch) => removal(&daemon, &remote, &from, *call, &launch).await,
+                Err(refused) => Err(refused),
+            }
         }
         // A read of a session or child its agent started here: served by the same tool as one it
         // did not start, that session or child read as its starter reads it on one machine.
         Ok(daemon) if READS.contains(&call.tool.as_str()) => {
             match own_launch(&daemon, &remote, &from, &call) {
-                Ok(launch) => session_call(&daemon, &remote, &from, *call, launch.agent).await,
+                Ok(launch) => {
+                    session_call(&daemon, &remote, &from, *call, launch.agent, false).await
+                }
                 Err(refused) => Err(refused),
             }
         }
@@ -1286,15 +1303,10 @@ fn called(
                     }
                 };
                 crate::tree::stop_tree(daemon, &agent.id, &reason);
+                let stays = workspace_stays(daemon, &launch);
                 match child {
-                    true => format!(
-                        "Stopped {} and its own children. Its workspace stays.",
-                        named(&agent)
-                    ),
-                    false => format!(
-                        "Ended the session {} with its tree. Its workspace stays.",
-                        named(&agent)
-                    ),
+                    true => format!("Stopped {} and its own children.{stays}", named(&agent)),
+                    false => format!("Ended the session {} with its tree.{stays}", named(&agent)),
                 }
             }
         }
@@ -1302,6 +1314,24 @@ fn called(
         _ => unreachable!("the tools are checked above"),
     };
     Ok(json!({"text": text}))
+}
+
+/// What the caller of `launch` is told of the workspace made for it here, once its session or
+/// child ended: that it stays, and how that caller removes it.
+fn workspace_stays(daemon: &Daemon, launch: &Launch) -> String {
+    let workspace = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok());
+    // Only a root removes a workspace: a caller below one is told it stays.
+    let root = launch.asked["asked"]["depth"].as_u64().unwrap_or(0) == 0;
+    match (workspace, own_name(daemon)) {
+        (Some(workspace), Some(here)) if root => format!(
+            " Its commits come back to you; its workspace {} stays: workspace {{\"action\": \
+             \"remove\", \"name\": \"{}\", \"machine\": \"{here}\"}} removes it.",
+            workspace.name, workspace.name
+        ),
+        _ => " Its workspace stays.".to_owned(),
+    }
 }
 
 /// What the pilot of another machine of the led session `agent` said of its following of it: kept
@@ -2198,6 +2228,7 @@ async fn session_call(
     from: &PublicKey,
     call: Call,
     reads: Option<String>,
+    removes: bool,
 ) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
@@ -2235,6 +2266,7 @@ async fn session_call(
     }
     let tool = stand_in_tools()
         .into_iter()
+        .chain(removes.then_some(REMOVES))
         .find(|tool| *tool == call.tool)
         .ok_or_else(|| format!("{:?} is not a tool another machine calls", call.tool))?;
     let args: Value = serde_json::from_str(&call.arguments)
@@ -2270,16 +2302,210 @@ async fn session_call(
         &members,
     );
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
-    let grant = Arc::new(crate::mcp::Grant {
-        reads,
-        ..stand_in_grant(daemon, &agent)
-    });
+    let grant = match removes {
+        true => removal_grant(daemon, &agent, &args).map_err(Refused::Never)?,
+        false => crate::mcp::Grant {
+            reads,
+            ..stand_in_grant(daemon, &agent)
+        },
+    };
+    let grant = Arc::new(grant);
     let played = crate::mcp::played_for(daemon, &grant, tool, args, &call.id).await;
     eprintln!(
         "flottille daemon: {tool} of agent {} of {name} on {}: {}",
         call.caller, call.agent, played.word
     );
     Ok(json!({"text": played.text, "outcome": played.word, "request": played.request}))
+}
+
+/// The tool a caller of another machine removes the workspace of a session or child it started
+/// here with: `workspace`, its action `remove` only.
+const REMOVES: &str = "workspace";
+
+/// The removal, asked by its caller on the machine of `from`, of the workspace this machine made
+/// for `launch`: the commits of that workspace go back first, so that what the removal is judged
+/// to lose is what never reached the caller; then it is played as one of this machine's agents'
+/// removals is, by the same gate (held for the user as theirs is) and the same tool
+/// (refused while an agent works in it, nothing lost but by the user's answer to discard).
+async fn removal(
+    daemon: &Arc<Daemon>,
+    remote: &Arc<Remote>,
+    from: &PublicKey,
+    call: Call,
+    launch: &Launch,
+) -> Result<Value, Refused> {
+    let name = remote
+        .name_of(from)
+        .ok_or_else(|| "it is no machine of the user's".to_owned())?;
+    let args: Value = serde_json::from_str(&call.arguments)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| "the call's arguments are not a JSON object".to_owned())?;
+    if args["action"] != "remove" {
+        return Err(format!(
+            "workspace {} is not called from another machine: only remove is",
+            args["action"]
+        )
+        .into());
+    }
+    let caller = call.caller.chars().take(64).collect::<String>();
+    let made = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok());
+    let workspace = match (made, args["name"].as_str()) {
+        (Some(made), Some(asked)) if made.name == asked => made,
+        (made, asked) => {
+            return Ok(json!({"outcome": "refused", "text": format!(
+                "refused: {}: agent {caller} of {name} removes here only the workspace made for \
+                 the session or child it started, {}",
+                match asked {
+                    Some(asked) => format!("the workspace {asked} is not the one of agent {}", call.agent),
+                    None => "name the workspace".to_owned(),
+                },
+                match made {
+                    Some(made) => format!("the workspace {}", made.name),
+                    None => "which is gone already".to_owned(),
+                }
+            )}));
+        }
+    };
+    let came = crate::travel::send_back(daemon, &launch.launch).await;
+    let mut answer = session_call(daemon, remote, from, call, None, true).await?;
+    let lines = came_lines(&own_name(daemon).unwrap_or_default(), came);
+    if !lines.is_empty() {
+        let text = answer["text"].as_str().unwrap_or_default();
+        answer["text"] = format!("{}\n{text}", lines.join("\n")).into();
+    }
+    eprintln!(
+        "flottille daemon: the removal of workspace {} of project {}, asked by agent {caller} of \
+         {name}: {}",
+        workspace.name, workspace.project, answer["outcome"]
+    );
+    Ok(answer)
+}
+
+/// The grant a caller of another machine stood in for here as `agent` removes, with `args`, the
+/// workspace this machine made for a session or child it started: in the project that workspace
+/// is in, whatever the caller calls it. Refused for any other workspace, of the same name or not.
+pub(crate) fn removal_grant(
+    daemon: &Daemon,
+    agent: &Agent,
+    args: &Value,
+) -> Result<crate::mcp::Grant, String> {
+    let (caller, machine) = agent
+        .id
+        .split_once('@')
+        .ok_or_else(|| format!("agent {} is of this machine", agent.id))?;
+    if args["action"] != "remove" {
+        return Err("a caller of another machine only removes a workspace here".to_owned());
+    }
+    let asked = args["name"].as_str().unwrap_or_default();
+    let launches = daemon
+        .read(|store| store.launches("in", Some(machine), LaunchFilter::All))
+        .map_err(|error| error.to_string())?;
+    let project = launches
+        .iter()
+        .filter(|launch| {
+            launch.caller == caller
+                && launch.kind != "handed"
+                && launch.state != "refused"
+                && launch.agent.is_some()
+        })
+        .filter_map(|launch| {
+            let id = launch.workspace_id?;
+            let made = daemon.read(|store| store.workspace_by_id(id)).ok()?;
+            (made.name == asked && made.project == launch.project).then_some(made.project)
+        })
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "{} made no workspace {asked} on this machine: it removes only the workspace of a \
+                 session or child it started here",
+                stand_in_name(agent).unwrap_or_else(|| agent.id.clone())
+            )
+        })?;
+    let project = crate::projects::load_project(daemon, &project).map_err(|f| f.message)?;
+    Ok(crate::mcp::Grant {
+        agent: agent.id.clone(),
+        epoch: agent.epoch,
+        tools: stand_in_tools().into_iter().chain([REMOVES]).collect(),
+        place: crate::place::Place::main(&project, project.folder.clone()),
+        launched: false,
+        reads: None,
+    })
+}
+
+/// The launch of a session or child `caller` started on another machine whose workspace there
+/// `args` (`workspace` `remove` with `machine`) removes; the refusal when it names none. `None`
+/// for any other call: one with no `machine` is this machine's.
+pub(crate) fn removal_aimed(
+    daemon: &Daemon,
+    caller: &str,
+    tool: &str,
+    args: &Value,
+) -> Option<Result<Launch, String>> {
+    let machine = args.get("machine")?;
+    if tool != REMOVES || args["action"] != "remove" {
+        return None;
+    }
+    let (Some(machine), Some(name)) = (machine.as_str(), args["name"].as_str()) else {
+        return Some(Err(
+            "refused: name the workspace and the machine it is on: {\"action\": \"remove\", \
+             \"name\": \"<workspace>\", \"machine\": \"<machine>\"}"
+                .to_owned(),
+        ));
+    };
+    let launches = daemon
+        .read(|store| store.launches("out", None, LaunchFilter::All))
+        .unwrap_or_default();
+    Some(
+        launches
+            .into_iter()
+            .find(|launch| {
+                launch.caller == caller
+                    && matches!(launch.kind.as_str(), "led" | "child")
+                    && launch.state != "refused"
+                    && launch.agent.is_some()
+                    && launch.workspace.as_deref() == Some(name)
+                    && machine_name(daemon, launch) == machine
+            })
+            .ok_or_else(|| {
+                format!(
+                    "refused: you started no session or child on {machine} whose workspace is \
+                     {name}: with machine, workspace remove removes only the workspace there of a \
+                     session or child you started; left out, a workspace of this machine"
+                )
+            }),
+    )
+}
+
+/// The removal, asked by the grant's agent, of the workspace on another machine of the session or
+/// child `launch` it started there: sent to that machine, which judges it and does it as one of
+/// its own agents' removals, its answer as that machine gave it.
+pub(crate) async fn remove_there(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: &Value,
+    launch: &Launch,
+) -> Outcome {
+    let mut args = args.clone();
+    if let Some(args) = args.as_object_mut() {
+        args.remove("machine");
+    }
+    let agent = launch.agent.clone().unwrap_or_default();
+    let name = machine_name(daemon, launch);
+    let aim = Aim {
+        machine: &launch.machine,
+        name: &name,
+        agent: &agent,
+        launch: &launch.launch,
+        session: format!(
+            "the workspace {} of agent {agent}",
+            launch.workspace.as_deref().unwrap_or_default()
+        ),
+        woken: false,
+    };
+    forward_to(daemon, grant, REMOVES, &args, aim).await
 }
 
 /// A tool of the tree aimed at `away`, a session of another machine: sent to that machine,

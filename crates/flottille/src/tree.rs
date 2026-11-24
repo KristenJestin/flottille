@@ -2316,6 +2316,8 @@ pub const ITS_PILOT_ENDED: &str = "its pilot ended";
 pub const ITS_PARENT_STOPPED: &str = "its parent stopped";
 /// Why a child ended as its parent failed.
 pub const ITS_PARENT_FAILED: &str = "its parent failed";
+/// Why a child that reported ends: its report told its parent, and brought its commits back.
+const REPORTED: &str = "it reported";
 
 /// The sessions that end with `pilot`'s end, its led sessions and theirs in turn, the oldest
 /// first: what the user is told before they confirm.
@@ -2558,7 +2560,8 @@ pub fn tell_parent(daemon: &Arc<Daemon>, child: &Agent, kind: &str, text: &str, 
                 kind,
                 &format!("Your child {} {text}", named(child)),
                 urgency,
-                kind == "child-report",
+                // Its commits go back with its report or its failure: never left there.
+                matches!(kind, "child-report" | "child-failed"),
                 matches!(kind, "child-report" | "child-failed"),
             );
         }
@@ -2706,7 +2709,24 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
                 None,
             ),
             approval::BETWEEN_TURNS,
-            false,
+            // Commits made since its last report go back with its end.
+            true,
+            true,
+        );
+    }
+    // A child an agent of another machine launched, stopped but by its parent's own end: its
+    // parent is told there, with the commits it made since its last report.
+    if state == AgentState::Ended
+        && crate::across::remote_child(daemon, &agent)
+        && ![ITS_PARENT_STOPPED, ITS_PARENT_FAILED, REPORTED].contains(&reason)
+    {
+        crate::across::tell(
+            daemon,
+            id,
+            "child-ended",
+            &format!("Your child {} ended: {reason}.", named(&agent)),
+            approval::BETWEEN_TURNS,
+            true,
             true,
         );
     }
@@ -2893,7 +2913,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
         return;
     }
     if agent.reported_at.is_some() {
-        stop_tree(daemon, id, "it reported");
+        stop_tree(daemon, id, REPORTED);
         return;
     }
     // A cancelled turn is followed by what cancelled it.
@@ -2991,7 +3011,7 @@ pub fn end_late_reporters(daemon: &Arc<Daemon>) {
     let late = now_ms().saturating_sub(REPORT_GRACE_MS);
     for agent in daemon.read(Store::live_agents).unwrap_or_default() {
         if agent.parent.is_some() && agent.reported_at.is_some_and(|at| at < late) {
-            stop_tree(daemon, &agent.id, "it reported");
+            stop_tree(daemon, &agent.id, REPORTED);
         }
     }
 }

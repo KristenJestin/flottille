@@ -287,6 +287,10 @@ async fn send_place<'a>(
 /// repositories, a bundle of the commits of its branch past what was sent and what came back
 /// already, fetched there into `refs/flottille/machines/<this machine>/<launch>/<branch>`.
 pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, String> {
+    // One at a time: an end's delivery and a removal may send the same commits back together,
+    // and the second must find them gone already, never fail on the first's transfer.
+    static SENDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = SENDING.lock().await;
     let remote = remote_of(daemon)?;
     let travels = stored(daemon.read(|store| store.travels("in", None, launch)))?;
     let Some(first) = travels.first() else {
@@ -365,6 +369,29 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
         }));
     }
     Ok(json!({"machine": machine, "repositories": back}))
+}
+
+/// The commits of `workspace` that went back already to the machine whose launch it was made
+/// for: each repository's path with the last tip sent. Nothing for a workspace no launch made.
+pub(crate) fn returned(
+    daemon: &Daemon,
+    workspace: &flottille_core::workspace::Workspace,
+) -> Vec<(String, String)> {
+    let launches = daemon
+        .read(|store| store.launches("in", None, flottille_core::store::LaunchFilter::All))
+        .unwrap_or_default();
+    launches
+        .iter()
+        .filter(|launch| {
+            launch.workspace_id == Some(workspace.id) && launch.project == workspace.project
+        })
+        .flat_map(|launch| {
+            daemon
+                .read(|store| store.travels("in", Some(&launch.machine), &launch.launch))
+                .unwrap_or_default()
+        })
+        .filter_map(|travel| Some((travel.repository, travel.returned?)))
+        .collect()
 }
 
 /// Sends a `git` message on `link`, and gives its answer; the other side's refusal as it said it.

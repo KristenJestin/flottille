@@ -584,7 +584,8 @@ const SERVED: [Definition; 33] = [
                 "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
                 "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "create: the branch it starts from in place of the base rule, on the remote: one for every repository, or {path: branch}. Its pull requests target it."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
-                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
+                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."},
+                "machine": {"type": "string", "description": "remove: the machine of a session or child you started on another machine, whose workspace there it removes, judged there; left out, this machine."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2480,8 +2481,13 @@ async fn played_whole(
         }
         _ => None,
     };
+    // The removal of the workspace of a session or child this agent started there: done there.
+    let removal_there = match grant.tools.contains(&tool) && !replaced && removed.is_none() {
+        true => crate::across::removal_aimed(daemon, &grant.agent, tool, &args),
+        false => None,
+    };
     // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
-    let shaped = away.is_some() || launch_read.is_some();
+    let shaped = away.is_some() || launch_read.is_some() || removal_there.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2504,6 +2510,13 @@ async fn played_whole(
         crate::across::forward(daemon, grant, tool, &args, away).await
     } else if let Some(launch) = &launch_read {
         crate::across::read_launch(daemon, grant, tool, &args, launch).await
+    } else if let Some(removal) = removal_there {
+        // Judged by the machine the workspace is on, as a removal of its own agents': nothing
+        // of it here.
+        match removal {
+            Ok(launch) => crate::across::remove_there(daemon, grant, &args, &launch).await,
+            Err(why) => Outcome::Refused(why),
+        }
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.

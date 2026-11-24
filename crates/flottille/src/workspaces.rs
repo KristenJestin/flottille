@@ -2672,8 +2672,16 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     let mut unpushed = 0;
     let mut read = None;
     let heads = heads(workspace).await;
+    // A workspace made of another machine's launch: what went back there is that machine's now.
+    let returned = crate::travel::returned(daemon, workspace);
     for worktree in &made {
         let dir = workspace.folder_of(&worktree.path);
+        let mut sent = Vec::new();
+        for (_, tip) in returned.iter().filter(|(path, _)| *path == worktree.path) {
+            if commit_of(&dir, tip).await.ok().flatten().is_some() {
+                sent.push(tip.as_str());
+            }
+        }
         let head = workspace
             .repositories
             .iter()
@@ -2730,6 +2738,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
             &["log", "--format=%h %s", "HEAD", "--not"][..],
             elsewhere,
             &[base],
+            &sent,
         ]
         .concat();
         let commits = git::output(&dir, &log, Class::Read)
@@ -2780,6 +2789,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                 &["log", "--format=%h %s", &recorded, "--not"][..],
                 elsewhere,
                 &[base],
+                &sent,
             ]
             .concat();
             let left = git::output(&dir, &log, Class::Read)

@@ -1185,8 +1185,31 @@ those past what the caller's machine sent or already has; the caller's machine v
 fetches it into `refs/flottille/machines/<machine>/<launch>/<branch>`, and the delivery names that
 ref: two launches from one branch come back to two refs, neither overwriting the other.
 Nothing moves the user's branch: the agent or the user reviews and merges it (a `git merge` run,
-judged as any), as a local child's work. The pilot of a led session on another machine stops it
-and removes its workspace as today, through `call`.
+judged as any), as a local child's work.
+
+**An end brings the rest back** (#1278). A session or child that ends there with commits made
+since its last report sends them back first, the same way: a led session's end
+(`session-turn-ended` saying it ended, whoever ended it), a child's failure (`child-failed`), and a
+child stopped but by its parent's own end (`child-ended`, `Your child … ended: stopped by its
+parent, …`), each naming the ref they came into. A child that reported and ends after it sends
+nothing more: its report did. What ends with its pilot or its parent sends nothing: nobody is left
+to be told.
+
+**The workspace there is removed as one here** (#1278). The answer of `agent_stop` names it and
+how: `Its commits come back to you; its workspace login stays: workspace {"action": "remove",
+"name": "login", "machine": "server"} removes it`. The `workspace` tool's `remove` takes the same
+optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
+nothing here, to that machine, only for the workspace there of a session or child that very agent
+started (`refused: you started no session or child on server whose workspace is login: …`
+otherwise, nothing sent). That machine checks again that the workspace is the one it made for
+that launch of that caller, sends that launch's commits back first, then plays the removal as one
+of its own agents' removals (`tools.md`, "The workspace"), its caller stood in for in the
+workspace's project there, in its tree's mode: held for its user as a removal of its own agents'
+is, its card saying what would be lost, refused while an agent works in it, and done only with nothing lost or
+by the user's answer to discard. Commits that went back count as kept, as commits another branch
+holds do: what the card names is only what never reached the caller. The user's answer comes back
+as an `approval` delivery, as any held call of another machine's. Only a root removes one, as on
+one machine; another machine's caller removes no other workspace, of any name.
 
 **Built (#819), in the window.** While the window shows this machine, each led session and each
 child an agent of this machine started on another (`remote.launches`, `protocol.md`) has a row
@@ -2505,6 +2528,15 @@ on a real phone, by hand, and reported.
   than waiting, even briefly, for an answer that may not come. Asking that machine with a bounded
   wait is a follow-up. A launch on another machine that names no agent yet (held for the user
   there) is not stopped with its parent: a follow-up.
+
+- **What an end sends back, and the removal of a workspace there** (#1278): a child stopped by
+  its parent is told `child-ended`, with its commits, though it was its parent that stopped it:
+  the delivery is the only way commits travel, and a parent that stops a child with work in it
+  learns where that work went. A removal asked from another machine sends the commits back on its
+  own before it is judged, rather than refusing until an end brought them: the caller asks once.
+  A removal that runs while an end's delivery is sending the same commits waits for it (one send
+  back at a time); if the removal goes first, that delivery may say its commits could not come
+  back, the workspace being gone, though the removal's answer named where they came.
 
 ## Open questions
 
