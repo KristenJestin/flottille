@@ -31,7 +31,7 @@ fn window<'a>(
     cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: flottille_window::link::Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
-    cx.simulate_resize(size(px(1280.), px(1600.)));
+    cx.simulate_resize(size(px(1280.), px(2400.)));
     (shell, cx)
 }
 
@@ -68,9 +68,17 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
-/// The elements named by one word that are drawn as a tall sliver: a word wrapped letter by
-/// letter is taller than it is wide, and two lines high at least (a title crushed to its ellipsis
-/// is one line high, and is another defect).
+fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+/// The elements drawn as a tall sliver: a word wrapped letter by letter ("O" over "ff") is
+/// narrower than a few letters, taller than it is wide, and two lines high at least (a title
+/// crushed to its ellipsis is one line high, and is another defect).
 fn slivers(cx: &mut VisualTestContext) -> Vec<String> {
     cx.update(|window, _| {
         window
@@ -78,27 +86,28 @@ fn slivers(cx: &mut VisualTestContext) -> Vec<String> {
             .iter()
             .filter(|element| element.visible())
             .filter_map(|element| {
-                let word = element.label()?;
                 let bounds = element.bounds();
                 let (wide, high) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-                let one_word = word.chars().count() >= 2 && !word.contains(char::is_whitespace);
-                (one_word && wide > 0. && high > 36. && high > 1.5 * wide)
-                    .then(|| format!("{word:?} is {wide} x {high} px"))
+                (wide > 0. && wide < 40. && high > 36. && high > 1.5 * wide)
+                    .then(|| format!("{wide} x {high} px {:?}", element))
             })
             .collect()
     })
 }
 
-/// Draws the screen in the narrow window, then back in a wide one to go on: what it cuts.
+/// Draws the screen in a wide window and in a narrow one: what each cuts. The window is tall,
+/// so that nothing is below its edge.
 fn cut(cx: &mut VisualTestContext, screen: &str, all: &mut Vec<String>) {
-    cx.simulate_resize(size(px(NARROW), px(1600.)));
-    settle(cx);
-    all.extend(
-        slivers(cx)
-            .into_iter()
-            .map(|one| format!("{screen}: {one}")),
-    );
-    cx.simulate_resize(size(px(1280.), px(1600.)));
+    for width in [1280., NARROW] {
+        cx.simulate_resize(size(px(width), px(2400.)));
+        settle(cx);
+        all.extend(
+            slivers(cx)
+                .into_iter()
+                .map(|one| format!("{screen} at {width} px: {one}")),
+        );
+    }
+    cx.simulate_resize(size(px(1280.), px(2400.)));
     settle(cx);
 }
 
@@ -166,6 +175,13 @@ fn no_word_of_the_window_wraps_letter_by_letter_in_a_narrow_window(cx: &mut Test
         let id = format!("settings-tabs-{tab}");
         if present(cx, &id) {
             cx.update(|window, cx| window.click(id, cx));
+            // The checks of General are read once the tab is shown.
+            until(&shell, cx, "the tab is drawn", |cx| {
+                tab != "general"
+                    || (present(cx, "check-flottille-provider-codex-fix")
+                        && label(cx, "check-flottille-sandbox-state")
+                            .is_some_and(|state| state != "Reading…"))
+            });
             settle(cx);
             cut(cx, &format!("Settings, {tab}"), &mut all);
         }
