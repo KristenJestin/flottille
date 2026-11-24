@@ -17,10 +17,12 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
+use flottille_window::state::{AgentState, icon_id};
 use flottille_window::tree::{
-    by_machine_id, group_count_id, group_header_id, new_group_id, project_id, project_slot_id,
-    projects_menu_id, session_id,
+    by_machine_id, group_count_id, group_header_id, group_mark_id, group_menu_id, group_remove_id,
+    group_rename_id, new_group_id, project_id, project_slot_id, projects_menu_id, session_id,
 };
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
@@ -894,6 +896,278 @@ fn the_window_draws_no_frame_at_rest_with_groups_and_a_finished_drag(cx: &mut Te
         frames_at_rest(&shell, cx),
         (0, 0),
         "groups and a drag that ended: (drawn, asked)"
+    );
+}
+
+/// The titles and second lines of the toasts shown.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, Option<String>)> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| {
+                (
+                    toast.title().to_owned(),
+                    toast.second_line().map(str::to_owned),
+                )
+            })
+            .collect()
+    })
+}
+
+/// A group's "⋯" menu opened and `entry` picked, nothing settled after it.
+fn from_menu(
+    group: &str,
+    entry: gpui_kit::ElementId,
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) {
+    cx.update(|window, cx| window.click(group_menu_id(group), cx));
+    settle(shell, cx);
+    cx.update(|window, cx| window.click(entry, cx));
+}
+
+fn is_open(shell: &Entity<Shell>, group: &str, cx: &mut VisualTestContext) -> bool {
+    shell.read_with(cx, |shell, _| {
+        shell
+            .listing()
+            .groups
+            .into_iter()
+            .find(|held| held.id == group)
+            .is_some_and(|held| held.open)
+    })
+}
+
+#[gpui_kit::test]
+fn a_group_is_renamed_from_its_menu(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo"], cx);
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+
+    from_menu(&id, group_rename_id(&id), &shell, cx);
+    settle(&shell, cx);
+    assert!(
+        is_open(&shell, &id, cx),
+        "a press on the menu does not fold the group"
+    );
+    // The New group dialog in a rename mode: its field holds the name the group has.
+    assert!(shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()));
+    let field = shell.read_with(cx, |s, cx| s.group_form().read(cx).field().clone());
+    assert_eq!(
+        field.read_with(cx, |field, _| field.value().to_string()),
+        "Work"
+    );
+    assert_eq!(label(cx, "group-name-save").as_deref(), Some("Save"));
+    cx.update(|window, cx| field.update(cx, |field, cx| field.set_value("Office", window, cx)));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("group-name-save", cx));
+    settle(&shell, cx);
+
+    assert!(!shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()));
+    assert_eq!(group_id(&shell, "Office", cx), id, "the same group");
+    assert_eq!(
+        held(&shell, "Office", cx),
+        names(&["alpha"]),
+        "with its projects"
+    );
+    assert_eq!(
+        label(
+            cx,
+            gpui_kit::ElementId::Name(format!("projects-list-group-{id}-title").into())
+        )
+        .as_deref(),
+        Some("Office"),
+        "its heading says it"
+    );
+    eventually("the daemon kept the name", || {
+        kept(&user)["groups"][0]["name"] == "Office"
+    });
+}
+
+#[gpui_kit::test]
+fn a_group_cannot_take_the_name_of_another_but_may_change_its_own_case(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha"], cx);
+    new_group("Work", &shell, cx);
+    new_group("Home", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    let rename = |name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        if !shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()) {
+            from_menu(&id, group_rename_id(&id), shell, cx);
+            settle(shell, cx);
+        }
+        let field = shell.read_with(cx, |s, cx| s.group_form().read(cx).field().clone());
+        let name = name.to_owned();
+        cx.update(|window, cx| field.update(cx, |field, cx| field.set_value(&name, window, cx)));
+        settle(shell, cx);
+        cx.update(|window, cx| window.click("group-name-save", cx));
+        settle(shell, cx);
+    };
+    rename("home", &shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, cx| s
+            .group_form()
+            .read(cx)
+            .error()
+            .map(str::to_owned)),
+        Some("A group of that name exists.".to_owned())
+    );
+    assert!(shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()));
+    // Its own name, in another case, is its own to take.
+    rename("WORK", &shell, cx);
+    assert!(!shell.read_with(cx, |s, cx| s.group_form().read(cx).is_open()));
+    assert_eq!(group_id(&shell, "WORK", cx), id);
+}
+
+#[gpui_kit::test]
+fn removing_a_group_from_its_menu_keeps_its_projects_and_folds_it_away(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo", "charlie"], cx);
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+    drag(project_id("bravo"), group_header_id(&id), 0., &shell, cx);
+    assert_eq!(held(&shell, "Work", cx), names(&["bravo", "alpha"]));
+    settle(&shell, cx);
+    // The row below the group rides up as the heading folds away with its gap.
+    let top = |cx: &mut VisualTestContext| bounds(cx, project_slot_id("charlie")).origin.y;
+    let before = top(cx);
+
+    from_menu(&id, group_remove_id(&id), &shell, cx);
+    // Half-way: the heading is still there, folding away with its gap.
+    step(&shell, FRAME, cx);
+    step(&shell, PANEL / 2, cx);
+    assert!(present(cx, group_header_id(&id)), "the heading folds away");
+    let half = top(cx);
+    assert!(
+        held(&shell, "Work", cx).is_empty(),
+        "the arrangement has forgotten the group at once"
+    );
+
+    settle(&shell, cx);
+    let end = top(cx);
+    assert!(
+        end < half && half <= before,
+        "the gap folds away over time: {before:?}, {half:?}, {end:?}"
+    );
+    assert!(!present(cx, group_header_id(&id)), "the heading is gone");
+    assert_eq!(loose(&shell, cx), names(&["charlie", "bravo", "alpha"]));
+    assert!(present(cx, project_id("alpha")) && present(cx, project_id("bravo")));
+    assert_eq!(
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "no project was removed"
+    );
+    // The result is a toast, that says nothing was removed.
+    assert_eq!(
+        toasts(&shell, cx),
+        vec![(
+            "Group removed".to_owned(),
+            Some("Its 2 projects are back in the list.".to_owned())
+        )]
+    );
+    eventually("the daemon forgot the group", || {
+        kept(&user)["groups"].as_array().is_some_and(Vec::is_empty)
+    });
+}
+
+#[gpui_kit::test]
+fn a_folded_group_shows_its_strongest_mark(cx: &mut TestAppContext) {
+    let user = user();
+    // The agent works until it is stopped.
+    user.fake_script(json!({"turns": [{"when": "HANG", "do": [{"hang": true}]}]}));
+    project(&user, "app");
+    let answer = user
+        .call("agent.start", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let agent = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let state = |user: &User| {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    eventually("the first turn ends", || state(&user) == "idle");
+    user.call("agent.send", json!({"agent": agent, "message": "HANG"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the rows", |cx| present(cx, project_id("app")));
+    until(&shell, cx, "the agent runs", |cx| {
+        shell.read_with(cx, |shell, cx| {
+            shell.session(&agent).and_then(|row| row.read(cx).mark()) == Some(AgentState::Running)
+        })
+    });
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    // Folded, the project's row is its heading alone: the pointer is not on one of its sessions.
+    cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
+    settle(&shell, cx);
+    drag(project_id("app"), group_header_id(&id), 0., &shell, cx);
+    assert_eq!(held(&shell, "Work", cx), names(&["app"]));
+    settle(&shell, cx);
+    // The row shows it while the group is unfolded.
+    assert!(
+        !present(cx, group_mark_id(&id)),
+        "unfolded, the group says nothing"
+    );
+
+    let in_heading = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let header = window.find(group_header_id(&id)).bounds();
+            window
+                .find_all(icon_id(AgentState::Running))
+                .iter()
+                .any(|icon| header.contains(&icon.bounds().center()))
+        })
+    };
+    cx.update(|window, cx| window.click(group_header_id(&id), cx));
+    settle(&shell, cx);
+    assert!(!is_open(&shell, &id, cx));
+    assert!(present(cx, group_mark_id(&id)), "folded, it shows the mark");
+    assert!(
+        in_heading(cx),
+        "the strongest mark of its projects: running"
+    );
+
+    cx.update(|window, cx| window.click(group_header_id(&id), cx));
+    settle(&shell, cx);
+    assert!(
+        !present(cx, group_mark_id(&id)),
+        "unfolded again, it is gone"
+    );
+
+    cx.update(|window, cx| window.click(group_header_id(&id), cx));
+    settle(&shell, cx);
+    assert!(in_heading(cx));
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    until(&shell, cx, "the mark leaves", |cx| !in_heading(cx));
+    settle(&shell, cx);
+    assert!(
+        !present(cx, group_mark_id(&id)),
+        "nothing is held, nothing is said"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_with_a_group_menu_opened_and_closed(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = with_projects(&user, &["alpha", "bravo"], cx);
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+    cx.update(|window, cx| window.click(group_menu_id(&id), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(group_menu_id(&id), cx));
+    quiet(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "a group's menu closed: (drawn, asked)"
     );
 }
 
