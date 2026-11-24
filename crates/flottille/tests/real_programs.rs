@@ -3,11 +3,17 @@
 //! real one does, so a sandbox change could break `ssh` or `git` while every test stayed green
 //! (#1302: root-owned files seen as owned by nobody, and OpenSSH refusing `/etc/ssh/ssh_config`).
 //! Here the programs an agent runs every day (`ssh`, `git`, `gh`, `cargo`, `node`, `pnpm`,
-//! `curl`) run as a command of an agent working in Full, and as the same script outside the
+//! `curl`) run as a command of an agent working in Auto, and as the same script outside the
 //! sandbox, with the same temporary home; each must end as it ends outside, and none may complain
 //! of an owner or a permission. Only an exit status and a few verdicts are kept: what a real
 //! program prints is never shown nor stored. The hosts are invented (`.invalid` never resolves),
 //! the home is the test's with an empty `~/.ssh`, the agent is the fake ACP agent.
+//!
+//! Never in Full: a run in Full is the user's own, with no namespace and no Landlock
+//! (`docs/tools.md`), so the test would stay green whatever the sandbox did to a program. The
+//! agent works in Auto, its judge allowing every call, and the probe also reports the mount
+//! namespace it runs in: a test whose run shares the daemon's namespace fails, so that it cannot
+//! be put back in Full (or anywhere unconfined) unseen.
 //!
 //! A program not on the `PATH`, or one that does not work outside either, is skipped with its
 //! reason, except where `CI` is set: CI installs them, and a missing one fails there.
@@ -23,7 +29,8 @@ use common::{User, user_namespaces};
 use serde_json::{Value, json};
 
 /// A project `app` over a throwaway repository, its workspace `w`, and the session of a root
-/// agent working there in Full, so that nothing is held: its session, the workspace's folder.
+/// agent working there in Auto, its judge allowing every call so that nothing is held (never
+/// Full: its runs are not sandboxed). Its session, the workspace's folder.
 fn session(user: &User) -> (Mcp, PathBuf) {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -54,7 +61,7 @@ fn session(user: &User) -> (Mcp, PathBuf) {
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap();
     let (url, authorization) = server_of(user, opened);
-    let output = user.run(&["agent", "mode", id, "full"]);
+    let output = user.run(&["agent", "mode", id, "auto"]);
     assert!(
         output.status.success(),
         "{}",
@@ -75,8 +82,8 @@ fn done(answer: Answer) -> String {
 
 /// What each program came to, as a JSON line on stdout: `status` (its exit status, `missing`
 /// when it is not on the `PATH`, `timeout`), `owner` (it complained of an owner or a permission)
-/// and `resolve` (it said the invented host does not resolve). Nothing else of what a program
-/// printed leaves this script. Run in an empty folder, in the sandbox and outside it.
+/// and `resolve` (it said the invented host does not resolve), beside `namespace`, the mount
+/// namespace the script runs in. Nothing else of what a program printed leaves this script. Run in an empty folder, in the sandbox and outside it.
 const PROBE: &str = r#"
 import json, os, shutil, subprocess
 
@@ -111,13 +118,21 @@ for name, line in PROGRAMS:
     out[name] = {"status": done.returncode,
                  "owner": any(word in said for word in COMPLAINTS),
                  "resolve": "nohost.invalid" in said and "resolve" in said}
-print(json.dumps({"probe": out}))
+print(json.dumps({"probe": out, "namespace": os.readlink("/proc/self/ns/mnt")}))
 "#;
 
-/// The verdicts of [`PROBE`] in the sandbox of the agent's run.
+/// The verdicts of [`PROBE`] in the sandbox of the agent's run, once the run is known to be in a
+/// mount namespace of its own: the test's is the daemon's, and a run in Full or with no
+/// namespace is in it.
 fn through_the_sandbox(mcp: &Mcp, place: &Path) -> Value {
     std::fs::write(place.join("probe.py"), PROBE).unwrap();
     let text = done(mcp.call("run", json!({"line": "python3 probe.py", "timeout": 120})));
+    let ours = std::fs::read_link("/proc/self/ns/mnt").unwrap();
+    assert_ne!(
+        probe_namespace(&text),
+        ours.to_str().unwrap(),
+        "the run is not sandboxed: it shares the daemon's mount namespace"
+    );
     probe_line(&text)
 }
 
@@ -155,12 +170,20 @@ fn outside(user: &User) -> Value {
     probe_line(&String::from_utf8(output.stdout).unwrap())
 }
 
-fn probe_line(text: &str) -> Value {
+fn probe_report(text: &str) -> Value {
     let line = text
         .lines()
         .find(|line| line.trim_start().starts_with("{\"probe\""))
         .expect("the probe said nothing");
-    serde_json::from_str::<Value>(line.trim()).unwrap()["probe"].clone()
+    serde_json::from_str::<Value>(line.trim()).unwrap()
+}
+
+fn probe_line(text: &str) -> Value {
+    probe_report(text)["probe"].clone()
+}
+
+fn probe_namespace(text: &str) -> String {
+    probe_report(text)["namespace"].as_str().unwrap().to_owned()
 }
 
 /// Whether the row `name` can be judged: its program is there and works outside the sandbox.
