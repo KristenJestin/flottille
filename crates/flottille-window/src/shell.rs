@@ -1604,51 +1604,37 @@ impl Shell {
             .map(|(name, _)| name.clone())
     }
 
-    /// The machine whose name the projects' row `row` bears (`None`: this one), and that name:
-    /// the row's first machine. A name no row bears is this machine's.
-    fn origin(&self, row: &str) -> (Option<String>, String) {
+    /// The name the machine `machine` (`None`: this one) has the project of the projects' row
+    /// `row` by: the one the sidebar grouped in that row ([`crate::model::Project::name_on`]),
+    /// `None` when the row does not mark that machine. A name no row bears (a project added a
+    /// moment ago, not listed yet) is a project of this machine only.
+    fn name_on(&self, row: &str, machine: Option<&str>) -> Option<String> {
         match self.snapshot.projects.iter().find(|p| p.name == row) {
-            Some(project) => (
-                project
-                    .homes
-                    .first()
-                    .filter(|home| !home.here)
-                    .map(|home| home.machine.clone()),
-                project.title().to_owned(),
-            ),
-            None => (None, row.to_owned()),
+            Some(project) => project.name_on(machine).map(str::to_owned),
+            None => machine.is_none().then(|| row.to_owned()),
         }
     }
 
-    /// The name the machine `to` (`None`: this one) has the project `name` of the machine `from`
-    /// by (`Machines::project_on`, the sidebar's match); `name` when it does not have it.
-    fn name_on(&self, from: Option<&str>, name: &str, to: Option<&str>, cx: &App) -> String {
-        self.machines
-            .read(cx)
-            .machines()
-            .and_then(|read| read.project_on(from, name, to))
-            .unwrap_or_else(|| name.to_owned())
-    }
-
-    /// The projects' row of the project the machine `machine` (`None`: this one) has by `name`:
-    /// the row whose own machine has it by that name; `name` when no row is.
-    fn row_of(&self, machine: Option<&str>, name: &str, cx: &App) -> String {
-        let Some(read) = self.machines.read(cx).machines() else {
-            return name.to_owned();
-        };
-        let here = |home: &crate::model::Home| match machine {
-            None => home.here,
-            Some(machine) => home.machine == machine,
-        };
+    /// The projects' row of the project the machine `machine` (`None`: this one) has by `name`;
+    /// `name` when no row is.
+    fn row_of(&self, machine: Option<&str>, name: &str) -> String {
         self.snapshot
             .projects
             .iter()
-            .filter(|project| project.homes.iter().any(here))
-            .find(|project| {
-                let (from, named) = self.origin(&project.name);
-                read.project_on(from.as_deref(), &named, machine).as_deref() == Some(name)
-            })
+            .find(|project| project.name_on(machine) == Some(name))
             .map_or_else(|| name.to_owned(), |project| project.name.clone())
+    }
+
+    /// The machines the row of the project the machine in front has by `name` marks: those its
+    /// switches offer (#1410).
+    pub fn project_homes(&self, name: &str) -> Vec<crate::model::Home> {
+        let row = self.row_of(self.front.as_deref(), name);
+        self.snapshot
+            .projects
+            .iter()
+            .find(|project| project.name == row)
+            .map(|project| project.homes.clone())
+            .unwrap_or_default()
     }
 
     /// The machine of the page shown, when it is not this one.
@@ -1664,8 +1650,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let there =
-            |project: &str| self.name_on(self.front.as_deref(), project, name.as_deref(), cx);
+        let there = |project: &str| {
+            let row = self.row_of(self.front.as_deref(), project);
+            self.name_on(&row, name.as_deref())
+                .unwrap_or_else(|| project.to_owned())
+        };
         let selection = match &self.selected {
             Some(Selection::Settings) | None => Selection::Settings,
             // A project's page or settings: that machine's of the same project, by its name there.
@@ -1693,12 +1682,14 @@ impl Shell {
             .read(cx)
             .machines()
             .and_then(|read| read.this.clone());
+        let row = self.row_of(self.front.as_deref(), project);
         if let Some(chosen) = name.clone().or(this) {
-            let row = self.row_of(self.front.as_deref(), project, cx);
-            self.starts.insert(row, chosen);
+            self.starts.insert(row.clone(), chosen);
             self.sidebar_changed(cx);
         }
-        let there = self.name_on(self.front.as_deref(), project, name.as_deref(), cx);
+        let there = self
+            .name_on(&row, name.as_deref())
+            .unwrap_or_else(|| project.to_owned());
         self.reach(name, Selection::Project(there), window, cx);
     }
 
@@ -1711,18 +1702,13 @@ impl Shell {
         let Some(machines) = self.machines.read(cx).machines() else {
             return Start::On(None);
         };
-        // The row's project as the machine whose name the row bears has it.
-        let (from, named) = self.origin(project);
-        let here = machines
-            .project_on(from.as_deref(), &named, None)
-            .is_some_and(|name| ours(&name));
+        // Only the machines the row marks, each by the name the row holds of it (#1410).
+        let here = self.name_on(project, None).is_some_and(|name| ours(&name));
         let can = |name: &str| {
             machines
                 .machine(name)
                 .is_some_and(|machine| machine.runs() && machine.online())
-                && machines
-                    .project_on(from.as_deref(), &named, Some(name))
-                    .is_some()
+                && self.name_on(project, Some(name)).is_some()
         };
         if here && self.this_can_run(machines) {
             return Start::On(None);
@@ -4918,7 +4904,7 @@ impl Shell {
         };
         let name = page.read(cx).name().to_owned();
         // Its row in the projects' list, whose name may be another machine's (#1410).
-        let row = self.row_of(self.front.as_deref(), &name, cx);
+        let row = self.row_of(self.front.as_deref(), &name);
         // Another machine's project page reads what was read of it.
         let read = self.pages().clone();
         let Some(project) = read.projects.iter().find(|p| p.name == name) else {
@@ -6515,8 +6501,7 @@ impl Shell {
         // A project's row opens that machine's page of the same project, by its name there.
         let selection = match selection {
             Selection::Project(row) => {
-                let (from, named) = self.origin(&row);
-                Selection::Project(self.name_on(from.as_deref(), &named, machine.as_deref(), cx))
+                Selection::Project(self.name_on(&row, machine.as_deref()).unwrap_or(row))
             }
             selection => selection,
         };

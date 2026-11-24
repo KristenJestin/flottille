@@ -860,12 +860,13 @@ impl Composer {
             return Vec::new();
         };
         let shown = crate::machines::shown_machine(cx);
+        let shell = shell.read(cx);
+        let homes = shell.project_homes(&self.project);
         shell
-            .read(cx)
             .machines()
             .read(cx)
             .machines()
-            .map(|read| crate::machines::project_choices(read, &self.project, shown.as_deref()))
+            .map(|read| crate::machines::project_choices(read, &homes, shown.as_deref()))
             .unwrap_or_default()
     }
 

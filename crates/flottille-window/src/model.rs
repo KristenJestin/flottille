@@ -85,6 +85,22 @@ impl Project {
         }
     }
 
+    /// The name the machine `machine` (`None`: this one) has this row's project by, as the
+    /// sidebar grouped it (#1410); `None` when the row does not mark that machine. A row of a
+    /// machine alone, which marks none, is this machine's project of its name.
+    pub fn name_on(&self, machine: Option<&str>) -> Option<&str> {
+        if self.homes.is_empty() {
+            return machine.is_none().then_some(self.name.as_str());
+        }
+        self.homes
+            .iter()
+            .find(|home| match machine {
+                None => home.here,
+                Some(machine) => home.machine == machine,
+            })
+            .map(|home| home.project.as_str())
+    }
+
     /// Whether every machine that has it is off: its row is greyed.
     pub fn offline(&self) -> bool {
         !self.homes.is_empty() && self.homes.iter().all(|home| home.offline)
@@ -105,6 +121,9 @@ pub struct Home {
     pub state: String,
     /// Not online: its projects are greyed.
     pub offline: bool,
+    /// In a project's row, the name this machine has the row's project by (#1410): the one the
+    /// sidebar grouped, which a switch to this machine opens. Empty in the list of the machines.
+    pub project: String,
 }
 
 impl Home {
@@ -133,6 +152,7 @@ impl Home {
             colour,
             state: seen.map_or_else(|| "online".to_owned(), |machine| machine.state_words()),
             offline: seen.is_some_and(|machine| !machine.online()),
+            project: String::new(),
         }
     }
 }
@@ -176,7 +196,8 @@ fn listed_by<'a>(
 struct Group {
     key: String,
     identity: crate::machines::Identity,
-    machines: Vec<String>,
+    /// The machines that have it, each with the name it has it by.
+    machines: Vec<(String, String)>,
     /// The name this machine's own project goes by in it, when this machine has it.
     own: Option<String>,
     /// The machine that has a project of this name which this is not.
@@ -1753,12 +1774,14 @@ impl Snapshot {
                 // A machine has a project once in a row: two of its own with the same
                 // repositories stay two rows.
                 let found = groups.iter().position(|group| {
-                    !group.machines.iter().any(|m| m == machine)
+                    !group.machines.iter().any(|(m, _)| m == machine)
                         && crate::machines::same((&group.identity, &group.key), (&identity, name))
                 });
                 let index = match found {
                     Some(index) => {
-                        groups[index].machines.push(machine.to_owned());
+                        groups[index]
+                            .machines
+                            .push((machine.to_owned(), name.to_owned()));
                         if machine == own {
                             groups[index].own = Some(name.to_owned());
                         }
@@ -1772,7 +1795,7 @@ impl Snapshot {
                                 false => name.to_owned(),
                             },
                             identity,
-                            machines: vec![machine.to_owned()],
+                            machines: vec![(machine.to_owned(), name.to_owned())],
                             own: (machine == own).then(|| name.to_owned()),
                             apart: taken.then(|| machine.to_owned()),
                         });
@@ -1816,8 +1839,13 @@ impl Snapshot {
                 project.homes = group
                     .machines
                     .iter()
-                    .filter_map(|machine| homes.iter().find(|home| &home.machine == machine))
-                    .cloned()
+                    .filter_map(|(machine, name)| {
+                        let home = homes.iter().find(|home| &home.machine == machine)?;
+                        Some(Home {
+                            project: name.clone(),
+                            ..home.clone()
+                        })
+                    })
                     .collect();
                 project
             })

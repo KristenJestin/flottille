@@ -2924,10 +2924,12 @@ impl ProjectSettingsPage {
             .shell
             .upgrade()
             .and_then(|shell| {
-                let machines = shell.read(cx).machines().read(cx).machines()?;
+                let shell = shell.read(cx);
+                let homes = shell.project_homes(&self.name);
+                let machines = shell.machines().read(cx).machines()?;
                 Some(crate::machines::project_choices(
                     machines,
-                    &self.name,
+                    &homes,
                     shown.as_deref(),
                 ))
             })

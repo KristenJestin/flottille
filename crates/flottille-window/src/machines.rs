@@ -1183,33 +1183,6 @@ impl Machines {
             None => Identity::Unknown,
         }
     }
-
-    /// The name the machine `to` (`None`: this one) has the project `name` of the machine `from`
-    /// by, when it has it ([`same`]): one of `to`'s own projects of the same remotes, else the
-    /// same name (`has_project`) unless both say remotes, which differ: a machine that does not
-    /// say them, or a project with no remote, is matched by its name, as before (#1410). What
-    /// another machine lists matches this machine's project only by the remotes this machine's
-    /// own daemon says of it.
-    pub fn project_on(&self, from: Option<&str>, name: &str, to: Option<&str>) -> Option<String> {
-        let (from, to) = (self.other(from), self.other(to));
-        if from == to {
-            return Some(name.to_owned());
-        }
-        let identity = self.identity(from, name);
-        if let Some(held) = self.held(to).iter().find(|held| {
-            same(
-                (&identity, name),
-                (&self.identity(to, &held.name), &held.name),
-            )
-        }) {
-            return Some(held.name.clone());
-        }
-        let both_remotes = matches!(
-            (&identity, &self.identity(to, name)),
-            (Identity::Remotes(_), Identity::Remotes(_))
-        );
-        (!both_remotes && self.has_project(to, name)).then(|| name.to_owned())
-    }
 }
 
 /// Machines named in a sentence: `server`, `server or laptop`, `server, laptop or pi`.
@@ -1221,17 +1194,22 @@ pub fn said_or(names: &[String]) -> String {
     }
 }
 
-/// The machines that have `project`, the name the machine in front (`front`, `None` for this
-/// one) has it by, as the composer's picker lists them: this one first, each with its state. The
-/// machine in front is always one of them; another has it by its remotes ([`Machines::project_on`]).
-pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {
+/// The machines that have a project, as the composer's picker lists them: this one first, each
+/// with its state. They are the ones its row in the sidebar marks (`homes`, #1410), and the
+/// machine in front (`front`, `None` for this one) is always one of them.
+pub fn project_choices(
+    machines: &Machines,
+    homes: &[crate::model::Home],
+    front: Option<&str>,
+) -> Vec<Choice> {
     choices(machines)
         .into_iter()
         .filter(|choice| {
             choice.name.as_deref() == front
-                || machines
-                    .project_on(front, project, choice.name.as_deref())
-                    .is_some()
+                || homes.iter().any(|home| match choice.name.as_deref() {
+                    None => home.here,
+                    Some(name) => home.machine == name,
+                })
         })
         .collect()
 }
@@ -1786,78 +1764,51 @@ mod tests {
         assert!(!read.has_project(Some("nobody"), "app"));
     }
 
-    fn held(name: &str, remotes: &[&str]) -> super::MachineProject {
-        super::MachineProject {
-            name: name.to_owned(),
-            remotes: remotes.iter().map(|r| (*r).to_owned()).collect(),
+    /// A machine a project's row marks: this one, or another by its name.
+    fn home(machine: &str, here: bool) -> crate::model::Home {
+        crate::model::Home {
+            machine: machine.to_owned(),
+            here,
+            icon: String::new(),
+            colour: String::new(),
+            state: String::new(),
+            offline: false,
+            project: "app".to_owned(),
         }
-    }
-
-    #[test]
-    fn a_project_is_found_on_another_machine_by_its_remotes_whatever_its_name() {
-        let mut read = two(Some(vec!["web-app", "app", "notes"]), "online");
-        read.this = Some("pc".to_owned());
-        read.lists.this_projects = vec![held("app", &["git.example/acme/app"]), held("notes", &[])];
-        read.lists.projects = vec![(
-            "server".to_owned(),
-            vec![
-                held("app", &["git.example/other/app"]),
-                held("web-app", &["git.example/acme/app"]),
-                held("notes", &[]),
-            ],
-        )];
-        assert_eq!(
-            read.project_on(None, "app", Some("server")).as_deref(),
-            Some("web-app"),
-            "the same remotes, not the same name"
-        );
-        assert_eq!(
-            read.project_on(Some("server"), "web-app", None).as_deref(),
-            Some("app")
-        );
-        assert_eq!(read.project_on(Some("server"), "app", None), None);
-        assert_eq!(
-            read.project_on(None, "notes", Some("server")).as_deref(),
-            Some("notes"),
-            "no remote: by the name"
-        );
-        assert_eq!(
-            read.project_on(Some("pc"), "app", None).as_deref(),
-            Some("app"),
-            "this machine by its name is this machine"
-        );
-        // A machine that does not say its projects' remotes is matched by the name.
-        read.lists.projects.clear();
-        assert_eq!(
-            read.project_on(None, "app", Some("server")).as_deref(),
-            Some("app")
-        );
-        assert_eq!(read.project_on(None, "solo", Some("server")), None);
     }
 
     #[test]
     fn the_composer_lists_this_machine_first_then_those_that_have_the_project() {
         let read = two(Some(vec!["app"]), "online");
-        let names = |project: &str| -> Vec<Option<String>> {
-            project_choices(&read, project, None)
+        let names = |homes: &[crate::model::Home]| -> Vec<Option<String>> {
+            project_choices(&read, homes, None)
                 .into_iter()
                 .map(|choice| choice.name)
                 .collect()
         };
-        assert_eq!(names("app"), [None, Some("server".to_owned())]);
-        assert_eq!(names("solo"), [None], "one machine: no picker");
+        let shared = [home("pc", true), home("server", false)];
+        assert_eq!(names(&shared), [None, Some("server".to_owned())]);
+        assert_eq!(names(&shared[..1]), [None], "one machine: no picker");
+        assert_eq!(
+            names(&shared[1..]),
+            [None, Some("server".to_owned())],
+            "the machine in front is always one"
+        );
     }
 
     #[test]
     fn a_machine_that_is_off_is_listed_as_off_and_the_one_in_front_always_is() {
         let read = two(None, "offline");
-        // Its list names `site`: it is listed, off, after this machine, which is in front.
-        let choices = project_choices(&read, "site", None);
+        // Its row marks it: it is listed, off, after this machine, which is in front.
+        let choices = project_choices(&read, &[home("server", false)], None);
         assert_eq!(choices.len(), 2);
         assert!(!choices[1].online);
         assert_eq!(choices[1].state, "offline");
         // In front, it is listed whatever its lists say.
-        assert_eq!(project_choices(&read, "app", Some("server")).len(), 2);
+        assert_eq!(
+            project_choices(&read, &[home("pc", true)], Some("server")).len(),
+            2
+        );
     }
 
     #[test]
