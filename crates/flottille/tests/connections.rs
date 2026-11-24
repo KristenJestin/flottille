@@ -36,7 +36,7 @@ fn eventually(what: &str, mut check: impl FnMut() -> bool) {
 
 /// A user whose agents are the fake agent, each turn of which says `ready`.
 fn user() -> User {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_agent_browser(&fake_mcp());
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     user
 }
@@ -105,14 +105,25 @@ fn logged(user: &User, name: &str, event: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The command of the fake server of the connection `name`: for `browser`, the fake run as
+/// `agent-browser`, the only program a browser connection's command may name.
 fn command_of(user: &User, name: &str) -> Value {
+    let program = match name {
+        "browser" => as_agent_browser(user),
+        _ => fake_mcp(),
+    };
     json!([
-        fake_mcp(),
+        program,
         "--script",
         script_file(user, name),
         "--log",
         log_file(user, name)
     ])
+}
+
+/// The fake server under the name `agent-browser`, in the user's temporary folder.
+fn as_agent_browser(user: &User) -> PathBuf {
+    user.path("bin/agent-browser")
 }
 
 fn turn_on(user: &User) {
@@ -5106,7 +5117,9 @@ fn a_confined_run_finds_no_chrome_profile_in_the_temporary_folder() {
     // agent-browser makes Chrome's profile, which holds its cookies, in the temporary folder: the
     // daemon's own is the runs' too. While the browser runs, a run in Ask and in Auto lists the
     // daemon's temporary folder and finds nothing of it.
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
+        .with_allowing_judge();
     let temporary = user.path("tmp");
     std::fs::create_dir(&temporary).unwrap();
     let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
@@ -6091,6 +6104,17 @@ impl Drop for Closed {
 /// allows everything.
 fn real_user() -> Option<(User, PathBuf)> {
     let user = User::with_fake_agent().with_allowing_judge();
+    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
+    let program = match real_agent_browser(&user.path("home")) {
+        Ok(program) => program,
+        Err(why) => {
+            real_browser_skip(&why, required.as_deref());
+            return None;
+        }
+    };
+    // As an install does: the real program is the `agent-browser` of the daemon's `PATH`, which
+    // the connection's command names (`review` refuses any other file).
+    let user = user.with_agent_browser(&program);
     // The test's runtime folder is under `/tmp`, so the sandbox rules each entry of `/tmp` and
     // not `/tmp` itself (`landlock.rs`): Chrome makes its profile in a temporary folder of the
     // test's own, as it does in `/tmp` on a machine whose runtime folder is `/run/user/<uid>`.
@@ -6100,14 +6124,6 @@ fn real_user() -> Option<(User, PathBuf)> {
         .with_env("TMPDIR", temporary.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_PASTA", "pasta");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
-    let required = std::env::var("FLOTTILLE_REAL_BROWSER").ok();
-    let program = match real_agent_browser(&user.path("home")) {
-        Ok(program) => program,
-        Err(why) => {
-            real_browser_skip(&why, required.as_deref());
-            return None;
-        }
-    };
     if !pasta_on_the_path() {
         return None;
     }
@@ -6130,13 +6146,13 @@ fn pasta_on_the_path() -> bool {
 
 /// The connection `browser` running the real `agent-browser mcp`, headless, its actions as the
 /// adapter sets them.
-fn real_connection(user: &User, program: &Path) {
+fn real_connection(user: &User) {
     turn_on(user);
     let added = user
         .call(
             "connection.add",
             json!({"name": "browser", "about": "A browser for the tests.",
-                "command": [program, "mcp"]}),
+                "command": ["agent-browser", "mcp"]}),
         )
         .unwrap();
     if added["given"] != true {
@@ -6336,7 +6352,7 @@ fn a_run_cannot_reach_the_browsers_devtools() {
         vault: vault_folder(&user),
     };
     let (url, _asked) = local_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
@@ -6360,7 +6376,7 @@ fn the_browser_reaches_a_local_server_of_the_host() {
         vault: vault_folder(&user),
     };
     let (url, asked) = local_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
@@ -6386,7 +6402,7 @@ fn the_login_fills_and_no_run_reads_it() {
         vault: vault_folder(&user),
     };
     let (url, signed_in) = login_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     user.call(
         "vault.set",
@@ -6434,7 +6450,7 @@ fn a_run_finds_none_of_the_real_browsers_profile() {
         vault: vault_folder(&user),
     };
     let (url, _asked) = local_page();
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     let (id, mcp) = session(&user, "app");
     set_mode(&user, &id, "full");
@@ -6469,7 +6485,7 @@ fn the_real_agent_browser_signs_in_with_a_vault_entry() {
     };
     let (url, signed_in) = login_page();
     let before = written_by_others(&user);
-    real_connection(&user, &program);
+    real_connection(&user);
     project(&user, "app");
     user.call(
         "vault.set",
@@ -8315,6 +8331,249 @@ fn login_is_refused_while_the_connections_env_moves_the_browsers_folders() {
     }
 }
 
+/// The server's command of the connection `browser`, its `words` before the fake's own.
+fn browser_command_after(user: &User, words: &[&str]) -> Value {
+    let mut command: Vec<Value> = words.iter().map(|word| json!(word)).collect();
+    command.extend(
+        command_of(user, "browser")
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    command.push(json!("mcp"));
+    json!(command)
+}
+
+/// The server of `browser` never started, its review refused by `named` (never the value), and
+/// login refused with nothing typed.
+fn never_started(user: &User, mcp: &Mcp, named: &str) {
+    assert!(logged(user, "browser", "start").is_empty(), "{named}");
+    let refused_review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap_err();
+    assert!(
+        refused_review.1.contains(named),
+        "{named}: {refused_review:?}"
+    );
+    assert!(
+        !refused_review.1.contains("/tmp/elsewhere"),
+        "{named}: {refused_review:?}"
+    );
+    let failing = connection(user, "browser")["failing"].to_string();
+    assert!(failing.contains(named), "{named}: {failing}");
+    assert!(!failing.contains("/tmp/elsewhere"), "{named}: {failing}");
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(logged(user, "browser", "start").is_empty(), "{named}");
+    assert!(logged(user, "browser", "login").is_empty(), "{named}");
+    assert!(form(user).is_none(), "{named}");
+}
+
+#[test]
+fn a_connection_whose_command_moves_the_browser_s_folders_is_never_started() {
+    for named in ["AGENT_BROWSER_SOCKET_DIR", "HOME"] {
+        let user = user();
+        let assignment = format!("{named}=/tmp/elsewhere");
+        let added = browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"command": browser_command_after(&user, &["env", &assignment])}),
+        );
+        assert_eq!(added["given"], false, "{named}: {added}");
+        let (_, mcp) = signed_up(&user);
+        never_started(&user, &mcp, named);
+    }
+}
+
+#[test]
+fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
+    for named in MOVING.iter().copied().chain(["HOME", "LANG"]) {
+        let user = user();
+        let assignment = format!("{named}=/tmp/elsewhere");
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"command": browser_command_after(&user, &["env", &assignment])}),
+        );
+        let (_, mcp) = signed_up(&user);
+        // A folder variable is said by its name (never `HOME` for `XDG_CONFIG_HOME`); any other
+        // assignment, by the launcher.
+        let said = if named == "LANG" {
+            "starts with env".to_owned()
+        } else {
+            named.to_owned()
+        };
+        never_started(&user, &mcp, &said);
+    }
+    // An edit after the user accepted a clean command is refused as well: its server is not
+    // started again.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    std::fs::remove_file(form_file(&user)).ok();
+    let logins = logged(&user, "browser", "login").len();
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "command": browser_command_after(
+            &user, &["env", "AGENT_BROWSER_SOCKET_DIR=/tmp/elsewhere"])}),
+    )
+    .unwrap();
+    let starts = logged(&user, "browser", "start").len();
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let failing = connection(&user, "browser")["failing"].to_string();
+    assert!(failing.contains("AGENT_BROWSER_SOCKET_DIR"), "{failing}");
+    assert!(!failing.contains("/tmp/elsewhere"), "{failing}");
+    assert_eq!(logged(&user, "browser", "start").len(), starts);
+    assert_eq!(logged(&user, "browser", "login").len(), logins);
+    assert!(form(&user).is_none());
+}
+
+#[test]
+fn a_call_to_a_connection_whose_command_was_refused_says_it_is_flottille_s_refusal() {
+    let user = user();
+    let (_, mcp) = browser_by_another_program(&user);
+    // Accepted with the adapter by a Flottille that did not check the command.
+    stored_version(&user, "browser", "pin", "0.43.0");
+    restart(&user, "browser");
+    let starts = logged(&user, "browser", "start").len();
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    assert!(said.contains("Flottille refused to start it"), "{said}");
+    assert!(said.contains("flottille-fake-mcp"), "{said}");
+    // Its own words, not a server's: no frame of a third party's data around them.
+    assert!(!said.contains("third party"), "{said}");
+    assert_eq!(logged(&user, "browser", "start").len(), starts);
+}
+
+#[test]
+fn a_connection_whose_command_starts_with_a_launcher_is_refused() {
+    for launcher in [
+        &["nohup"][..],
+        &["setsid"],
+        &["nice", "-n", "5"],
+        &["timeout", "600"],
+        &["/usr/bin/env"],
+        &["env", "-i"],
+    ] {
+        let user = user();
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"command": browser_command_after(&user, launcher)}),
+        );
+        let (_, mcp) = signed_up(&user);
+        // Said by the launcher's own name, its folder left out.
+        let program = launcher[0].rsplit('/').next().unwrap();
+        never_started(&user, &mcp, &format!("starts with {program}"));
+    }
+}
+
+/// The connection `browser` on a program that is not agent-browser (the fake under its own name,
+/// as `node -e '…' mcp` would be), pinned while its server said it was agent-browser 0.42.0, a
+/// version no adapter applies to; the script then says 0.43.0, which the adapter applies to.
+fn browser_by_another_program(user: &User) -> (String, Mcp) {
+    let mut command = command_of(user, "browser");
+    command[0] = json!(fake_mcp());
+    command.as_array_mut().unwrap().push(json!("mcp"));
+    let added = browser_declared(
+        user,
+        &agent_browser("0.42.0"),
+        json!({}),
+        &[],
+        json!({"command": command}),
+    );
+    assert_eq!(added["given"], true, "{added}");
+    let mut script = agent_browser("0.43.0");
+    script["login"] = json!({"form": form_file(user)});
+    write_script(user, "browser", &script);
+    signed_up(user)
+}
+
+/// Sets, in the store, the version that the connection's `column` (`pin` or `seen`) says its
+/// server announced, as a Flottille before this check would have stored it.
+fn stored_version(user: &User, name: &str, column: &str, version: &str) {
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let changed = db
+        .execute(
+            &format!(
+                "UPDATE ext_connections_connections \
+                 SET {column} = json_set({column}, '$.server.version', ?1) WHERE name = ?2"
+            ),
+            rusqlite::params![version, name],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+#[test]
+fn an_accepted_connection_whose_command_does_not_name_agent_browser_is_not_started_again() {
+    let user = user();
+    let (_, mcp) = browser_by_another_program(&user);
+    // Accepted with the adapter by a Flottille that did not check the command.
+    stored_version(&user, "browser", "pin", "0.43.0");
+    restart(&user, "browser");
+    let starts = logged(&user, "browser", "start").len();
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    let failing = connection(&user, "browser")["failing"].to_string();
+    assert!(failing.contains("flottille-fake-mcp"), "{failing}");
+    assert_eq!(logged(&user, "browser", "start").len(), starts);
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn an_accept_of_a_connection_whose_command_does_not_name_agent_browser_is_refused() {
+    let user = user();
+    browser_by_another_program(&user);
+    // Reviewed as agent-browser 0.43.0 by a Flottille that did not check the command, and not
+    // accepted yet.
+    stored_version(&user, "browser", "seen", "0.43.0");
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE ext_connections_connections SET pin = NULL, pinned_for = NULL \
+         WHERE name = 'browser'",
+        [],
+    )
+    .unwrap();
+    let refused_accept = user
+        .call("connection.accept", json!({"name": "browser"}))
+        .unwrap_err();
+    assert!(
+        refused_accept.1.contains("flottille-fake-mcp"),
+        "{refused_accept:?}"
+    );
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let pin: Option<String> = db
+        .query_row(
+            "SELECT pin FROM ext_connections_connections WHERE name = 'browser'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pin, None);
+    assert_ne!(connection(&user, "browser")["state"], "ready");
+}
+
 #[test]
 fn a_harmless_variable_of_agent_browsers_is_accepted() {
     let user = user();
@@ -8459,6 +8718,7 @@ fn an_entry_bound_to_plain_http_on_this_machine_signs_in() {
 /// A user whose daemon has a display, as a desktop session gives it.
 fn user_with_display() -> User {
     let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
         .with_env("WAYLAND_DISPLAY", "wayland-test")
         .with_env("DISPLAY", ":7")
         .with_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus");
@@ -8727,7 +8987,9 @@ fn a_browser_kept_to_its_domains_makes_its_own_profile_out_of_the_runs_reach() {
     // With no profile of Flottille's, agent-browser makes one of its own for each browser
     // (`agent-browser-chrome-…`, in the temporary folder): not in the daemon's, which runs list,
     // but in the connection's vault folder.
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
+        .with_allowing_judge();
     let temporary = user.path("tmp");
     std::fs::create_dir(&temporary).unwrap();
     let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
@@ -9573,6 +9835,8 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     if !pasta_on_the_path() {
         return;
     }
+    // As an install does: the real program is the `agent-browser` of the daemon's `PATH`.
+    let user = user.with_agent_browser(&program);
     let _weston = match weston(&user, "wayland-flottille-test") {
         Ok(weston) => weston,
         Err(why) => {
@@ -9585,7 +9849,7 @@ fn a_real_agent_browser_keeps_the_sign_in_from_shown_to_headless() {
     user.call(
         "connection.add",
         json!({"name": "browser", "about": "A real browser for the tests.",
-            "command": [program, "mcp"]}),
+            "command": ["agent-browser", "mcp"]}),
     )
     .unwrap();
     project(&user, "app");

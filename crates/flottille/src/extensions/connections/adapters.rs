@@ -12,7 +12,7 @@
 //! secret, given only to a page of its entry's own site.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -444,6 +444,11 @@ pub fn applying(listing: &Listing) -> Option<&'static Adapter> {
     }
 }
 
+/// The adapter whose program the server's command `words` runs, if one does.
+pub fn named_by(words: &[String]) -> Option<&'static Adapter> {
+    ALL.iter().copied().find(|adapter| adapter.named_by(words))
+}
+
 /// `MAJOR.MINOR.PATCH`, nothing more: a pre-release or a build is no version an adapter was
 /// checked on.
 fn version(text: &str) -> Option<(u64, u64, u64)> {
@@ -699,23 +704,284 @@ impl Adapter {
 }
 
 impl Adapter {
-    /// Why login is refused when the connection's environment names a variable that says where
-    /// agent-browser puts its socket and Chrome its profile, caches and crash dumps
-    /// (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder, and the
-    /// connection's env, which an agent can propose an edit of, is not to move them.
-    pub fn moves_folders(&self, env: &BTreeMap<String, String>) -> Option<String> {
-        let named = FOLDERS_OF_THE_BROWSER
-            .iter()
-            .find(|name| env.contains_key(**name))?;
+    /// Why login is refused when the server's command or the connection's environment names a
+    /// variable that says where agent-browser puts its socket and Chrome its profile, caches and
+    /// crash dumps (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder,
+    /// and the connection, which an agent can propose an edit of, is not to move them.
+    pub fn moves_folders(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        let why = self.folder_set(words).map(command_sets).or_else(|| {
+            let named = FOLDERS_OF_THE_BROWSER
+                .iter()
+                .find(|name| env.contains_key(**name))?;
+            Some(sets_a_folder(
+                "the connection's environment",
+                "the connection's env",
+                named,
+            ))
+        })?;
+        Some(format!("login is refused while {why}"))
+    }
+
+    /// Why login is refused when the server's command does not run the adapter's program itself
+    /// (`not_itself`).
+    pub fn launched(&self, words: &[String], env: &BTreeMap<String, String>) -> Option<String> {
+        let why = self.not_itself(words, search_path(env).as_deref())?;
+        Some(format!("login is refused while {why}"))
+    }
+
+    /// Why the adapter's server is not started, nor its connection accepted, with the server's
+    /// command `words`: it sets one of the browser's folders before the program, or does not run
+    /// the program itself. Flottille sets the folders before it runs the command, so anything
+    /// between the two (`env`, a shell, a sandbox) would put the browser's socket, which drives
+    /// it with no gate, and its profile where a run reaches them.
+    pub fn command_refused(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        self.command_refused_on(words, search_path(env).as_deref())
+    }
+
+    /// `command_refused`, with the folders the server looks a program in (its `PATH`), `None`
+    /// when they are not known.
+    fn command_refused_on(&self, words: &[String], path: Option<&OsStr>) -> Option<String> {
+        let why = self
+            .folder_set(words)
+            .map(command_sets)
+            .or_else(|| self.not_itself(words, path))?;
+        Some(format!("{} {REFUSED_START} {why}", self.server))
+    }
+
+    /// Whether the server's command names the adapter's program: run through a wrapper the gate
+    /// unwraps, or any word of it (`setsid …/agent-browser mcp`, which the gate does not unwrap).
+    /// Its server is checked before its first start, as the adapter's.
+    pub fn named_by(&self, words: &[String]) -> bool {
+        self.reached(words, None).named || words.iter().any(|word| self.names_program(word))
+    }
+
+    /// Whether `word` looks like the adapter's program, by what follows its last `/`: it only
+    /// decides that the command is checked, never that it is accepted (`is_program`).
+    fn names_program(&self, word: &str) -> bool {
+        let program = crate::gate::base(word);
+        program == self.server
+            || program
+                .strip_prefix(self.server)
+                .is_some_and(|rest| rest.starts_with('@'))
+    }
+
+    /// Whether a package runner's `spec` is the adapter's package: its name alone, or with a
+    /// version or a tag (`agent-browser@0.43.0`, `agent-browser@latest`). A scope, a path, a URL,
+    /// an alias (`@npm:`) or a source (`@github:`, `@file:`) would run another program.
+    fn is_package(&self, spec: &str) -> bool {
+        match spec.strip_prefix(self.server) {
+            Some("") => true,
+            Some(rest) => rest.strip_prefix('@').is_some_and(|version| {
+                version.starts_with(|c: char| c.is_ascii_alphanumeric() || "^~<>=*".contains(c))
+                    && version
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || ".-_+^~<>=*|".contains(c))
+            }),
+            None => false,
+        }
+    }
+
+    /// Whether `word`, run directly, is the adapter's program: its name, which the system finds
+    /// on the server's `PATH`, or the path of that very file.
+    fn is_program(&self, word: &str, path: Option<&OsStr>) -> bool {
+        if word == self.server {
+            return true;
+        }
+        let (Some(path), true) = (path, Path::new(word).is_absolute()) else {
+            return false;
+        };
+        let found = std::env::split_paths(path)
+            .map(|folder| folder.join(self.server))
+            .find(|program| program.is_file());
+        match (
+            std::fs::canonicalize(word),
+            found.map(std::fs::canonicalize),
+        ) {
+            (Ok(asked), Some(Ok(found))) => asked == found,
+            _ => false,
+        }
+    }
+
+    /// The folder variable an assignment sets before the program, in any layer of the command.
+    /// The program's own arguments are its own: one that holds `HOME=` as text sets nothing.
+    fn folder_set(&self, words: &[String]) -> Option<&'static str> {
+        let reached = self.reached(words, None);
+        FOLDERS_OF_THE_BROWSER.into_iter().find(|name| {
+            reached.before.iter().any(|word| {
+                crate::gate::assignment(word) && word.split_once('=').map(|(n, _)| n) == Some(*name)
+            })
+        })
+    }
+
+    /// Why the server's command does not run the adapter's program itself: the program, its path
+    /// or a package runner's spec of it (`agent-browser@0.43.0`), run directly or by a chain of
+    /// plain package runners (`RUNNERS`, with no word but `RUNNER_WORDS` before what they run).
+    /// Every other program before it is refused, whatever it is: a list of the wrappers that set
+    /// an environment (`env`, `envdir`, `chpst`, `setpriv`, `flatpak`, a shell, `node -e`…) is
+    /// never whole.
+    fn not_itself(&self, words: &[String], path: Option<&OsStr>) -> Option<String> {
+        let what = self.reached(words, path).refused?;
         Some(format!(
-            "login is refused while the connection's environment sets {named}: Flottille sets it \
-             for the browser, in the connection's vault folder, which no run reaches, so that the \
-             socket that drives the browser with no gate, its profile (cookies, the password \
-             filled) and its crash dumps stay out of their reach; one the connection moved would \
-             put them where a run reads them. The user takes {named} out of the connection's env"
+            "the server's command {what}: a connection to {server} runs {server} itself, by its \
+             name or its path, or through npx, bunx, pnpm or yarn with dlx or exec and no option \
+             but -y, since anything between them could set the environment after Flottille set \
+             where the browser keeps its socket, which drives it with no gate, its profile and \
+             the password filled. The user starts the connection's command with {server}",
+            server = self.server
         ))
     }
 
+    /// How the server's command reaches the adapter's program, layer after layer as the gate
+    /// unwraps them.
+    fn reached(&self, words: &[String], path: Option<&OsStr>) -> Arrival {
+        let layers = crate::gate::layers(words).unwrap_or_else(|_| vec![words.to_vec()]);
+        let mut reached = Arrival::default();
+        for (at, layer) in layers.iter().enumerate() {
+            // Assignments in front of a program, as a shell's line has them.
+            let set = layer
+                .iter()
+                .take_while(|word| crate::gate::assignment(word))
+                .count();
+            reached.before.extend(layer[..set].iter().cloned());
+            if let Some((name, _)) = layer
+                .first()
+                .filter(|_| set > 0)
+                .and_then(|w| w.split_once('='))
+            {
+                reached
+                    .refused
+                    .get_or_insert_with(|| format!("sets {name} before its program"));
+            }
+            let Some(first) = layer.get(set) else {
+                break;
+            };
+            let program = crate::gate::base(first);
+            if self.names_program(first) {
+                reached.named = true;
+                if reached.refused.is_none() {
+                    // What a runner was given is a package, what the command starts with a
+                    // program: neither is accepted by what follows its last `/`.
+                    let itself = match at {
+                        0 => self.is_program(first, path),
+                        _ => self.is_package(first),
+                    };
+                    if !itself {
+                        reached.refused = Some(match at {
+                            0 => format!(
+                                "runs {} by a path that is not the one found on the PATH",
+                                self.server
+                            ),
+                            _ => format!(
+                                "gives its runner another package than {}, or {} by a path, a \
+                                 scope, a URL, an alias or a source",
+                                self.server, self.server
+                            ),
+                        });
+                    }
+                }
+                return reached;
+            }
+            // The words between the program and what it runs: all of them when what it runs is
+            // not its end (a line it splits).
+            let end = match layers.get(at + 1) {
+                Some(next) if layer.ends_with(next) => layer.len() - next.len(),
+                _ => layer.len(),
+            };
+            reached.before.extend(layer[set..end].iter().cloned());
+            if reached.refused.is_some() {
+                continue;
+            }
+            reached.refused = if !RUNNERS.contains(&program) {
+                Some(match at + set {
+                    0 => format!("starts with {program}"),
+                    _ => format!("runs {program}"),
+                })
+            } else {
+                let passed = layer[set + 1..end]
+                    .iter()
+                    .find(|word| !RUNNER_WORDS.contains(&word.as_str()));
+                match passed {
+                    // An option by its name alone: its value may be a path or a secret.
+                    Some(word) => Some(format!(
+                        "passes {} to {program}",
+                        word.split('=').next().unwrap_or(word)
+                    )),
+                    None if end == layer.len() => Some(format!("runs nothing with {program}")),
+                    None => None,
+                }
+            };
+        }
+        reached
+            .refused
+            .get_or_insert_with(|| format!("runs no {}", self.server));
+        reached
+    }
+}
+
+/// What `Adapter::reached` found of a server's command.
+#[derive(Default)]
+struct Arrival {
+    /// The words before the program, of every layer: the wrappers, their options and the
+    /// assignments they make.
+    before: Vec<String>,
+    /// Why it does not run the program itself, by names alone, never a value.
+    refused: Option<String>,
+    /// Whether a layer runs the program.
+    named: bool,
+}
+
+/// The package runners that run a package's program as it was given, with the environment they
+/// were given.
+const RUNNERS: &[&str] = &["npx", "bunx", "pnpm", "yarn"];
+
+/// The words a package runner may have before what it runs: anything else could choose another
+/// package (`-p`), a shell (`-c`) or Node's own options (`--node-options`).
+const RUNNER_WORDS: &[&str] = &["-y", "--yes", "dlx", "exec", "--"];
+
+/// That `sets` (the server's command, the connection's environment) sets the folder variable
+/// `named`, and from where the user takes it out.
+fn sets_a_folder(sets: &str, from: &str, named: &str) -> String {
+    format!(
+        "{sets} sets {named}: Flottille sets it for the browser, in the connection's vault \
+         folder, which no run reaches, so that the socket that drives the browser with no gate, \
+         its profile (cookies, the password filled) and its crash dumps stay out of their reach; \
+         one the connection moved would put them where a run reads them. The user takes {named} \
+         out of {from}"
+    )
+}
+
+/// What follows the server's name in Flottille's own refusal to start it (`command_refused`),
+/// which says it apart from what a server says.
+const REFUSED_START: &str = "is not started while";
+
+/// Whether `why` is Flottille's own refusal to start a server (`command_refused`), not words of
+/// the server's.
+pub fn is_start_refusal(why: &str) -> bool {
+    why.contains(REFUSED_START)
+}
+
+/// Where the server looks for a program: the daemon's `PATH`, which it is given, unless the
+/// connection's environment sets one (its value is a vault entry, which is not read here).
+fn search_path(env: &BTreeMap<String, String>) -> Option<OsString> {
+    match env.contains_key("PATH") {
+        true => None,
+        false => std::env::var_os("PATH"),
+    }
+}
+
+fn command_sets(named: &str) -> String {
+    sets_a_folder("the server's command", "the connection's command", named)
+}
+
+impl Adapter {
     /// Why login is refused when an option agent-browser itself calls unsafe (those its
     /// `--allowed-domains` rejects, `UNSAFE`) is set by the server's command, the connection's
     /// environment, or the environment the daemon started with, which agent-browser inherits:
@@ -1486,7 +1752,8 @@ pub async fn perform(
             .own_config(&program)
             .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
             .or_else(|| AGENT_BROWSER.unsafe_start(&program, &declaration.env))
-            .or_else(|| AGENT_BROWSER.moves_folders(&declaration.env))
+            .or_else(|| AGENT_BROWSER.moves_folders(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.launched(&program, &declaration.env))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
@@ -2079,6 +2346,266 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(line: &[&str]) -> Vec<String> {
+        line.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// Why agent-browser's adapter refuses the command `line`, if it does.
+    fn refused(line: &[&str]) -> Option<String> {
+        refused_on(line, OsStr::new("/nonexistent-folder"))
+    }
+
+    /// The same, with the folders the server looks for a program in (its `PATH`).
+    fn refused_on(line: &[&str], path: &OsStr) -> Option<String> {
+        AGENT_BROWSER.command_refused_on(&words(line), Some(path))
+    }
+
+    /// A folder holding a program named agent-browser, and the `PATH` that is that folder.
+    fn with_program() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("agent-browser");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (folder, program)
+    }
+
+    #[test]
+    fn agent_browser_run_by_a_package_runner_is_accepted() {
+        for line in [
+            &["agent-browser", "mcp"][..],
+            &["npx", "agent-browser", "mcp"],
+            &["npx", "-y", "agent-browser@0.43.0", "mcp"],
+            &["pnpm", "dlx", "agent-browser", "mcp"],
+            &["pnpm", "exec", "agent-browser", "mcp"],
+            &["bunx", "agent-browser", "mcp"],
+            // An argument of agent-browser's own that holds `HOME=` as text.
+            &[
+                "agent-browser",
+                "--user-agent",
+                "HOME=/tmp/elsewhere",
+                "mcp",
+            ],
+        ] {
+            assert_eq!(refused(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_runner_is_given_agent_browser_by_its_name_and_a_version_or_a_tag_alone() {
+        for line in [
+            &["npx", "-y", "agent-browser@0.43.0", "mcp"][..],
+            &["npx", "agent-browser@latest", "mcp"],
+            &["npx", "agent-browser@^0.43", "mcp"],
+            &["pnpm", "dlx", "agent-browser@next", "mcp"],
+            &["bunx", "agent-browser@0.43.0", "mcp"],
+            &["yarn", "dlx", "agent-browser", "mcp"],
+        ] {
+            assert_eq!(refused(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_runner_given_another_package_that_ends_in_agent_browser_is_refused() {
+        for (spec, kind) in [
+            ("@someone/agent-browser", "scope"),
+            ("someone/agent-browser", "GitHub shorthand"),
+            ("https://host.example.test/agent-browser", "tarball URL"),
+            ("agent-browser@npm:another-package", "alias"),
+            ("agent-browser@github:someone/agent-browser", "git source"),
+            ("./agent-browser", "folder"),
+            ("../agent-browser", "folder above"),
+            ("/tmp/x/agent-browser", "absolute folder"),
+            ("agent-browser@file:x.tgz", "file"),
+            ("agent-browser@../x.tgz", "relative file"),
+            (
+                "agent-browser@git+https://host.example.test/x.git",
+                "git URL",
+            ),
+            ("agent-browser@", "no version"),
+            ("agent-browser@1.0.0@2.0.0", "two versions"),
+            ("agent-browser@.", "dot"),
+            ("agent-browser-evil", "another name"),
+        ] {
+            for runner in [
+                &["npx", "-y"][..],
+                &["npx"],
+                &["bunx"],
+                &["pnpm", "dlx"],
+                &["pnpm", "exec"],
+                &["yarn", "dlx"],
+            ] {
+                let mut line = runner.to_vec();
+                line.extend([spec, "mcp"]);
+                let said =
+                    refused(&line).unwrap_or_else(|| panic!("not refused ({kind}): {line:?}"));
+                assert!(said.contains("agent-browser"), "{line:?}: {said}");
+                // Never the spec itself: a URL may carry a token.
+                assert!(!said.contains("host.example.test"), "{line:?}: {said}");
+                assert!(!said.contains("someone"), "{line:?}: {said}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_run_by_a_path_is_accepted_when_it_is_the_one_found_on_the_path() {
+        let (folder, program) = with_program();
+        let path = folder.path().as_os_str();
+        let by_path = program.to_str().unwrap();
+        assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
+        assert_eq!(refused_on(&[by_path, "--headed", "mcp"], path), None);
+        // A link to it, named as it is, and a path with a folder that goes back, are the same
+        // file.
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("agent-browser");
+        std::os::unix::fs::symlink(&program, &link).unwrap();
+        assert_eq!(refused_on(&[link.to_str().unwrap(), "mcp"], path), None);
+        let around = format!("{}/../{}/agent-browser", folder.path().display(), {
+            folder.path().file_name().unwrap().to_str().unwrap()
+        });
+        assert_eq!(refused_on(&[&around, "mcp"], path), None);
+    }
+
+    #[test]
+    fn an_npm_global_install_is_accepted_by_its_name_and_by_its_path_on_the_path() {
+        // `npm install --global` links `<prefix>/bin/agent-browser` (a relative link) to a script
+        // under `<prefix>/lib/node_modules`, and the prefix may itself be a link: both sides of
+        // the comparison resolve to the same file.
+        let real = tempfile::tempdir().unwrap();
+        let script = real.path().join("lib/node_modules/agent-browser/bin");
+        std::fs::create_dir_all(&script).unwrap();
+        std::fs::write(script.join("agent-browser.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::create_dir_all(real.path().join("bin")).unwrap();
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/agent-browser/bin/agent-browser.js",
+            real.path().join("bin/agent-browser"),
+        )
+        .unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let prefix = links.path().join("prefix");
+        std::os::unix::fs::symlink(real.path(), &prefix).unwrap();
+        let bin = prefix.join("bin");
+        let by_path = bin.join("agent-browser");
+        let direct = real.path().join("bin");
+        for path in [bin.as_os_str(), direct.as_os_str()] {
+            assert_eq!(refused_on(&["agent-browser", "mcp"], path), None);
+            assert_eq!(
+                refused_on(&[by_path.to_str().unwrap(), "mcp"], path),
+                None,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_run_by_a_path_that_is_not_the_one_found_on_the_path_is_refused() {
+        let (folder, _) = with_program();
+        let (other, elsewhere) = with_program();
+        let path = folder.path().as_os_str();
+        let said = refused_on(&[elsewhere.to_str().unwrap(), "mcp"], path).expect("refused");
+        assert!(said.contains("agent-browser"), "{said}");
+        assert!(!said.contains(other.path().to_str().unwrap()), "{said}");
+        // A path to nothing, a relative path (it is read from the connection's folder, which
+        // Flottille makes), and a path of the right name on a PATH that has none.
+        for line in [
+            &["/nonexistent-folder/agent-browser", "mcp"][..],
+            &["./agent-browser", "mcp"],
+            &["bin/agent-browser", "mcp"],
+        ] {
+            assert!(refused_on(line, path).is_some(), "{line:?}");
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert!(
+            refused_on(
+                &[elsewhere.to_str().unwrap(), "mcp"],
+                empty.path().as_os_str()
+            )
+            .is_some()
+        );
+        // A path whose program the PATH does not know, however it is spelt.
+        assert!(
+            AGENT_BROWSER
+                .command_refused_on(&words(&[elsewhere.to_str().unwrap(), "mcp"]), None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_package_runner_running_env_that_unsets_the_browser_s_folders_is_refused() {
+        let said = refused(&[
+            "pnpm",
+            "exec",
+            "env",
+            "-u",
+            "AGENT_BROWSER_SOCKET_DIR",
+            "-u",
+            "TMPDIR",
+            "agent-browser",
+            "mcp",
+        ])
+        .expect("refused");
+        assert!(said.contains("env"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_envdir_is_refused() {
+        let said = refused(&["envdir", "/tmp/vars", "agent-browser", "mcp"]).expect("refused");
+        assert!(said.contains("starts with envdir"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_node_e_is_refused() {
+        let said = refused(&["node", "-e", "require('agent-browser')", "mcp"]).expect("refused");
+        assert!(said.contains("starts with node"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_another_wrapper_is_refused() {
+        for (line, named) in [
+            (
+                &["chpst", "-e", "/tmp/vars", "agent-browser", "mcp"][..],
+                "chpst",
+            ),
+            (
+                &["setpriv", "--reset-env", "agent-browser", "mcp"],
+                "setpriv",
+            ),
+            (&["flatpak", "run", "org.example.Browser", "mcp"], "flatpak"),
+            (&["toolbox", "run", "agent-browser", "mcp"], "toolbox"),
+            (&["sh", "-c", "agent-browser mcp"], "sh"),
+            (&["npx", "-c", "agent-browser mcp"], "-c"),
+            (
+                &[
+                    "npx",
+                    "env",
+                    "AGENT_BROWSER_SOCKET_DIR=/tmp/x",
+                    "agent-browser",
+                    "mcp",
+                ],
+                "AGENT_BROWSER_SOCKET_DIR",
+            ),
+            (
+                &[
+                    "npx",
+                    "--node-options=--require=/tmp/x.js",
+                    "agent-browser",
+                    "mcp",
+                ],
+                "--node-options",
+            ),
+            (
+                &["npx", "-p", "another-package", "agent-browser", "mcp"],
+                "-p",
+            ),
+            (&["HOME=/tmp/x", "agent-browser", "mcp"], "HOME"),
+            (&["pnpm", "exec", "node", "agent-browser", "mcp"], "node"),
+        ] {
+            let said = refused(line).unwrap_or_else(|| panic!("not refused: {line:?}"));
+            assert!(said.contains(named), "{line:?}: {said}");
+            assert!(!said.contains("/tmp/x"), "{line:?}: {said}");
+        }
+    }
 
     #[test]
     fn a_version_is_three_numbers_and_nothing_more() {

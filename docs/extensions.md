@@ -1718,10 +1718,35 @@ way in:
   agent-browser's, and removes `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is
   refused, naming the variable, while the connection's `env` names one of them or `HOME` (which
   moves where agent-browser looks for the Chrome it downloaded and where Chrome reads
-  `~/.pki/nssdb`). **Its other options and variables are not judged** (`AGENT_BROWSER_SESSION`,
-  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
-  variables of the daemon's own environment that send the session elsewhere (a `HTTP_PROXY` of the
-  user's session), which a run inherits too.
+  `~/.pki/nssdb`). **The server's command runs agent-browser itself**, in one of these forms
+  and no other: `agent-browser`, by its name, which the system finds on the `PATH` the server is
+  given; an **absolute path** that resolves (links and `..` followed) to the very file named
+  `agent-browser` on that `PATH` (a relative path, a path to another file, or one whose `PATH` is
+  set by the connection's `env`, is refused: the folder it is read from is not known); or a chain
+  of package runners (`npx`, `bunx`, `pnpm` or `yarn` with `dlx` or `exec`) with no word but `-y`
+  or `--yes` before the package, which is exactly `agent-browser` or `agent-browser@<version or
+  tag>` (`npx agent-browser mcp`, `pnpm dlx agent-browser@0.43.0 mcp`, `bunx agent-browser@latest
+  mcp`). A package name that ends in `agent-browser` is not it: a scope (`@someone/agent-browser`),
+  a GitHub shorthand (`someone/agent-browser`), a URL, a path (`./agent-browser`), an alias
+  (`agent-browser@npm:another`), a source (`agent-browser@github:…`, `@file:…`, `@git+…`) or
+  any `/`, `:` or second `@` after the `@` are refused, said without echoing the spec. Anything else
+  between Flottille and agent-browser could set the environment after Flottille did, so it is an
+  allow list, not a list of launchers: a program before agent-browser (`env`, `envdir`, `chpst`,
+  `setpriv`, `flatpak run`, a shell, `node -e`…, also inside a runner, as in `pnpm exec env -u
+  AGENT_BROWSER_SOCKET_DIR agent-browser mcp`), a runner's other option (`-p`, `-c`,
+  `--node-options`…), or an assignment `NAME=value` before the program is refused, said by the
+  program's, the option's or the variable's name, never a value; one of the folder variables set
+  that way is said as itself. The command is unwrapped as the gate unwraps a line, and only the
+  words before the program are read: agent-browser's own arguments are its own. It is checked
+  before the server starts (at the review, on an edit, at every start and reconnection: nothing
+  runs), at the accept, and again at each login, so an edit after the user accepted the
+  connection never starts it. A command that names agent-browser (a layer runs it, or a word of
+  it is its name or its path, as in `setsid …/agent-browser mcp`) is checked before its first
+  start too; one that does not (`node -e '…' mcp`) is refused when its server says it is
+  agent-browser, before it starts with the adapter. **Its other options and variables are not
+  judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as
+  written. What is not covered: the variables of the daemon's own environment that send the
+  session elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
   give them.** An agent drives a browser for the user, who works in another window: a window that
   comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused
