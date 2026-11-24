@@ -379,8 +379,7 @@ fn sending(launch: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut locks = SENDING.lock().unwrap();
     // A lock no send holds or waits on any more is only this map's.
     locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-    let _ = launch;
-    locks.entry(String::new()).or_default().clone()
+    locks.entry(launch.to_owned()).or_default().clone()
 }
 
 /// The commits of `workspace` that went back already to the machine whose launch it was made
