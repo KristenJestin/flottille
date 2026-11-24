@@ -1132,9 +1132,11 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   the tree later is not given until it is written there), no secret, no file: when its project is
   not on that machine, its place is a folder that does not exist. Its answer, whatever its
   outcome (a refusal and a "cannot answer now" too), is masked again of the caller's machine's
-  secrets, then cut there as a local result is (a refusal at the error limit), saying so; where
-  either machine cut it, the start of such a secret whose end the cut left out (6 characters or
-  more) is masked too, so that no half of one is shown; an answer without
+  secrets, then cut there as a local result is (a refusal at the error limit), saying so. That
+  machine's cut comes after the masking and splits no secret; where the other machine cut it
+  (the end of a text, `‹+N chars›`; the middle of a long result, `[N characters left out …]`;
+  a long line shown as several), the start of such a secret before the cut and its end after it
+  (6 bytes or more) are masked too, so that no half of one is shown; an answer without
   an outcome, or a call without a project, comes from an older daemon and is refused saying that
   daemon needs updating. A machine stands in 64 callers of one other machine at most
   (one more is refused, saying so), forgets one idle for 30 days, and those of a machine that left
@@ -1977,7 +1979,8 @@ on a real phone, by hand, and reported.
   caller stood in for, which reads the session it started without a leave and its child as its
   parent; the answer is masked again on the caller's machine and cut there too, as every answer
   of another machine to a tool of the tree is (a send, a stop, an approval's answer, their
-  refusals and "cannot answer now"), the start of a secret a cut left half masked too.
+  refusals and "cannot answer now"), both halves of a secret a cut of that machine split masked
+  too.
 - `agent_status` without `agent_id` lists the children of this machine only; a child on another
   machine is read by its id.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
