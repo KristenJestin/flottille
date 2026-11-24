@@ -131,7 +131,10 @@ impl Contexts {
     /// missing or has none.
     pub(super) async fn of(&mut self, forge: &Forge) -> Result<String, String> {
         if self.0.is_none() {
-            self.0 = Some(list().await);
+            self.0 = Some(list().await.map_err(|error| match error == missing() {
+                true => error,
+                false => super::unchecked("bkt", &error, false),
+            }));
         }
         let all = self.0.as_ref().unwrap().as_ref().map_err(Clone::clone)?;
         let Forge::Bitbucket { host, .. } = forge else {
@@ -191,12 +194,8 @@ fn hostname(key: &str) -> String {
 
 /// `bkt context list --json`: names, hosts and defaults, no secret.
 async fn list() -> Result<Vec<Context>, String> {
-    let listed = json(&["context", "list", "--json"])
-        .await
-        .map_err(|error| match error == missing() {
-            true => error,
-            false => format!("{error}: run `bkt auth login <url>` to sign in"),
-        })?;
+    // A failure of the listing says nothing of who is signed in: never advice to sign in.
+    let listed = json(&["context", "list", "--json"]).await?;
     Ok(listed["contexts"]
         .as_array()
         .into_iter()
@@ -1692,6 +1691,16 @@ pub(super) async fn branch_exists(forge: &Forge, name: &str) -> Result<(), Strin
     json(&["api", &path, "--context", &context])
         .await
         .map(|_| ())
+}
+
+/// The base of the merged pull request of `branch`, from the repository itself.
+pub(super) async fn merged_into(forge: &Forge, branch: &str) -> Result<Option<String>, String> {
+    let context = Contexts::default().of(forge).await?;
+    Ok(pulls(forge, &context, "MERGED")
+        .await?
+        .into_iter()
+        .find(|pull| pull.own && pull.branch == branch)
+        .map(|pull| pull.base))
 }
 
 /// `forge` `create`, `merge` and `checks` for a Bitbucket repository, once the gate let it

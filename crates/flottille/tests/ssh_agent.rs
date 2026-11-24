@@ -1805,6 +1805,56 @@ fn an_allowed_push_runs_no_credential_helper_a_run_wrote() {
 }
 
 #[test]
+fn a_push_runs_nothing_a_run_in_full_added_to_the_user_s_git_settings() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    let mcp = session(&user, &url);
+    // As a run in Full writes them, as the user does: in place, the file the daemon found at its
+    // start still the one at its path.
+    let planted = user.path("planted/helper");
+    script(
+        &planted,
+        &format!("echo \"$1\" >> '{}'\n", user.path("planted-ran").display()),
+    );
+    let hooks = user.path("planted/hooks");
+    script(
+        &hooks.join("pre-push"),
+        &format!("echo hook >> '{}'\n", user.path("planted-ran").display()),
+    );
+    let mut settings = std::fs::OpenOptions::new()
+        .append(true)
+        .open(user.path("home/.gitconfig"))
+        .unwrap();
+    std::io::Write::write_all(
+        &mut settings,
+        format!(
+            "[credential]\n\thelper = !{}\n[core]\n\thooksPath = {}\n\
+             [protocol \"ext\"]\n\tallow = always\n",
+            planted.display(),
+            hooks.display()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    drop(settings);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/after-full");
+
+    assert!(
+        !user.path("planted-ran").exists(),
+        "what the run wrote ran: {}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "after-full"), "{}", pushed.text);
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
 fn an_allowed_push_runs_no_git_a_run_put_first_in_the_path() {
     let (user, _agent, _bus) = user();
     // A folder of the user's first in the daemon's `PATH`, as `~/.local/bin` often is.
@@ -2608,6 +2658,26 @@ fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
         "{:?}",
         helper_said(&user)
     );
+}
+
+#[test]
+fn an_include_made_after_the_daemon_s_start_gives_a_lifted_push_none_of_its_settings() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    // The user's settings include a file that is not there yet (a machine-local one, made by a
+    // later `gh auth setup-git`, a dotfiles update, or a run in Full).
+    let later = user.path("home/later.gitconfig");
+    let user = credential_helper(user);
+    let mut settings = std::fs::read_to_string(user.path("home/.gitconfig")).unwrap();
+    settings.push_str(&format!("[include]\n\tpath = {}\n", later.display()));
+    std::fs::write(user.path("home/.gitconfig"), settings).unwrap();
+    let mcp = session(&user, &url);
+    // After the start: a proxy nobody listens on, which a push given it could not get through.
+    std::fs::write(&later, "[http]\n\tproxy = http://127.0.0.1:9\n").unwrap();
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/included-late");
+
+    assert!(remote_has(&user, "included-late"), "{}", pushed.text);
 }
 
 #[test]

@@ -43,7 +43,7 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("provider list", Window(&["provider.list"])),
     (
         "provider new-session",
-        Window(&["provider.set_new_session"]),
+        Window(&["provider.set_new_session", "provider.set_new_session_mode"]),
     ),
     ("provider enable", Window(&["provider.enable"])),
     ("provider disable", Window(&["provider.disable"])),
@@ -213,6 +213,10 @@ pub const COMMANDS: &[(&str, Place)] = &[
     (
         "read-page",
         Script("the web tool's page reader, run by Flottille for an agent"),
+    ),
+    (
+        "browser-network",
+        Script("holds the network of a connection's browser, run by the daemon"),
     ),
     (
         "mcp",

@@ -33,8 +33,8 @@ fn wayland_socket(user: &User) -> std::os::unix::net::UnixListener {
 }
 
 /// A project `app` over a throwaway repository, its workspace `w`, and the session of a root
-/// agent working there in Full, so that nothing is held: the agent's id, its session, the
-/// workspace's folder.
+/// agent working there in Auto, its judge allowing every call (a run in Full has the daemon's own
+/// display, `docs/tools.md`): the agent's id, its session, the workspace's folder.
 fn session(user: &User) -> (String, Mcp, PathBuf) {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -61,7 +61,7 @@ fn session(user: &User) -> (String, Mcp, PathBuf) {
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
     let (url, authorization) = server_of(user, opened);
-    let output = user.run(&["agent", "mode", &id, "full"]);
+    let output = user.run(&["agent", "mode", &id, "auto"]);
     assert!(
         output.status.success(),
         "{}",

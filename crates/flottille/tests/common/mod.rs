@@ -83,6 +83,10 @@ const SIGN_INS: [&str; 7] = [
     "OPENAI_API_KEY",
 ];
 
+/// The marker `User::with_clean_environment` sets: the commands of this user start from an empty
+/// environment.
+const CLEAN_ENVIRONMENT: &str = "FLOTTILLE_TEST_CLEAN_ENVIRONMENT";
+
 /// The file `User::new` writes in the daemon's configuration folder, which no test's own folder
 /// listing counts (`names_in`).
 const HARNESS_FILE: &str = "tool-results.toml";
@@ -206,7 +210,16 @@ impl User {
         let mut user = User {
             dir,
             _runtime: runtime,
-            env: vec![("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs)],
+            // A connection's browser runs in a network of its own, which passt's `pasta` gives a
+            // way out (`docs/vault.md`, "The browser's network"): a test's stands on `true`, which
+            // gives none, so that no test needs passt. A test of the real one names `pasta`.
+            env: vec![
+                ("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs),
+                (
+                    "FLOTTILLE_TEST_PASTA".to_owned(),
+                    program("true").display().to_string(),
+                ),
+            ],
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
         };
@@ -260,6 +273,13 @@ impl User {
     pub fn with_env(mut self, name: &str, value: &str) -> User {
         self.env.push((name.to_owned(), value.to_owned()));
         self
+    }
+
+    /// This user's daemon, and every command it starts, has the harness's environment alone: none
+    /// of the developer's (forge tokens, compositor sockets, sign-ins), only their `PATH`. A run
+    /// in Full inherits the daemon's environment as it is (`docs/tools.md`).
+    pub fn with_clean_environment(self) -> User {
+        self.with_env(CLEAN_ENVIRONMENT, "1")
     }
 
     /// This user's daemon keeps the items of its projects up to date (`docs/items.md`): every
@@ -1022,6 +1042,12 @@ fn command_of(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
 
 fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
     let mut command = Command::new(program);
+    if env.iter().any(|(name, _)| name == CLEAN_ENVIRONMENT) {
+        command.env_clear();
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
+    }
     command
         .args(args)
         .env("HOME", dir.join("home"))

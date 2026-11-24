@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 
 use crate::actions::{Command, Pick, Target};
@@ -23,7 +23,6 @@ use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::mode::ModeSwitch;
 use crate::providers::{Provider, Providers};
 use crate::settings::Reveal;
-use crate::shell::Shell;
 
 /// What a toast says when the daemon starts no session, or the composer waits for a picture.
 const NOT_STARTED: &str = "The session was not started";
@@ -187,7 +186,8 @@ pub enum Choice {
 }
 
 pub struct Composer {
-    shell: WeakEntity<Shell>,
+    /// The shell as its page's machine asks it: what it writes and reads goes there (#1271).
+    shell: crate::commands::ShellOf,
     project: String,
     /// The field: its text and the chips of its pictures.
     tokens: Entity<TokenField>,
@@ -220,8 +220,8 @@ pub struct Composer {
     sending: Option<Target>,
     error: Option<SharedString>,
     blocked: Option<String>,
-    /// The mode the next session starts in: Auto each time the composer is shown and after each
-    /// start, so that Full is never on by mistake.
+    /// The mode the next session starts in: the machine's default each time the composer is shown
+    /// and after each start, so that a choice for one session never carries over to the next.
     mode: Entity<ModeSwitch>,
     /// How many times it was drawn: the tests count them.
     renders: usize,
@@ -237,7 +237,7 @@ impl Composer {
     /// The composer of one project: its draft and the session it starts belong to it, so that
     /// opening another project's page neither carries the draft there nor loses it.
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         project: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -250,7 +250,7 @@ impl Composer {
             field.set_submit_on_enter(true, cx);
             field.set_placeholder("Describe a task, a bug to fix, an idea to try…", window, cx);
         });
-        let mode = cx.new(|_| ModeSwitch::local(shell.clone()));
+        let mode = cx.new(|_| ModeSwitch::local((*shell).clone()));
         let subscriptions = vec![
             cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
                 this.attached.chip_changed(event, cx);
@@ -306,6 +306,11 @@ impl Composer {
         self.keeping.sent()
     }
 
+    /// How many writes of the draft the daemon has not answered yet.
+    pub fn drafts_unanswered(&self) -> usize {
+        self.keeping.unanswered()
+    }
+
     fn draft_now(&self, cx: &App) -> Draft {
         let (text, pictures) = self.attached.draft(cx);
         Draft { text, pictures }
@@ -320,10 +325,7 @@ impl Composer {
     /// update is over: the shell is the one updating when a session started.
     fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
         if let Some(write) = self.draft_to_write(cx, false) {
-            let shell = self.shell.clone();
-            cx.defer(move |cx| {
-                shell.update(cx, |shell, _| shell.perform(write)).ok();
-            });
+            crate::commands::perform_later(&self.shell, write, cx);
         }
     }
 
@@ -373,9 +375,7 @@ impl Composer {
 
     fn read_draft_again(&mut self, cx: &mut Context<Self>) {
         let key = self.keeping.key().clone();
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
-            .ok();
+        self.shell.perform(Command::DraftRead { key }, cx);
     }
 
     /// The daemon answered a write of the draft.
@@ -403,7 +403,7 @@ impl Composer {
         &self.mode
     }
 
-    /// Back on Auto, as each time the composer is shown.
+    /// Back on the machine's default mode, as each time the composer is shown.
     pub fn reset_mode(&mut self, cx: &mut Context<Self>) {
         self.mode.update(cx, |mode, cx| mode.reset(cx));
     }
@@ -457,6 +457,10 @@ impl Composer {
             let chosen = providers.judge.is_some();
             self.mode
                 .update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
+        }
+        if let Some(default) = &providers.new_session_mode {
+            self.mode
+                .update(cx, |mode, cx| mode.set_default(default, cx));
         }
         if self.providers != *providers || self.pick != pick || self.default != default {
             self.providers = providers.clone();
@@ -726,15 +730,13 @@ impl Composer {
             message,
             images: self.attached.sending(),
             texts: self.attached.texts(cx),
-            mode: self.mode.read(cx).mode().unwrap_or("auto").to_owned(),
+            mode: self.mode.read(cx).chosen().map(str::to_owned),
         };
         self.sending = Some(target);
         self.sent = Some(self.pick.clone());
         self.error = None;
         self.menu = None;
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
         cx.notify();
     }
 
@@ -876,7 +878,7 @@ impl Composer {
             chosen,
             self.open_of(Menu::Machine),
             Self::handler(cx, |this, _, cx| this.toggle_menu(Menu::Machine, cx)),
-            move |name, _, cx| {
+            move |name, window, cx| {
                 this.update(cx, |this, cx| {
                     this.menu = None;
                     this.back_to_main(cx);
@@ -884,7 +886,9 @@ impl Composer {
                 .ok();
                 let project = project.clone();
                 shell
-                    .update(cx, |shell, cx| shell.choose_machine_for(name, &project, cx))
+                    .update(cx, |shell, cx| {
+                        shell.choose_machine_for(name, &project, window, cx)
+                    })
                     .ok();
             },
         );

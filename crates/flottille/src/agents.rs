@@ -194,8 +194,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.send" => {
             let mut asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "writes to it")?;
-            refuse_remote_child(daemon, &agent)?;
+            refuse_any_child(daemon, &agent, "writes to it")?;
             refuse_final(&agent)?;
             let upload = asked.upload.take();
             take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
@@ -270,19 +269,19 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.quota_resume" => {
             let asked: AgentQuotaResume = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "chooses when it resumes")?;
+            refuse_any_child(daemon, &agent, "chooses when it resumes")?;
             crate::quota::choose(daemon, &agent, asked.resume)
         }
         "agent.unqueue" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "takes back a message")?;
+            refuse_any_child(daemon, &agent, "takes back a message")?;
             deliveries::withdraw(daemon, &agent.id, &asked.delivery, asked.images)
         }
         "agent.send_now" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "sends a message now")?;
+            refuse_any_child(daemon, &agent, "sends a message now")?;
             deliveries::send_now(daemon, &agent.id, &asked.delivery)
         }
         "agent.image" => {
@@ -309,7 +308,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.reload_tools" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "reloads its tools")?;
+            refuse_any_child(daemon, &agent, "reloads its tools")?;
             refuse_final(&agent)?;
             let asked = daemon
                 .agents
@@ -329,7 +328,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.resume" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "resumes it")?;
+            refuse_any_child(daemon, &agent, "resumes it")?;
             crate::projects::refuse_removing(daemon, &agent.project)?;
             if !agent.state.is_final() {
                 return Err(Failure::refused(format!(
@@ -355,13 +354,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let waited = agent.waiting_on_answer;
             let failed = (agent.state == AgentState::Failed)
                 .then(|| agent.state_reason.clone().unwrap_or_default());
-            let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
-                Some((agent, event)) => Ok((Some(agent), Some(event))),
-                None => Ok((None, None)),
-            })?;
-            let agent = resumed.ok_or_else(|| {
-                Failure::refused(format!("agent {} was resumed already", agent.id))
-            })?;
+            let agent = resume_write(daemon, &agent)?;
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
@@ -378,7 +371,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.rename" => {
             let asked: flottille_core::protocol::AgentRename = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "names it, with agent_launch")?;
+            refuse_any_child(daemon, &agent, "names it, with agent_launch")?;
             crate::titles::rename(daemon, &agent, &asked.title)
         }
         "agent.ending" => {
@@ -411,8 +404,24 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     ),
                 )
             })?;
-            // A tree has one mode, its root's.
-            let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
+            // A tree has one mode, its root's: a child of another machine's agent, and every
+            // agent under it, has its root there, and no switch here sets its mode apart from it.
+            let root = tree::root_of(daemon, &asked.agent);
+            if let Some((caller, machine, kind)) = crate::launches::launched_from(daemon, &root)
+                && kind == "child"
+            {
+                let whose = if root == asked.agent {
+                    format!("a child of agent {caller} of {machine}")
+                } else {
+                    format!("under agent {root}, a child of agent {caller} of {machine}")
+                };
+                return Err(Failure::refused(format!(
+                    "agent {} is {whose}: its mode is its session's, set on {machine}",
+                    asked.agent
+                )));
+            }
+            let agent = find(daemon, &root)?;
+            let was = agent.gate_mode;
             // A switch to Full the user signed from a device is kept, for a launch on another
             // machine to start in Full there; any other switch forgets it.
             let signed = match mode {
@@ -436,6 +445,17 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Ok(((), event))
             })?;
             let agent = find(daemon, &agent.id)?;
+            match (was, mode) {
+                (GateMode::Full, GateMode::Full) => {}
+                (_, GateMode::Full) => crate::project_map::tell_switched_to_full(daemon, &agent),
+                (GateMode::Full, GateMode::Ask) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Ask")
+                }
+                (GateMode::Full, GateMode::Auto) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Auto")
+                }
+                _ => {}
+            }
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.options" => {
@@ -506,7 +526,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "cancels its turn")?;
+            refuse_any_child(daemon, &agent, "cancels its turn")?;
             let (answer, answered) = oneshot::channel();
             let task = daemon
                 .agents
@@ -565,9 +585,17 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
         return Ok(());
     };
     let root = tree::root_of(daemon, &agent.id);
+    // A root that is itself a child of another machine's agent is not the user's either: theirs
+    // is that tree's root, on that machine.
+    let theirs = match crate::launches::launched_from(daemon, &root) {
+        Some((caller, machine, kind)) if kind == "child" => {
+            format!("the root of agent {caller}'s tree, on {machine}")
+        }
+        _ => format!("its root, agent {root}"),
+    };
     Err(Failure::refused(format!(
         "agent {} is a child of agent {parent}: only its parent {does}; the user writes to and \
-         stops its root, agent {root}",
+         stops {theirs}",
         agent.id
     )))
 }
@@ -575,14 +603,20 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
 /// A child an agent of another machine launched here belongs to that agent: only it writes to
 /// it. The user still answers its questions and stops it, the ways out while that machine is off
 /// (`docs/remote.md`, "Where a question goes when the parent is off").
-fn refuse_remote_child(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+fn refuse_remote_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failure> {
     match crate::launches::launched_from(daemon, &agent.id) {
         Some((caller, machine, kind)) if kind == "child" => Err(Failure::refused(format!(
-            "agent {} is a child of agent {caller} of {machine}: only its parent writes to it",
+            "agent {} is a child of agent {caller} of {machine}: only its parent {does}",
             agent.id
         ))),
         _ => Ok(()),
     }
+}
+
+/// [`refuse_child`] for a child wherever its parent is: here, or on another machine.
+fn refuse_any_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failure> {
+    refuse_child(daemon, agent, does)?;
+    refuse_remote_child(daemon, agent, does)
 }
 
 fn refuse_final(agent: &Agent) -> Result<(), Failure> {
@@ -803,19 +837,17 @@ async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
              and a permission mode of the agent's could only loosen it"
         )));
     }
-    // The user's door alone reaches this method, so it is the user who names the session's mode.
-    let gate_mode = asked
-        .gate_mode
-        .as_deref()
-        .map(|text| {
-            GateMode::parse(text).ok_or_else(|| {
-                Failure::new(
-                    "invalid-params",
-                    format!("there is no mode {text}: the modes are ask, auto and full"),
-                )
-            })
-        })
-        .transpose()?;
+    // The user's door alone reaches this method, so it is the user who names the session's mode,
+    // or who chose the one a new session starts in (`new_session_mode` of `providers.toml`).
+    let gate_mode = match asked.gate_mode.as_deref() {
+        Some(text) => GateMode::parse(text).ok_or_else(|| {
+            Failure::new(
+                "invalid-params",
+                format!("there is no mode {text}: the modes are ask, auto and full"),
+            )
+        })?,
+        None => providers::new_session_mode(daemon)?,
+    };
     let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
         Failure::refused(format!(
             "there is no role {}: the roles are {}",
@@ -887,7 +919,7 @@ async fn start(daemon: &Arc<Daemon>, mut asked: AgentRun) -> Answer {
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
-            gate_mode,
+            gate_mode: Some(gate_mode),
             launched_by: None,
             led: false,
             launched: None,
@@ -967,7 +999,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
 /// checked.
 pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     crate::projects::refuse_removing(daemon, &project.name)?;
-    let (place, folder, repositories) = match &new.workspace {
+    let (place, folder, repositories, branch) = match &new.workspace {
         // An extension's agent that reads a place of the extension's own (a pull request's copy).
         None if new.launched.as_ref().is_some_and(|l| l.at.is_some()) => {
             let at = new.launched.as_ref().and_then(|l| l.at.clone()).unwrap();
@@ -975,6 +1007,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                 "the copy of a pull request".to_owned(),
                 at.clone(),
                 vec![(".".to_owned(), at.clone(), at)],
+                String::new(),
             )
         }
         None => {
@@ -989,7 +1022,12 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     (r.path.clone(), folder.clone(), folder)
                 })
                 .collect();
-            ("main".to_owned(), project.folder.clone(), repositories)
+            (
+                "main".to_owned(),
+                project.folder.clone(),
+                repositories,
+                String::new(),
+            )
         }
         Some(name) => {
             let workspace = daemon
@@ -1027,7 +1065,13 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     (r.path.clone(), workspace.folder_of(&r.path), original)
                 })
                 .collect();
-            (format!("workspace {name}"), workspace.folder, repositories)
+            let branch = workspace.branch.clone();
+            (
+                format!("workspace {name}"),
+                workspace.folder,
+                repositories,
+                branch,
+            )
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
@@ -1099,8 +1143,19 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
         &files,
     );
-    if let Some(launched) = &new.launched {
-        instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+    match &new.launched {
+        Some(launched) => {
+            instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+        }
+        // Masked as the rest of the session's part: the project's file is the user's to write.
+        None => instructions.push_str(&format!(
+            "\n\n{}",
+            flottille_core::secrets::mask(
+                &crate::project_map::map(project, &place, &folder, &branch),
+                &std::env::vars_os().collect(),
+            )
+            .trim_end()
+        )),
     }
     let agent = Agent {
         id: match new.id {
@@ -1145,15 +1200,46 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     Ok(agent)
 }
 
+/// Starts the ended `agent` again on its own session: the write of `agent.resume`. The room of
+/// its pilot in its machine's cap is checked in this very write, as for a new session
+/// ([`write_new`]): a pilot whose sessions all ended counts again with this one.
+pub(crate) fn resume_write(daemon: &Arc<Daemon>, agent: &Agent) -> Result<Agent, Failure> {
+    let pilot = agent.launched_by.as_ref().or(agent.detached_from.as_ref());
+    let resumed = daemon.write(|store| {
+        if let Some(pilot) = pilot
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Err(why), None));
+        }
+        match store.resume_agent(&agent.id)? {
+            Some((agent, event)) => Ok((Ok(Some(agent)), Some(event))),
+            None => Ok((Ok(None), None)),
+        }
+    })?;
+    resumed
+        .map_err(Failure::refused)?
+        .ok_or_else(|| Failure::refused(format!("agent {} was resumed already", agent.id)))
+}
+
 /// Writes the agent `made` made.
 pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
     let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
         "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
         "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
-    daemon.write(|store| {
+    // The pilot's room in its machine's cap is checked in this very write: one session that makes
+    // it count again, and another caller, never pass the cap together.
+    let refused = daemon.write(|store| {
+        if let Some(pilot) = &agent.launched_by
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Some(why), None));
+        }
         let event = store.create_agent(agent, ("agent.created", data.clone()))?;
-        Ok(((), event))
+        Ok((None, Some(event)))
     })?;
+    if let Some(why) = refused {
+        return Err(Failure::refused(why));
+    }
     crate::extensions::heard(daemon, &[("agent.created", data)]);
     Ok(())
 }

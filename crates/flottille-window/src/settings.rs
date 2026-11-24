@@ -37,7 +37,6 @@ use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{NewSession, Provider, Providers};
 use crate::rules::RulesEditor;
-use crate::shell::Shell;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -186,6 +185,17 @@ pub const COMPACTION_HINT: &str = "When an agent's context fills up, its convers
 pub const NEW_SESSIONS_SENTENCE: &str = "What a session starts on when its project says nothing \
      and you pick nothing: left alone, the provider's own recommendation.";
 
+/// What the mode's row says under its label: which sessions it is for.
+pub const NEW_SESSION_MODE_HINT: &str =
+    "Sessions agents start, and children, keep their own rules.";
+
+/// What the page says once when Full is chosen for new sessions: what Full lends.
+pub const FULL_LENDS: &str = "In Full, a session's commands run as yours, as in your terminal: \
+     nothing is held back, the vault included.";
+
+/// The modes of a new session, in the order of the choice: the daemon's word and the word said.
+const NEW_SESSION_MODES: [(&str, &str); 3] = [("ask", "Ask"), ("auto", "Auto"), ("full", "Full")];
+
 /// What the page says of the summary's cost, under the model that writes it.
 pub const COMPACTOR_COST: &str = "Each summary is a turn of this model, on your own quota.";
 
@@ -286,7 +296,10 @@ const FINDINGS_HINT: &str = "What agents reported about Flottille itself, one fi
      Export them for the agent that files the issues.";
 
 pub struct SettingsPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
+    /// The machine whose Settings these are (`None`: this one): another machine's page enters as
+    /// a page that shows up when it is chosen (#1271).
+    of: Option<String>,
     /// The user's machines: the hub, its devices, this machine's addresses.
     machines: Entity<crate::machines_page::MachinesSection>,
     providers: Providers,
@@ -328,6 +341,8 @@ pub struct SettingsPage {
     judge_refused: Option<String>,
     /// What new sessions start on, chosen, until the daemon lists it.
     new_session_pending: bool,
+    /// The mode of new sessions chosen, until the daemon lists it: what it was asked to become.
+    new_session_mode_pending: Option<String>,
     /// The developer mode, once the daemon said it.
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
@@ -417,9 +432,15 @@ pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each sess
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
+    /// These Settings are `machine`'s.
+    pub fn of_machine(mut self, machine: Option<String>) -> Self {
+        self.of = machine;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         rules: Entity<RulesEditor>,
         about: Entity<AboutEditor>,
         judge_guidance: Entity<RulesEditor>,
@@ -435,6 +456,7 @@ impl SettingsPage {
         check: Entity<crate::check::CheckSection>,
     ) -> Self {
         Self {
+            of: None,
             sign_in,
             check,
             machines,
@@ -459,6 +481,7 @@ impl SettingsPage {
             judge_turning: None,
             judge_refused: None,
             new_session_pending: false,
+            new_session_mode_pending: None,
             developer: None,
             developer_pending: None,
             findings: None,
@@ -575,11 +598,7 @@ impl SettingsPage {
             return;
         }
         self.compaction_pending = true;
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::CompactionSet { params })
-            })
-            .ok();
+        self.shell.perform(Command::CompactionSet { params }, cx);
         cx.notify();
     }
 
@@ -1106,9 +1125,7 @@ impl SettingsPage {
             name: name.to_owned(),
             enabled,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
         cx.notify();
     }
 
@@ -1142,10 +1159,7 @@ impl SettingsPage {
             None => (None, None),
         };
         self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::SetJudge { provider, model })
-            })
-            .ok();
+            .perform(Command::SetJudge { provider, model }, cx);
         cx.notify();
     }
 
@@ -1170,9 +1184,7 @@ impl SettingsPage {
         }
         self.judge_pending = true;
         self.judge_refused = None;
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::PickJudge))
-            .ok();
+        self.shell.perform(Command::PickJudge, cx);
         cx.notify();
     }
 
@@ -1208,15 +1220,34 @@ impl SettingsPage {
             Some((provider, model, effort)) => (Some(provider), model, effort),
             None => (None, None, None),
         };
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::SetNewSession {
-                    provider,
-                    model,
-                    effort,
-                })
-            })
-            .ok();
+        self.shell.perform(
+            Command::SetNewSession {
+                provider,
+                model,
+                effort,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// The mode new sessions start in as the page shows it: the one asked for while the daemon
+    /// has not listed it, else what the machine keeps (Auto until it said).
+    fn new_session_mode_shown(&self) -> &str {
+        self.new_session_mode_pending
+            .as_deref()
+            .or(self.providers.new_session_mode.as_deref())
+            .unwrap_or("auto")
+    }
+
+    /// Asks the daemon for the mode a new session starts in.
+    pub fn choose_new_session_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if self.new_session_mode_pending.is_some() || self.new_session_mode_shown() == mode {
+            return;
+        }
+        self.new_session_mode_pending = Some(mode.to_owned());
+        let mode = mode.to_owned();
+        self.shell.perform(Command::SetNewSessionMode { mode }, cx);
         cx.notify();
     }
 
@@ -1230,6 +1261,28 @@ impl SettingsPage {
             ),
             None => toast(
                 Toast::success("New sessions saved").detail("They apply to the next session."),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// The daemon's answer to the mode new sessions start in: a toast of its own says it.
+    pub fn new_session_mode_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        // Taken, the mode stays on the choice while the providers are read again: it never slides
+        // back to the old one and forward once more.
+        let asked = self.new_session_mode_pending.take();
+        if let (None, Some(mode)) = (&refused, asked) {
+            self.providers.new_session_mode = Some(mode);
+        }
+        match refused {
+            Some(why) => toast(
+                Toast::failure("The mode of new sessions was not changed").detail(why),
+                cx,
+            ),
+            None => toast(
+                Toast::success("New session mode saved")
+                    .detail("It applies to the next session you start."),
                 cx,
             ),
         }
@@ -1292,9 +1345,7 @@ impl SettingsPage {
         }
         let log = !self.developer_on();
         self.developer_pending = Some(log);
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::DeveloperSet { log }))
-            .ok();
+        self.shell.perform(Command::DeveloperSet { log }, cx);
         cx.notify();
     }
 
@@ -1365,9 +1416,7 @@ impl SettingsPage {
             return;
         }
         self.exporting = true;
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::FindingsExport))
-            .ok();
+        self.shell.perform(Command::FindingsExport, cx);
         cx.notify();
     }
 
@@ -1563,13 +1612,12 @@ impl SettingsPage {
             return;
         }
         self.unchanged_pending = Some(!unchanged);
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::UnchangedSet {
-                    unchanged: !unchanged,
-                })
-            })
-            .ok();
+        self.shell.perform(
+            Command::UnchangedSet {
+                unchanged: !unchanged,
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -1578,11 +1626,7 @@ impl SettingsPage {
             return;
         }
         self.tool_results_pending = Some(limit);
-        self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::ToolResultsSet { limit })
-            })
-            .ok();
+        self.shell.perform(Command::ToolResultsSet { limit }, cx);
         cx.notify();
     }
 
@@ -1696,9 +1740,7 @@ impl SettingsPage {
             return;
         }
         self.sessions_pending = Some(days);
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::SessionsSet { days }))
-            .ok();
+        self.shell.perform(Command::SessionsSet { days }, cx);
         cx.notify();
     }
 
@@ -1749,10 +1791,7 @@ impl SettingsPage {
         }
         self.resume_pending = Some(!resume);
         self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::ResumeSet { resume: !resume })
-            })
-            .ok();
+            .perform(Command::ResumeSet { resume: !resume }, cx);
         cx.notify();
     }
 
@@ -2141,6 +2180,67 @@ impl SettingsPage {
                     .into_any_element()
             },
         );
+        // The mode: one visible label, the state said once by the choice; the note under it is
+        // there only while Full is chosen, and unfolds and folds away with its gap.
+        let shown_mode = self.new_session_mode_shown().to_owned();
+        let mode = Segmented::new(
+            "new-sessions-mode",
+            "Mode",
+            NEW_SESSION_MODES,
+            NEW_SESSION_MODES
+                .iter()
+                .position(|(key, _)| *key == shown_mode)
+                .unwrap_or(1),
+        )
+        .alarm(2)
+        .disabled(!self.providers.known)
+        .on_choose({
+            let this = cx.entity().downgrade();
+            move |index, _, cx| {
+                let (mode, _) = NEW_SESSION_MODES[index];
+                this.update(cx, |this, cx| this.choose_new_session_mode(mode, cx))
+                    .ok();
+            }
+        });
+        let mode_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(space::LG)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(div().text_size(px(13.)).child("Mode"))
+                    .child(
+                        div()
+                            .id("new-sessions-mode-hint")
+                            .aria_label(NEW_SESSION_MODE_HINT)
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child(NEW_SESSION_MODE_HINT)
+                            .test_support(),
+                    ),
+            )
+            .child(mode);
+        let full_note = presence_of(
+            "new-sessions-full-note-line",
+            (shown_mode == "full").then(|| SharedString::from(FULL_LENDS)),
+            move |said| {
+                div()
+                    .id("new-sessions-full-note")
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.wait)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            },
+        )
+        .space(space::MD);
         let card = div()
             .id("new-sessions")
             .p(space::LG)
@@ -2152,6 +2252,15 @@ impl SettingsPage {
             .border_color(p.line)
             .child(choice)
             .child(notice)
+            .child(
+                div()
+                    .mt(space::MD)
+                    .pt(space::MD)
+                    .border_t_1()
+                    .border_color(p.line)
+                    .child(mode_row),
+            )
+            .child(full_note)
             .test_support();
         // Its models are the providers': the card crossfades in from a skeleton once they are known.
         Section::new("new-sessions", "New sessions")
@@ -2342,9 +2451,7 @@ impl SettingsPage {
             }));
         let check = Button::secondary("providers-check", "Check again").on_click(cx.listener(
             |this, _, _, cx| {
-                this.shell
-                    .update(cx, |shell, _| shell.perform(Command::ReadProviders))
-                    .ok();
+                this.shell.perform(Command::ReadProviders, cx);
             },
         ));
         // What is in use, not how many rows there are: three rows with one switched on count one.
@@ -2548,9 +2655,7 @@ impl Render for SettingsPage {
         let pad = if self.narrow { space::LG } else { space::XXL };
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
-        let header = PageHeader::new("settings-header", "Settings").crumb(
-            crate::machines::where_line("settings-where", &["Settings", SECTIONS[tab].1], cx),
-        );
+        let header = PageHeader::new("settings-header", "Settings");
         if SECTIONS[tab].0 == "general" {
             self.check.update(cx, |check, cx| check.ensure(cx));
         }
@@ -2613,7 +2718,11 @@ impl Render for SettingsPage {
             .child(div().flex_1().min_w_0().child(header))
             .children(self.machine_chooser(window, cx))
             .test_support();
-        let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
+        // Each machine's parts have their own: chosen, another machine's page enters.
+        let key = |part: &str| match &self.of {
+            None => ElementId::Name(format!("enter-settings-{part}").into()),
+            Some(machine) => ElementId::Name(format!("enter-settings-{machine}-{part}").into()),
+        };
         let column = |element: AnyElement| {
             div()
                 .w_full()
@@ -2633,8 +2742,7 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
-            .child(column(self.own_line(cx).into_any_element()));
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
         // plays again), after the tabs.
         let page = div()
@@ -2650,6 +2758,9 @@ impl Render for SettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
+            // The sentence of another machine's page is the first line of what scrolls: it goes
+            // with the sections, so that no text is ever drawn over it or under it (#1293).
+            .child(column(self.own_line(cx).into_any_element()))
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
@@ -2704,14 +2815,14 @@ impl SettingsPage {
                         })
                         .ok();
                 },
-                move |name, _, cx| {
+                move |name, window, cx| {
                     page.update(cx, |page, cx| {
                         page.machine_menu = false;
                         cx.notify();
                     })
                     .ok();
                     shell
-                        .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                        .update(cx, |shell, cx| shell.choose_machine(name, window, cx))
                         .ok();
                 },
             )
@@ -2736,8 +2847,9 @@ impl SettingsPage {
         )
     }
 
-    /// One line under the tabs while another machine is shown, whichever tab: the appearance and
-    /// the version are this window's, and stay this machine's.
+    /// One line at the top of what scrolls, under the tabs, while another machine is shown,
+    /// whichever tab: the appearance and the version are this window's, and stay this machine's.
+    /// It scrolls with the sections, never a fixed line that they could pass under.
     fn own_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let this = self
@@ -2752,17 +2864,21 @@ impl SettingsPage {
                  machine is chosen above."
             ))
         });
+        // Its gap to the first section is inside it, so that it folds away with it.
         presence_of("settings-own-block", said, move |said| {
             div()
-                .id("settings-own")
-                .aria_label(said.clone())
-                .text_size(px(12.5))
-                .text_color(p.mute)
-                .child(said)
-                .test_support()
+                .pb(space::XL)
+                .child(
+                    div()
+                        .id("settings-own")
+                        .aria_label(said.clone())
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(said)
+                        .test_support(),
+                )
                 .into_any_element()
         })
-        .space(space::MD)
     }
 }
 

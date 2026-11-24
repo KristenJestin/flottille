@@ -768,6 +768,9 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
         Some("create") => {
             say(names("reviewers").map(|n| format!("Its reviewers, besides the project's: {n}")));
             say(names("labels").map(|n| format!("Its labels: {n}")));
+            say(args["base"]
+                .as_str()
+                .map(|base| format!("It goes into the base {base}")));
             if args["delete_branch_on_merge"] == true {
                 // GitHub has no such flag per pull request: only a merge by Flottille deletes.
                 let github = matches!(
@@ -2938,6 +2941,7 @@ mod tests {
                 home: None,
             },
             launched: false,
+            reads: None,
         };
 
         for kind in ["led", "handed"] {

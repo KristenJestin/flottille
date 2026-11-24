@@ -1367,8 +1367,9 @@ is followed and what is left out): `flottille connection login <name>`, or the c
 **Sign in** in the window (#672), which opens the sign-in address only when it is `https://`,
 or `http://` on this machine, and says why in a toast otherwise. The daemon reads the server's challenge, its protected resource
 metadata (RFC 9728) and its authorization server's metadata (RFC 8414, OpenID Connect discovery);
-it uses the `client_id` the user declared, or registers itself (RFC 7591) when the authorization
-server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
+it uses the `client_id` the user declared, else Flottille's own client metadata document (an
+`https://` address that serves as its client id, when the authorization server takes them: nothing
+is registered), else registers itself (RFC 7591) when the authorization server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
 (RFC 8707) to a one-shot loopback redirect on `127.0.0.1` and a port the system picks, which waits
 five minutes; a redirect with another `state` is refused and its code never exchanged. The
 browser is opened by the client the user asked from, with the system's default handler.
@@ -1569,9 +1570,22 @@ way in:
   runs), never with the real folder, and asking again starts nothing. Headless, the server gets no
   display variable of the daemon's; **whether
   the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
-  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
-  (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
-  same browser and the removal of a display folder never takes a live socket. One browser per
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's **socket folder**, the
+  one folder of its vault folder (below), of a random name (`browser-<random>`, made the first
+  time and found again by listing it; agent-browser puts its daemon's socket there, else under
+  `$XDG_RUNTIME_DIR`, named after its session, `default`, which anyone can tell), so they reach
+  the same browser, the removal of a display folder never takes a live socket, and a run does not
+  reach that socket, which drives the browser with no gate (an init script, a route, the filled
+  password field read). **The server, its login, its reload and `close` run agent-browser in the
+  browser's network namespace** (`docs/vault.md`, "The browser's network"): agent-browser 0.43
+  starts Chrome with `--remote-debugging-port=0`, so Chrome's DevTools listens on the loopback, on
+  a port of its choice, with no token, and agent-browser's daemon on another port; in a network of
+  their own neither is on the runs' loopback, while the browser still reaches the internet and the
+  host's local servers (`localhost:<port>`) through passt's `pasta`. **Without pasta, or where the
+  kernel refuses user namespaces, the browser runs in the runs' network, where a run that finds
+  the port drives it, and the login refuses to fill**, saying to install passt; the rest of the
+  connection works, and `flottille doctor` says the gap. The adapter keeps `get_cdp_url`, which
+  says the address, off. One browser per
   connection, in the mode of the last `agent_browser_open` (any other action goes on in the mode
   that runs, and a call that asks the other mode **restarts the server and closes the browser**,
   its profile kept: the user signs in shown, the agent goes on headless). **Flottille keeps the
@@ -1600,9 +1614,11 @@ way in:
   login is given that folder again, never one made again at its path, which Landlock, holding a
   folder by its inode, would keep out of the browser's reach (#1040). It is closed (`agent-browser close`, on
   that socket folder) when the server is stopped (an edit of what trust is given to, turning it off, removing it), when a call asks the other mode and when
-  the daemon stops; one a daemon that died left (an update that killed it, a crash) is closed the
-  same way when the next daemon starts, before it serves any tool call, since the folder it was
-  confined with is made again out of its reach; the next start, of the server or of a login, starts a browser in the mode asked.
+  the daemon stops; one a daemon that died left (an update that killed it, a crash), shown or
+  not, is closed the same way when the next daemon starts, before it serves any tool call (one
+  whose socket folder holds anything), since the display folder it was confined with is made
+  again out of its reach and it keeps the vault folder within its reach; the next start, of the
+  server or of a login, starts a browser in the mode asked.
   **Showing the browser has a risk, said in the review**: with
   X11 the browser can read the keys typed in other windows and type into them (a terminal's
   included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
@@ -1622,22 +1638,36 @@ way in:
   `AGENT_BROWSER_EXECUTABLE_PATH`) and a script run in every page (`--init-script`,
   `AGENT_BROWSER_INIT_SCRIPTS`): through them the password would reach more than the entry's site.
   While one is set, `login` is refused, naming the option or the variable alone and saying to take
-  it out, and the review says it; the server starts as the user wrote it. The options agent-browser
-  refuses beside a domain list (`--cdp`, `--auto-connect`, `--profile`, `--state`, `--restore`,
-  `-p`/`--provider`, `--args`, `--session-name`, `--allowed-domains`, and their variables) no
-  longer refuse `login`: with no list of Flottille's they are the user's, and `login` types into
-  the browser the user's command chose. **Its other
-  options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
-  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
-  variables of the daemon's own environment, which a run inherits.
+  it out, and the review says it; the server starts as the user wrote it. **The options
+  agent-browser itself calls unsafe** (those its `--allowed-domains` rejects) refuse `login` the
+  same way: another profile (`--profile`, `AGENT_BROWSER_PROFILE`), a saved or restored session
+  (`--state`, `--restore`, `--session-name`, and their variables), a browser reached over CDP or
+  found running (`--cdp`, `--auto-connect`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`), a
+  browser of a provider's (`-p`/`--provider`, `AGENT_BROWSER_PROVIDER`), and launch arguments of
+  the command's (`--args`, `AGENT_BROWSER_ARGS`, which could carry a `--proxy-server` or another
+  profile folder), a plugin registry (`--plugins`, `AGENT_BROWSER_PLUGINS`, which could replace
+  Flottille's credential plugin, run with the vault's access) and a namespace (`--namespace`,
+  `AGENT_BROWSER_NAMESPACE`, which puts the daemon's socket in a subfolder): `login` would type
+  into a browser, a profile or a network that is not the one Flottille made. These are looked for in the server's command, the connection's `env`, and the
+  environment the daemon itself started with, which agent-browser inherits; no configuration file
+  of the user's is read (agent-browser reads the one `--config` Flottille names, and only it).
+  **The connection's `env` never moves the browser's folders**: Flottille sets
+  `AGENT_BROWSER_SOCKET_DIR`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`
+  last, on every start of the server and of a command of agent-browser's, and removes
+  `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is refused, naming the variable,
+  while the connection's `env` names one of them. **Its other options and variables are not
+  judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as written.
+  What is not covered: the variables of the daemon's own environment that send the session
+  elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
   give them.** An agent drives a browser for the user, who works in another window: a window that
   comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused
   window (Hyprland with `misc:focus_on_activate` and cursor warps), the mouse. Flottille never
   writes the user's desktop configuration, so it does two things and says the third:
   - **The browser has a window identity of its own.** The configuration the adapter writes gives
-    the shown browser the launch argument `--class=flottille-browser` (`args`; a browser nobody
-    sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
+    the shown browser the launch argument `--class=flottille-browser` (`args`, beside
+    `--disk-cache-size`, which every browser gets, `docs/vault.md`, "The browser's network"; a
+    browser nobody sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
     sets the window's `WM_CLASS` class on X11 and, for a browser window (not an app window), the
     `app_id` Chrome gives `xdg_toplevel` on Wayland, so `--class` is the one flag, and the desktop
     tells this browser from the user's own by that class or app id. It was not run on a real
@@ -1671,8 +1701,10 @@ way in:
     The Hyprland lines are the wiki's forms for each version (the Lua one is the form of the
     default `hyprland.lua` of 0.56), not run by Flottille's tests either. The window's switch *Show
     the browser* says it, in a sentence that names this section.
-- **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
-  written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
+- **Its start** gains `--config $XDG_RUNTIME_DIR/flottille/vault/<name>/agent-browser.json`,
+  written by Flottille in the connection's vault folder (below), which no run reaches: a run that
+  rewrote it while a login starts would have its own program run as the plugin, by a browser that
+  reaches the vault. It is one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
   user's own. agent-browser reads **the first `--config`** of a command line (and never the form
   `--config=<file>`), and `AGENT_BROWSER_CONFIG` only when no `--config` is given: a configuration
@@ -1713,17 +1745,37 @@ way in:
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
   or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has. **A login that
   fails** (or runs out of time) is followed by Flottille's own `open <the entry's URL>`, on the same
-  command line, folder, environment (without the token) and session: the page is loaded afresh, so
+  command line, folder, environment and session: the page is loaded afresh, so
   a secret typed into its form does not stay there (a browser does not restore a password field).
   It is Flottille's call, not an agent's, so it does not need `open` on. If it fails too, the
   login's error is still returned, masked, and says that the page could not be loaded again.
 - **The plugin is Flottille.** The daemon refuses every client that descends from it, so the
   login does not go through its socket: for that run alone the daemon listens on
-  `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
-  and gives the run a **one-time token** in `FLOTTILLE_VAULT_TOKEN`. `flottille vault provide` (hidden, needs no
-  folder of Flottille's) reads agent-browser's request on its standard input, sends the token and
-  the item and the URL agent-browser asks for to that socket, and writes the answer on its
-  standard output. The daemon answers **only** the token of the run it started, **once**, only
+  `vault.sock` in the connection's **vault folder**, `$XDG_RUNTIME_DIR/flottille/vault/<name>`
+  (removed when the run ends), and gives the run a **one-time token** in `vault.token` beside it
+  (written once the page is loaded, temporary file and rename, removed when the run ends). A file
+  and not a variable: agent-browser's session daemon, not the login's command line, starts the
+  plugin, with the environment it was started with. The vault folder is in the user's runtime
+  folder, which no run reaches (`docs/vault.md`, "The runtime folder"): a run of an agent that
+  waits for the login cannot read the token nor reach the socket, where a folder of the user's
+  under the state folder would give both to any of its processes. Only the connection's server,
+  its login's commands, `agent-browser close` and the browser they start are given it (as a
+  display folder is). It is **kept**: made once, never made again, not even by a daemon that
+  starts after one died: agent-browser's daemon outlives the server, the login and Flottille's
+  daemon, confined with the folder's inode, and is found again by its socket there (one made
+  again would be out of its reach, and its browser left running). A daemon that starts removes
+  what a login killed with its daemon left in it (`vault.token`, `vault.sock`, `vault.why`),
+  keeping the socket folder, and the configuration and plugin socket an earlier Flottille wrote
+  in the connection's state folder; the folder is removed with the connection, once its browser
+  is closed. `flottille vault provide` (hidden, needs no folder of
+  Flottille's) reads agent-browser's request on its standard input, sends the token and the item
+  and the URL agent-browser asks for to that socket, and writes the answer on its standard output.
+  agent-browser says of a plugin that failed only that it "exited unsuccessfully": the plugin also
+  writes why in `vault.why` of the vault folder (temporary file and rename: a link at its name is
+  replaced, never written through), and the login's error says it (masked) when the daemon did
+  not refuse the request itself, read without following a link and up to 1 KiB. Each request on the socket is answered on its own, its question awaited 5 seconds at most, so one
+  that says nothing holds no other; a request after the token was spent is refused and is not
+  taken for why the login failed. The daemon answers **only** the token of the run it started, **once**, only
   for a URL of the entry's own host, and only for the entry that run is for, bound
   to this connection; without the token the plugin is refused before anything is asked. The
   secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or

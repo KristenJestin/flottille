@@ -83,6 +83,9 @@ struct Server {
     headless: Mutex<Option<String>>,
     /// The browser its server or a login started, which outlives them: closed when it stops.
     browser: Mutex<Option<super::adapters::Browser>>,
+    /// Its vault's runtime folder, made once and kept while the daemon runs: every browser of the
+    /// connection is confined with it, held by its inode, and may outlive any server or login.
+    vault: Mutex<Option<crate::display::Folder>>,
 }
 
 #[derive(Default)]
@@ -280,6 +283,19 @@ pub(super) async fn exclusively_shown<T, F: std::future::Future<Output = T>>(
 /// The browser `browser` may now run for the connection, to close when its server stops.
 pub(super) fn browser_started(daemon: &Daemon, name: &str, browser: super::adapters::Browser) {
     *server_of(daemon, name).browser.lock().unwrap() = Some(browser);
+}
+
+/// The connection's vault folder (`display::vault`): the one its browsers were confined with,
+/// made the first time.
+pub(super) fn vault_of(daemon: &Daemon, name: &str) -> Result<crate::display::Folder, String> {
+    let server = server_of(daemon, name);
+    let mut vault = server.vault.lock().unwrap();
+    if let Some(folder) = vault.as_ref() {
+        return Ok(folder.clone());
+    }
+    let folder = crate::display::vault(&daemon.paths, name)?;
+    *vault = Some(folder.clone());
+    Ok(folder)
 }
 
 /// The display folder of the browser that may run for the connection, while it is not closed.
@@ -600,9 +616,26 @@ async fn start_with(
             // The folder of the connection's browser, its profile in it: given back to its server
             // alone (`browsers.rs`).
             let mut profile = None;
+            // The adapter's server gets its vault's folder, which its browser's plugin reaches.
+            let mut vault = None;
+            // And its browser's network, where it can be made.
+            let mut network = None;
             let options = match adapter {
                 Some(_) => {
                     let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
+                    let own = vault.insert(vault_of(daemon, &declaration.name)?);
+                    if let Some(program) = super::adapters::command_line(declaration) {
+                        // Without one it runs as before, its browser in the runs' network, and
+                        // login refuses: the gap is said (`flottille doctor`, the review).
+                        match super::adapters::network(daemon, &program, &folder, own).await {
+                            Ok(made) => network = Some(made),
+                            Err(why) => eprintln!(
+                                "flottille daemon: connection {}: its browser runs in the runs' \
+                                 network, and its login refuses to fill: {why}",
+                                declaration.name
+                            ),
+                        }
+                    }
                     (display, headless) =
                         super::adapters::shown(daemon, declaration, &declaration.name, headed);
                     if let Some(browser) =
@@ -612,7 +645,7 @@ async fn start_with(
                     }
                     let options = super::adapters::start_options(
                         declaration,
-                        &folder,
+                        own,
                         &given,
                         display.is_some(),
                     )?;
@@ -622,18 +655,19 @@ async fn start_with(
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
-            if adapter.is_some() {
-                super::adapters::display(
-                    &mut env,
-                    display.as_ref().map(|shown| &shown.env),
-                    &folder,
-                );
-            }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
                 given.push(secret.clone());
                 env.insert(OsString::from(name), OsString::from(secret));
+            }
+            // Last: the connection's own variables never move the browser's folders.
+            if let Some(vault) = &vault {
+                super::adapters::display(
+                    &mut env,
+                    display.as_ref().map(|shown| &shown.env),
+                    vault,
+                )?;
             }
             let mut command = tokio::process::Command::new(&words[0]);
             command
@@ -646,11 +680,19 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let shown = display.as_ref().map(|shown| &shown.folder);
+            let reached: Vec<&crate::display::Folder> = display
+                .as_ref()
+                .map(|shown| &shown.folder)
+                .into_iter()
+                .chain(vault.as_ref())
+                .collect();
+            if let Some(network) = &network {
+                network.entered(&mut command);
+            }
             crate::children::in_own_session(&mut command);
             match &profile {
-                Some(profile) => crate::landlock::confined_browser(&mut command, shown, profile),
-                None => crate::landlock::confined_but(&mut command, shown),
+                Some(profile) => crate::landlock::confined_browser(&mut command, &reached, profile),
+                None => crate::landlock::confined_given(&mut command, &reached),
             };
             let mut child = crate::children::spawn(&mut command)
                 .map_err(|error| format!("{}: {error}", words[0]))?;
@@ -996,6 +1038,18 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
     if running {
         super::changed_event(daemon, name, None);
     }
+}
+
+/// The vault folder of the connection `name`, once it is removed and its browser closed
+/// (`stop`), removed with it: the next connection of its name gets one afresh.
+pub async fn vault_removed(daemon: &Arc<Daemon>, name: &str) {
+    let server = server_of(daemon, name);
+    // Under the turn: no login nor start of a server of its name makes anything there meanwhile.
+    let _turn = server.turn.lock().await;
+    server.vault.lock().unwrap().take();
+    let vault = daemon.paths.runtime.join("vault").join(name);
+    super::network::ended(&vault);
+    let _ = std::fs::remove_dir_all(vault);
 }
 
 /// The browser the server or a login of it started, closed: the next start applies the switch.

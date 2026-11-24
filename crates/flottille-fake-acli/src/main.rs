@@ -31,7 +31,9 @@
 //! `site` (`example.atlassian.net` by default) is the `Site:` line `acli jira auth status` prints, none
 //! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network, and
 //! `view_delay_ms` does the same for `workitem view`.
-//! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
+//! `signed_in: false` makes `acli jira auth status` end with 1, saying it is not logged in;
+//! `status_fail` (`"✗ Error: Something went wrong"`) makes it end with 1 saying that text, as a
+//! check that could not reach the service does (#1315). `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
 //! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's
 //! `key`, its `self` and only those of its `fields`, as the real one is assumed to: a read that
@@ -403,6 +405,10 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
         ["jira", "auth", "logout", ..] => sign_in::logout(dir, args),
         ["jira", "auth", "status", ..] => {
             wait(script);
+            if let Some(why) = script["status_fail"].as_str() {
+                eprintln!("{why}");
+                return 1;
+            }
             if !sign_in::signed_in(dir, script) {
                 eprintln!("✗ Not logged in. Run: acli jira auth login");
                 return 1;

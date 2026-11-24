@@ -254,6 +254,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         repositories: repositories.clone(),
         identities,
         settings: Some(settings),
+        launched: launched(daemon, caller),
         depth: caller.depth,
         copied: crate::travelled::copied(&project, &repositories),
     };
@@ -295,7 +296,7 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         crate::travel::Testing::default(),
     )
     .await;
-    let placed = match sent {
+    let mut placed = match sent {
         Ok(placed) => placed,
         Err(why) => {
             let _ = daemon.write(|store| {
@@ -318,7 +319,32 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
-    Ok(Outcome::Done(answer(&asked, machine, &launch, &placed)))
+    // The user there may have answered between the two writes: their answer, come first, was
+    // kept (`Store::decide_launch`), and the caller is never told it waits for it.
+    let decided = daemon
+        .read(|store| store.launches("out", Some(&record.machine), LaunchFilter::Named(&launch)))
+        .ok()
+        .and_then(|recorded| recorded.into_iter().next())
+        .map(|recorded| recorded.state)
+        .filter(|state| record.request.is_some() && state != "held");
+    if let Some(state) = &decided {
+        placed["decided"] = state.clone().into();
+    }
+    // Its pilot follows it from here, as a session it leads here: held, from now on too, since its
+    // first wake may come before anything else is heard of it. Refused already, it never runs.
+    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent)
+        && decided.as_deref().is_none_or(|state| state == "started")
+    {
+        crate::subscriptions::lead_elsewhere(daemon, &caller.id, session, &asked.title, machine)
+            .map_err(refused)?;
+    }
+    Ok(Outcome::Done(answer_to_caller(
+        kind_word(asked.kind),
+        &asked.title,
+        machine,
+        &launch,
+        &placed,
+    )))
 }
 
 /// `why` a launch on `machine` is refused, with the window's action that would let it through,
@@ -348,10 +374,17 @@ fn actioned(why: &str, machine: &str, provider: &str) -> String {
     format!("{why}. {action}")
 }
 
-/// What the caller is told of its launch on `machine`.
-fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String {
+/// What the caller is told of its launch on `machine`, of `kind` titled `title`: held, and once
+/// started, the result of the user's answer when it was held.
+fn answer_to_caller(
+    kind: &str,
+    title: &str,
+    machine: &str,
+    launch: &str,
+    placed: &Value,
+) -> String {
     let id = placed["session"].as_str().unwrap_or_default();
-    let named = format!("\"{}\" (agent {id})", asked.title);
+    let named = format!("\"{title}\" (agent {id})");
     let there = placed["branch"].as_str().unwrap_or_default();
     let workspace = placed["workspace"].as_str().unwrap_or_default();
     let place = format!(
@@ -378,27 +411,68 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
         None => String::new(),
     };
     let back = format!("{back}{kept}");
+    // Said as a call held here, then where it will run: the user's answer comes as a held call's.
     if let Some(number) = placed["request"].as_u64() {
+        // Unless that answer came before this call returned: it was handed to the caller already.
+        let asked = format!("Request #{number} on {machine} (agent_launch)");
+        match placed["decided"].as_str() {
+            // Approved, and its session may have ended since: still approved.
+            Some("started" | "ended") => {
+                return format!(
+                    "{asked} was approved by the user there before this call returned: its \
+                     result was handed to you."
+                );
+            }
+            Some(_) => {
+                return format!(
+                    "{asked} was refused by the user there before this call returned. Nothing \
+                     was done; the reason was handed to you."
+                );
+            }
+            None => {}
+        }
+        let waiting = crate::approvals::waiting(number).replacen(
+            &format!("#{number}."),
+            &format!("#{number} on {machine}."),
+            1,
+        );
+        let follows = match kind {
+            "led" => {
+                "it runs as a session led by you: each end of its turns wakes you as a local led \
+                 session's does, and session_send reaches it"
+            }
+            "child" => {
+                "it runs as your child: its report, questions and failure come to you as a local \
+                 child's do, and agent_send reaches it"
+            }
+            _ => "it runs as the user's session, handed over",
+        };
         return format!(
-            "Not started yet: request #{number} on {machine} is waiting for the user, who allows \
-             or refuses it there. {named} will run on {machine} {place}, once allowed. {back} You \
-             are told nothing more here: go on with your own work."
+            "{waiting}\nIt will run as {named} on {machine} {place}, once allowed. {back} Once \
+             the user allows it there, {follows}."
         );
     }
-    match asked.kind {
-        LaunchKind::Child => format!(
+    match kind {
+        "child" => format!(
             "Launched {named} on {machine}, {place}. {back} Its report, questions and failure \
              come to you as a local child's; agent_send, agent_status and agent_stop reach it \
              while {machine} is on, and a message sent while it is off is kept and delivered \
              when it is back."
         ),
-        LaunchKind::Led => format!(
+        "led" => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
-             of {machine}, not your child: the user sees it there and may talk to it. {back}"
+             of {machine}, not your child: the user sees it there and may talk to it, and the \
+             agent_* tools do not reach it. It asks you its questions: a delivery \
+             [flottille:session-turn-ended] wakes you at each end of its turns, with its last \
+             message, kept while this machine is off. Answer with session_send, relay to the user \
+             with ask, or do nothing; session_read reads it, and forge unsubscribe with its \
+             session stops the wakes. {back}"
         ),
-        LaunchKind::Handed => format!(
+        _ => format!(
             "Started a session for the user, {named}, on {machine}, {place}, handed over. It is \
-             the user's. {back}"
+             the user's, not your child: the user follows it in the window and the agent_* tools \
+             do not reach it. You hear nothing more of it unless it writes to you; you can write \
+             to it with session_send. {back}"
         ),
     }
 }
@@ -666,7 +740,19 @@ async fn judged(
     );
     // Its project's settings, classed as the same writes of an agent here: one base makes the
     // launch the user's to decide, never the judge's.
-    let classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    let mut classed = crate::travelled::classed(daemon, &found, &asked, sender, &machine)?;
+    // No chain without the user, across machines as here: a session another agent started
+    // starts a session only as base (`gate::LAUNCHED_LAUNCH`). A child is not held for it, as a
+    // launched session's children are not here. A session this machine itself started on the
+    // sender is such a session whatever the launch says; of any other caller, the sender's word
+    // is taken (the machines are the user's own).
+    let launched = asked.launched || started_there(daemon, &machine, &asked.caller);
+    if launched && kind != LaunchKind::Child {
+        classed.base = true;
+        classed
+            .reasons
+            .push(crate::gate::LAUNCHED_LAUNCH.to_owned());
+    }
     // The files its setup copies that the project here lacks: made from the vault entries the
     // user shares from the caller's machine. A secret written into a file is the user's to allow,
     // whatever the mode, those shared already named, those not yet asked for.
@@ -927,24 +1013,7 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
             return;
         };
         let (project, name) = (workspace.project.clone(), workspace.name.clone());
-        let removed = async {
-            if workspace.repositories.iter().any(|r| r.laid.is_none()) {
-                return Err("it is not made only of code that came".to_owned());
-            }
-            let losses = crate::workspaces::losses(&daemon, &project, &name)
-                .await
-                .map_err(|failure| failure.message)?;
-            let digest = crate::workspaces::digest(&workspace)
-                .await
-                .map_err(|failure| failure.message)?;
-            crate::workspaces::remove_with_project(
-                daemon.clone(),
-                &workspace,
-                Some((&losses, &digest)),
-            )
-            .await
-            .map_err(|failure| failure.message)
-        };
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {});
         if let Err(why) = removed.await {
             eprintln!(
                 "flottille daemon: the workspace {name} of project {project}, made of a launch \
@@ -952,6 +1021,32 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
             );
         }
     });
+}
+
+/// Removes `workspace`, made of code that came, unless something in it changes while it is read:
+/// the function does not tell the code that came from other work, it refuses only what moves
+/// between its two reads. What it holds is read first, then what the removal would lose, which it
+/// checks again: a file written between the two reads, even one said lost the same, differs from
+/// the first, and the workspace is kept. `between` runs after the first read.
+async fn remove_unless_work_came(
+    daemon: &Arc<Daemon>,
+    workspace: &flottille_core::workspace::Workspace,
+    between: impl AsyncFnOnce(),
+) -> Result<(), String> {
+    if workspace.repositories.iter().any(|r| r.laid.is_none()) {
+        return Err("it is not made only of code that came".to_owned());
+    }
+    let digest = crate::workspaces::digest(workspace)
+        .await
+        .map_err(|failure| failure.message)?;
+    between().await;
+    let losses = crate::workspaces::losses(daemon, &workspace.project, &workspace.name)
+        .await
+        .map_err(|failure| failure.message)?;
+    crate::workspaces::remove_with_project(daemon.clone(), workspace, Some((&losses, &digest)))
+        .await
+        .map_err(|failure| failure.message)
+        .map(|_| ())
 }
 
 /// Refused when what `git` says of the code it sends is not the launch's: its project, one of its
@@ -1077,6 +1172,18 @@ async fn with_agent(
     let role = crate::roles::role(role).ok_or_else(|| format!("there is no role {role}"))?;
     let mode =
         GateMode::parse(launch.asked["mode"].as_str().unwrap_or_default()).unwrap_or_default();
+    // A led or handed session records the agent that started it as one started here does: the
+    // caller, stood in for here.
+    let led = launch.kind == "led";
+    let pilot = match !child {
+        true => Some(crate::across::pilot_stand_in(
+            daemon,
+            &launch,
+            &asked.project,
+            mode,
+        )?),
+        false => None,
+    };
     let agent = agents::create(
         daemon,
         &project,
@@ -1094,8 +1201,8 @@ async fn with_agent(
             model: asked.model.clone(),
             effort: asked.effort.clone(),
             gate_mode: Some(mode),
-            launched_by: None,
-            led: false,
+            launched_by: pilot,
+            led,
             launched: None,
         },
     )
@@ -1177,12 +1284,8 @@ async fn with_agent(
     // the caller's row and answer say of it.
     placed["project"] = launch.project.clone().into();
     placed["made"] = (launch.asked["made"] == true).into();
-    if asked.settings.is_some() && !crate::travelled::takes(&project, &launch.machine) {
-        placed["kept"] = match project.from_machine {
-            None => "user",
-            Some(_) => "machine",
-        }
-        .into();
+    if let Some(kept) = kept_of(&project, &launch) {
+        placed["kept"] = kept.into();
     }
     Ok(placed)
 }
@@ -1215,6 +1318,8 @@ pub(crate) fn held_by_request(daemon: &Daemon, number: u64) -> Option<Launch> {
 /// workspace is removed.
 pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Request, allowed: bool) {
     let Some(agent) = launch.agent.clone() else {
+        let why = allowed.then_some("its session there is gone");
+        never_started(daemon, &launch, request, why);
         return;
     };
     let state = match allowed {
@@ -1238,6 +1343,18 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
             eprintln!(
                 "flottille daemon: launch {}: its answer cannot be kept: {why}",
                 launch.launch
+            );
+            // Its caller would wait for the answer for ever.
+            let here = this_machine(daemon);
+            let asked = asked_of(Some(request.number), &here, &launch);
+            crate::across::tell_decided(
+                daemon,
+                &launch,
+                &format!(
+                    "{asked} was answered by the user, but nothing was done: the answer could not \
+                     be kept there."
+                ),
+                false,
             );
             false
         }
@@ -1332,10 +1449,19 @@ fn finish(
                 )
             }
         };
-        // What it lacked is said to the agent that launched it, which would wait for nothing.
-        if !missing.is_empty() {
-            refused_for_missing(daemon, &launch, &missing, why.as_deref());
-        }
+        // The agent that launched it is told, and what it lacked, as a held call's result comes:
+        // it would wait for nothing.
+        let here = this_machine(daemon);
+        let asked = asked_of(Some(request.number), &here, &launch);
+        let body = match (&why, missing.is_empty()) {
+            (_, false) => refused_for_missing(&asked, &here, &missing, why.as_deref()),
+            (Some(why), true) => format!(
+                "{asked} was approved by the user, but nothing was done: it could not start \
+                 there: {why}."
+            ),
+            (None, true) => format!("{asked} was refused by the user. Nothing was done."),
+        };
+        crate::across::tell_decided(daemon, &launch, &body, false);
         crate::tree::stop_tree(daemon, &agent, &reason);
         // Its setup never runs: the workspace made of its code goes once its agent ended, and
         // the project made for it then.
@@ -1355,44 +1481,210 @@ fn finish(
             launch.launch
         );
     }
+    // Told before its setup goes on, so that a setup that fails at once is never heard of first.
+    let here = this_machine(daemon);
+    let asked = asked_of(Some(request.number), &here, &launch);
+    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
+    let placed = placed_of(daemon, &launch, &agent);
+    let result = answer_to_caller(&launch.kind, title, &here, &launch.launch, &placed);
+    crate::across::tell_decided(
+        daemon,
+        &launch,
+        &format!(
+            "{asked} was approved by the user, and Flottille has now done it. Its \
+             result:\n\n{result}"
+        ),
+        true,
+    );
     go_on(daemon, &launch, &agent);
 }
 
-/// Tells the agent of the other machine that asked `launch` that it is refused for lacking
-/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
-fn refused_for_missing(
-    daemon: &Arc<Daemon>,
-    launch: &Launch,
-    missing: &[crate::travelled::Need],
-    why: Option<&str>,
-) {
-    let here = crate::link::remote_of(daemon)
+/// What the agent `agent` of the held `launch`, allowed now, was placed in: as `placed` says it
+/// to the caller's answer.
+fn placed_of(daemon: &Daemon, launch: &Launch, agent: &str) -> Value {
+    let branch = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok())
+        .map(|workspace| workspace.branch)
+        .unwrap_or_default();
+    let mut placed = json!({"session": agent, "workspace": launch.workspace, "branch": branch});
+    if let Ok(project) = projects::load_project(daemon, &launch.project)
+        && let Some(kept) = kept_of(&project, launch)
+    {
+        placed["project"] = launch.project.clone().into();
+        placed["kept"] = kept.into();
+    }
+    placed
+}
+
+/// Whose settings the project of `launch` here keeps instead of the caller's, when it keeps its
+/// own: `user` when the user registered it, `machine` when it was made for another machine.
+fn kept_of(project: &flottille_core::project::Project, launch: &Launch) -> Option<&'static str> {
+    let settings = !launch.asked["asked"]["settings"].is_null();
+    if !settings || crate::travelled::takes(project, &launch.machine) {
+        return None;
+    }
+    Some(match project.from_machine {
+        None => "user",
+        Some(_) => "machine",
+    })
+}
+
+/// This machine's name among the user's, as the agents of the others know it.
+fn this_machine(daemon: &Daemon) -> String {
+    crate::link::remote_of(daemon)
         .ok()
         .and_then(|remote| remote.listed().ok().map(|(_, name)| name))
-        .unwrap_or_else(|| "the other machine".to_owned());
+        .unwrap_or_else(|| "the other machine".to_owned())
+}
+
+/// The request `number` of the held `launch`, as its caller is told of the user's answer, as a
+/// held call's answer names its request: `Request #4 on server (agent_launch)`. A launch with no
+/// request is named by its title.
+fn asked_of(number: Option<u64>, here: &str, launch: &Launch) -> String {
+    match number {
+        Some(number) => format!("Request #{number} on {here} (agent_launch)"),
+        None => {
+            let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
+            format!("Your launch \"{title}\" on {here}")
+        }
+    }
+}
+
+/// The held `launch`, answered by `request`, never starts: it has no session here, or, with
+/// `why`, it could not start. Refused, its workspace removed, and its caller told, which would
+/// otherwise wait for ever.
+fn never_started(daemon: &Arc<Daemon>, launch: &Launch, request: &Request, why: Option<&str>) {
+    if let Err(error) = daemon.write(|store| {
+        store.settle_launch(&launch.machine, &launch.launch, "refused")?;
+        store
+            .refuse_started_launch(&launch.machine, &launch.launch)
+            .map(|()| ((), None))
+    }) {
+        eprintln!(
+            "flottille daemon: launch {}: its refusal cannot be kept: {error}",
+            launch.launch
+        );
+    }
+    if let Some(workspace) = launch.workspace_id {
+        remove_workspace(daemon, workspace, None);
+    }
+    if let Err(error) = daemon.write(|store| Ok(((), store.settle_unsent(request, "refused")?))) {
+        eprintln!(
+            "flottille daemon: request #{}: its answer cannot be stored: {error}",
+            request.number
+        );
+    }
+    let here = this_machine(daemon);
+    let asked = asked_of(Some(request.number), &here, launch);
+    let body = match why {
+        Some(why) => format!(
+            "{asked} was approved by the user, but nothing was done: it could not start there: \
+             {why}."
+        ),
+        None => format!("{asked} was refused by the user. Nothing was done."),
+    };
+    crate::across::tell_decided(daemon, launch, &body, false);
+    crate::travelled::unmake(daemon, launch);
+}
+
+/// At start: a request allowed whose answer was never stored, which held a launch of another
+/// machine here: the daemon stopped while it set it up, before its caller was told. It never
+/// starts, and its caller is told so.
+pub(crate) fn interrupted_at_start(daemon: &Arc<Daemon>) {
+    let unsettled = match daemon.read(|store| store.unsettled_requests()) {
+        Ok(unsettled) => unsettled,
+        Err(error) => {
+            eprintln!("flottille daemon: reading the requests: {error}");
+            return;
+        }
+    };
+    for request in unsettled {
+        interrupted(daemon, &request);
+    }
+}
+
+/// The launch held by `request`, cut while it was set up (`interrupted_at_start`), if it is one.
+fn interrupted(daemon: &Arc<Daemon>, request: &Request) {
+    let Some(mut launch) = daemon
+        .read(|store| store.launches("in", None, LaunchFilter::Request(request.number)))
+        .ok()
+        .and_then(|launches| {
+            launches
+                .into_iter()
+                .find(|launch| matches!(launch.state.as_str(), "held" | "started"))
+        })
+    else {
+        return;
+    };
+    let why = "Flottille stopped there while it was setting it up";
+    let Some(agent) = launch.agent.clone() else {
+        never_started(daemon, &launch, request, Some(why));
+        return;
+    };
+    // Its setup is over and its session was briefed: it runs, and its caller was told. Only the
+    // answer's settling was lost: it is stored again, and nothing is stopped.
+    if launch.state == "started" && ran(daemon, &launch, &agent) {
+        if let Err(error) = daemon.write(|store| Ok(((), store.settle_unsent(request, "done")?))) {
+            eprintln!(
+                "flottille daemon: request #{}: its answer cannot be stored: {error}",
+                request.number
+            );
+        }
+        return;
+    }
+    // Stopped before its answer was settled: settled as allowed, which `finish` refuses.
+    if launch.state == "held"
+        && let Ok(Some(workspace_id)) = daemon.write(|store| {
+            store
+                .settle_launch(&launch.machine, &launch.launch, "started")
+                .map(|settled| (settled, None))
+        })
+    {
+        launch.state = "started".into();
+        launch.workspace_id = workspace_id;
+    }
+    finish(daemon, launch, request, agent, Err(Some(why.to_owned())));
+}
+
+/// Whether the `agent` of the allowed `launch` ran: its workspace is no longer being prepared and
+/// its first message was delivered.
+fn ran(daemon: &Daemon, launch: &Launch, agent: &str) -> bool {
+    let prepared = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok())
+        .is_some_and(|made| made.state() != flottille_core::workspace::State::Preparing);
+    prepared
+        && daemon
+            .read(|store| store.agent(agent))
+            .ok()
+            .flatten()
+            .is_some_and(|agent| crate::tree::briefed(daemon, &agent))
+}
+
+/// What the agent of the other machine that asked `asked` is told when it is refused for lacking
+/// `missing` here: refused by the user, or, with `why`, allowed while they were still not shared.
+fn refused_for_missing(
+    asked: &str,
+    here: &str,
+    missing: &[crate::travelled::Need],
+    why: Option<&str>,
+) -> String {
     let lacking: Vec<String> = missing
         .iter()
         .map(|need| format!("{} (the vault entry {})", need.path, need.entry))
         .collect();
-    let title = launch.asked["asked"]["title"].as_str().unwrap_or_default();
     let what = match why {
-        None => "the user refused it",
-        Some(_) => "it was allowed before what it needs there was shared",
+        None => "was refused by the user. Nothing was done".to_owned(),
+        Some(_) => "was approved by the user, but nothing was done: it was allowed before what it \
+             needs there was shared"
+            .to_owned(),
     };
-    let body = format!(
-        "Your launch \"{title}\" on {here} is refused: {what}. Its setup copies what {here} \
-         lacks: {}, which the user shares from this machine through the vault. Nothing of it \
-         runs there; launch it again once they are shared.",
+    format!(
+        "{asked} {what}. Its setup copies what {here} lacks: {}, which the user shares from this \
+         machine through the vault. Launch it again once they are shared.",
         crate::travelled::listed(&lacking)
-    );
-    crate::across::tell_of(
-        daemon,
-        launch,
-        "child-failed",
-        &body,
-        approval::URGENT,
-        true,
-    );
+    )
 }
 
 /// The agent `agent` ended, its requests cancelled: a launch it was held for the user's answer
@@ -1416,6 +1708,18 @@ pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
         remove_workspace(daemon, workspace, Some(agent.to_owned()));
     }
     if matches!(settled, Ok(Some(_))) {
+        // Its caller would wait for the user's answer for ever.
+        let here = this_machine(daemon);
+        let asked = asked_of(launch.request, &here, &launch);
+        crate::across::tell_decided(
+            daemon,
+            &launch,
+            &format!(
+                "{asked} was refused: its session there ended before the user of {here} \
+                 decided. Nothing was done."
+            ),
+            false,
+        );
         crate::travelled::unmake(daemon, &launch);
     }
 }
@@ -1445,6 +1749,22 @@ pub(crate) fn launched_from_shown(daemon: &Daemon, agent: &str) -> Value {
     }
 }
 
+/// Whether `agent` is a session another agent started: here (`launched_by`), or on another
+/// machine. Its own launches come to the user (`gate::LAUNCHED_LAUNCH`).
+pub(crate) fn launched(daemon: &Daemon, agent: &Agent) -> bool {
+    agent.launched_by.is_some() || launched_from(daemon, &agent.id).is_some()
+}
+
+/// Whether `agent` of the machine `machine` (its key in hex) is a session an agent of this
+/// machine launched there.
+fn started_there(daemon: &Daemon, machine: &str, agent: &str) -> bool {
+    daemon
+        .read(|store| store.launches("out", Some(machine), LaunchFilter::Agent(agent)))
+        .unwrap_or_default()
+        .iter()
+        .any(|launch| launch.state != "refused")
+}
+
 /// Whether `agent` was started here for another machine's agent, and allowed: its first message
 /// is due.
 pub(crate) fn started_here(daemon: &Daemon, agent: &str) -> bool {
@@ -1453,4 +1773,138 @@ pub(crate) fn started_here(daemon: &Daemon, agent: &str) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|launch| launch.state == "started")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flottille_core::workspace::{Base, Workspace, Worktree};
+
+    #[test]
+    fn a_refusal_before_waiting_is_never_answered_as_waiting() {
+        // The user there answered between the caller's two writes: its answer came first.
+        for (decided, said) in [
+            ("refused", "was refused by the user there"),
+            ("started", "was approved by the user there"),
+            // Approved, then its session ended before this call returned.
+            ("ended", "was approved by the user there"),
+        ] {
+            let placed = json!({"session": "0123456789ab", "workspace": "w", "branch": "b",
+                "request": 4, "decided": decided});
+
+            let answer = answer_to_caller("led", "Docs", "server", "first", &placed);
+
+            assert!(!answer.contains("Waiting"), "{answer}");
+            assert!(
+                answer.starts_with(&format!("Request #4 on server (agent_launch) {said}")),
+                "{answer}"
+            );
+            if decided == "refused" {
+                assert!(answer.contains("the reason was handed to you"), "{answer}");
+            }
+        }
+    }
+
+    /// Runs `git` in `dir`, in a home and a configuration of its own.
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let nowhere = std::ffi::OsStr::new("/dev/null");
+        let name = std::ffi::OsStr::new("Test");
+        let email = std::ffi::OsStr::new("test@example.org");
+        let env = [
+            ("GIT_CONFIG_GLOBAL", nowhere),
+            ("GIT_CONFIG_NOSYSTEM", std::ffi::OsStr::new("1")),
+            ("GIT_AUTHOR_NAME", name),
+            ("GIT_COMMITTER_NAME", name),
+            ("GIT_AUTHOR_EMAIL", email),
+            ("GIT_COMMITTER_EMAIL", email),
+        ];
+        crate::git::output_with(dir, args, crate::git::Class::Work, &env)
+            .await
+            .unwrap();
+    }
+
+    /// A workspace made of code that came (a repository laid), in a throwaway repository, with
+    /// `notes.txt` written in it and not committed: what the sender's work was.
+    async fn made_of_code_that_came(dir: &std::path::Path) -> (Arc<Daemon>, Workspace) {
+        let project = dir.join("app");
+        let folder = dir.join("workspace");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "--quiet", "-b", "main"]).await;
+        std::fs::write(project.join("a.txt"), "a\n").unwrap();
+        git(&project, &["add", "a.txt"]).await;
+        git(&project, &["commit", "--quiet", "-m", "first"]).await;
+        let commit = crate::git::output(&project, &["rev-parse", "HEAD"], crate::git::Class::Read)
+            .await
+            .unwrap()
+            .trim()
+            .to_owned();
+        let at = folder.to_string_lossy().into_owned();
+        git(&project, &["worktree", "add", "--quiet", "-b", "fix", &at]).await;
+        std::fs::write(folder.join("notes.txt"), "one\n").unwrap();
+        let mut workspace = Workspace {
+            id: 0,
+            project: "app".into(),
+            name: "workspace".into(),
+            branch: "fix".into(),
+            folder,
+            project_folder: project,
+            created_at: 1,
+            variables: Default::default(),
+            repositories: vec![Worktree {
+                path: ".".into(),
+                base: Base {
+                    branch: "main".into(),
+                    remote: "origin".into(),
+                    reference: "refs/heads/main".into(),
+                    commit,
+                    fetched_now: false,
+                    fetched_at: None,
+                    note: None,
+                    fetch: None,
+                },
+                resumed: false,
+                resumed_branch: None,
+                laid: Some("laid".into()),
+            }],
+            steps: Vec::new(),
+            ticket: None,
+        };
+        let daemon = crate::daemon::tests::a_daemon(dir, false);
+        workspace.id = daemon
+            .write(|store| {
+                let (id, event) =
+                    store.create_workspace(&workspace, ("workspace.created", json!({})))?;
+                Ok((id, event))
+            })
+            .unwrap();
+        (daemon, workspace)
+    }
+
+    #[tokio::test]
+    async fn a_workspace_of_code_that_came_goes_when_nothing_was_written_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, workspace) = made_of_code_that_came(dir.path()).await;
+
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {}).await;
+
+        assert_eq!(removed, Ok(()));
+        assert!(!workspace.folder.exists());
+    }
+
+    #[tokio::test]
+    async fn work_written_after_a_held_agent_stops_is_not_lost_by_the_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, workspace) = made_of_code_that_came(dir.path()).await;
+        let notes = workspace.folder.join("notes.txt");
+
+        // The file the sender's work holds is written again between the two reads of what the
+        // workspace holds: the same sentence says it lost, only its content tells.
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {
+            std::fs::write(&notes, "two\n").unwrap();
+        })
+        .await;
+
+        assert!(removed.is_err(), "{removed:?}");
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "two\n");
+    }
 }

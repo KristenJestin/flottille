@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use flottille_core::agent::{Agent, Choices};
+use flottille_core::agent::{Agent, Choices, GateMode};
 use flottille_core::paths::Paths;
 use flottille_core::project::Project;
 use flottille_core::provider::{self, Judge, NewSession, Settings, says_default};
@@ -1172,6 +1172,14 @@ pub fn check_change(
     Ok(Checked { model, dropped })
 }
 
+/// The mode a session the user starts is in when the user names none: what they chose for new
+/// sessions, Auto otherwise.
+pub fn new_session_mode(daemon: &Daemon) -> Result<GateMode, Failure> {
+    Settings::load(&daemon.paths)
+        .map(|settings| settings.new_session_mode)
+        .map_err(|error| Failure::new("invalid-config", error))
+}
+
 /// The provider and the choices of a new agent, checked against the providers enabled and ready
 /// and the models they offer: a refusal names what is available.
 pub fn choose(
@@ -1466,6 +1474,30 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             }
             Ok(json!({"new_session": chosen}))
         }
+        "provider.set_new_session_mode" => {
+            // The user's choice only: no tool of an agent reaches this method.
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Chosen {
+                mode: String,
+            }
+            let Chosen { mode } = serde_json::from_value(params)?;
+            let mode = GateMode::parse(&mode).ok_or_else(|| {
+                Failure::new(
+                    "invalid-params",
+                    format!("there is no mode {mode}: the modes are ask, auto and full"),
+                )
+            })?;
+            if set_new_session_mode(&daemon.paths, mode)? {
+                daemon
+                    .emit(
+                        "provider.new_session_mode_changed",
+                        json!({"mode": mode.as_str()}),
+                    )
+                    .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            }
+            Ok(json!({"new_session_mode": mode.as_str()}))
+        }
         "provider.judge_noticed" => {
             if judge_noticed(&daemon.paths)? {
                 let judge = Settings::load(&daemon.paths)
@@ -1590,6 +1622,22 @@ fn set_new_session(paths: &Paths, chosen: Option<&NewSession>) -> Result<bool, F
             }
             document.insert("new_session", toml_edit::Item::Table(table));
         }
+        true
+    })
+}
+
+/// Sets `new_session_mode` in `providers.toml`: the mode a session the user starts is in. Auto is
+/// what the file says nothing of, so it removes the key. The rest of the file is kept as the user
+/// wrote it. Whether it changed.
+fn set_new_session_mode(paths: &Paths, mode: GateMode) -> Result<bool, Failure> {
+    edit_judge(paths, |before, document| {
+        if before.new_session_mode == mode {
+            return false;
+        }
+        match mode {
+            GateMode::Auto => document.remove("new_session_mode"),
+            _ => document.insert("new_session_mode", toml_edit::value(mode.as_str())),
+        };
         true
     })
 }
@@ -1882,6 +1930,23 @@ pub fn new_session_text(chosen: &Value) -> String {
     format!("New sessions start on {}.\n", new_session_words(chosen))
 }
 
+/// A mode as the command line says it: `Full`; Auto when the answer says none.
+fn mode_word(mode: &Value) -> &'static str {
+    match mode.as_str() {
+        Some("ask") => "Ask",
+        Some("full") => "Full",
+        _ => "Auto",
+    }
+}
+
+/// What `flottille provider new-session --mode` says once it set the mode a new session starts in.
+pub fn new_session_mode_text(answer: &Value) -> String {
+    format!(
+        "New sessions start in {}.\n",
+        mode_word(&answer["new_session_mode"])
+    )
+}
+
 /// `flottille provider list`: each provider, whether its agents can run, and the Auto judge,
 /// said picked by Flottille until the user saw it.
 pub fn list_text(answer: &Value) -> String {
@@ -1913,6 +1978,10 @@ pub fn list_text(answer: &Value) -> String {
         }
     });
     shown.push_str(&format!(
+        "New session mode: {}.\n",
+        mode_word(&answer["new_session_mode"])
+    ));
+    shown.push_str(&format!(
         "New sessions: {}.\n",
         new_session_words(&answer["new_session"])
     ));
@@ -1942,6 +2011,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
         "providers": providers,
         "judge": settings.judge,
         "new_session": settings.new_session,
+        "new_session_mode": settings.new_session_mode.as_str(),
     });
     if let Some(project) = project {
         let provider = project_provider(project, &settings);

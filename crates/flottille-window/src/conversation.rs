@@ -589,7 +589,9 @@ pub struct Conversation {
     /// The title of each session for the user an `agent_launch` call starts, by the call's id,
     /// then, once held, by its request: it is no sub-agent, and is said as a session.
     sessions: HashMap<String, String>,
-    held_sessions: HashMap<u64, String>,
+    /// Each machine counts its own requests: a held session is keyed by its request and the
+    /// machine it is held on, `None` for this one.
+    held_sessions: HashMap<(u64, Option<String>), String>,
     /// The arguments of each `fs_edit` call still running, for its diff once it is done: its
     /// updates do not repeat them.
     edits: HashMap<String, Value>,
@@ -1491,8 +1493,11 @@ impl Conversation {
             strings(&data["raw_output"], &mut texts);
             if texts.iter().any(|text| text.contains(STARTED_SESSION)) {
                 changes.extend(self.push(started_session(title)));
-            } else if let Some(number) = texts.iter().find_map(|text| held_request(text)) {
-                self.held_sessions.insert(number, title);
+            } else if texts.iter().any(|text| approved_before_return(text)) {
+                // The user there allowed it before this call returned: no held entry waits for it.
+                changes.extend(self.push(started_session(title)));
+            } else if let Some(held) = texts.iter().find_map(|text| held_launch(text)) {
+                self.held_sessions.insert(held, title);
             }
         }
         // A report, or the end of a command, delivered as a note on the result.
@@ -1537,8 +1542,8 @@ impl Conversation {
                     }
                 }
                 changes.extend(self.push(block));
-                if let Some(title) = launched_after_approval(&body)
-                    .and_then(|number| self.held_sessions.remove(&number))
+                if let Some(title) =
+                    launched_after_approval(&body).and_then(|held| self.held_sessions.remove(&held))
                 {
                     changes.extend(self.push(started_session(title)));
                 }
@@ -1799,13 +1804,37 @@ fn started_session(said: String) -> Block {
 }
 
 /// An `agent_launch` the user allowed and the daemon performed, which started a session: its
-/// request.
-fn launched_after_approval(body: &str) -> Option<u64> {
+/// request, and the machine it was held on when it is another.
+fn launched_after_approval(body: &str) -> Option<(u64, Option<String>)> {
     let rest = body.strip_prefix("Request #")?;
     let (number, rest) = rest.split_once(" (agent_launch) ")?;
     let (_, result) = rest.split_once("has now done it. Its result:\n\n")?;
     result.contains(STARTED_SESSION).then_some(())?;
-    number.parse().ok()
+    // A launch held on another machine names it: `#4 on server`.
+    match number.split_once(" on ") {
+        Some((number, machine)) => Some((number.parse().ok()?, Some(machine.to_owned()))),
+        None => Some((number.parse().ok()?, None)),
+    }
+}
+
+/// The request a held `agent_launch` answers (`… request #4 …`), and the machine it is held on
+/// when it is another (`… request #4 on server. …`).
+fn held_launch(text: &str) -> Option<(u64, Option<String>)> {
+    let number = held_request(text)?;
+    let (_, rest) = text.split_once(&format!("request #{number}"))?;
+    // The name may hold spaces and dots: it ends where the sentence's fixed ending begins
+    // (`approvals::waiting`).
+    let machine = rest
+        .strip_prefix(" on ")
+        .and_then(|rest| rest.split_once(". This action"))
+        .map(|(machine, _)| machine.to_owned());
+    Some((number, machine))
+}
+
+/// Whether `text` is what `agent_launch` answers when the user of the other machine allowed the
+/// launch before the call returned (`launches.rs`, `answer_to_caller`).
+fn approved_before_return(text: &str) -> bool {
+    text.contains("(agent_launch) was approved by the user there before this call returned")
 }
 
 /// The request a held call's answer names (`… request #4 …`).
@@ -2631,6 +2660,171 @@ mod tests {
                 kind: STARTED_SESSION_KIND.into(),
                 text: "\"Docs\"".into()
             })
+        );
+    }
+
+    #[test]
+    fn a_session_held_on_another_machine_then_allowed_is_said_once_it_started() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "machine": "server", "title": "Docs", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Waiting for the user's approval, request #4 on server. This action has not happened; do not assume it did.\nIt will run on server in workspace w there, once allowed."}),
+        ));
+        c.apply(&event(
+            3,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 on server (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Docs\" (agent 0123456789ab), on server, in workspace w there."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "\"Docs\"".into()
+            })
+        );
+        assert!(c.held_sessions.is_empty(), "{:?}", c.held_sessions);
+    }
+
+    #[test]
+    fn request_numbers_of_two_machines_never_overwrite_each_other() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        // Each machine counts its own requests: a #4 here and a #4 on server.
+        for (n, (id, title, machine, waiting)) in [
+            ("here", "Local", None, "request #4."),
+            ("there", "Remote", Some("server"), "request #4 on server."),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut asked = json!({"kind": "led", "title": title, "brief": "Go"});
+            if let Some(machine) = machine {
+                asked["machine"] = machine.into();
+            }
+            c.apply(&event(
+                2 * n as u64 + 1,
+                "agent.tool_call",
+                json!({"id": id, "title": "mcp__flottille__agent_launch",
+                    "status": "in_progress", "raw_input": asked}),
+            ));
+            c.apply(&event(
+                2 * n as u64 + 2,
+                "agent.tool_call",
+                json!({"id": id, "update": true, "status": "completed",
+                    "raw_output": format!("Waiting for the user's approval, {waiting} This \
+                        action has not happened; do not assume it did.")}),
+            ));
+        }
+        let started = |text: &str| Block::Notice {
+            kind: STARTED_SESSION_KIND.into(),
+            text: text.into(),
+        };
+
+        c.apply(&event(
+            5,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 on server (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Remote\" (agent 0123456789ab), on server, in workspace w there."}),
+        ));
+        assert_eq!(c.blocks().last(), Some(&started("\"Remote\"")));
+        c.apply(&event(
+            6,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Local\" (agent 0123456789ac), in w."}),
+        ));
+        assert_eq!(c.blocks().last(), Some(&started("\"Local\"")));
+        assert!(c.held_sessions.is_empty(), "{:?}", c.held_sessions);
+    }
+
+    #[test]
+    fn a_session_held_on_a_machine_named_with_spaces_is_said_once_it_started() {
+        // A machine's name may hold inner spaces and dots.
+        for machine in ["Kris laptop", "srv.lan"] {
+            let mut c = Conversation::new("the conversation".into(), None);
+            c.apply(&event(
+                1,
+                "agent.tool_call",
+                json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                    "raw_input": {"kind": "led", "machine": machine, "title": "Docs", "brief": "Go"}}),
+            ));
+            c.apply(&event(
+                2,
+                "agent.tool_call",
+                json!({"id": "l", "update": true, "status": "completed",
+                    "raw_output": format!("Waiting for the user's approval, request #4 on {machine}. This action has not happened; do not assume it did.")}),
+            ));
+            c.apply(&event(
+                3,
+                "agent.prompted",
+                json!({"text": format!("[flottille:approval]\nRequest #4 on {machine} (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Docs\" (agent 0123456789ab), on {machine}, in workspace w there.")}),
+            ));
+            assert_eq!(
+                c.blocks().last(),
+                Some(&Block::Notice {
+                    kind: STARTED_SESSION_KIND.into(),
+                    text: "\"Docs\"".into()
+                }),
+                "{machine}"
+            );
+            assert!(
+                c.held_sessions.is_empty(),
+                "{machine}: {:?}",
+                c.held_sessions
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_approved_before_its_launch_returned_is_said_once_it_started() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "machine": "server", "title": "Docs", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Request #4 on server (agent_launch) was approved by the user there before this call returned: its result was handed to you."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "\"Docs\"".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_refused_before_its_launch_returned_is_not_said_started() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "machine": "server", "title": "Docs", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Request #4 on server (agent_launch) was refused by the user there before this call returned. Nothing was done; the reason was handed to you."}),
+        ));
+        assert!(
+            !c.blocks()
+                .iter()
+                .any(|b| matches!(b, Block::Notice { kind, .. } if kind == STARTED_SESSION_KIND)),
+            "{:?}",
+            c.blocks()
         );
     }
 

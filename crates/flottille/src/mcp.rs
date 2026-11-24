@@ -372,7 +372,7 @@ const SERVED: [Definition; 33] = [
                 "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
                 "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
                 "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
-                "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
+                "base": {"type": "string", "description": "create: the branch it goes into, in place of the workspace's base (left out, a workspace whose base branch was merged and deleted opens it into where that went, and says so). edit: the branch it goes into; the workspace's base follows when it is the workspace's own pull request. It must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
                 "verdict": {"type": "string", "enum": crate::forge::REVIEW_VERDICTS, "description": "review: comment, approve or request_changes; the last two wait for the user in every mode."},
                 "comments": {"type": "array", "description": "review: comments on lines of the diff.", "items": {"type": "object", "properties": {
@@ -722,7 +722,7 @@ const SERVED: [Definition; 33] = [
         description: "kind (required): child, a part of your own task, in your place, that you \
             direct and that reports to you (no workspace; refused above the children cap); led, an \
             autonomous job of its own that you pilot, a real session the user sees under you and \
-            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
+            may talk to, which asks you its questions and wakes you at each end of its turns; \
             handed, a session you start for the user and let go, of which you hear nothing more \
             unless it writes to you. led and handed: a root only, judged, in workspace (main is \
             the project folder) or new_workspace; you and it write with session_send. Answered at \
@@ -1069,6 +1069,9 @@ pub struct Grant {
     pub place: Place,
     /// The agent is a root another agent started for the user: it starts none without the user.
     pub launched: bool,
+    /// A caller of another machine stood in for here, reading the session or child it started
+    /// here (`across::serve_call`): that agent, read without a leave, its child as its parent.
+    pub reads: Option<String>,
 }
 
 /// What a tool did.
@@ -1618,7 +1621,8 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
         epoch: agent.epoch,
         tools,
         place,
-        launched: agent.launched_by.is_some(),
+        launched: crate::launches::launched(daemon, agent),
+        reads: None,
     })
 }
 
@@ -2467,8 +2471,17 @@ async fn played_whole(
     } else {
         (args, None, None)
     };
+    // A read of a session or child this agent started there: answered there by the same tool.
+    let launch_read = match (tool, &away) {
+        ("session_read" | "agent_status", None)
+            if grant.tools.contains(&tool) && !replaced && removed.is_none() =>
+        {
+            crate::across::aimed(daemon, &grant.agent, tool, &args)
+        }
+        _ => None,
+    };
     // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
-    let shaped = away.is_some();
+    let shaped = away.is_some() || launch_read.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2489,6 +2502,8 @@ async fn played_whole(
     } else if let Some(away) = &away {
         // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
         crate::across::forward(daemon, grant, tool, &args, away).await
+    } else if let Some(launch) = &launch_read {
+        crate::across::read_launch(daemon, grant, tool, &args, launch).await
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -2592,9 +2607,13 @@ async fn played_whole(
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 // The judge takes seconds: a leave the user withdrew meanwhile,
-                                // or a session ended, stops the message it was judging.
-                                let lost = (tool == "session_send")
-                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                // or a session ended, stops the message it was judging. A
+                                // session on another machine is no session here: the check
+                                // before the judge skipped it too.
+                                let lost = (tool == "session_send"
+                                    && crate::across::aimed(daemon, &grant.agent, tool, &args)
+                                        .is_none())
+                                .then(|| crate::tree::needs_leave(daemon, grant, &args));
                                 // A read of another project's session is under the same leave.
                                 let read_lost = tool == "session_read"
                                     && crate::session_read::needs_leave(daemon, grant, &args);
@@ -2671,14 +2690,16 @@ async fn played_whole(
     );
     let word = outcome.word();
     let (text, limit) = match (shaped, outcome) {
-        // Masked there of that machine's secrets, and here of this one's: a secret only this
-        // machine knows is never shown its agent either. Escaped and cut there.
-        (true, Outcome::Done(text) | Outcome::Failed(text)) => {
-            (masked(&text, &grant.place), RESULT_LIMIT)
-        }
-        (true, Outcome::Held(text) | Outcome::Refused(text) | Outcome::Invalid(text)) => {
-            (text, RESULT_LIMIT)
-        }
+        // Masked there of that machine's secrets, and here of this one's, whatever its outcome: a
+        // secret only this machine knows is never shown its agent either. Escaped and cut there.
+        (
+            true,
+            Outcome::Done(text)
+            | Outcome::Failed(text)
+            | Outcome::Held(text)
+            | Outcome::Refused(text)
+            | Outcome::Invalid(text),
+        ) => (masked(&text, &grant.place), RESULT_LIMIT),
         (false, outcome) => shown(outcome, &grant.place),
     };
     // Notes left for the session that replaced this one are its own, not this late call's.
@@ -4283,6 +4304,7 @@ mod tests {
                 home: None,
             },
             launched: false,
+            reads: None,
         }
     }
 

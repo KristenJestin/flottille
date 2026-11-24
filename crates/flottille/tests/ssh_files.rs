@@ -16,7 +16,8 @@ use common::{User, user_namespaces};
 use serde_json::{Value, json};
 
 /// A project `app` over a throwaway repository, its workspace `w`, and the session of a root
-/// agent working there in Full, so that nothing is held: its session, the workspace's folder.
+/// agent working there in Auto, its judge allowing every call: a run in Full is the user's own,
+/// unconfined (`docs/tools.md`). Its session, the workspace's folder.
 fn session(user: &User) -> (Mcp, PathBuf) {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -47,7 +48,7 @@ fn session(user: &User) -> (Mcp, PathBuf) {
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap();
     let (url, authorization) = server_of(user, opened);
-    let output = user.run(&["agent", "mode", id, "full"]);
+    let output = user.run(&["agent", "mode", id, "auto"]);
     assert!(
         output.status.success(),
         "{}",
@@ -609,5 +610,210 @@ fn the_agent_is_lent_to_no_push_where_landlock_is_absent() {
     assert!(
         report["warnings"].to_string().contains("Landlock"),
         "{report}"
+    );
+}
+
+/// Whether the real `ssh` client is on the `PATH`: the tests of #1302 run it, never a stand-in,
+/// since a stand-in reads no configuration as OpenSSH does and so misses what it refuses.
+fn ssh_client() -> bool {
+    let found = std::process::Command::new("ssh")
+        .arg("-V")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !found {
+        eprintln!(
+            "skipped: no ssh client on the PATH, and only the real one reads its configuration"
+        );
+    }
+    found
+}
+
+/// The session of a root agent in Full, its home's `~/.ssh` empty: what `ssh` reads there adds
+/// nothing to the machine's own `/etc/ssh/ssh_config` and what it includes.
+fn session_with_empty_ssh(user: &User) -> (Mcp, PathBuf) {
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
+    session(user)
+}
+
+#[test]
+fn a_run_s_ssh_reads_the_root_owned_system_config() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // The machine's configuration is root's, and so are the fragments it includes: in the run's
+    // namespace they were owned by no one ssh knows, and it refused them (#1302). What ssh says
+    // is not looked at, only whether it read its configuration.
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, place) = session_with_empty_ssh(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        "import subprocess\n\
+         out['ssh'] = subprocess.run(['ssh', '-G', 'example.invalid'],\n\
+         \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n",
+    );
+
+    assert_eq!(out["ssh"], 0, "{out}");
+}
+
+#[test]
+fn a_run_fetches_from_an_ssh_remote_with_a_root_owned_system_config() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // The real git and ssh, to a host that does not resolve: they get as far as the network,
+    // past the configuration that stopped them before (#1302).
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (mcp, place) = session_with_empty_ssh(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        "import subprocess\n\
+         for name, line in [('ls-remote', ['git', 'ls-remote', 'ssh://nohost.invalid/x']),\n\
+         \x20   ('fetch', ['git', 'fetch', 'ssh://nohost.invalid/x'])]:\n\
+         \x20   said = subprocess.run(line, capture_output=True, text=True).stderr\n\
+         \x20   out[name] = 'refused' if 'Bad owner or permissions' in said else \\\n\
+         \x20       'unresolved' if 'nohost.invalid' in said and 'resolve' in said else said[-500:]\n",
+    );
+
+    assert_eq!(out["ls-remote"], "unresolved", "{out}");
+    assert_eq!(out["fetch"], "unresolved", "{out}");
+}
+
+#[test]
+fn a_run_still_cannot_read_an_ssh_setting_it_can_write() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // A root-owned file ssh includes is the run's own in its namespace, as its owner: never one
+    // it may change, by a write or its mode, nor from a namespace of its own made inside, where it
+    // holds every capability, by a remount or an unmount of the copy (Landlock refuses a
+    // sandboxed process every mount, and the copy's file system is read-only besides). The
+    // propagation of `/` is left as it is, which Landlock would refuse to change before any of
+    // these was tried. The daemon is told the machine's configuration is a file of the test's
+    // that includes the machine's own, so that one root-owned file is always given.
+    let root_owned = PathBuf::from("/etc/ssh/ssh_config");
+    if !std::fs::metadata(&root_owned).is_ok_and(|m| m.is_file()) {
+        eprintln!("skipped: no /etc/ssh/ssh_config on this machine");
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    std::fs::create_dir_all(user.path("system")).unwrap();
+    let system = user.path("system/ssh_config");
+    std::fs::write(&system, "Include /etc/ssh/ssh_config\n").unwrap();
+    let before = std::fs::read(&root_owned).unwrap();
+    let user = user.with_env("FLOTTILLE_TEST_SSH_SYSTEM_CONFIG", system.to_str().unwrap());
+    let (mcp, place) = session_with_empty_ssh(&user);
+    // In a user and mount namespace of the run's own: what each attempt came to, as JSON.
+    std::fs::write(
+        place.join("nested.py"),
+        "import ctypes, errno, json, os, sys\n\
+         libc = ctypes.CDLL(None, use_errno=True)\n\
+         target = sys.argv[1].encode()\n\
+         out = {'root': os.getuid() == 0}\n\
+         def call(name, result):\n\
+         \x20   out[name] = 'done' if result == 0 else errno.errorcode.get(ctypes.get_errno())\n\
+         MS_RDONLY, MS_REMOUNT, MS_BIND = 1, 32, 4096\n\
+         call('remount_bind_rw', libc.mount(None, target, None, MS_REMOUNT | MS_BIND, None))\n\
+         call('remount_rw', libc.mount(None, target, None, MS_REMOUNT, None))\n\
+         call('unmounted', libc.umount2(target, 2))\n\
+         try:\n\
+         \x20   open(sys.argv[1], 'a').write('ProxyCommand sh -c planted\\n')\n\
+         \x20   out['write'] = 'done'\n\
+         except OSError as e:\n\
+         \x20   out['write'] = errno.errorcode.get(e.errno)\n\
+         print(json.dumps(out))\n",
+    )
+    .unwrap();
+
+    let out = ran(
+        &mcp,
+        &place,
+        &format!(
+            "import subprocess\n\
+             target = {root_owned}\n\
+             attempt('write', write(target))\n\
+             attempt('mode', lambda: os.chmod(target, 0o666))\n\
+             out['owner'] = os.stat(target).st_uid == os.getuid()\n\
+             nested = subprocess.run(['unshare', '-Urm', '--propagation', 'unchanged',\n\
+             \x20   'python3', 'nested.py', target],\n\
+             \x20   capture_output=True, text=True)\n\
+             out['nested'] = json.loads(nested.stdout) if nested.returncode == 0 \\\n\
+             \x20   else nested.stderr[-500:]\n\
+             out['ssh'] = subprocess.run(['ssh', '-G', '-F', {system}, 'example.invalid'],\n\
+             \x20   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode\n\
+             out['planted'] = 'planted' in open(target).read()\n",
+            root_owned = py(&root_owned),
+            system = py(&system),
+        ),
+    );
+
+    // Refused for the copy's file system being read-only, not for the file being root's.
+    assert_eq!(out["write"], "EROFS", "{out}");
+    assert_eq!(out["mode"], "EROFS", "{out}");
+    assert_eq!(out["owner"], true, "{out}");
+    let nested = &out["nested"];
+    assert_eq!(nested["root"], true, "{out}");
+    for name in ["remount_bind_rw", "remount_rw", "unmounted", "write"] {
+        assert_ne!(nested[name], "done", "{name}: {out}");
+    }
+    assert_eq!(out["ssh"], 0, "{out}");
+    assert_eq!(out["planted"], false, "{out}");
+    assert_eq!(std::fs::read(&root_owned).unwrap(), before);
+}
+
+#[test]
+fn a_fifo_included_by_the_user_s_ssh_config_blocks_no_run() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    // Read at every confined start: a FIFO, which a read waits on for a writer, is not read.
+    let user = User::with_fake_agent().with_allowing_judge();
+    ssh_config(&user, "Include fifo\n");
+    let made = std::process::Command::new("mkfifo")
+        .arg(user.path("home/.ssh/fifo"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (mcp, place) = session(&user);
+
+    let out = ran(&mcp, &place, "out['ran'] = True\n");
+
+    assert_eq!(out["ran"], true, "{out}");
+}
+
+#[test]
+fn the_daemon_s_fetch_of_an_ssh_origin_reaches_the_network() {
+    if skipped_without_user_namespaces() || !ssh_client() {
+        return;
+    }
+    // The daemon's own fetch of a workspace's base runs confined as a run does, with the real git
+    // and ssh: an origin on a host that does not resolve fails on the host, past the machine's
+    // root-owned configuration that stopped it before (#1302).
+    let user = User::with_fake_agent();
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.git(
+        &folder,
+        &["remote", "add", "origin", "ssh://nohost.invalid/x"],
+    );
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+
+    let created = user
+        .call("workspace.create", json!({"project": "app", "name": "w"}))
+        .unwrap();
+
+    let said = created.to_string();
+    assert!(!said.contains("Bad owner or permissions"), "{said}");
+    assert!(
+        said.contains("could not be fetched") && said.contains("nohost.invalid"),
+        "{said}"
     );
 }

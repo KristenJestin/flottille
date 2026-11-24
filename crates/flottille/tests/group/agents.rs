@@ -31,6 +31,8 @@ mod codex_bridge;
 mod expired_login;
 #[path = "../full_mode.rs"]
 mod full_mode;
+#[path = "../full_runs.rs"]
+mod full_runs;
 #[path = "../judge.rs"]
 mod judge;
 #[path = "../models_left.rs"]
@@ -43,6 +45,8 @@ mod private_mounts;
 mod providers;
 #[path = "../quota.rs"]
 mod quota;
+#[path = "../real_programs.rs"]
+mod real_programs;
 #[path = "../reload_tools.rs"]
 mod reload_tools;
 #[path = "../rules.rs"]

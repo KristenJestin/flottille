@@ -506,3 +506,122 @@ fn the_judge_and_the_compactor_mark_the_model_flottille_applies_for_them(cx: &mu
         shown["compactor"]["provider"] == "claude" && shown["compactor"]["model"] == "haiku"
     });
 }
+
+// ── The mode a new session starts in (#1325) ─────────────────────────────────────────────────
+
+/// What the daemon says a new session starts in.
+fn mode_of(user: &User) -> serde_json::Value {
+    user.call("provider.list", serde_json::Value::Null).unwrap()["new_session_mode"].clone()
+}
+
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
+fn selected(cx: &mut VisualTestContext, id: &str) -> Option<bool> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.selected())
+    })
+}
+
+#[gpui_kit::test]
+fn the_new_sessions_settings_choose_the_mode(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, _page, cx) = settings_page(&user, cx);
+
+    // Left alone, Auto: chosen once, by the segmented choice, and no note.
+    until(&shell, cx, "the mode is drawn", |cx| {
+        present(cx, "new-sessions-mode")
+    });
+    assert_eq!(label(cx, "new-sessions-mode").as_deref(), Some("Mode"));
+    assert_eq!(selected(cx, "new-sessions-mode-ask"), Some(false));
+    assert_eq!(selected(cx, "new-sessions-mode-auto"), Some(true));
+    assert_eq!(selected(cx, "new-sessions-mode-full"), Some(false));
+    assert!(!present(cx, "new-sessions-full-note"));
+    assert_eq!(
+        label(cx, "new-sessions-mode-hint").as_deref(),
+        Some("Sessions agents start, and children, keep their own rules.")
+    );
+
+    // Full: the daemon keeps it, and the page says once what Full lends.
+    click(&shell, cx, "new-sessions-mode-full");
+    until(&shell, cx, "the daemon holds Full", |_| {
+        mode_of(&user) == "full"
+    });
+    until(&shell, cx, "the note unfolds", |cx| {
+        present(cx, "new-sessions-full-note")
+    });
+    settle(cx);
+    assert_eq!(selected(cx, "new-sessions-mode-full"), Some(true));
+    assert_eq!(selected(cx, "new-sessions-mode-auto"), Some(false));
+    // The note is a line of text under the choice, as the page's other lines: no padded box
+    // around it, so it is as tall as the hint's line of the same size.
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("new-sessions-full-note").bounds().size.height,
+            window.find("new-sessions-mode-hint").bounds().size.height,
+        );
+    });
+    assert_eq!(
+        label(cx, "new-sessions-full-note").as_deref(),
+        Some(
+            "In Full, a session's commands run as yours, as in your terminal: nothing is \
+             held back, the vault included."
+        )
+    );
+
+    // The mode says it was saved in a toast of its own, not the one of the provider's choice.
+    until(&shell, cx, "the mode's toast", |cx| {
+        toasts(&shell, cx).contains(&"New session mode saved".to_owned())
+    });
+    assert!(
+        !toasts(&shell, cx).contains(&"New sessions saved".to_owned()),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+
+    // Ask: the note leaves, and the daemon holds Ask.
+    click(&shell, cx, "new-sessions-mode-ask");
+    until(&shell, cx, "the daemon holds Ask", |_| {
+        mode_of(&user) == "ask"
+    });
+    until(&shell, cx, "the note folds away", |cx| {
+        !present(cx, "new-sessions-full-note")
+    });
+    assert_eq!(selected(cx, "new-sessions-mode-ask"), Some(true));
+
+    // Back on Auto, which is what the file does not say.
+    click(&shell, cx, "new-sessions-mode-auto");
+    until(&shell, cx, "the daemon holds Auto", |_| {
+        mode_of(&user) == "auto"
+    });
+    until(&shell, cx, "Auto is chosen", |cx| {
+        selected(cx, "new-sessions-mode-auto") == Some(true)
+    });
+}
+
+#[gpui_kit::test]
+fn the_mode_chosen_before_the_window_opened_is_shown(cx: &mut TestAppContext) {
+    let user = user();
+    user.call(
+        "provider.set_new_session_mode",
+        serde_json::json!({"mode": "full"}),
+    )
+    .unwrap();
+    let (shell, _page, cx) = settings_page(&user, cx);
+
+    until(&shell, cx, "Full is chosen", |cx| {
+        selected(cx, "new-sessions-mode-full") == Some(true)
+    });
+    until(&shell, cx, "the note is shown", |cx| {
+        present(cx, "new-sessions-full-note")
+    });
+}

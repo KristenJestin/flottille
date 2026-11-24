@@ -9,6 +9,7 @@ mod adapters;
 mod bounded;
 mod client;
 pub mod command;
+pub mod network;
 mod oauth;
 pub mod requests;
 mod schema;
@@ -37,26 +38,20 @@ use crate::projects::Failure;
 pub use adapters::{in_clear, provide, site};
 pub use client::{Live, stop_all};
 
-/// The browsers a daemon that died left, closed before any server or login of theirs
-/// starts: agent-browser's daemon outlives the daemon that started it, confined with the display
-/// folder this daemon removed (`display::clean`) and makes again, a folder out of its reach
-/// (#1040). Each is closed the way a stop closes it, by its socket folder; one that does not
-/// answer is no error.
+/// The browsers a daemon that died left, shown or hidden, closed before any server or login of
+/// theirs starts: agent-browser's daemon outlives the daemon that started it, a shown one confined
+/// with the display folder this daemon removed (`display::clean`) and makes again, a folder out of
+/// its reach (#1040), and every one with its vault folder within its reach, under a mode the
+/// user's switch may have changed since. Each is closed the way a stop closes it, by its socket
+/// folder; one that does not answer is no error.
 pub async fn close_left_at_start(daemon: &Daemon) {
+    adapters::swept_at_start(&daemon.paths);
     let Ok(declared) = declarations(&daemon.paths) else {
         return;
     };
     let left: Vec<adapters::Browser> = declared
         .iter()
-        // Only a server Flottille's adapter was pinned for: `close` is agent-browser's word.
-        .filter(|declaration| {
-            row(daemon, &declaration.name)
-                .pin
-                .as_ref()
-                .and_then(adapters::applying)
-                .is_some()
-        })
-        .filter_map(|declaration| adapters::browser(daemon, declaration, None))
+        .filter_map(|declaration| adapters::left(daemon, declaration))
         .collect();
     // At once, as `stop_all` does: each close is bounded.
     futures::future::join_all(left.iter().map(|browser| adapters::close(daemon, browser))).await;
@@ -2720,6 +2715,7 @@ async fn remove_if(
         Ok(())
     })?;
     client::stop(daemon, &name).await;
+    client::vault_removed(daemon, &name).await;
     // Its browser closed with the server: its profile, the sign-ins made in it, goes with it.
     crate::browsers::remove(&daemon.paths, &name);
     forget_row(daemon, &name)?;
@@ -2861,6 +2857,8 @@ fn adapter_said(
                 && let Some(why) = adapter
                     .own_config(words)
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
+                    .or_else(|| adapter.unsafe_start(words, &declaration.env))
+                    .or_else(|| adapter.moves_folders(&declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }

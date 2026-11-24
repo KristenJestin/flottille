@@ -118,6 +118,12 @@ pub async fn family_call(
     connections::requests::tool(daemon, args, approved, place).await
 }
 
+/// Whether `kind` is the name an extension tells a lead of another machine under (a review's
+/// result), as it tells one here: the only one ever sent across.
+pub(crate) fn tells_across(kind: &str) -> bool {
+    kind == review::EXTENSION.name
+}
+
 /// Every extension, in the order of their settings' tabs.
 pub const ALL: &[&Extension] = &[
     &specs::EXTENSION,
@@ -762,6 +768,18 @@ pub fn secrets_in(value: &str) -> Vec<String> {
 /// its server (agent-browser's plugin protocol), which asks the daemon's login that runs.
 pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
     connections::provide(socket)
+}
+
+/// `flottille browser-network`: holds the network namespace of a connection's browser
+/// (`connections::network`).
+pub fn browser_network() -> ! {
+    connections::network::hold()
+}
+
+/// Whether a connection's browser can run in a network of its own here, and why not
+/// (`flottille doctor`).
+pub fn browser_network_available() -> Result<(), String> {
+    connections::network::available()
 }
 
 /// The sign-in of the connection `name` waiting for the browser on this machine, if one does: what

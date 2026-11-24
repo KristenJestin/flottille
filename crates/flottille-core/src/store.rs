@@ -1037,14 +1037,28 @@ const EXTENSION_MIGRATIONS: &str = "
 ";
 
 /// A child an agent of another machine launched here was stored with no parent at depth 0 before
-/// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
-/// tree across machines"). Made at every open rather than as a numbered migration: it changes
-/// nothing once done, as such a child is never stored so again, and every check of a root then
-/// reads the depth alone.
+/// #1274, a root's place, and a beta of it put it at depth 1 but left the agents it had started
+/// here at theirs: each is put at its place in the tree (`docs/remote.md`, "A tree across
+/// machines"), the remote child at its caller's depth plus one, as its launch says (1 when it
+/// says none), and each agent under it one lower than its parent, so that a stop ordered by depth
+/// ends them before it. A depth is only ever raised, never lowered, and an agent no launch of a
+/// child names, nor any under it, is left alone: made at every open rather than as a numbered
+/// migration, it changes nothing once done.
 const REMOTE_CHILDREN_DEPTH: &str = "
-    UPDATE agents SET depth = 1
-    WHERE parent IS NULL AND depth = 0
-      AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child');
+    WITH RECURSIVE placed(id, level) AS (
+        SELECT agents.id, max(agents.depth, 1 + coalesce((
+            SELECT max(json_extract(launches.asked, '$.asked.depth')) FROM launches
+            WHERE launches.way = 'in' AND launches.kind = 'child' AND launches.agent = agents.id
+              AND json_valid(launches.asked)
+        ), 0))
+        FROM agents
+        WHERE agents.parent IS NULL
+          AND agents.id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child')
+        UNION ALL
+        SELECT agents.id, placed.level + 1 FROM agents JOIN placed ON agents.parent = placed.id
+    )
+    UPDATE agents SET depth = placed.level FROM placed
+    WHERE placed.id = agents.id AND placed.level > agents.depth;
 ";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1546,6 +1560,24 @@ impl Store {
         transaction.execute(
             "UPDATE workspaces SET branch = ?2 WHERE id = ?1",
             params![workspace, branch],
+        )?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Records the repositories of the workspace as they are now (a base that moved), with its
+    /// event, in one transaction.
+    pub fn set_workspace_repositories(
+        &mut self,
+        workspace: i64,
+        repositories: &[crate::workspace::Worktree],
+        event: (&str, Value),
+    ) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE workspaces SET repositories = ?2 WHERE id = ?1",
+            params![workspace, serde_json::to_string(repositories)?],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
@@ -2893,14 +2925,7 @@ impl Store {
     /// `most` of that machine's are kept already.
     pub fn keep_stand_in(&mut self, agent: &Agent, most: usize) -> Result<Option<Agent>> {
         if self.agent(&agent.id)?.is_none() {
-            let machine = agent.id.split_once('@').map_or("", |(_, machine)| machine);
-            let kept: i64 = self.connection.query_row(
-                "SELECT count(*) FROM agents WHERE instr(id, '@') > 0 \
-                 AND substr(id, instr(id, '@') + 1) = ?1",
-                params![machine],
-                |row| row.get(0),
-            )?;
-            if kept as usize >= most {
+            if !self.stand_in_fits(&agent.id, most)? {
                 return Ok(None);
             }
             self.create_agent(agent, ("agent.stood_in", serde_json::json!({})))?;
@@ -2921,6 +2946,29 @@ impl Store {
         Ok(Some(
             self.agent(&agent.id)?.unwrap_or_else(|| agent.clone()),
         ))
+    }
+
+    /// Whether the stand-in `id` may count in the cap `most` of its machine, as it does once it
+    /// leads a session: its machine's other stand-ins that count leave it room.
+    pub fn stand_in_fits(&self, id: &str, most: usize) -> Result<bool> {
+        Ok(self.counted_stand_ins(id)? < most as i64)
+    }
+
+    /// How many of the stand-ins of the machine of `id` count in its cap, `id` itself not counted.
+    /// The pilot of sessions that all ended is kept for them only, never forgotten while they
+    /// are: it launches nothing more, and counts no more.
+    fn counted_stand_ins(&self, id: &str) -> Result<i64> {
+        let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM agents AS s WHERE instr(s.id, '@') > 0 \
+             AND substr(s.id, instr(s.id, '@') + 1) = ?1 AND s.id != ?2 \
+             AND NOT (EXISTS (SELECT 1 FROM agents WHERE launched_by = s.id \
+             OR detached_from = s.id) AND NOT EXISTS (SELECT 1 FROM agents \
+             WHERE (launched_by = s.id OR detached_from = s.id) \
+             AND state NOT IN ('ended', 'failed')))",
+            params![machine, id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Forgets the callers of other machines stood in for here ([`Store::keep_stand_in`]) of a
@@ -2945,9 +2993,13 @@ impl Store {
         let mut forgotten = 0;
         for (id, at) in stand_ins {
             let machine = id.split_once('@').map_or("", |(_, machine)| machine);
+            // One that leads a session here, or led it before it was detached, is kept with it.
             if at < idle_before || left(machine) {
-                forgotten +=
-                    transaction.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+                forgotten += transaction.execute(
+                    "DELETE FROM agents WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM agents \
+                     WHERE launched_by = ?1 OR detached_from = ?1)",
+                    params![id],
+                )?;
             }
         }
         let awaited: Vec<(String, i64, u64)> = {
@@ -3555,6 +3607,29 @@ impl Store {
         .collect()
     }
 
+    /// The led session of the launch `launch` (`way`, with the machine of key `machine`) was
+    /// detached by the user: it is theirs, as a session handed over is, and its caller reaches it
+    /// no more as the session it started.
+    pub fn hand_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET kind = 'handed' WHERE way = ?1 AND machine = ?2 AND launch = ?3 \
+             AND kind = 'led'",
+            params![way, machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the pilot of another machine of the led session of the launch `launch` still
+    /// follows it here: `on`, `paused` or `ended`, as that pilot's machine said it.
+    pub fn follow_launch(&mut self, machine: &str, launch: &str, following: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET asked = json_set(asked, '$.following', ?3) WHERE way = 'in' \
+             AND machine = ?1 AND launch = ?2",
+            params![machine, launch, following],
+        )?;
+        Ok(())
+    }
+
     /// Ends the launch `out` `launch` to `machine`: the session it started there ended, and counts
     /// in no cap here any more.
     pub fn end_launch(&mut self, machine: &str, launch: &str) -> Result<()> {
@@ -3562,6 +3637,20 @@ impl Store {
             "UPDATE launches SET state = 'ended' WHERE way = 'out' AND machine = ?1 \
              AND launch = ?2 AND state != 'refused'",
             params![machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Settles the launch `out` `launch` to `machine`, held for the user there, as their answer
+    /// came: `started` or `refused`. Only a launch not settled yet, still `accepted` when the
+    /// answer came before its place was recorded: an answer sent again changes nothing. A launch
+    /// started told it is refused ended there: it is `ended`.
+    pub fn decide_launch(&mut self, machine: &str, launch: &str, state: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = CASE WHEN state = 'started' THEN 'ended' ELSE ?3 END \
+             WHERE way = 'out' AND machine = ?1 AND launch = ?2 \
+             AND (state IN ('held', 'accepted') OR (state = 'started' AND ?3 = 'refused'))",
+            params![machine, launch, state],
         )?;
         Ok(())
     }
@@ -5166,13 +5255,18 @@ impl Space<'_> {
 
 /// Records a launch, in place of the one of the same name with the same machine: a launch `in`
 /// already recorded keeps its workspace, its name and its id, as `place_launch` alone writes them.
+/// A launch `out` the user's answer settled (`decide_launch`) is never made held again by the
+/// record of its place, which may come after that answer.
 fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
     connection.execute(
         "INSERT INTO launches (way, machine, launch, caller, kind, project, state, request, \
          agent, workspace, workspace_id, asked, at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT (way, machine, launch) DO UPDATE SET caller = excluded.caller, \
-         kind = excluded.kind, project = excluded.project, state = excluded.state, \
+         kind = excluded.kind, project = excluded.project, \
+         state = CASE WHEN launches.way = 'out' AND excluded.state IN ('held', 'accepted') \
+         AND launches.state IN ('started', 'refused', 'ended') THEN launches.state \
+         ELSE excluded.state END, \
          request = excluded.request, agent = excluded.agent, \
          workspace = CASE WHEN launches.way = 'in' THEN launches.workspace \
          ELSE excluded.workspace END, asked = excluded.asked, at = excluded.at",
@@ -9214,6 +9308,140 @@ mod tests {
         }
     }
 
+    /// A store at `path` holding `agents` (id, parent, depth) and, for each `(agent, kind, caller
+    /// depth)`, a launch `in` that started it: an agent of another machine's, as a release of
+    /// before stored it.
+    fn stored_tree(
+        path: &Path,
+        agents: &[(&str, Option<&str>, u32)],
+        launched: &[(&str, &str, Option<u32>)],
+    ) {
+        let mut store = Store::open(path).unwrap();
+        for (id, parent, _) in agents {
+            let agent = Agent {
+                id: (*id).into(),
+                parent: parent.map(Into::into),
+                ..an_agent()
+            };
+            store
+                .create_agent(&agent, ("agent.created", json!({"agent": id})))
+                .unwrap();
+        }
+        for (number, (agent, kind, depth)) in launched.iter().enumerate() {
+            let asked = match depth {
+                Some(depth) => json!({"asked": {"depth": depth}}),
+                None => json!({"asked": {}}),
+            };
+            store
+                .record_launch(&Launch {
+                    launch: format!("launch-{number}"),
+                    kind: (*kind).into(),
+                    state: "started".into(),
+                    agent: Some((*agent).into()),
+                    asked,
+                    ..a_launch_in()
+                })
+                .unwrap();
+        }
+        // The depths as that release left them, which the store's own writes never set so.
+        for (id, _, depth) in agents {
+            store
+                .connection
+                .execute(
+                    "UPDATE agents SET depth = ?1 WHERE id = ?2",
+                    params![depth, id],
+                )
+                .unwrap();
+        }
+    }
+
+    fn depths(path: &Path, ids: &[&str]) -> Vec<u32> {
+        let store = Store::open(path).unwrap();
+        ids.iter()
+            .map(|id| store.agent(id).unwrap().unwrap().depth)
+            .collect()
+    }
+
+    #[test]
+    fn a_remote_child_a_beta_moved_alone_takes_its_local_children_one_lower() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        // The beta put the remote child at depth 1 and left its local child at 1.
+        stored_tree(
+            &path,
+            &[("remote", None, 1), ("local", Some("remote"), 1)],
+            &[("remote", "child", None)],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [1, 2]);
+    }
+
+    #[test]
+    fn a_remote_child_of_a_caller_below_its_root_takes_the_caller_s_depth_plus_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[("remote", None, 0), ("local", Some("remote"), 1)],
+            &[("remote", "child", Some(2))],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [3, 4]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_never_lower_a_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[("remote", None, 3), ("local", Some("remote"), 5)],
+            &[("remote", "child", Some(1))],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [3, 5]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_never_move_a_root_of_this_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        // A root the user started, its child, and a session another machine's agent led here:
+        // roots all but the child, which no launch of a child names.
+        stored_tree(
+            &path,
+            &[
+                ("root", None, 0),
+                ("child", Some("root"), 1),
+                ("led", None, 0),
+            ],
+            &[("led", "led", Some(0))],
+        );
+
+        assert_eq!(depths(&path, &["root", "child", "led"]), [0, 1, 0]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_are_set_once_however_often_the_store_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[
+                ("remote", None, 0),
+                ("local", Some("remote"), 1),
+                ("below", Some("local"), 2),
+            ],
+            &[("remote", "child", None)],
+        );
+
+        let first = depths(&path, &["remote", "local", "below"]);
+        let second = depths(&path, &["remote", "local", "below"]);
+
+        assert_eq!(first, [1, 2, 3]);
+        assert_eq!(second, first);
+    }
+
     #[test]
     fn a_launch_update_never_resurrects_a_workspace_id_cleared_since() {
         let mut store = Store::open_in_memory().unwrap();
@@ -9391,6 +9619,54 @@ mod tests {
         );
     }
 
+    fn a_launch_out(state: &str) -> Launch {
+        Launch {
+            way: "out".into(),
+            state: state.into(),
+            ..a_launch_in()
+        }
+    }
+
+    fn state_out(store: &Store) -> String {
+        store.launches("out", None, LaunchFilter::All).unwrap()[0]
+            .state
+            .clone()
+    }
+
+    #[test]
+    fn a_held_launch_decided_before_its_second_record_keeps_the_decision() {
+        for (first, decided) in [("held", "started"), ("accepted", "refused")] {
+            let mut store = Store::open_in_memory().unwrap();
+            let launch = a_launch_out(first);
+            store.record_launch(&launch).unwrap();
+            // The user there answered before the caller recorded what the launch's place said.
+            store
+                .decide_launch(&launch.machine, &launch.launch, decided)
+                .unwrap();
+            assert_eq!(state_out(&store), decided);
+
+            store.record_launch(&a_launch_out("held")).unwrap();
+
+            assert_eq!(state_out(&store), decided, "first recorded {first}");
+        }
+    }
+
+    #[test]
+    fn an_end_told_as_an_answer_on_a_started_launch_ends_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let launch = a_launch_out("held");
+        store.record_launch(&launch).unwrap();
+        store
+            .decide_launch(&launch.machine, &launch.launch, "started")
+            .unwrap();
+
+        store
+            .decide_launch(&launch.machine, &launch.launch, "refused")
+            .unwrap();
+
+        assert_eq!(state_out(&store), "ended");
+    }
+
     #[test]
     fn a_machine_s_projects_stay_beside_the_sessions_it_lists_again() {
         let mut store = Store::open_in_memory().unwrap();
@@ -9515,6 +9791,130 @@ mod tests {
         assert!(store.leaves_of(&local.id).unwrap().is_empty());
         assert!(!store.take_awaited("aa", 5, &local.id).unwrap());
         assert!(store.agent(&local.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stand_in_that_leads_a_session_is_kept_while_it_does() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_stand_in(&a_stand_in("c0", "aa"), 3).unwrap();
+        store.keep_stand_in(&a_stand_in("c1", "aa"), 3).unwrap();
+        let mut led = an_agent();
+        led.launched_by = Some("c0@aa".into());
+        led.led = true;
+        store
+            .create_agent(&led, ("agent.created", json!({})))
+            .unwrap();
+
+        // Idle for long, or its machine gone: the pilot of a session stays, the other goes.
+        assert_eq!(store.forget_stand_ins(Some(&[]), now_ms() + 1).unwrap(), 1);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+        assert!(store.agent("c1@aa").unwrap().is_none());
+
+        // Detached, the session still names it.
+        store
+            .change_agent(
+                &led.id,
+                AgentChange {
+                    detached_from: Some("c0@aa".into()),
+                    ..AgentChange::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.forget_stand_ins(Some(&[]), now_ms() + 1).unwrap(), 0);
+        assert!(store.agent("c0@aa").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_pilot_of_an_ended_session_leaves_the_cap_of_its_machine() {
+        let mut store = Store::open_in_memory().unwrap();
+        // 65 pilots in turn, each session it led ended before the next one comes.
+        for n in 0..65 {
+            let pilot = format!("c{n}@aa");
+            assert!(
+                store
+                    .keep_stand_in(&a_stand_in(&format!("c{n}"), "aa"), 64)
+                    .unwrap()
+                    .is_some(),
+                "pilot {n} is refused"
+            );
+            let mut led = an_agent();
+            led.id = format!("led{n}");
+            led.launched_by = Some(pilot);
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+            store
+                .change_agent(
+                    &led.id,
+                    AgentChange {
+                        state: Some(AgentState::Ended),
+                        ..AgentChange::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        // A live session's pilot still counts: 64 of them fill the cap.
+        let mut store = Store::open_in_memory().unwrap();
+        for n in 0..64 {
+            store
+                .keep_stand_in(&a_stand_in(&format!("c{n}"), "aa"), 64)
+                .unwrap();
+            let mut led = an_agent();
+            led.id = format!("led{n}");
+            led.launched_by = Some(format!("c{n}@aa"));
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+        }
+        assert!(
+            store
+                .keep_stand_in(&a_stand_in("c64", "aa"), 64)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_ended_pilot_starts_counting_again_only_where_the_cap_has_room() {
+        let mut store = Store::open_in_memory().unwrap();
+        let lead = |store: &mut Store, name: &str, ended: bool| {
+            store.keep_stand_in(&a_stand_in(name, "aa"), 64).unwrap();
+            let mut led = an_agent();
+            led.id = format!("led-{name}");
+            led.launched_by = Some(format!("{name}@aa"));
+            led.led = true;
+            store
+                .create_agent(&led, ("agent.created", json!({})))
+                .unwrap();
+            if ended {
+                store
+                    .change_agent(
+                        &led.id,
+                        AgentChange {
+                            state: Some(AgentState::Ended),
+                            ..AgentChange::default()
+                        },
+                        None,
+                    )
+                    .unwrap();
+            }
+        };
+        // One pilot whose only session ended (it counts no more), then 64 with a live one.
+        lead(&mut store, "old", true);
+        for n in 0..64 {
+            lead(&mut store, &format!("c{n}"), false);
+        }
+        assert!(
+            !store.stand_in_fits("old@aa", 64).unwrap(),
+            "the ended pilot takes a place the cap does not have"
+        );
+        // A live pilot has its place already, and a machine with room takes the ended one.
+        assert!(store.stand_in_fits("c0@aa", 64).unwrap());
+        assert!(store.stand_in_fits("old@aa", 65).unwrap());
     }
 
     #[test]

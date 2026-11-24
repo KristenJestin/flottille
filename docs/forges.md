@@ -23,7 +23,8 @@ would send a read or a write to another host than the one the declaration was ch
 
 - **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
   `--show-token`, never reads `gh`'s configuration folder. Of `gh auth status --hostname
-  github.com` it reads the exit code alone: 0 is signed in.
+  github.com` it reads the exit code, and, when that is not 0, whether the command line says it
+  holds no login (below): nothing else it prints is kept.
 - **What `gh` and `bkt` print is masked** before it is shown or stored (titles, comments, errors),
   as every output is (`flottille_core::secrets`).
 - **Agents never get that environment.** An agent's process and its command runs have the forge
@@ -52,6 +53,23 @@ with the system's default handler.
 | `bkt`, Bitbucket Cloud | <https://github.com/avivsinai/bitbucket-cli> | `brew install bitbucket-cli` (macOS and Linux with Homebrew) | `bkt auth login https://bitbucket.org --kind cloud --web`, then `bkt context create bitbucket-org-<workspace> --host api.bitbucket.org --workspace <workspace>` |
 | `bkt`, Data Center | the same | the same | `bkt auth login https://<host> --web-token`, then `bkt context create <host>-<project> --host <host> --project <PROJECT>` |
 | `acli` | <https://developer.atlassian.com/cloud/acli/guides/install-acli/> | none | `acli jira auth login`; signed in to another site: `acli jira auth switch --site <site>` |
+
+**A check says one of three things** (#1315), for `gh`, `glab`, `acli` and `bkt` alike: **signed in**
+(exit 0, or for `bkt` a context for the host), **not signed in** (the command line says it holds no
+login: `gh auth status` says `You are not logged into any GitHub hosts`, or its `- Error:` line is a
+401, bad credentials or an expired token, `acli` and `glab` that they are not logged in or not
+authenticated, a `bkt` listing with no context for the host), and **could not check** (any other
+failure: the network, a service that is down, a rate limit, a command that gives no answer in 30 s).
+`gh` prints every failure of its API call but a timeout in the shape of a bad token (`X Failed to
+log in…`, `- The token in keyring is invalid.`), with the real cause on its `- Error:` line, so for
+`gh` that line, not the shape, says which it is. When unsure, a failure that is not a clear "not
+logged in" is "could not check": it says nothing of who is signed in, and is never answered with a
+sign-in. It carries the command line's `- Error:` line for `gh`, else its first error line (for
+`glab`, what its failed call answered), masked, with no login said, or `no answer in N s`; the
+daemon's log says the same line (`gh could not be checked: <line>; what is shown could not be
+refreshed`). A write that finds the check could not be made says nothing was written instead. What the projects show of a forge or a tracker (pull requests, tickets) keeps its
+last known state when a check could not be made, and says it could not be refreshed, rather than
+"not signed in".
 
 The `bkt` commands are the ones its README gives (Cloud by the browser, Data Center by a personal
 access token), with the workspace or the project of the repository that declares the forge, and the
@@ -732,6 +750,56 @@ same rules: spawned by the daemon, the repository named, its output masked, no t
 It never reaches a repository outside the agent's place, and is listed to every agent of a
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
 `forge_read` and `forge_write`.
+
+### A workspace's base
+
+A workspace's pull request goes into the base its repository started from (`docs/workspaces.md`,
+"The base of each branch"), and `merge` takes only the open pull request of the workspace's own
+branch into that base: an agent never merges into a branch it chose. A stacked workspace, started
+from another ticket's branch, would be stuck once that branch is merged and deleted, so the base
+moves, and only when the forge says so:
+
+- **A `forge edit` of `base` that succeeded** on the workspace's own pull request (from the
+  repository itself, of the branch the workspace's worktree is on): the base of that repository
+  becomes the new one, **only when the repository's base rule allows a merge into it**: the new
+  base is one of the rule's branches, or where the workspace's own stacked base went (the base of
+  its merged pull request, once that base is gone from the forge and the forge has the new one).
+  Any other base the forge took (`edit` of a base is judged as the gate judges it, and in Full or
+  a lenient Auto no one approves it) is the forge's: the workspace's base stays, the answer says
+  the merge into it will be refused and why, and `merge` refuses as before. A pull request that is
+  not the workspace's own, a refused edit and a failed one leave it too.
+- **A base branch merged and deleted on the forge.** Before a `create` or a `merge` of a base
+  that is not one of the repository's base rule (a stacked one, started with `--base`), the forge
+  is asked whether it still has the branch (`gh api repos/<repository>/branches/<b>`; Bitbucket
+  Cloud's `refs/branches/<b>`; Data Center cannot be asked and is taken to have it). When it has
+  not, the base goes where the branch went: the base of its merged pull request (`gh pr list
+  --head <b> --state merged`; `bkt pr list --state MERGED`) when the forge has that base, else
+  the first branch of the repository's base rule that the forge confirms it has, said in the
+  answer to be where the branch was not found, not merged and deleted. A forge's answer that is
+  not a clear "not found" (`HTTP 404` / `Not Found`, never a bare `404`: a branch named
+  `fix/1404-x` is in the URL a dropped call prints; and a 404 may also be a repository the
+  sign-in cannot see) for the base, and a clear "found" for where it went, moves nothing. A `merge` then accepts the pull request into that
+  base, and only into it (GitHub retargets a pull request there itself when its base branch is
+  deleted); a pull request into any other branch is refused as before, and so is one into the
+  project's base while the branch is still there.
+- Nothing else: not a pull request retargeted on the forge by hand, not text an agent gives, not
+  a `forge create` with a `base`.
+
+`create` takes an optional `base`, the branch the pull request goes into in place of the
+workspace's (`gh pr create --base`, `bkt pr create --target`), refused before anything is opened
+when the forge has no such branch, and it does not change the workspace's base. Without it, a
+workspace whose base branch is gone opens the pull request into where it went and says so in the
+answer.
+
+A move is made from the base its decision was read at: written only if the record still holds
+that base (one transaction), else the record is left and the answer says the base moved meanwhile
+(two sessions of one workspace, a `merge` and a `forge edit`, cannot undo each other).
+
+Each move is recorded (`workspace.base_changed`, `docs/events.md`), shown under the repository on
+the workspace's card as its base's note (`moved from chore/2-start: …`), and told to the
+workspace's sessions as a delivery (`[flottille:workspace-base]`), which is the line in their
+history: `The base of . in the workspace login moved from chore/2-start to main: …. Its pull
+requests go into main now.` There is no `workspace` action to set a base by hand.
 
 ## The CI family
 
