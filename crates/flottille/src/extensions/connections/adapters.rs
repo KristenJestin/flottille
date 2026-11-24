@@ -48,6 +48,19 @@ pub struct Adapter {
     patterns: &'static [&'static str],
     /// Actions off while it applies, which no setting turns on.
     locked: &'static [&'static str],
+    /// The rest of the actions of the versions it was checked on, judged at the first pin. An
+    /// action in none of its lists is one it does not know: off at every pin it comes in with,
+    /// and the user's to turn on.
+    others: &'static [&'static str],
+    /// Its actions that take a file's path beside their other arguments, and those arguments:
+    /// a call that gives one is refused, and the action runs with the server's own folder.
+    file_arguments: &'static [(&'static str, &'static [&'static str])],
+    /// Arguments every one of its actions takes though no schema says them, refused on each.
+    hidden_arguments: &'static [&'static str],
+    /// The argument that says how long the browser may sit idle before it closes, which an action
+    /// that starts it takes: it must be a number above 0, as 0 keeps the browser alive, and no
+    /// close ever empties its screenshots and downloads folders.
+    idle_argument: &'static str,
     /// Why they are.
     pub locked_why: &'static str,
     /// Its own actions, served by Flottille.
@@ -80,10 +93,7 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_eval",
         "agent_browser_wait_for_function",
         "agent_browser_add_init_script",
-        "agent_browser_batch",         // runs other actions, eval among them
-        "agent_browser_flow_run",      // replays steps, as batch does
         "agent_browser_network_route", // serves a body of its own for the page's requests
-        "agent_browser_chat",          // agent-browser's own model, through an external gateway
     ],
     files: &[
         "agent_browser_network_har_start",
@@ -95,7 +105,12 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_flow_save",
         "agent_browser_flow_steps",
     ],
-    patterns: &["agent_browser_wait_for_url", "agent_browser_network_route"],
+    patterns: &[
+        "agent_browser_wait_for_url",
+        "agent_browser_network_route",
+        // The pattern a route was given, as network_route's own url.
+        "agent_browser_network_unroute",
+    ],
     locked: &[
         "agent_browser_auth_delete",
         "agent_browser_auth_list",
@@ -117,13 +132,214 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         // Not served by 0.43.0: named should a 0.43 patch serve it, since off alone the user could
         // turn agent-browser's own login on beside Flottille's.
         "agent_browser_with_login",
+        // The browser's profile lasts from one browser to the next and keeps the sign-ins, made
+        // by hand or through the vault (#1326): a session cookie or a token in a page's storage is
+        // a credential. Their answers are not masked to names instead: a value of a site's own
+        // format is no secret Flottille knows, and saved state is a file.
+        "agent_browser_cookies_get",
+        "agent_browser_storage_get",
+        "agent_browser_state_save",
+        "agent_browser_state_show",
+        // They read or write a file by a path the agent gives, through the server, which reaches
+        // the profile: a run plants a link to its cookies under a name built in a script, which
+        // the gate never sees, and the server follows it. A check of the path loses to a link
+        // swapped after it, and these cannot run without a path.
+        "agent_browser_cookies_set_curl",
+        "agent_browser_upload",
+        "agent_browser_download",
+        "agent_browser_pdf",
+        "agent_browser_record_start",
+        "agent_browser_record_restart",
+        // A request's details hold its headers and body: the `Authorization` a page builds from
+        // a token in its storage, the Cookie it sends and the Set-Cookie it gets. A header is
+        // not masked instead: a value of a site's own format is no secret Flottille knows.
+        "agent_browser_network_requests",
+        "agent_browser_network_request",
+        // batch runs any command of agent-browser's, the locked ones among them (cookies get,
+        // state save, upload, get cdp-url), which no list of Flottille's follows; flow_run
+        // replays a flow, a file under the home, which a run writes. Off at the first pin is not
+        // enough: the user turning one on would open every lock.
+        "agent_browser_batch",
+        "agent_browser_flow_run",
+        // As get_cdp_url: DevTools, a stream's WebSocket and the dashboard drive the browser
+        // from a local port no token guards.
+        "agent_browser_inspect",
+        "agent_browser_dashboard_start",
+        // 0.43.0 streams always ("Streaming is always enabled"), so this lock changes nothing:
+        // what protects the port stream_status hands out is the browser's network namespace.
+        "agent_browser_stream_enable",
+        // Past every lock, as batch: chat is agent-browser's own model, which drives it through
+        // its own command function; install with withDeps runs the package manager as root
+        // through sudo; upgrade moves the server out of 0.43.x, after which an accepted review
+        // makes the connection generic (no locks, no url or file refusals).
+        "agent_browser_chat",
+        "agent_browser_install",
+        "agent_browser_upgrade",
     ],
+    // Every other tool of 0.43.0's `tools/list --tools all`. webmcp_invoke takes params as an
+    // object, which the server gives agent-browser as JSON, never its `@file` form; 0.43.0
+    // serves no add_init_script (its init scripts are a global option, which extraArgs and
+    // batch alone would carry).
+    others: &[
+        "agent_browser_tools_profiles",
+        "agent_browser_open",
+        "agent_browser_flow_list",
+        "agent_browser_webmcp_list",
+        "agent_browser_webmcp_invoke",
+        "agent_browser_webmcp_result",
+        "agent_browser_webmcp_cancel",
+        "agent_browser_read",
+        "agent_browser_snapshot",
+        "agent_browser_click",
+        "agent_browser_fill",
+        "agent_browser_type",
+        "agent_browser_press",
+        "agent_browser_hover",
+        "agent_browser_focus",
+        "agent_browser_check",
+        "agent_browser_uncheck",
+        "agent_browser_select",
+        "agent_browser_scroll",
+        "agent_browser_scroll_into_view",
+        "agent_browser_wait_ms",
+        "agent_browser_wait_for_selector",
+        "agent_browser_wait_for_text",
+        "agent_browser_wait_for_load",
+        "agent_browser_get_text",
+        "agent_browser_get_html",
+        "agent_browser_get_value",
+        "agent_browser_get_url",
+        "agent_browser_get_title",
+        "agent_browser_close",
+        "agent_browser_back",
+        "agent_browser_forward",
+        "agent_browser_reload",
+        "agent_browser_dblclick",
+        "agent_browser_drag",
+        "agent_browser_keydown",
+        "agent_browser_keyup",
+        "agent_browser_keyboard_type",
+        "agent_browser_keyboard_insert_text",
+        "agent_browser_get_attr",
+        "agent_browser_get_count",
+        "agent_browser_get_box",
+        "agent_browser_get_styles",
+        "agent_browser_is_visible",
+        "agent_browser_is_enabled",
+        "agent_browser_is_checked",
+        "agent_browser_find",
+        "agent_browser_mouse_move",
+        "agent_browser_mouse_down",
+        "agent_browser_mouse_up",
+        "agent_browser_mouse_wheel",
+        "agent_browser_set_viewport",
+        "agent_browser_set_device",
+        "agent_browser_set_geo",
+        "agent_browser_set_offline",
+        "agent_browser_set_headers",
+        "agent_browser_set_media",
+        "agent_browser_storage_set",
+        "agent_browser_storage_clear",
+        "agent_browser_cookies_set",
+        "agent_browser_cookies_clear",
+        "agent_browser_tab_new",
+        "agent_browser_tab_list",
+        "agent_browser_tab_switch",
+        "agent_browser_tab_close",
+        "agent_browser_window_new",
+        "agent_browser_frame_switch",
+        "agent_browser_frame_main",
+        "agent_browser_dialog_status",
+        "agent_browser_dialog_accept",
+        "agent_browser_dialog_dismiss",
+        "agent_browser_profiler_start",
+        "agent_browser_record_stop",
+        "agent_browser_console",
+        "agent_browser_errors",
+        "agent_browser_highlight",
+        "agent_browser_clipboard_read",
+        "agent_browser_clipboard_write",
+        "agent_browser_clipboard_copy",
+        "agent_browser_clipboard_paste",
+        "agent_browser_state_list",
+        "agent_browser_state_clear",
+        "agent_browser_state_clean",
+        "agent_browser_state_rename",
+        "agent_browser_tap",
+        "agent_browser_swipe",
+        "agent_browser_device",
+        "agent_browser_diff_url",
+        "agent_browser_react_tree",
+        "agent_browser_react_inspect",
+        "agent_browser_react_renders_start",
+        "agent_browser_react_renders_stop",
+        "agent_browser_react_suspense",
+        "agent_browser_vitals",
+        "agent_browser_a11y",
+        "agent_browser_pushstate",
+        "agent_browser_remove_init_script",
+        "agent_browser_confirm",
+        "agent_browser_deny",
+        "agent_browser_stream_disable",
+        "agent_browser_stream_status",
+        "agent_browser_session",
+        "agent_browser_session_list",
+        "agent_browser_session_id",
+        "agent_browser_session_info",
+        "agent_browser_profiles",
+        "agent_browser_skills_list",
+        "agent_browser_skills_get",
+        "agent_browser_skills_path",
+        "agent_browser_doctor",
+        "agent_browser_dashboard_stop",
+    ],
+    // The same, where the path is optional: without one the server writes to its own folder,
+    // which Flottille puts in the vault folder (`display`) or which only the user turns on
+    // (HAR, traces).
+    file_arguments: &[
+        ("agent_browser_screenshot", &["path", "screenshotDir"]),
+        ("agent_browser_wait_for_download", &["path"]),
+        ("agent_browser_network_har_stop", &["path"]),
+        ("agent_browser_trace_stop", &["path"]),
+        ("agent_browser_profiler_stop", &["path"]),
+        ("agent_browser_flow_save", &["output"]),
+        ("agent_browser_diff_snapshot", &["baseline"]),
+        ("agent_browser_diff_screenshot", &["baseline", "output"]),
+    ],
+    // restore and restoreSave save the cookies and storage to a file under the home, which runs
+    // read; caCert is a file the server reads and trusts; namespace moves the daemon's socket and
+    // its restore folders, as at the start (`UNSAFE`); extraArgs carries any of agent-browser's
+    // options (--restore, --screenshot-dir…), which no list of Flottille's can follow.
+    // capture: "flow" records the session, what a login types included, for flow_save to write
+    // under the home.
+    hidden_arguments: &[
+        "extraArgs",
+        "restore",
+        "restoreSave",
+        "caCert",
+        "namespace",
+        "capture",
+    ],
+    idle_argument: "idleTimeout",
     locked_why: "agent-browser's own logins keep passwords in its own store or take them as \
                  arguments, and its plugins run commands with its credential providers: \
                  Flottille's vault is the only way to sign in, with the action login; connect and \
                  state_load bring a browser or a session someone else controls, which a login \
                  would type into; get_cdp_url hands out Chrome's DevTools address, which drives \
-                 the browser with no gate",
+                 the browser with no gate; cookies_get, storage_get, state_save and state_show \
+                 give the cookies, storage and saved state of the browser's profile, which keeps \
+                 the sign-ins, and upload, download, pdf, cookies_set_curl, record_start and \
+                 record_restart read or write a file by its path through the server, which \
+                 reaches the profile however that path is made; network_requests and \
+                 network_request give a request's headers and body, its Authorization and \
+                 cookies among them; batch and flow_run run any command of agent-browser's, \
+                 the locked ones among them, and so does chat, agent-browser's own model, which \
+                 drives it through its own command function; install with withDeps runs the \
+                 package manager as root, and upgrade moves the server out of the version this \
+                 adapter was checked on, after which no lock applies; inspect and \
+                 dashboard_start open a local port that drives the browser with no gate; \
+                 stream_enable changes nothing, agent-browser 0.43 streams always, and what \
+                 protects the port stream_status hands out is the browser's network namespace",
     actions: &[Own {
         name: LOGIN,
         description: "Signs in to a site in the browser with a vault entry of the user's: \
@@ -138,7 +354,10 @@ pub static AGENT_BROWSER: Adapter = Adapter {
            headed, true to show it on the user's screen, only when the user must act in the page \
            (sign in, a captcha) or see it, never to read a page; left out or false it runs \
            headless, and the next open without headed hides it again. The browser keeps its \
-           profile when it changes.",
+           profile when it changes. Its cookies, storage and saved state are not yours to read: \
+           cookies_get, storage_get, state_save, upload, download, pdf, network_request and \
+           batch are off, and no action takes a file's path, extraArgs, restore or capture; a \
+           screenshot without a path comes back as an image.",
     shows: Some((OPEN, SHOWS)),
 };
 
@@ -243,9 +462,30 @@ impl Adapter {
         self.locked.contains(&action)
     }
 
-    /// The setting of a new action at the first pin, if the adapter sets one.
+    /// Whether `action` is in one of its lists: one it was checked on.
+    pub fn knows(&self, action: &str) -> bool {
+        [
+            self.locked,
+            self.scripts,
+            self.files,
+            self.patterns,
+            self.others,
+        ]
+        .iter()
+        .any(|list| list.contains(&action))
+            || self.file_arguments.iter().any(|(name, _)| *name == action)
+    }
+
+    /// The setting of an action new to a pin, or changed, if the adapter sets one, at the first
+    /// pin and at every one after it: off where it does not know the action, or keeps it off, or
+    /// where it is off by design (`scripts`, `files`). A re-pin that switches the server's tools
+    /// (agent-browser's default ones to `--tools all`) brings those in off, as the first did.
     pub fn first(&self, action: &str) -> Option<&'static str> {
-        if self.locks(action) || self.scripts.contains(&action) || self.files.contains(&action) {
+        if !self.knows(action)
+            || self.locks(action)
+            || self.scripts.contains(&action)
+            || self.files.contains(&action)
+        {
             return Some("off");
         }
         None
@@ -277,13 +517,19 @@ impl Adapter {
         })
     }
 
-    /// Why a call of `action` with `arguments` is refused: a `url` that is no web address, such
-    /// as a `javascript:` or a `data:` one, which runs in the page.
+    /// Why a call of `action` with `arguments` is refused: a `url`, or any argument whose name
+    /// starts with it (`url1`, `url2` of `diff_url`), that is no web address, such as a
+    /// `javascript:` or a `data:` one, which runs in the page, or a `file:` one, which reads the
+    /// profile.
     pub fn refuses_url(&self, action: &str, arguments: &Value) -> Option<String> {
-        let url = arguments["url"].as_str()?;
-        if self.patterns.contains(&action) || web_address(url).is_some() {
+        if self.patterns.contains(&action) {
             return None;
         }
+        arguments
+            .as_object()?
+            .iter()
+            .filter(|(name, _)| name.starts_with("url"))
+            .find(|(_, url)| url.as_str().is_none_or(|url| web_address(url).is_none()))?;
         Some(format!(
             "{action} takes a url that is http or https with a host while Flottille's adapter \
              applies: another scheme (javascript:, data:, file:…) runs in the page or reads \
@@ -291,21 +537,77 @@ impl Adapter {
         ))
     }
 
+    /// Why a call of `action` with `arguments` is refused: a file's path, which the server would
+    /// follow into the browser's profile, or an argument agent-browser takes on every action that
+    /// saves the browser's state or moves its folders (`file_arguments`, `hidden_arguments`).
+    pub fn refuses_files(&self, action: &str, arguments: &Value) -> Option<String> {
+        let files = self
+            .file_arguments
+            .iter()
+            .find(|(name, _)| *name == action)
+            .map_or(&[][..], |(_, files)| *files);
+        let given = files
+            .iter()
+            .chain(self.hidden_arguments)
+            .find(|name| arguments.get(**name).is_some())?;
+        Some(format!(
+            "{action} takes no {given} while Flottille's adapter applies: the server would read \
+             or write a file Flottille does not choose, or save the browser's state, and the \
+             browser's profile keeps the user's sign-ins; call it without {given}"
+        ))
+    }
+
+    /// Why a call of `action` with `arguments` is refused: an idle timeout that is not a number
+    /// above 0 (`idle_argument`). 0 keeps the browser alive, so its screenshots and downloads,
+    /// emptied once it ended, stay where a run can reach them; the unit is the server's own, and
+    /// the adapter does not state a floor beyond 0.
+    pub fn refuses_idle(&self, action: &str, arguments: &Value) -> Option<String> {
+        let idle = arguments.get(self.idle_argument)?;
+        if idle.as_f64().is_some_and(|idle| idle > 0.0) {
+            return None;
+        }
+        Some(format!(
+            "{action} takes {} only as a number above 0 while Flottille's adapter applies: 0 \
+             keeps the browser alive, and the screenshots and downloads of its folders are \
+             emptied only once it ended",
+            self.idle_argument
+        ))
+    }
+
     /// What it changes, a sentence each, as the review says it.
     pub fn changed(&self, config: &Path) -> Vec<String> {
         let mut said = vec![format!(
             "{} run a script in the page, which no gate can judge: they are off at the first \
-             review, and the user may turn them on",
+             review and at any later one they come in with, and the user may turn them on",
             self.scripts.join(", ")
         )];
         said.push(format!(
             "{} write the page's traffic, or what was typed in it, to a file, which is not \
-             masked: they are off at the first review, and the user may turn them on",
+             masked: they are off at the first review and at any later one they come in with, and the user may \
+             turn them on",
             self.files.join(", ")
         ));
         said.push(
             "a url its actions open must be http or https with a host: a javascript: or a data: \
-             one runs in the page"
+             one runs in the page; an idleTimeout must be a number above 0, as 0 keeps the \
+             browser alive"
+                .to_owned(),
+        );
+        said.push(format!(
+            "a call that gives a file's path ({}) or {} is refused: the server would follow it \
+             into the browser's profile, or save the browser's state; a screenshot and a \
+             download without a path go to a folder of the connection's vault folder",
+            self.file_arguments
+                .iter()
+                .map(|(action, files)| format!("{} of {action}", files.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; "),
+            self.hidden_arguments.join(", ")
+        ));
+        said.push(
+            "an action it does not know, which a version of its range adds, is off at the \
+             review it comes in with, as one may read what the locked ones do, and the user may \
+             turn it on"
                 .to_owned(),
         );
         said.push(format!(
@@ -728,6 +1030,12 @@ pub fn display(
         sockets(vault)?.into_os_string(),
     );
     env.insert("TMPDIR".into(), private(vault, TEMPORARY)?.into_os_string());
+    // A screenshot without a path goes to `~/.agent-browser/tmp/screenshots`, under the home
+    // runs write: a link planted there, at the name of the next one, would have it written into
+    // the profile. A download would go to a folder of Chrome's choosing.
+    for (variable, name) in BROWSERS_FILES {
+        env.insert(variable.into(), private(vault, name)?.into_os_string());
+    }
     // Chrome writes outside its profile, whatever profile it is given: its crash database (page
     // memory, a password typed) under its default configuration folder, its caches; never in a
     // folder of the user's, which runs read and write (`docs/vault.md`, "The browser's network").
@@ -743,10 +1051,12 @@ pub fn display(
 /// The variables [`display`] sets, or removes, for the browser: where agent-browser puts its
 /// socket, and where Chrome writes its profile, caches and crash dumps; and `HOME`, which moves
 /// where agent-browser looks for the Chrome it downloaded and where Chrome reads `~/.pki/nssdb`.
-pub const FOLDERS_OF_THE_BROWSER: [&str; 8] = [
+pub const FOLDERS_OF_THE_BROWSER: [&str; 10] = [
     "HOME",
     "AGENT_BROWSER_SOCKET_DIR",
     "TMPDIR",
+    "AGENT_BROWSER_SCREENSHOT_DIR",
+    "AGENT_BROWSER_DOWNLOAD_PATH",
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
@@ -760,6 +1070,13 @@ const CHROMES_FOLDERS: [(&str, &str); 3] = [
     ("XDG_CONFIG_HOME", "config"),
     ("XDG_CACHE_HOME", "cache"),
     ("XDG_DATA_HOME", "data"),
+];
+
+/// The variables that say where agent-browser writes a screenshot and a download given no path,
+/// and the folder of the vault folder each names.
+const BROWSERS_FILES: [(&str, &str); 2] = [
+    ("AGENT_BROWSER_SCREENSHOT_DIR", "screenshots"),
+    ("AGENT_BROWSER_DOWNLOAD_PATH", "downloads"),
 ];
 
 /// The folder `name` of the vault folder, made the user's alone: the temporary folder of
@@ -837,7 +1154,7 @@ pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
             .and_then(|sockets| std::fs::read_dir(sockets).ok()?.next())
             .is_none();
         if no_browser {
-            emptied(&vault.join(TEMPORARY));
+            emptied_files(&vault);
         }
     }
     for state in folders(paths.state.join("connections")) {
@@ -935,7 +1252,18 @@ fn emptied(folder: &Path) {
 fn emptied_once_ended(vault: &Path) {
     let answering = sockets_in(vault).is_some_and(|sockets| network::alive(&sockets));
     if !answering {
-        emptied(&vault.join(TEMPORARY));
+        emptied_files(vault);
+    }
+}
+
+/// `emptied` the temporary folder of the vault folder `vault`, and the folders of its
+/// screenshots and downloads, which no browser's next start needs.
+fn emptied_files(vault: &Path) {
+    for name in [TEMPORARY]
+        .into_iter()
+        .chain(BROWSERS_FILES.map(|(_, name)| name))
+    {
+        emptied(&vault.join(name));
     }
 }
 

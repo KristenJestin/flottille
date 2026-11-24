@@ -1489,13 +1489,71 @@ way in:
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
   So are `agent_browser_connect` and `agent_browser_state_load`: they bring a browser, or a
   session, that someone else controls, and a login would type into it.
+- **The browser's profile is never the agent's to read** (#1326). It lasts from one browser to
+  the next and keeps the sign-ins, made by hand in the shown window or through the vault, so a
+  session cookie or a token of a page's storage is a credential. `agent_browser_cookies_get`,
+  `_storage_get`, `_state_save` and `_state_show` are off and stay off: their answers are not
+  masked to names instead, since a site's cookie is no secret Flottille knows and saved state is a
+  file. So are the actions that cannot run without a file's path, which the server follows into
+  the profile however the path is made (a link a run planted under a name built in a script,
+  which the gate never sees, and swapped after any check): `upload`, `download`, `pdf`,
+  `cookies_set_curl`, `record_start`, `record_restart`. Those whose path is optional run without
+  one, a call that gives it refused: `path` and `screenshotDir` of `screenshot`, `path` of
+  `wait_for_download`, `network_har_stop`, `trace_stop` and `profiler_stop`, `output` of
+  `flow_save`, `baseline` of `diff_snapshot`, `baseline` and `output` of `diff_screenshot`. A
+  screenshot and a download given no path go to `screenshots/` and `downloads/` of the
+  connection's vault folder (`AGENT_BROWSER_SCREENSHOT_DIR`, `AGENT_BROWSER_DOWNLOAD_PATH`), out of
+  every run's reach and emptied once the browser ended: agent-browser's own default is under the
+  home. A small screenshot still comes back to the agent as an image. And the arguments
+  agent-browser takes on every action though no schema says them are refused on each:
+  `restore` and `restoreSave` (they save the cookies and storage to a file under the home),
+  `caCert` (a file the server reads and trusts), `namespace` (it moves the daemon's socket, as at
+  the start), `extraArgs` (any of agent-browser's options, `--restore` and `--screenshot-dir`
+  among them) and `capture` (`"flow"` records the session, what a login types included, for
+  `flow_save` to write under the home). Default taken, to confirm: locked outright rather than
+  confined to a folder of the server's alone, which agent-browser 0.43 cannot be told to keep to
+  for an upload.
+- **Nothing else reaches the profile, or what a page sends** (#1326, the review of its pull
+  request). `network_requests` and `network_request` are off and stay off: a request's details
+  hold its headers and body, the `Authorization: Bearer` a page builds from a token in its storage,
+  the `Cookie` it sends and the `Set-Cookie` it gets; not masked instead, as a cookie's value is no
+  secret Flottille knows. So are `batch` and `flow_run`: `batch` runs any command of
+  agent-browser's (`cookies get`, `state save`, `upload`, `get cdp-url`…), which no lock of
+  Flottille's follows, and `flow_run` replays a flow, a file under the home a run can plant; off
+  at the first pin alone, the user turning one on would open every lock. So are `chat`
+  (agent-browser's own model, which drives agent-browser through its own command function, past
+  every lock, as `batch` does), `install` (with `withDeps` it runs the package manager as root,
+  through sudo) and `upgrade` (it moves the server out of 0.43.x, after which an accepted review
+  makes the connection generic: no lock, no refusal of a url or a file). And `inspect` and
+  `dashboard_start`, as `get_cdp_url`: DevTools and the dashboard drive the browser from a local
+  port no token guards. `stream_enable` is locked too, but its lock changes nothing: 0.43.0
+  streams always ("Streaming is always enabled"), so the port `stream_status` hands out is there
+  whatever is set; what protects it is the browser's network namespace (above), not the lock,
+  and the lock's reason says so. `network_unroute`'s `url` is a pattern, as `wait_for_url`'s, not
+  an address that is opened. An `idleTimeout` is refused unless it is a number above 0: 0 keeps
+  the browser alive, so the `screenshots/` and `downloads/` folders, emptied only once the browser
+  ended, are never emptied. Checked on 0.43.0's own words
+  (no run): `webmcp_invoke` takes `params` as an object, which the server gives agent-browser as
+  JSON, never in the `@file` form its command line reads a file with, and 0.43.0's server has no
+  `add_init_script` (its init scripts are the global option `--init-script <path>`, which only
+  `extraArgs` and `batch` would carry, both refused).
+- **A tool the adapter does not know comes in off.** The adapter lists every tool of 0.43.0's
+  `tools/list --tools all`; one in none of its lists, which a 0.43 patch adds, may read what the
+  locked ones read. It is off at the review it comes in with, the first pin or any later one, and
+  the user may turn it on there: the review says it is new to the adapter.
+  The tools that are off by design (the scripts and the files below) are off at every pin alike:
+  a connection switched from agent-browser's default `core` tools to `--tools all` (same 0.43.0)
+  brings `network_har_start` and `har_stop` in off, as a first pin does, never judged. Only a
+  setting the user kept for an unchanged tool stays.
 - **`login` is offered beside every other action**, as agent-browser's own login restricts
   nothing after it: what keeps the secret is that it never reaches the model's context (Flottille's
   own `auth login` run fills it), the masking of the outputs, and the secret given only to a page of
   its entry's own site (below). The actions that run a script in the page, which no gate can judge, are **off at
-  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `batch` and `flow_run` (which
-  run or replay the others), `network_route` (which serves a body of its own for the page's
-  requests) and `chat` (agent-browser's own model, through an external gateway). So are those that
+  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `network_route` (which serves a
+  body of its own for the page's requests). `eval`, once the user turns it on, reads the page's storage
+  (`localStorage`) and the part of `document.cookie` that is not `HttpOnly`: the tokens of a site
+  of the profile, which the locks above keep from every other action, so turning it on gives them
+  to the agent. So are those that
   write the page's traffic, or what was typed in it, to a file, which no masking reaches:
   `network_har_start`, `network_har_stop`, `trace_start`, `trace_stop`, and `flow_save` and
   `flow_steps` (a session recorded to be saved as a flow: `open` and `tab_new` take `capture`, and
@@ -1503,9 +1561,10 @@ way in:
   action is judged at the first pin, as any server's. A connection accepted with one of the first
   on (`eval`) gets `login` beside it with no new review: the review says so (`agent_browser_eval
   is on: a page script can read what login types`).
-- **A `url` is a web address.** While the adapter applies, a call whose `url` argument is not
-  `http` or `https` with a host is refused before the server sees it (`open`, `tab_new`,
-  `pushstate`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
+- **A `url` is a web address.** While the adapter applies, a call whose `url` argument, or any
+  argument whose name starts with `url` (`url1` and `url2` of `diff_url`), is not `http` or
+  `https` with a host is refused before the server sees it (`open`, `tab_new`, `pushstate`,
+  `diff_url`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
   open, the login form among them, and a `file:` one reads this machine. `wait_for_url` and
   `network_route` are left out: their `url` is a pattern matched against an address, never opened.
 - **Every output of the connection's tools is masked** for the vault's secrets, those of the
@@ -1520,8 +1579,8 @@ way in:
   into what another action reads, a show-password toggle shows the secret on a screenshot (pixels
   are not masked), a selector can test a field's `value` attribute one guess at a time, an action
   that reads the page (`snapshot`, `get_value`, `eval`…) right after a login may see the secret in
-  a form other than those masked, and **a page saved to a file** (`pdf`, `download`, a HAR or a
-  trace the user turned on) is not masked: Flottille masks what the tools answer, not the files
+  a form other than those masked, and **a page saved to a file** (a HAR or a trace the user
+  turned on, written under the home since its path is refused) is not masked: Flottille masks what the tools answer, not the files
   the browser writes. Each call of these actions is judged by the gate, which is what stands
   against them; the user turns off what they do not want.
 - **The browser is open; the secret is kept to its site.** Flottille keeps the browser to no list

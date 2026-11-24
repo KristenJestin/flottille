@@ -1419,20 +1419,20 @@ fn now_of(daemon: &Daemon, name: &str) -> Option<(Declaration, Row, State)> {
 }
 
 /// The setting of an action as it applies: what the user set, but off where the adapter that
-/// applies to the pin keeps it off.
+/// applies to the pin keeps it off; with no setting, judged, or off where that adapter does not
+/// know the action.
 fn setting_of<'a>(row: &'a Row, action: &str) -> &'a str {
-    if row
-        .pin
-        .as_ref()
-        .and_then(adapters::applying)
-        .is_some_and(|adapter| adapter.locks(action))
-    {
+    let adapter = row.pin.as_ref().and_then(adapters::applying);
+    if adapter.is_some_and(|adapter| adapter.locks(action)) {
         return "off";
     }
     row.settings
         .get(action)
         .map(String::as_str)
-        .unwrap_or("judged")
+        .unwrap_or_else(|| match adapter {
+            Some(adapter) if !adapter.knows(action) => "off",
+            _ => "judged",
+        })
 }
 
 // ── The tool ─────────────────────────────────────────────────────────────────────────────────
@@ -1674,7 +1674,12 @@ fn decide<'a>(
             action.name, action.name
         )
     })?;
-    if let Some(why) = adapter.and_then(|adapter| adapter.refuses_url(&action.name, &arguments)) {
+    if let Some(why) = adapter.and_then(|adapter| {
+        adapter
+            .refuses_url(&action.name, &arguments)
+            .or_else(|| adapter.refuses_files(&action.name, &arguments))
+            .or_else(|| adapter.refuses_idle(&action.name, &arguments))
+    }) {
         return Err(why);
     }
     limits(declaration, action, &arguments)?;
@@ -2976,8 +2981,9 @@ fn review_first(name: &str) -> Failure {
 }
 
 /// The settings `accept` writes for `listing`: kept where the action did not change from the pin
-/// of `row`, judged where it is new or changed (or as the adapter that applies says at the first
-/// pin), then those the user named; off where that adapter keeps it off, whatever is named.
+/// of `row`, judged where it is new or changed (or as the adapter that applies says, at every pin
+/// the same: off for an action it keeps off, runs a script or writes a file by design, or does not
+/// know), then those the user named; off where that adapter keeps it off, whatever is named.
 fn settings_of_accept(
     row: &Row,
     listing: &Listing,
@@ -2992,9 +2998,7 @@ fn settings_of_accept(
             .and_then(|pin| pin.action(&action.name))
             .filter(|had| *had == action)
             .map(|_| setting_of(row, &action.name).to_owned());
-        let first = adapter
-            .filter(|_| row.pin.is_none())
-            .and_then(|adapter| adapter.first(&action.name));
+        let first = adapter.and_then(|adapter| adapter.first(&action.name));
         let setting = match adapter.is_some_and(|adapter| adapter.locks(&action.name)) {
             true => "off".to_owned(),
             false => kept.unwrap_or_else(|| first.unwrap_or("judged").to_owned()),
