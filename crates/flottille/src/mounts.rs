@@ -474,6 +474,87 @@ fn write_file(path: &CStr, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// The mount `fd` (`O_PATH`) is at, and every mount below it, made read-only: cloned, made
+/// read-only whole while no one sees it, then put over it.
+///
+/// # Safety
+/// In the child, before its program: system calls alone.
+unsafe fn read_only_at(fd: libc::c_int) -> io::Result<()> {
+    let attr = MountAttr {
+        attr_set: MOUNT_ATTR_RDONLY,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: 0,
+    };
+    // SAFETY: as the function says; C strings and a structure alive for each call.
+    unsafe {
+        let tree = libc::syscall(
+            libc::SYS_open_tree,
+            fd,
+            c"".as_ptr(),
+            OPEN_TREE_CLONE
+                | AT_RECURSIVE
+                | libc::AT_EMPTY_PATH as libc::c_uint
+                | libc::O_CLOEXEC as libc::c_uint,
+        );
+        check(tree)?;
+        let tree = tree as libc::c_int;
+        let mut made = check(libc::syscall(
+            libc::SYS_mount_setattr,
+            tree,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH as libc::c_uint | AT_RECURSIVE,
+            &attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        ));
+        if made.is_ok() {
+            made = check(libc::syscall(
+                libc::SYS_move_mount,
+                tree,
+                c"".as_ptr(),
+                fd,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ));
+        }
+        libc::close(tree);
+        made
+    }
+}
+
+/// `path` bound onto itself and made read-only by its path, on a kernel without the calls of
+/// [`read_only_at`]: before Linux 5.12, the top mount alone.
+///
+/// # Safety
+/// As [`read_only_at`].
+unsafe fn read_only_by_path(path: &CStr, flags: libc::c_ulong) -> io::Result<()> {
+    let none = std::ptr::null::<libc::c_char>();
+    // SAFETY: as the function says.
+    unsafe {
+        if libc::mount(
+            path.as_ptr(),
+            path.as_ptr(),
+            none,
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        ) != 0
+        {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        check(libc::mount(
+            none,
+            path.as_ptr(),
+            none,
+            libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
+            std::ptr::null(),
+        ) as libc::c_long)
+    }
+}
+
 impl Plan {
     /// In the child, before its program: the namespace made as planned. Any failure fails the
     /// command's start: one that started without its folders emptied would reach them.
@@ -514,51 +595,33 @@ impl Plan {
                 }
             }
             for (path, flags) in &self.read_only {
-                let bound = libc::mount(
-                    path.as_ptr(),
-                    path.as_ptr(),
-                    none,
-                    libc::MS_BIND | libc::MS_REC,
-                    std::ptr::null(),
-                );
-                if bound != 0 {
-                    let error = io::Error::last_os_error();
-                    match error.raw_os_error() {
-                        Some(libc::ENOENT) => continue,
-                        _ => return Err(error),
+                // Opened once, following no link on its way, and made read-only through that
+                // descriptor alone: a link put on its way since the daemon's start leads nowhere
+                // else between two steps.
+                let fd = open_unfollowed(path, libc::O_PATH);
+                let made = match fd {
+                    0.. => {
+                        let made = read_only_at(fd as libc::c_int);
+                        libc::close(fd as libc::c_int);
+                        made
                     }
-                }
-                // Read-only with every mount below it, those just made to keep a folder in place
-                // included: a remount changes one mount alone, and a pinned folder below would
-                // stay writable under a read-only one.
-                let attr = MountAttr {
-                    attr_set: MOUNT_ATTR_RDONLY,
-                    attr_clr: 0,
-                    propagation: 0,
-                    userns_fd: 0,
+                    _ => Err(io::Error::last_os_error()),
                 };
-                let recursive = libc::syscall(
-                    libc::SYS_mount_setattr,
-                    libc::AT_FDCWD,
-                    path.as_ptr(),
-                    AT_RECURSIVE,
-                    &attr as *const MountAttr,
-                    std::mem::size_of::<MountAttr>(),
-                );
-                // Before Linux 5.12, the top mount alone: such a kernel has no Landlock of the
-                // second ABI either, so no push is lent anything or run outside the sandbox
-                // (`pushed::ssh_unlent`, `pushed::unlifted`).
-                if recursive != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
-                {
-                    check(libc::mount(
-                        none,
-                        path.as_ptr(),
-                        none,
-                        libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
-                        std::ptr::null(),
-                    ) as libc::c_long)?;
-                } else {
-                    check(recursive)?;
+                match made {
+                    Ok(()) => {}
+                    // Gone, or a link on its way now: not the path found at the daemon's start,
+                    // nothing to protect there; the push judges it (`pushed::unlent`).
+                    Err(error)
+                        if fd < 0
+                            && matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ELOOP)) => {
+                    }
+                    // Before Linux 5.12, the top mount alone: such a kernel has no Landlock of the
+                    // second ABI either, so no push is lent anything or run outside the sandbox
+                    // (`pushed::ssh_unlent`, `pushed::unlifted`).
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => {
+                        read_only_by_path(path, *flags)?
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             // At best: a command started without them meets the refusal of `ssh` alone, where
