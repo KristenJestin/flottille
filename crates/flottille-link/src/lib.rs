@@ -55,7 +55,8 @@ pub use request::{
     runs_agents,
 };
 pub use sessions::{
-    LightProject, LightSession, MOST_SESSIONS, ProjectList, STATES, SessionList, TITLE_LIMIT,
+    LightPilot, LightProject, LightSession, MOST_SESSIONS, PilotList, ProjectList, STATES,
+    SessionList, TITLE_LIMIT,
 };
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
