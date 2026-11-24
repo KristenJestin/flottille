@@ -1138,13 +1138,16 @@ fn drawn_over_the_own_line(cx: &mut VisualTestContext) -> Vec<String> {
 fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut TestAppContext) {
     let (_hub, pc, _server) = pc_and_server();
     let (shell, cx) = window(&pc, cx);
-    // Short, so that every tab scrolls.
-    cx.simulate_resize(size(px(1000.), px(520.)));
     settings(&shell, "general", cx);
     settings_of(&shell, "server", cx);
     for shade in ["light", "dark"] {
+        // The window's own shade, set while it is tall enough to reach the control.
+        cx.simulate_resize(size(px(1000.), px(2400.)));
         click(&shell, "settings-tabs-general", cx);
+        settle(&shell, cx);
         click(&shell, &format!("appearance-shade-{shade}"), cx);
+        // Short, so that every tab scrolls.
+        cx.simulate_resize(size(px(1000.), px(520.)));
         for tab in [
             "agents",
             "approvals",
