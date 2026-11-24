@@ -883,23 +883,25 @@ fn doctor_says_the_root_owned_files_past_those_copied() {
         return;
     }
     // More root-owned files included than are copied: a run's ssh refuses the rest, and the
-    // user is told. The machine's own licence files, root's, play them.
-    let many = std::fs::read_dir("/usr/share/doc")
+    // user is told. The machine's own C headers, root's, play them: plain files, not links to
+    // the same one, so that they are more than are copied before the walk's limit of files.
+    let many = std::fs::read_dir("/usr/include")
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
-                .filter(|entry| entry.path().join("copyright").is_file())
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".h"))
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
                 .count()
         })
         .unwrap_or(0);
     if many <= 64 {
-        eprintln!("skipped: fewer than 65 files /usr/share/doc/*/copyright on this machine");
+        eprintln!("skipped: 64 files /usr/include/*.h or fewer on this machine");
         return;
     }
     let user = User::with_fake_agent();
     std::fs::create_dir_all(user.path("system")).unwrap();
     let system = user.path("system/ssh_config");
-    std::fs::write(&system, "Include /usr/share/doc/*/copyright\n").unwrap();
+    std::fs::write(&system, "Include /usr/include/*.h\n").unwrap();
     let user = user.with_env("FLOTTILLE_TEST_SSH_SYSTEM_CONFIG", system.to_str().unwrap());
     started(&user);
 
