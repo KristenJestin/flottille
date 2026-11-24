@@ -865,6 +865,117 @@ fn a_folded_lead_and_the_ended_group_stay_as_they_were(
     assert!(shell.read_with(cx, |s, cx| s.ended().unwrap().read(cx).is_open()));
 }
 
+/// A connection to the daemon that holds back the window's read of its rows (`project.list`) while
+/// `closed` is set: the window knows what the daemon keeps of the sidebar, and has no rows yet.
+/// `asked` says the read was held.
+fn rows_held(inner: Connect, closed: Arc<AtomicBool>, asked: Arc<AtomicBool>) -> Connect {
+    use std::io::{BufRead as _, Write as _};
+
+    Arc::new(move || {
+        let (mine, theirs) = UnixStream::pair()?;
+        let daemon = inner()?;
+        let (mut from_daemon, mut to_window) = (daemon.try_clone()?, theirs.try_clone()?);
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from_daemon, &mut to_window);
+            let _ = to_window.shutdown(std::net::Shutdown::Both);
+        });
+        let (closed, asked) = (closed.clone(), asked.clone());
+        std::thread::spawn(move || {
+            let mut daemon = daemon;
+            let mut requests = std::io::BufReader::new(theirs);
+            let mut line = String::new();
+            while requests.read_line(&mut line).unwrap_or(0) > 0 {
+                if line.contains("\"project.list\"") {
+                    asked.store(true, Ordering::SeqCst);
+                    while closed.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                if daemon.write_all(line.as_bytes()).is_err() {
+                    break;
+                }
+                line.clear();
+            }
+            let _ = daemon.shutdown(std::net::Shutdown::Both);
+        });
+        Ok(mine)
+    })
+}
+
+/// A window that knows what the daemon keeps of the sidebar but has no rows yet has nothing to say
+/// of the folds: what it writes (its own choice of showing the projects by machine here) carries
+/// the folds of the projects and of the leads as they were, for every window.
+#[gpui_kit::test]
+fn a_second_window_opening_keeps_the_projects_folds(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    project(&user, "other");
+    let (lead, led) = lead_and_led(&user, "app");
+
+    let (shell, cx) = window(&user, first);
+    until(&shell, cx, "the lead's row", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&led)).is_some())
+    });
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
+    settle(cx);
+    eventually("the daemon keeps both folds", || {
+        let state = sidebar(&user);
+        state["leads"][&lead] == false && state["projects"]["other"] == false
+    });
+
+    let closed = Arc::new(AtomicBool::new(true));
+    let asked = Arc::new(AtomicBool::new(false));
+    let connect = rows_held(Arc::new(user.connector()), closed.clone(), asked.clone());
+    let (second_shell, second_cx) = window_via(&user, connect, second);
+    until(
+        &second_shell,
+        second_cx,
+        "the read of the rows is held",
+        |_| asked.load(Ordering::SeqCst),
+    );
+    // What the daemon keeps is read before the rows are asked for.
+    second_shell.update_in(second_cx, |shell, window, cx| shell.poll(window, cx));
+    second_shell.update_in(second_cx, |shell, window, cx| {
+        shell.toggle_by_machine(window, cx)
+    });
+    eventually("the second window writes", || {
+        sidebar(&user)["by_machine"] == true
+    });
+
+    let state = sidebar(&user);
+    assert_eq!(
+        state["projects"]["other"], false,
+        "the project stays folded"
+    );
+    assert_eq!(
+        state["projects"]["app"], true,
+        "the other keeps its default"
+    );
+    assert_eq!(state["leads"][&lead], false, "the lead stays folded");
+
+    // The rows come: the first window still has its folds, and so has the second.
+    closed.store(false, Ordering::SeqCst);
+    until(&second_shell, second_cx, "the second window's rows", |cx| {
+        cx.update(|window, _| window.try_find(project_id("other")).is_some())
+    });
+    let open = |name: &str, cx: &mut VisualTestContext| {
+        second_shell.read_with(cx, |s, cx| s.project(name).unwrap().read(cx).is_open())
+    };
+    assert!(
+        !open("other", second_cx),
+        "the second window shows it folded"
+    );
+    assert!(open("app", second_cx));
+    assert!(
+        !shell.read_with(cx, |s, cx| s.project("other").unwrap().read(cx).is_open()),
+        "the first window still shows it folded"
+    );
+}
+
 #[gpui_kit::test]
 fn a_project_removed_forgets_its_fold(cx: &mut TestAppContext) {
     let user = user();

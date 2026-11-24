@@ -1629,6 +1629,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   did not take is not taken as kept, a read it did not answer is not taken as "no draft", so that
   nothing is written over a draft the window never saw, and the text typed before the read
   answered is written once it does, or at the close once the daemon answers a read of its own.
+  A draft of another machine's session or project is kept by this machine's daemon too, under that
+  machine's name (never sent to it, and never the draft of this machine's project of the same
+  name).
   The row of a session says its pencil as soon as the window opens (`draft.list`), without its
   page being opened. A session that is forgotten and a
   project that is removed take their drafts with them; the pictures are files of the daemon's

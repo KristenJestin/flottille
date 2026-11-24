@@ -625,6 +625,14 @@ pub fn compared(says: &[String]) -> Vec<&String> {
         .collect()
 }
 
+/// What a removal's card says when it would lose nothing.
+const NOTHING_LOST: &str = "Nothing would be lost";
+
+/// Whether the removal a card `says` would lose anything.
+pub fn removal_loses(says: &[String]) -> bool {
+    !says.iter().any(|said| said == NOTHING_LOST)
+}
+
 fn removal_words(removal: Removal) -> Vec<String> {
     let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
@@ -637,7 +645,7 @@ fn removal_words(removal: Removal) -> Vec<String> {
         says.push(format!("{STOPPED}{}", lines.join(", ")));
     }
     if losses.is_empty() {
-        says.push("Nothing would be lost".into());
+        says.push(NOTHING_LOST.into());
     } else {
         says.push(
             "This would be lost, and the workspace is removed only if your answer says to \
@@ -895,8 +903,13 @@ fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
 /// Whether the agent is a root, the agent the user talks to. A child an agent of another machine
 /// launched has no parent here: its depth says it is a child.
 fn is_root(daemon: &Daemon, grant: &Grant) -> bool {
+    is_root_agent(daemon, &grant.agent)
+}
+
+/// Whether the agent `agent` is a root.
+pub(crate) fn is_root_agent(daemon: &Daemon, agent: &str) -> bool {
     daemon
-        .read(|store| store.agent(&grant.agent))
+        .read(|store| store.agent(agent))
         .ok()
         .flatten()
         .is_some_and(|agent| agent.parent.is_none() && agent.depth == 0)
@@ -1469,15 +1482,19 @@ pub async fn remove_discarding(
 }
 
 /// `workspace` `remove` in Full: removed even with what it loses, which is what the user's answer
-/// to discard would cover, found now.
+/// to discard would cover, found now. A caller of another machine is let through only when its
+/// card said nothing would be lost: what it finds now is then refused, never discarded unseen.
 pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
     let call: WorkspaceCall = match arguments("workspace", args) {
         Ok(call) => call,
         Err(refused) => return refused,
     };
-    let losses = match removal_losses(daemon, grant, &call).await {
-        Ok(removal) => removal.losses,
-        Err(refused) => return refused,
+    let losses = match crate::across::is_stand_in(&grant.agent) {
+        true => Vec::new(),
+        false => match removal_losses(daemon, grant, &call).await {
+            Ok(removal) => removal.losses,
+            Err(refused) => return refused,
+        },
     };
     crate::workspaces::workspace_remove(
         daemon,
