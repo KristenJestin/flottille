@@ -4690,6 +4690,8 @@ fn agent_browser(version: &str) -> Value {
         .chain(&REPLAYS)
         .chain(&TRAFFIC)
         .chain(&DEVTOOLS)
+        // Served once, with the file arguments its schema gives below.
+        .filter(|name| FILE_ARGUMENTS.iter().all(|(file, _)| file != *name))
     {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
     }
@@ -7024,7 +7026,12 @@ fn an_agent_cannot_write_into_the_browser_s_profile_through_a_download_or_a_scre
         json!({"path": into}),
     );
     // The others that take a file's path run without one; with one they are refused, whatever it
-    // names.
+    // names, flow_save turned on included.
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_flow_save": "judged"}}),
+    )
+    .unwrap();
     for (action, files) in FILE_ARGUMENTS {
         for file in files {
             refused_unseen(&user, &mcp, action, json!({*file: "shot.png"}), file);
