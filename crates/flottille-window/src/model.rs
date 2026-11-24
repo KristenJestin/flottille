@@ -2982,6 +2982,18 @@ mod tests {
     }
 
     #[test]
+    fn a_session_launched_by_an_agent_of_another_machine_keeps_its_launch_title() {
+        // Its launch records its caller as a stand-in `<caller>@<machine>` here, not as an
+        // agent of this machine: that is still another machine's launch.
+        let mut launched = agent("r1", None, "idle", None);
+        launched["title"] = json!("Rework the login");
+        launched["launched_by"] = json!("0123abcd4567@a1b2c3d4");
+        launched["led"] = json!(true);
+        let snapshot = build(json!({"agents": [launched]}), json!({}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Rework the login");
+    }
+
+    #[test]
     fn a_held_launch_an_older_machine_lists_idle_still_needs_you() {
         // A machine before the list said `needs you` for a held launch lists it idle.
         let row = the_led_row(&led_on_server("held", None, Some("idle")));
