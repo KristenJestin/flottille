@@ -138,11 +138,13 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     }
 }
 
-fn present(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> bool {
+fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bool {
+    let id = id.into();
     cx.update(|window, _| window.try_find(id).is_some())
 }
 
-fn label(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> Option<String> {
+fn label(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> Option<String> {
+    let id = id.into();
     cx.update(|window, _| {
         window
             .try_find(id)
