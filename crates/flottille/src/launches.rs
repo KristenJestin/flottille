@@ -296,6 +296,9 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         crate::travel::Testing::default(),
     )
     .await;
+    while crate::across::playing_slow_call() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let mut placed = match sent {
         Ok(placed) => placed,
         Err(why) => {
@@ -320,7 +323,8 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
     };
     write(daemon, &record).map_err(refused)?;
     // The user there may have answered between the two writes: their answer, come first, was
-    // kept (`Store::decide_launch`), and the caller is never told it waits for it.
+    // kept (`Store::decide_launch`), and the caller is never told it waits for it. Read before
+    // `recorded`, which ends a launch whose caller is gone.
     let decided = daemon
         .read(|store| store.launches("out", Some(&record.machine), LaunchFilter::Named(&launch)))
         .ok()
@@ -330,9 +334,12 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
     if let Some(state) = &decided {
         placed["decided"] = state.clone().into();
     }
+    // Its caller may have ended while its code travelled: what it started goes with it.
+    let gone = crate::across::recorded(daemon, &record);
     // Its pilot follows it from here, as a session it leads here: held, from now on too, since its
-    // first wake may come before anything else is heard of it. Refused already, it never runs.
-    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent)
+    // first wake may come before anything else is heard of it. Refused already, or its caller
+    // gone, it never runs.
+    if let (LaunchKind::Led, Some(session), false) = (asked.kind, &record.agent, gone)
         && decided.as_deref().is_none_or(|state| state == "started")
     {
         crate::subscriptions::lead_elsewhere(daemon, &caller.id, session, &asked.title, machine)
