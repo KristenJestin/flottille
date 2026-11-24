@@ -2175,6 +2175,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_accept_read_before_the_user_s_save_writes_nothing_over_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "example-dev-login", "secret": "r3alm-l0gin-passw0rd",
+                "url": "https://id.example.invalid/realms/dev/"}),
+        )
+        .await);
+        let proposed = daemon
+            .write(|store| {
+                store.create_agent(
+                    &crate::daemon::tests::an_agent("a1"),
+                    ("agent.created", json!({})),
+                )?;
+                let event = store.append_agent_event(
+                    "a1",
+                    "vault.asked",
+                    json!({"agent": "a1", "project": "app", "name": "example-dev-login",
+                        "why": "the root shows no form", "every": true,
+                        "url": "https://id.example.invalid/realms/dev/account",
+                        "edit": {"url": {"before": "https://id.example.invalid/realms/dev/",
+                            "after": "https://id.example.invalid/realms/dev/account"}}}),
+                    false,
+                )?;
+                Ok((event.seq, event))
+            })
+            .unwrap();
+        // What Accept read of the entry before the user saved it, the proposal applied.
+        let read_before = json!({"name": "example-dev-login",
+            "url": "https://id.example.invalid/realms/dev/account"});
+        // The user saves the entry first (from the card's Edit): that answers the proposal.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "example-dev-login", "url": "https://id.example.invalid/realms/dev/login"}),
+        )
+        .await);
+        let accepted = set(&daemon, read_before, Some(proposed)).await;
+        assert!(
+            accepted.is_err(),
+            "the accept was written over the user's save"
+        );
+        assert_eq!(
+            listed(&daemon).await[0].url.as_deref(),
+            Some("https://id.example.invalid/realms/dev/login")
+        );
+    }
+
+    #[tokio::test]
     async fn editing_an_entry_with_a_secret_replaces_it() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
