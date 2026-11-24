@@ -517,10 +517,14 @@ fn the_description_says_the_child_works_on_a_copy_and_its_commits_come_back_on_a
     for said in ["machine", "copy of your place"] {
         assert!(description.contains(said), "{said}: {description}");
     }
-    // The description holds a limit; the parameter says the rest.
+    // The description holds a limit; the guide, given with the first call (a refused one too),
+    // says the rest.
     let machine = &tool["inputSchema"]["properties"]["machine"];
     assert_eq!(machine["type"], "string", "{tool:#}");
-    let said_of_machine = machine["description"].as_str().unwrap();
+    assert!(machine["description"].is_null(), "{tool:#}");
+    let (refused, guide) = mcp.call_with_guide("agent_launch", json!({}));
+    assert!(refused.error, "{}", refused.text);
+    let said_of_machine = guide.expect("the first call brings the guide");
     for said in [
         "copy of your place",
         "uncommitted changes",
