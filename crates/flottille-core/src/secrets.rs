@@ -2258,4 +2258,39 @@ mod tests {
             streamed(&text, &bytes, &BTreeMap::new());
         }
     }
+
+    #[test]
+    fn the_start_of_a_text_that_ends_a_secret_is_masked_from_6_bytes() {
+        let known = Secrets::new(&BTreeMap::new(), &["pc-only-token-7f3a9c".to_owned()]);
+        assert_eq!(known.mask_cut_start("token-7f3a9c rest"), "[masked] rest");
+        assert_eq!(known.mask_cut_start("7f3a9c rest"), "[masked] rest");
+        // Shorter than `VAULT_SHORTEST`: too likely an ordinary word.
+        assert_eq!(known.mask_cut_start("f3a9c rest"), "f3a9c rest");
+        assert_eq!(known.mask_cut_start("nothing of it"), "nothing of it");
+    }
+
+    #[test]
+    fn a_value_shorter_than_6_bytes_never_masks_the_start_of_a_text() {
+        let known = Secrets::new(&BTreeMap::new(), &["ab-12".to_owned()]);
+        assert_eq!(known.mask_cut_start("ab-12 rest"), "ab-12 rest");
+        assert_eq!(known.mask_cut_start("b-12 rest"), "b-12 rest");
+    }
+
+    #[test]
+    fn the_start_of_a_text_that_ends_a_secret_of_several_bytes_a_character_is_masked() {
+        let known = Secrets::new(&BTreeMap::new(), &["clé-sécrète-42".to_owned()]);
+        assert_eq!(known.mask_cut_start("crète-42 fin"), "[masked] fin");
+        assert_eq!(known.mask_cut_start("ète-42 fin"), "[masked] fin");
+        // No bound inside a character is tried.
+        assert_eq!(known.mask_cut_start("éééééééééé"), "éééééééééé");
+    }
+
+    #[test]
+    fn a_whole_secret_at_the_start_of_a_text_is_left_to_mask() {
+        let known = Secrets::new(&BTreeMap::new(), &["pc-only-token-7f3a9c".to_owned()]);
+        // Only a value longer than the start is a secret cut: the whole one is `mask`'s.
+        let text = "pc-only-token-7f3a9c rest";
+        assert_eq!(known.mask_cut_start(text), text);
+        assert_eq!(known.mask(text), "[masked] rest");
+    }
 }
