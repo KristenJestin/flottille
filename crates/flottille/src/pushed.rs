@@ -588,10 +588,12 @@ fn recorded(found: &Found, path: &Path) -> Option<(u64, u64)> {
 
 /// Why `path`, made read-only at the daemon's start, may no longer be what a command sees
 /// read-only: gone, or another file at its path since, which a command started before it still
-/// sees writable.
+/// sees writable; or reached through a link now, which a command started since does not follow
+/// to make it read-only (`mounts::Plan::enter`).
 fn changed(found: &Found, path: &Path) -> Option<String> {
     let start = recorded(found, path)?;
-    match identity(path) == Some(start) {
+    let same = identity(path) == Some(start) && path.canonicalize().is_ok_and(|real| real == path);
+    match same {
         true => None,
         false => Some(format!(
             "{} is not the one the daemon found at its start (removed, or replaced), and a file a \
@@ -2037,6 +2039,28 @@ mod tests {
         let refused = settle(&found, &found.settings[0]).unwrap_err();
         assert!(refused.contains(&why), "{refused}");
         assert!(refused.contains("flottille daemon stop"), "{refused}");
+    }
+
+    #[test]
+    fn a_read_only_path_reached_through_a_link_now_is_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let file = home.join("inc/extra");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+        let mut found = found_now(&home);
+        found
+            .read_only
+            .push((file.clone(), identity(&file).unwrap()));
+        assert!(changed(&found, &file).is_none());
+
+        // The same file, its folder moved and a link left at its place: a command started since
+        // does not make it read-only.
+        std::fs::rename(home.join("inc"), home.join("moved")).unwrap();
+        std::os::unix::fs::symlink(home.join("moved"), home.join("inc")).unwrap();
+
+        assert_eq!(identity(&file), recorded(&found, &file));
+        assert!(changed(&found, &file).is_some());
     }
 
     #[test]
