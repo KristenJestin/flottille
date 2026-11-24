@@ -751,6 +751,43 @@ It never reaches a repository outside the agent's place, and is listed to every 
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
 `forge_read` and `forge_write`.
 
+### A workspace's base
+
+A workspace's pull request goes into the base its repository started from (`docs/workspaces.md`,
+"The base of each branch"), and `merge` takes only the open pull request of the workspace's own
+branch into that base: an agent never merges into a branch it chose. A stacked workspace, started
+from another ticket's branch, would be stuck once that branch is merged and deleted, so the base
+moves, and only when the forge says so:
+
+- **A `forge edit` of `base` that succeeded** on the workspace's own pull request (from the
+  repository itself, of the branch the workspace's worktree is on): the base of that repository
+  becomes the new one. A pull request that is not the workspace's own, a refused edit and a failed
+  one leave it.
+- **A base branch merged and deleted on the forge.** Before a `create` or a `merge` of a base
+  that is not one of the repository's base rule (a stacked one, started with `--base`), the forge
+  is asked whether it still has the branch (`gh api repos/<repository>/branches/<b>`; Bitbucket
+  Cloud's `refs/branches/<b>`; Data Center cannot be asked and is taken to have it). When it has
+  not, the base goes where the branch went: the base of its merged pull request (`gh pr list
+  --head <b> --state merged`; `bkt pr list --state MERGED`), else the first branch of the
+  repository's base rule that the forge has. A `merge` then accepts the pull request into that
+  base, and only into it (GitHub retargets a pull request there itself when its base branch is
+  deleted); a pull request into any other branch is refused as before, and so is one into the
+  project's base while the branch is still there.
+- Nothing else: not a pull request retargeted on the forge by hand, not text an agent gives, not
+  a `forge create` with a `base`.
+
+`create` takes an optional `base`, the branch the pull request goes into in place of the
+workspace's (`gh pr create --base`, `bkt pr create --target`), refused before anything is opened
+when the forge has no such branch, and it does not change the workspace's base. Without it, a
+workspace whose base branch is gone opens the pull request into where it went and says so in the
+answer.
+
+Each move is recorded (`workspace.base_changed`, `docs/events.md`), shown under the repository on
+the workspace's card as its base's note (`moved from chore/2-start: …`), and told to the
+workspace's sessions as a delivery (`[flottille:workspace-base]`), which is the line in their
+history: `The base of . in the workspace login moved from chore/2-start to main: …. Its pull
+requests go into main now.` There is no `workspace` action to set a base by hand.
+
 ## The CI family
 
 An agent asked to "run the CI for the tests" runs it itself: `forge` lists what can be run, reads

@@ -44,6 +44,7 @@ mod logs;
 pub(crate) mod people;
 mod pipelines;
 mod review;
+mod stacked;
 mod started;
 mod threads;
 mod yaml;
@@ -2822,6 +2823,16 @@ async fn forge_note(
     {
         return refusal;
     }
+    // The branch of the pull request a base is asked for, when it is the repository's own: the
+    // workspace's base follows the forge once the forge took it.
+    let retargeted = match (action, asked.base.as_deref(), place.workspace.is_some()) {
+        ("edit", Some(_), true) => seen_of(&forge, asked.number.unwrap_or_default())
+            .await
+            .ok()
+            .filter(|seen| seen.own)
+            .map(|seen| seen.branch),
+        _ => None,
+    };
     // What the checks were before a change that may start some, to tell what started after it.
     let before = match action == "edit" {
         true => Some(started::Before::read(&forge, asked.number.unwrap_or_default()).await),
@@ -2875,6 +2886,10 @@ async fn forge_note(
                 crate::posts::record_body(daemon, on, body);
             }
             let mut said = format!("Pull request #{number} of {slug} was changed.{reviewers_said}");
+            if let (Some(head), Some(to)) = (retargeted, asked.base.as_deref()) {
+                let moved = follow_retarget(daemon, place, &checkout.path, &head, to, &number);
+                said.push_str(&moved.await);
+            }
             if let Some(before) = before {
                 let target = json!({"project": place.project, "repository": checkout.path,
                     "number": number.parse::<u64>().unwrap_or_default()});
@@ -2883,6 +2898,49 @@ async fn forge_note(
             Outcome::Done(said)
         }
     }
+}
+
+/// The workspace's base follows a pull request of its own branch that the forge moved onto `to`
+/// (`forge edit` with a base): the sentence to add to the answer, none when it is not the
+/// workspace's own pull request or the base was `to` already.
+async fn follow_retarget(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    repository: &str,
+    head: &str,
+    to: &str,
+    number: &str,
+) -> String {
+    let Some(name) = &place.workspace else {
+        return String::new();
+    };
+    let Ok(Some(workspace)) = daemon.read(|store| store.workspace(&place.project, name)) else {
+        return String::new();
+    };
+    let (workspace, heads) = workspaces::follow(daemon, workspace).await;
+    let branches = workspaces::branches(&workspace, &heads);
+    let own = workspace
+        .repositories
+        .iter()
+        .position(|worktree| worktree.path == repository)
+        .is_some_and(|at| branches[at] == head);
+    if !own {
+        return String::new();
+    }
+    let why = format!("its pull request #{number} was moved onto it on the forge");
+    workspaces::move_base(daemon, &workspace, repository, to, &why)
+        .map(|said| format!(" {said}"))
+        .unwrap_or_default()
+}
+
+/// The base rule of the repository `path` as the project's file says it now.
+fn repository_rule(project: &Project, path: &str) -> Vec<String> {
+    project
+        .repositories
+        .iter()
+        .find(|repository| repository.path == path)
+        .map(|repository| repository.base.clone())
+        .unwrap_or_default()
 }
 
 /// What an `edit` asks that the forge cannot do, refused before anything is written: labels on
@@ -2902,33 +2960,21 @@ async fn edit_checked(forge: &Forge, asked: &ForgeCall) -> Result<(), Outcome> {
             )));
         }
     }
-    let Some(base) = asked.base.as_deref() else {
-        return Ok(());
-    };
-    let found = match forge {
-        Forge::GitHub { .. } => {
-            let path = format!("repos/{slug}/branches/{base}");
-            gh_text(&[
-                "api",
-                &path,
-                "--hostname",
-                declared::GITHUB,
-                "--jq",
-                ".name",
-            ])
-            .await
-            .map(|_| ())
-        }
-        Forge::Bitbucket { .. } => bitbucket::branch_exists(forge, base).await,
-    };
-    match found {
-        Ok(()) => Ok(()),
-        Err(why) if why.contains("404") || why.contains("Not Found") => {
-            Err(Outcome::Refused(format!(
-                "refused: {slug} has no branch {} on the forge; nothing was written",
-                masked(base)
-            )))
-        }
+    match asked.base.as_deref() {
+        Some(base) => base_checked(forge, base).await,
+        None => Ok(()),
+    }
+}
+
+/// Refuses a base the forge has not got, before anything is written.
+async fn base_checked(forge: &Forge, base: &str) -> Result<(), Outcome> {
+    match stacked::has_branch(forge, base).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Outcome::Refused(format!(
+            "refused: {} has no branch {} on the forge; nothing was written",
+            forge.slug(),
+            masked(base)
+        ))),
         Err(why) => Err(Outcome::Failed(why)),
     }
 }
@@ -3324,7 +3370,7 @@ async fn on_remote(folder: &Path, remote: &str, branch: &str) -> Result<(), Stri
 
 /// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
 /// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
-async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Outcome {
     if let Some(why) = asked.malformed() {
         return Outcome::Refused(why);
     }
@@ -3464,17 +3510,64 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             .any(|r| r.path == checkout.path && r.delete_branch_on_merge),
         keep_because,
     };
+    // The base a pull request goes into: the one a `create` asked for; else where the workspace's
+    // base went when that branch was merged and deleted on the forge (a stacked workspace); else
+    // the recorded one. A base that moved is recorded once the write is done.
+    let recorded = repository.base.branch.clone();
+    let mut base = recorded.clone();
+    let mut followed = None;
+    match (asked.action.as_str(), asked.base.as_deref()) {
+        ("create", Some(chosen)) => {
+            if let Err(refusal) = base_checked(&forge, chosen).await {
+                return refusal;
+            }
+            base = chosen.to_owned();
+        }
+        ("create" | "merge", _) => {
+            let rule = &repository_rule(&project, &checkout.path);
+            if let Some(to) = stacked::moved(&forge, &recorded, rule).await {
+                base = to.clone();
+                followed = Some(to);
+            }
+        }
+        _ => {}
+    }
+    let settle = |forge_said: &str| -> String {
+        let Some(to) = &followed else {
+            return forge_said.to_owned();
+        };
+        let why = format!(
+            "{} is gone from {}, merged and deleted",
+            masked(&recorded),
+            forge.slug()
+        );
+        let moved = workspaces::move_base(daemon, &workspace, &checkout.path, to, &why);
+        match moved {
+            Some(moved) => format!("{forge_said} {moved}"),
+            None => forge_said.to_owned(),
+        }
+    };
     if matches!(forge, Forge::Bitbucket { .. }) {
-        let base = &repository.base.branch;
-        let on = (daemon, place.project.as_str(), checkout.path.as_str());
-        let written =
-            bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
+        let on = (
+            daemon.as_ref(),
+            place.project.as_str(),
+            checkout.path.as_str(),
+        );
+        let written = bitbucket::write(
+            on,
+            &forge,
+            (branch, base.as_str()),
+            &reviewers,
+            &deletion,
+            asked,
+        )
+        .await;
         return match written {
             Outcome::Done(said) => {
                 if own.is_some() {
                     opened(daemon, &place.project, &checkout.path, branch);
                 }
-                Outcome::Done(said + &reviewers_said)
+                Outcome::Done(settle(&(said + &reviewers_said)))
             }
             other => other,
         };
@@ -3491,10 +3584,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                     "refused: create needs a title: say what the pull request does".into(),
                 );
             };
-            let base = &repository.base.branch;
             let body = asked.body.unwrap_or_default();
             let mut args = vec![
-                "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
+                "pr", "create", "-R", &repo, "--head", branch, "--base", &base, "--title", &title,
                 "--body", &body,
             ];
             if asked.draft == Some(true) {
@@ -3540,13 +3632,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                                 a merge too";
                         }
                     }
-                    Outcome::Done(told + &reviewers_said)
+                    Outcome::Done(settle(&(told + &reviewers_said)))
                 }
                 Err(why) => Outcome::Failed(why),
             }
         }
         "merge" => {
-            let base = &repository.base.branch;
             let listed = match gh_json(&[
                 "pr",
                 "list",
@@ -3566,7 +3657,8 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             };
             // `--head` names a branch, in this repository or in any fork of it.
             let ours = |pull: &&Value| {
-                pull["isCrossRepository"] == false && pull["baseRefName"].as_str() == Some(base)
+                pull["isCrossRepository"] == false
+                    && pull["baseRefName"].as_str() == Some(base.as_str())
             };
             let Some(number) = listed.iter().find(ours).and_then(|p| p["number"].as_u64()) else {
                 let why = match listed.first() {
@@ -3638,10 +3730,10 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                         ),
                         _ => kept.said(branch),
                     };
-                    Outcome::Done(format!(
+                    Outcome::Done(settle(&format!(
                         "The pull request #{number} of {branch} was merged by {method} into \
                          {base} in {slug}{said}."
-                    ))
+                    )))
                 }
                 Err(why) => {
                     // Refused by the forge: when the repository forbids the method, say which

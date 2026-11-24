@@ -706,6 +706,72 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
     Ok(answer)
 }
 
+/// The base of `repository` in the workspace moves to `to`, because the forge said where its
+/// pull request goes (`why`, in the words of the line that tells it): the record takes it,
+/// `workspace.base_changed` says so, and the sessions of the workspace are told, which is also the
+/// line in their history. The sentence said, or none when the base was `to` already or could not
+/// be recorded. Never called from what an agent or a remote says without the forge confirming.
+pub fn move_base(
+    daemon: &Arc<Daemon>,
+    workspace: &Workspace,
+    repository: &str,
+    to: &str,
+    why: &str,
+) -> Option<String> {
+    let fresh = daemon
+        .read(|store| store.workspace(&workspace.project, &workspace.name))
+        .ok()??;
+    let mut repositories = fresh.repositories.clone();
+    let worktree = repositories.iter_mut().find(|w| w.path == repository)?;
+    if worktree.base.branch == to {
+        return None;
+    }
+    let was = std::mem::replace(&mut worktree.base.branch, to.to_owned());
+    // The tracking ref a review compares against follows the branch; a commit it started from
+    // is where it started, whatever its base is now.
+    if worktree.base.reference.starts_with("refs/remotes/") {
+        worktree.base.reference = format!("refs/remotes/{}/{to}", worktree.base.remote);
+    }
+    worktree.base.note = Some(format!("moved from {was}: {why}"));
+    let event = with(
+        about(&fresh),
+        json!({"repository": repository, "base": to, "was": was, "why": why}),
+    );
+    let written = daemon.write(|store| {
+        let event = store.set_workspace_repositories(
+            fresh.id,
+            &repositories,
+            ("workspace.base_changed", event),
+        )?;
+        Ok(((), event))
+    });
+    if let Err(error) = written {
+        eprintln!("flottille daemon: workspace.base_changed: {error}");
+        return None;
+    }
+    let said = format!(
+        "The base of {repository} in the workspace {} moved from {was} to {to}: {why}. Its pull \
+         requests go into {to} now.",
+        workspace.name
+    );
+    let sessions = daemon.read(|store| store.live_agents()).unwrap_or_default();
+    for agent in sessions.iter().filter(|agent| {
+        agent.parent.is_none()
+            && agent.project == workspace.project
+            && agent.workspace.as_deref() == Some(workspace.name.as_str())
+    }) {
+        crate::deliveries::deliver(
+            daemon,
+            &agent.id,
+            "workspace-base",
+            None,
+            &said,
+            flottille_core::approval::BETWEEN_TURNS,
+        );
+    }
+    Some(said)
+}
+
 // Creation.
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {

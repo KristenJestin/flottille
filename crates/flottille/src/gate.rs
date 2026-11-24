@@ -920,7 +920,7 @@ const FORGE_ONLY: [(&str, &[&str]); 16] = [
     ("reviewers_remove", &["edit"]),
     ("labels_add", &["edit"]),
     ("labels_remove", &["edit"]),
-    ("base", &["edit"]),
+    ("base", &["create", "edit"]),
     ("verdict", &["review"]),
     ("comments", &["review"]),
     ("query", &["people"]),
