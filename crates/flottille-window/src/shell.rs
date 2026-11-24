@@ -116,6 +116,18 @@ pub enum Selection {
     WhatsNew,
 }
 
+/// Where a session of a project starts, and so which machine's page of it opens (#1266).
+#[derive(Clone, Debug, PartialEq)]
+enum Start {
+    /// On this machine (`None`) or another.
+    On(Option<String>),
+    /// Several machines can, this one cannot: the start asks which, on the page of `page`.
+    Ask {
+        page: Option<String>,
+        machines: Vec<String>,
+    },
+}
+
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
 /// row's number, so that the next row is a toast of its own.
 #[derive(Default)]
@@ -207,6 +219,9 @@ pub struct Shell {
     sections: HashMap<String, Entity<MachineNode>>,
     /// The user's choice (`window.get`): the projects are shown by machine.
     by_machine: bool,
+    /// Each shared project's machine the user chose its sessions start on, by the project's name:
+    /// this machine by its name (`window.get`, #1266).
+    starts: HashMap<String, String>,
     /// They are shown by machine now: the choice, and another machine to group by.
     grouped: bool,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
@@ -831,6 +846,7 @@ impl Shell {
             machine_projects: HashMap::new(),
             sections: HashMap::new(),
             by_machine: false,
+            starts: HashMap::new(),
             grouped: false,
             ended: None,
             kept: Folds::default(),
@@ -1213,7 +1229,82 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The choice is the project's from now on: its page opens there, and asks no more.
+        let this = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.this.clone());
+        if let Some(chosen) = name.clone().or(this) {
+            self.starts.insert(project.to_owned(), chosen);
+            self.sidebar_changed(cx);
+        }
         self.reach(name, Selection::Project(project.to_owned()), window, cx);
+    }
+
+    /// Where a session of `project` starts (#1266): on the machine the user chose for it while
+    /// that machine has it and is online; else on this machine when it has the project and can run
+    /// an agent; else on the one machine online that can; when several can and this one cannot,
+    /// the start asks which.
+    fn start_on(&self, project: &str, cx: &App) -> Start {
+        let here = self
+            .read
+            .as_ref()
+            .unwrap_or(&self.snapshot)
+            .projects
+            .iter()
+            .any(|p| p.name == project);
+        let Some(machines) = self.machines.read(cx).machines() else {
+            return Start::On(None);
+        };
+        let can = |name: &str| {
+            machines
+                .machine(name)
+                .is_some_and(|machine| machine.runs() && machine.online())
+                && machines.has_project(Some(name), project)
+        };
+        match self.starts.get(project) {
+            Some(chosen) if Some(chosen) == machines.this.as_ref() && here => {
+                return Start::On(None);
+            }
+            Some(chosen) if can(chosen) => return Start::On(Some(chosen.clone())),
+            _ => {}
+        }
+        if here && self.this_can_run(machines) {
+            return Start::On(None);
+        }
+        let others: Vec<String> = machines
+            .runners()
+            .map(|machine| machine.name.clone())
+            .filter(|name| can(name))
+            .collect();
+        match others.as_slice() {
+            [] if here => Start::On(None),
+            [] => Start::On(self.machine_of_project(project, cx)),
+            [one] => Start::On(Some(one.clone())),
+            several => Start::Ask {
+                page: (!here).then(|| several[0].clone()),
+                machines: several.to_vec(),
+            },
+        }
+    }
+
+    /// Whether this machine runs agents: its role lets it, and one of its providers is ready (or
+    /// they are not read yet, when nothing says it cannot).
+    fn this_can_run(&self, machines: &crate::machines::Machines) -> bool {
+        let runner = machines
+            .this
+            .as_deref()
+            .and_then(|this| machines.members.iter().find(|member| member.name == this))
+            .is_none_or(|member| member.role == "runner");
+        let providers = match &self.front {
+            None => &self.providers,
+            Some(_) => match self.sides.get(&None) {
+                Some(pages) => &pages.providers,
+                None => return runner,
+            },
+        };
+        runner && (!providers.known || providers.offered().next().is_some())
     }
 
     /// The machine of the page `selection` names: a session's row says it; a project is this
@@ -1229,13 +1320,10 @@ impl Shell {
                 .map(|there| there.machine.clone()),
             // The list has a group for a project another machine only has: this machine's own
             // read says whether it is this one's.
-            Selection::Project(project) => {
-                let here = self.read.as_ref().unwrap_or(&self.snapshot);
-                match here.projects.iter().any(|p| &p.name == project) {
-                    true => None,
-                    false => self.machine_of_project(project, cx),
-                }
-            }
+            Selection::Project(project) => match self.start_on(project, cx) {
+                Start::On(machine) => machine,
+                Start::Ask { page, .. } => page,
+            },
             Selection::ProjectSettings(_) | Selection::Spec { .. } | Selection::Settings => {
                 self.front.clone()
             }
@@ -2702,6 +2790,7 @@ impl Shell {
                     .collect(),
             },
             by_machine: self.by_machine,
+            starts: self.starts.clone(),
             machines: match by_machine {
                 true => self
                     .sections
@@ -2896,6 +2985,7 @@ impl Shell {
             }
             Update::Kept(folds, arrangement, drafts) => {
                 let by_machine = folds.by_machine;
+                self.starts = folds.starts.clone();
                 self.kept = folds;
                 self.kept_read = true;
                 // What the daemon keeps of how the projects are shown comes after the first rows.
@@ -4340,12 +4430,21 @@ impl Shell {
             repositories: project.repositories.clone(),
             places,
             tracked: project.tracked,
+            machines: self.machine_sessions(&name, cx),
         };
         page.update(cx, |page, cx| page.set(data, cx));
         let default = (project.provider.clone(), project.model.clone());
+        let asking = match self.start_on(&name, cx) {
+            Start::Ask { machines, .. } => Some(format!(
+                "Choose where it runs: {}.",
+                crate::machines::said_or(&machines)
+            )),
+            Start::On(_) => None,
+        };
         if let Some(composer) = self.composer_of(&name).cloned() {
             let (providers, last) = (&self.providers, self.last_pick.as_ref());
             composer.update(cx, |composer, cx| {
+                composer.set_asking(asking, cx);
                 composer.set_places(choices, cx);
                 composer.set_providers(
                     providers,
@@ -4364,6 +4463,76 @@ impl Shell {
             self.details_asked += 1;
             self.actions.send(Command::Details(name));
         }
+    }
+
+    /// The sessions of `project` on the machines whose page of it is not shown, as the one list
+    /// has them (`docs/remote.md`, "One list of every machine"): one block a machine, in the order
+    /// the project's row marks them, this machine's own while another machine's page is shown.
+    fn machine_sessions(&self, project: &str, cx: &App) -> Vec<crate::project::MachineSessions> {
+        let list = &self.snapshot;
+        let Some(row) = list.projects.iter().find(|p| p.name == project) else {
+            return Vec::new();
+        };
+        let this = list.this_machine.clone().unwrap_or_default();
+        let line = |id: &str, title: &str, mark, active_at, cx: &App| {
+            self.sessions.get(id).map(|row| SessionLine {
+                id: id.to_owned(),
+                title: title.to_owned(),
+                agents: 1,
+                mark,
+                active_at,
+                status: row.read(cx).status(),
+                leads: Vec::new(),
+                pilot: None,
+                question: None,
+            })
+        };
+        let mut blocks = Vec::new();
+        for home in &row.homes {
+            let shown = match (&self.front, home.here) {
+                (None, here) => here,
+                (Some(front), _) => *front == home.machine,
+            };
+            if shown {
+                continue;
+            }
+            let mut sessions: Vec<SessionLine> = match home.here {
+                true => list
+                    .sessions
+                    .iter()
+                    .filter(|s| s.project == project && !s.ended && s.pilot.is_none())
+                    .filter_map(|s| line(&s.id, &s.title, s.mark, s.active_at, cx))
+                    .collect(),
+                false => list
+                    .elsewhere
+                    .iter()
+                    .filter(|s| s.project == project && s.pilot.is_none())
+                    .filter(|s| {
+                        s.elsewhere
+                            .as_ref()
+                            .is_some_and(|there| there.listed && there.machine == home.machine)
+                    })
+                    .filter_map(|s| line(&s.id, &s.title, s.mark, s.active_at, cx))
+                    .collect(),
+            };
+            // A machine with no session of it says nothing.
+            if sessions.is_empty() {
+                continue;
+            }
+            sessions.sort_by(|a, b| b.active_at.cmp(&a.active_at));
+            blocks.push(crate::project::MachineSessions {
+                machine: home.machine.clone(),
+                icon: home.icon.clone(),
+                colour: home.colour.clone(),
+                state: match home.here || home.machine == this {
+                    true => "this machine".to_owned(),
+                    false => home.state.clone(),
+                },
+                offline: home.offline,
+                sessions,
+            });
+        }
+        blocks
     }
 
     /// The providers as the daemon lists them, to the settings page and to every composer; an

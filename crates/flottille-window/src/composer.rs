@@ -203,6 +203,8 @@ pub struct Composer {
     choice: Choice,
     /// The machine the composer starts on is off: nothing is started on it.
     machine_off: bool,
+    /// Which machine it starts on is the user's to choose first, said in this line.
+    asking: Option<SharedString>,
     /// A workspace made from the picker, which becomes the place once the daemon lists it.
     wanted: Option<String>,
     menu: Option<Menu>,
@@ -285,6 +287,7 @@ impl Composer {
             places: Vec::new(),
             choice: Choice::Main,
             machine_off: false,
+            asking: None,
             wanted: None,
             menu: None,
             providers: Providers::default(),
@@ -544,7 +547,17 @@ impl Composer {
 
     /// What it asks before it starts anything: on which machine, when several could.
     pub fn asks_where(&self) -> Option<&str> {
-        None
+        self.asking.as_deref()
+    }
+
+    /// Several machines can start its session and this one cannot: it starts nothing until the
+    /// user chose one in its machine picker, and says so (#1266).
+    pub fn set_asking(&mut self, asking: Option<String>, cx: &mut Context<Self>) {
+        let asking = asking.map(SharedString::from);
+        if self.asking != asking {
+            self.asking = asking;
+            cx.notify();
+        }
     }
 
     pub fn is_sending(&self) -> bool {
@@ -705,6 +718,7 @@ impl Composer {
     fn can_send(&self) -> bool {
         self.blocked.is_none()
             && !self.machine_off
+            && self.asking.is_none()
             // Before the daemon listed the providers, it picks one itself, or says why not.
             && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
             && self.model_refused().is_none()
@@ -1279,6 +1293,23 @@ impl Render for Composer {
                     .text_size(px(12.5))
                     .text_color(p.faint)
                     .child(why)
+                    .test_support()
+                    .into_any_element()
+            },
+        ))
+        .child(presence_of(
+            "composer-ask-line",
+            self.asking.clone(),
+            move |asked| {
+                div()
+                    .id("composer-ask")
+                    .aria_label(asked.clone())
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(asked)
                     .test_support()
                     .into_any_element()
             },

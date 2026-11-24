@@ -1125,6 +1125,15 @@ impl Machines {
     }
 }
 
+/// Machines named in a sentence: `server`, `server or laptop`, `server, laptop or pi`.
+pub fn said_or(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 /// The machines that have `project`, as the composer's picker lists them: this one first, each
 /// with its state. The machine in front (`front`, `None` for this one) is always one of them.
 pub fn project_choices(machines: &Machines, project: &str, front: Option<&str>) -> Vec<Choice> {

@@ -9,9 +9,11 @@
 //! neither.
 
 mod ended;
+mod machine;
 mod place;
 
 pub use ended::EndedRuns;
+pub use machine::{MachineBlock, MachineSessions};
 pub use place::{PlaceBlock, block_id, session_end_id, session_menu_id, session_row_id};
 
 /// The block of the sessions of the machine `machine` on a shared project's page.
@@ -97,6 +99,9 @@ pub struct ProjectData {
     pub places: Vec<PlaceData>,
     /// It declares a tracker: its Progress tab shows.
     pub tracked: bool,
+    /// Its sessions on the other machines that have it, one block a machine, this machine first
+    /// when another machine's page of it is shown (#1266).
+    pub machines: Vec<MachineSessions>,
 }
 
 /// A repository's name on the page: the project's own name for the folder itself.
@@ -153,6 +158,10 @@ pub struct ProjectPage {
     places: Vec<Place>,
     /// The blocks as drawn: one that comes unfolds, one that goes folds away.
     place_rows: gpui_design_system::Listing<Place>,
+    /// The blocks of its other machines' sessions, and their machines as drawn.
+    machine_blocks: HashMap<String, Entity<MachineBlock>>,
+    machines: Vec<String>,
+    machine_rows: gpui_design_system::Listing<String>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
     /// Its tasks and runs, and the run drawer.
@@ -225,6 +234,9 @@ impl ProjectPage {
             blocks: Vec::new(),
             places: Vec::new(),
             place_rows: gpui_design_system::Listing::default(),
+            machine_blocks: HashMap::new(),
+            machines: Vec::new(),
+            machine_rows: gpui_design_system::Listing::default(),
             composer,
             new_workspace,
             tasks,
@@ -356,6 +368,42 @@ impl ProjectPage {
         }
     }
 
+    /// The blocks of the other machines' sessions, each unfolding as its machine comes to have
+    /// the project and folding away as it goes.
+    fn machine_items(&mut self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        self.machine_rows.sync(
+            self.machines
+                .iter()
+                .map(|name| (name.clone(), name.clone())),
+            at,
+            reduce,
+        );
+        // A block that leaves keeps its sessions until it has folded away.
+        let drawn: Vec<String> = self.machine_rows.rows().map(|r| r.key.to_owned()).collect();
+        self.machine_blocks.retain(|name, _| drawn.contains(name));
+        self.machine_rows
+            .rows()
+            .filter_map(|row| {
+                let block = self.machine_blocks.get(row.key)?.clone();
+                Some(
+                    gpui_design_system::Item::new(
+                        ElementId::Name(format!("machine-item-{}", row.key).into()),
+                        row.placement,
+                        block,
+                    )
+                    .gap(space::SM)
+                    .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    /// The blocks of the other machines' sessions, by machine.
+    pub fn machine_block(&self, machine: &str) -> Option<&Entity<MachineBlock>> {
+        self.machine_blocks.get(machine)
+    }
+
     /// Brings the page up to `data`; a block whose data did not change is not drawn again.
     pub fn set(&mut self, data: ProjectData, cx: &mut Context<Self>) {
         let mut changed = self.folder != data.folder || self.repositories != data.repositories;
@@ -391,6 +439,19 @@ impl ProjectPage {
             blocks.push(block);
         }
         self.blocks = blocks;
+        let machines: Vec<String> = data.machines.iter().map(|m| m.machine.clone()).collect();
+        changed |= self.machines != machines;
+        self.machines = machines;
+        for sessions in data.machines {
+            match self.machine_blocks.get(&sessions.machine) {
+                Some(block) => block.update(cx, |block, cx| block.set(sessions, cx)),
+                None => {
+                    let (shell, name) = (self.shell.clone(), sessions.machine.clone());
+                    let block = cx.new(|_| MachineBlock::new(shell, sessions));
+                    self.machine_blocks.insert(name, block);
+                }
+            }
+        }
         self.runs_moved(cx);
         if changed {
             cx.notify();
@@ -516,6 +577,9 @@ impl Render for ProjectPage {
             }
         }
         let pad = if self.narrow { space::LG } else { space::XXL };
+        // Synced on every frame, also while another tab is shown, so that a block that left
+        // meanwhile does not fold away when Work comes back.
+        let machine_items = self.machine_items(cx);
         let key = |part: &str| ElementId::Name(format!("enter-{}-{part}", self.name).into());
         let new_workspace = self.new_workspace.clone();
         // A project of one repository has no chip: its folder is its repository.
@@ -652,6 +716,7 @@ impl Render for ProjectPage {
                         )
                         .gap(space::SM)
                     }))
+                    .children(machine_items)
                     .child(self.ended.clone())
                     .test_support()
                     .into_any_element()
