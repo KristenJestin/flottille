@@ -900,6 +900,24 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   a session of another machine shows its page, read on that machine's own connection, every request
   signed for it and carried by this machine's daemon, its conversation watched live as a request carried
   is ("Requests from another machine's clients").
+- **Led from another machine.** A session led by an agent of another machine (`agent_launch`
+  `led` with `machine`) shows under its pilot's row, with its machine's mark, on every window, as a
+  led session of the same machine does (#1340). The list's `pilot` is a session of the same list
+  only (an id of another machine there would make every machine of before refuse the whole list,
+  whose fields are closed), so a runner tells its peers these pilots in a message of its own,
+  `pilots`, after its sessions and whenever they change: each led session's id, its pilot's
+  machine by name and the pilot's id there. A machine of before refuses that message alone, as
+  it refuses `projects`, and goes on taking the sessions: there such a session stays a root of its
+  machine, as before; a list that comes without `pilots` draws as before too. A receiver keeps it
+  beside the sessions and takes it only for what it is: a pilot is said of a session of the
+  sender's own list, of a member machine other than the sender, and a window puts the row under
+  it only when the machine named lists that pilot. On the pilot's machine the window takes its own
+  launches for it and none of these claims: a list never puts a row under a session of the machine
+  that reads it. On the session's machine the window reads it from the session itself (its
+  `led_by`, the stand-in of its pilot, and its `launched_from`). A row whose pilot is in another
+  project row, or is no row, stays among its own project's and says who leads it (`led by agent
+  r1 of pc`), as a session led from another project does. A session detached is the user's: under
+  no row.
 - **A machine that is off.** Its sessions stay in the list, greyed, with `server offline since
   22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
   machine's list for this: each live root session's title, project, state and last exchange, never
@@ -941,6 +959,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `pilots` | The pilots of another machine of a runner's led sessions: for each session of its `sessions` led by an agent of another machine, that machine's name and the agent's id there; 500 at most, each session once, every id 1 to 64 letters, digits, dashes or underscores. Sent after the sessions and again when they change, kept by the receiver beside them ("One list of every machine"). A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link. |
 | `projects` | A runner's projects, each one's name and the normalised remotes of its repositories (`github.com/acme/app`), 1024 at most, 64 remotes of 256 characters at most each; sent after the sessions and again when they change, kept by the receiver beside them. A machine of before refuses it as a kind it does not know, and the sender stops sending it on that link ("One list of every machine"). |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
@@ -2185,8 +2204,9 @@ on a real phone, by hand, and reported.
   `pilot-ended`, a `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
   caller, never for a handed launch; a `following` only for a led one, its state `on`, `paused`
   or `ended`. The light list does not name a pilot of another machine (its
-  `pilot` is a session of the same list): drawing it under its pilot on every window is the
-  window's part.
+  `pilot` is a session of the same list): the message `pilots` says it beside the list, and
+  every window draws it under its pilot ("One list of every machine", "Led from another
+  machine").
 - **A parent's end stops its tree on other machines** (#1277). An agent that ends for good (it is
   stopped, reports, or ends with its own parent or pilot) stops each child it started on another
   machine there (`its parent stopped`), and one that fails stops them too (`its parent failed`),
