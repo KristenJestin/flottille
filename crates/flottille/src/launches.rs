@@ -416,7 +416,8 @@ fn answer_to_caller(
         // Unless that answer came before this call returned: it was handed to the caller already.
         let asked = format!("Request #{number} on {machine} (agent_launch)");
         match placed["decided"].as_str() {
-            Some("started") => {
+            // Approved, and its session may have ended since: still approved.
+            Some("started" | "ended") => {
                 return format!(
                     "{asked} was approved by the user there before this call returned: its \
                      result was handed to you."
@@ -425,7 +426,7 @@ fn answer_to_caller(
             Some(_) => {
                 return format!(
                     "{asked} was refused by the user there before this call returned. Nothing \
-                     was done; why was handed to you."
+                     was done; the reason was handed to you."
                 );
             }
             None => {}
@@ -1620,6 +1621,17 @@ fn interrupted(daemon: &Arc<Daemon>, request: &Request) {
         never_started(daemon, &launch, request, Some(why));
         return;
     };
+    // Its setup is over and its session was briefed: it runs, and its caller was told. Only the
+    // answer's settling was lost: it is stored again, and nothing is stopped.
+    if launch.state == "started" && ran(daemon, &launch, &agent) {
+        if let Err(error) = daemon.write(|store| Ok(((), store.settle_unsent(request, "done")?))) {
+            eprintln!(
+                "flottille daemon: request #{}: its answer cannot be stored: {error}",
+                request.number
+            );
+        }
+        return;
+    }
     // Stopped before its answer was settled: settled as allowed, which `finish` refuses.
     if launch.state == "held"
         && let Ok(Some(workspace_id)) = daemon.write(|store| {
@@ -1632,6 +1644,21 @@ fn interrupted(daemon: &Arc<Daemon>, request: &Request) {
         launch.workspace_id = workspace_id;
     }
     finish(daemon, launch, request, agent, Err(Some(why.to_owned())));
+}
+
+/// Whether the `agent` of the allowed `launch` ran: its workspace is no longer being prepared and
+/// its first message was delivered.
+fn ran(daemon: &Daemon, launch: &Launch, agent: &str) -> bool {
+    let prepared = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok())
+        .is_some_and(|made| made.state() != flottille_core::workspace::State::Preparing);
+    prepared
+        && daemon
+            .read(|store| store.agent(agent))
+            .ok()
+            .flatten()
+            .is_some_and(|agent| crate::tree::briefed(daemon, &agent))
 }
 
 /// What the agent of the other machine that asked `asked` is told when it is refused for lacking
