@@ -364,20 +364,69 @@ impl Adapter {
 }
 
 impl Adapter {
-    /// Why login is refused when the connection's environment names a variable that says where
-    /// agent-browser puts its socket and Chrome its profile, caches and crash dumps
-    /// (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder, and the
-    /// connection's env, which an agent can propose an edit of, is not to move them.
-    pub fn moves_folders(&self, env: &BTreeMap<String, String>) -> Option<String> {
-        let named = FOLDERS_OF_THE_BROWSER
-            .iter()
-            .find(|name| env.contains_key(**name))?;
+    /// Why login is refused when the server's command or the connection's environment names a
+    /// variable that says where agent-browser puts its socket and Chrome its profile, caches and
+    /// crash dumps (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder,
+    /// and the connection, which an agent can propose an edit of, is not to move them. A word of
+    /// the command holding `NAME=value` is one a launcher (`env`, a shell) would set after
+    /// Flottille did.
+    pub fn moves_folders(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        // Anywhere in a word: a shell's line (`sh -c 'TMPDIR=… agent-browser mcp'`) sets it too.
+        let in_command = FOLDERS_OF_THE_BROWSER.iter().find_map(|name| {
+            let assigned = format!("{name}=");
+            words
+                .iter()
+                .any(|word| word.contains(&assigned))
+                .then_some(("the server's command", "the connection's command", *name))
+        });
+        let (sets, from, named) = in_command.or_else(|| {
+            FOLDERS_OF_THE_BROWSER
+                .iter()
+                .find(|name| env.contains_key(**name))
+                .map(|name| {
+                    (
+                        "the connection's environment",
+                        "the connection's env",
+                        *name,
+                    )
+                })
+        })?;
         Some(format!(
-            "login is refused while the connection's environment sets {named}: Flottille sets it \
-             for the browser, in the connection's vault folder, which no run reaches, so that the \
-             socket that drives the browser with no gate, its profile (cookies, the password \
-             filled) and its crash dumps stay out of their reach; one the connection moved would \
-             put them where a run reads them. The user takes {named} out of the connection's env"
+            "login is refused while {sets} sets {named}: Flottille sets it for the browser, in \
+             the connection's vault folder, which no run reaches, so that the socket that drives \
+             the browser with no gate, its profile (cookies, the password filled) and its crash \
+             dumps stay out of their reach; one the connection moved would put them where a run \
+             reads them. The user takes {named} out of {from}"
+        ))
+    }
+
+    /// Why login is refused when the server's command does not start with its program: a
+    /// launcher (`LAUNCHERS_OF_A_COMMAND`) or an assignment `NAME=value` would run agent-browser
+    /// with an environment, a shell or a process of its own choosing, after Flottille set the
+    /// browser's. Said by the launcher's name, or the variable's, never a value.
+    pub fn launched(&self, words: &[String]) -> Option<String> {
+        let first = words.first()?;
+        let program = std::path::Path::new(first)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(first);
+        let starts = if let Some((name, _)) = first.split_once('=') {
+            format!("an assignment of {name}")
+        } else if LAUNCHERS_OF_A_COMMAND.contains(&program) {
+            program.to_owned()
+        } else {
+            return None;
+        };
+        Some(format!(
+            "login is refused while the server's command starts with {starts}: a connection's \
+             command names its program directly, since a launcher or an assignment before it \
+             runs agent-browser with an environment, a shell or a process of the command's \
+             choosing, after Flottille set where the browser keeps its socket, its profile and \
+             the password filled. The user starts the connection's command with its program"
         ))
     }
 
@@ -414,6 +463,59 @@ impl Adapter {
         ))
     }
 }
+
+/// Programs that run another one, with an environment, a shell, a user, a process or a sandbox
+/// of their own: a connection's command that starts with one does not name its program.
+const LAUNCHERS_OF_A_COMMAND: &[&str] = &[
+    "env",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "mksh",
+    "ash",
+    "fish",
+    "csh",
+    "tcsh",
+    "busybox",
+    "nohup",
+    "setsid",
+    "nice",
+    "ionice",
+    "chrt",
+    "taskset",
+    "timeout",
+    "time",
+    "stdbuf",
+    "unbuffer",
+    "command",
+    "chronic",
+    "exec",
+    "xargs",
+    "sudo",
+    "doas",
+    "su",
+    "runuser",
+    "pkexec",
+    "systemd-run",
+    "flatpak-spawn",
+    "unshare",
+    "nsenter",
+    "firejail",
+    "bwrap",
+    "chroot",
+    "prlimit",
+    "strace",
+    "ltrace",
+    "script",
+    "watch",
+    "tmux",
+    "screen",
+    "dtach",
+    "abduco",
+    "ssh",
+];
 
 /// The options agent-browser itself calls unsafe beside a list of allowed domains, and the
 /// variables it reads as each: another profile, a session saved or restored, a browser reached
@@ -1082,7 +1184,8 @@ pub async fn perform(
             .own_config(&program)
             .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
             .or_else(|| AGENT_BROWSER.unsafe_start(&program, &declaration.env))
-            .or_else(|| AGENT_BROWSER.moves_folders(&declaration.env))
+            .or_else(|| AGENT_BROWSER.moves_folders(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.launched(&program))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
