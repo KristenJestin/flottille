@@ -941,11 +941,11 @@ fn shared_page_settled(
         .as_str()
         .unwrap()
         .to_owned();
-    eventually("the server's session runs", || {
+    eventually("the server's session works", || {
         server
             .user
             .call("agent.show", json!({"agent": running}))
-            .is_ok_and(|shown| shown["agent"]["state"] == "running")
+            .is_ok_and(|shown| shown["agent"]["state"] == "working")
     });
     // The laptop's session stays in this machine's copy of its list while it is off.
     eventually("pc is told the laptop's session", || {
