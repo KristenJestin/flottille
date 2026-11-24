@@ -620,7 +620,7 @@ choosing one shows its Settings, and every tab that is a machine's (Agents, Appr
 and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
 that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
 machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
-window keeps; one line under the tabs says it while another machine is shown (`This window
+window keeps; one line, the first of what scrolls under the tabs, says it while another machine is shown (`This window
 (appearance, version) stays this machine's, pc, whichever machine is chosen above.`). Settings, Machines is the hub's list, the same from
 every machine. **Add project** asks first on which machine (radios: this one first, then the runners,
 each with its role and state; Next), then the folder there (Back returns to the machine): on
@@ -953,7 +953,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -997,11 +997,25 @@ local child's work; nothing moves your branch.*
   agent b1 of pc`, and the phone lists it among no sessions. `agent.send` to it is refused, as to
   a child here (`agent a2 is a child of agent b1 of pc: only its parent writes to it`); the user
   still answers its questions and stops it, the ways out while its parent's machine is off ("Where
-  a question goes when the parent is off"). It is subscribed to nothing automatically, and gets its
-  brief again after a compaction, as a child does. A `led` or `handed` launch asked for by a
+  a question goes when the parent is off"). The other methods of the user that a child here refuses
+  are refused for it too, each in the same words as for a child here and naming its parent's
+  machine: `agent.unqueue` and `agent.send_now` (a message its parent queued is its parent's to
+  take back or send now), `agent.cancel`, `agent.rename`, `agent.quota_resume`,
+  `agent.reload_tools`, `agent.resume` (its session is not kept for the user), and `agent.mode`
+  (its mode is its session's, set on the machine of its parent's session: no switch here sets it
+  apart from its tree). The inactivity sweep never ends it (it ends with its parent), a review is
+  not asked for it, `session_title` is refused to it, and its report and failure are no
+  notification or inbox entry of the user: they go to its parent. Its question to the user while
+  its parent's machine is off stays the user's. It is subscribed to nothing automatically, and
+  gets its brief again after a compaction, as a child does. A `led` or `handed` launch asked for by a
   caller below its root (a `depth` above 0) is refused there, as its own machine refuses it. A
-  child stored by a Flottille of before, at depth 0, is put at depth 1 when the store opens, so it
-  takes a child's tools at its next start.
+  child stored by a Flottille of before, at depth 0, or at depth 1 with the agents it started
+  here left at theirs, is put at its caller's depth plus one when the store opens (1 when its launch
+  names none), so it takes a child's tools at its next start, and each agent under it one depth
+  below its parent, so that a stop ordered by depth ends them before it; a depth is only raised,
+  never lowered. An agent it starts here is a child of the tree of its parent's machine too: a
+  method the user's door refuses for a child names that tree's root, on that machine, as the one
+  the user writes to, and `agent.mode` is refused on it as on the remote child.
 - **The machine must be a runner, and online**: otherwise the call is refused at once, naming since
   when it is offline, or that it runs no agent. It must have the caller's provider signed in and a
   free slot ("Roles"): otherwise refused, naming the runners that would take it, if any (`refused:
@@ -1196,7 +1210,8 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   taken only by the agent that waits for that very request of that machine). Nothing gives a
   caller of another machine more than an agent of that machine: no other tool than
   `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
-  the tree later is not given until it is written there), no secret, no file: when its project is
+  the tree later is not given until it is written there), and `review` for one call alone, the
+  start of the review of a session it leads there ("What travels"), no secret, no file: when its project is
   not on that machine, its place is a folder that does not exist. Its answer, whatever its
   outcome (a refusal and a "cannot answer now" too), is masked again of the caller's machine's
   secrets, then cut there as a local result is (a refusal at the error limit), saying so. That
@@ -1781,6 +1796,23 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **A method the user's door refuses for a child here is refused for a child of another machine
+  too, whole** (#1304): the user's two ways out stay (`agent.answer` and `agent.stop`, while its
+  parent's machine is off), nothing else of the user reaches it. `agent.mode` is refused rather
+  than set on the child alone or forwarded to the parent's machine: forwarding would be a new
+  message of the link, and the mode of a session is set where it runs; the simpler refusal can be
+  replaced by a forward later. Its report and failure are left out of the user's notifications and
+  inbox, its question to the user (while its parent's machine is off) is kept in them.
+- **An old remote child's depth is taken from its launch** (#1304): the store's repair puts a
+  remote child stored by a release of before at its caller's depth plus one, as the launch it came
+  with says (1 when it says none), and every agent under it one below its parent, raising a depth
+  only. Its caller's depth read from the launch is the one the child would have been given, rather
+  than 1 for every such child.
+- **The sentence of another machine's Settings scrolls with the sections** (#1293): `This window
+  (appearance, version) stays this machine's…` was a fixed line under the tabs, and what scrolled
+  could be drawn over it. It is now the first line of what scrolls, so no text is ever drawn over
+  another; the kit has no opaque, fixed header for what scrolls to pass under, and none is drawn
+  here. A fixed header can come later, in the kit first.
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
   with the link's own refusal rather than run as any root's: the agent is answered `refused by
@@ -2493,8 +2525,14 @@ on a real phone, by hand, and reported.
   of an `out` launch of that name to the sending machine; a `call` only from the `caller` of an
   `in` launch of that name from the sending machine, for the agent it started, never for a
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
-  `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
-  not start agent …`). A call is judged on the caller's machine as one to a session it started
+  `agent_status`, `session_read`, `agent_stop` and `review` (a led session); anything else is
+  refused (`agent … of pc did not start agent …`). A `review` is only `{"action": "start",
+  "agent": <the session>}` (#1279): the lead's `review {start, agent}` of a session it leads
+  there, sent at once as a read is (refused while that machine cannot be reached), served there
+  for the caller stood in for, which is given the review tool for that call alone, by the gate and
+  the tool of a pilot of that machine; the review runs there, its findings go to the session, and
+  its pilot is told on its own machine (a `deliver` of the kind `review`). Its own change, a pull
+  request, a pass or a report is refused: a caller of another machine starts no other review. A call is judged on the caller's machine as one to a session it started
   there (ending a led session as `end_led`), but for the reads (`agent_status`, `session_read`):
   those are served as a call whose `launch` is empty, and judged there, the launch only saying
   which session or child the caller reads as its own. A `call` whose `launch` is empty (and not an
@@ -2588,6 +2626,15 @@ on a real phone, by hand, and reported.
   than waiting, even briefly, for an answer that may not come. Asking that machine with a bounded
   wait is a follow-up. A launch on another machine that names no agent yet (held for the user
   there) is not stopped with its parent: a follow-up.
+- **The review of a led session on another machine is not kept while that machine is off**
+  (#1279): the lead's `review {start, agent}` is sent at once and refused while the machine
+  cannot be reached, as a read or a stop is, rather than kept as a message is: a review started
+  hours later, on a change that moved meanwhile, is not what the lead asked for. The lead calls it
+  again once that machine is back. The lead's daemon sends `{"action": "start", "agent": <the
+  session>}` alone; that machine refuses any other argument rather than drop it. The refusal
+  says to call again once that machine is back, and does not promise a wake-up, as nothing comes
+  back from a review that was not started. A machine not updated yet (it answers that `review` is
+  no tool another machine calls) is told to the lead as a machine to update.
 
 ## Open questions
 

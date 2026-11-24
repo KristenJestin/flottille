@@ -187,7 +187,7 @@ fn resumes(daemon: &Daemon, wait: &QuotaWait) -> bool {
 
 /// What `agent.list` and the tree say of a session's wait: `null` when it does not wait.
 pub fn shown(daemon: &Daemon, agent: &Agent) -> Value {
-    if agent.parent.is_some() {
+    if agent.is_child() {
         return Value::Null;
     }
     match daemon.read(|store| store.quota_wait(&agent.id)) {
@@ -207,7 +207,7 @@ pub fn turn_ended(daemon: &Arc<Daemon>, id: &str) {
     let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
         return;
     };
-    if agent.parent.is_some() || agent.state.is_final() {
+    if agent.is_child() || agent.state.is_final() {
         return;
     }
     let prompted = daemon

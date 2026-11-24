@@ -706,29 +706,35 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
     Ok(answer)
 }
 
-/// The base of `repository` in the workspace moves to `to`, because the forge said where its
-/// pull request goes (`why`, in the words of the line that tells it): the record takes it,
-/// `workspace.base_changed` says so, and the sessions of the workspace are told, which is also the
-/// line in their history. The sentence said, or none when the base was `to` already or could not
-/// be recorded. Never called from what an agent or a remote says without the forge confirming.
+/// The base of `repository` in the workspace moves from `from` to `to`, because the forge said
+/// where its pull request goes (`why`, in the words of the line that tells it): the record takes
+/// it, `workspace.base_changed` says so, and the sessions of the workspace are told, which is also
+/// the line in their history. `from` is the base the decision was made on: when the record holds
+/// another by the time it is written (another move in between), it is left and the sentence says
+/// so. The sentence said, or none when the base was `to` already or could not be recorded. Never
+/// called from what an agent or a remote says without the forge confirming.
 pub fn move_base(
     daemon: &Arc<Daemon>,
     workspace: &Workspace,
     repository: &str,
-    to: &str,
+    (from, to): (&str, &str),
     why: &str,
 ) -> Option<String> {
-    // Read and written in one transaction: a rename or another move in between is not undone.
+    // Read, compared and written in one transaction: a rename or another move in between is not
+    // undone.
     let written = daemon.write(|store| {
         let Some(fresh) = store.workspace(&workspace.project, &workspace.name)? else {
-            return Ok((None, None));
+            return Ok((BaseWrite::Nothing, None));
         };
         let mut repositories = fresh.repositories.clone();
         let Some(worktree) = repositories.iter_mut().find(|w| w.path == repository) else {
-            return Ok((None, None));
+            return Ok((BaseWrite::Nothing, None));
         };
         if worktree.base.branch == to {
-            return Ok((None, None));
+            return Ok((BaseWrite::Nothing, None));
+        }
+        if worktree.base.branch != from {
+            return Ok((BaseWrite::Meanwhile(worktree.base.branch.clone()), None));
         }
         let was = std::mem::replace(&mut worktree.base.branch, to.to_owned());
         // The tracking ref a review compares against follows the branch; a commit it started from
@@ -746,11 +752,18 @@ pub fn move_base(
             &repositories,
             ("workspace.base_changed", event),
         )?;
-        Ok((Some(was), Some(event)))
+        Ok((BaseWrite::Moved(was), Some(event)))
     });
     let was = match written {
-        Ok(Some(was)) => was,
-        Ok(None) => return None,
+        Ok(BaseWrite::Moved(was)) => was,
+        Ok(BaseWrite::Meanwhile(now)) => {
+            return Some(format!(
+                "The base of {repository} in the workspace {} is {now}, moved meanwhile: it was \
+                 not moved from {from} to {to}.",
+                workspace.name
+            ));
+        }
+        Ok(BaseWrite::Nothing) => return None,
         Err(error) => {
             eprintln!("flottille daemon: workspace.base_changed: {error}");
             return None;
@@ -777,6 +790,14 @@ pub fn move_base(
         );
     }
     Some(said)
+}
+
+/// What `move_base` found when it wrote.
+enum BaseWrite {
+    Nothing,
+    Moved(String),
+    /// The base was not the one the decision was made on: the one it is.
+    Meanwhile(String),
 }
 
 // Creation.
