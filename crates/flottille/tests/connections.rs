@@ -8346,7 +8346,9 @@ fn a_browser_kept_to_its_domains_makes_its_own_profile_out_of_the_runs_reach() {
     // With no profile of Flottille's, agent-browser makes one of its own for each browser
     // (`agent-browser-chrome-…`, in the temporary folder): not in the daemon's, which runs list,
     // but in the connection's vault folder.
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
+        .with_allowing_judge();
     let temporary = user.path("tmp");
     std::fs::create_dir(&temporary).unwrap();
     let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
