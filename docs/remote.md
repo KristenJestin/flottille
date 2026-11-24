@@ -2532,7 +2532,10 @@ on a real phone, by hand, and reported.
   cannot be reached, as a read or a stop is, rather than kept as a message is: a review started
   hours later, on a change that moved meanwhile, is not what the lead asked for. The lead calls it
   again once that machine is back. The lead's daemon sends `{"action": "start", "agent": <the
-  session>}` alone; that machine refuses any other argument rather than drop it.
+  session>}` alone; that machine refuses any other argument rather than drop it. The refusal
+  says to call again once that machine is back, and does not promise a wake-up, as nothing comes
+  back from a review that was not started. A machine not updated yet (it answers that `review` is
+  no tool another machine calls) is told to the lead as a machine to update.
 
 ## Open questions
 

@@ -1236,13 +1236,18 @@ pub(crate) async fn review_led(
             launch.caller == lead.id && launch.kind == "led" && launch.state != "refused"
         })?;
     let name = machine_name(daemon, &launch);
+    let session = match launch.asked["title"].as_str().map(str::trim) {
+        Some(title) if !title.is_empty() => format!("the session \"{title}\" (agent {id})"),
+        _ => format!("the session agent {id}"),
+    };
     let aim = Aim {
         machine: &launch.machine,
         name: &name,
         agent: id,
         launch: &launch.launch,
-        session: format!("agent {id}"),
-        woken: true,
+        session,
+        // Nothing comes back from a review that was refused: the lead calls again.
+        woken: false,
     };
     let args = json!({"action": "start", "agent": id});
     Some(older_review(
@@ -1253,8 +1258,18 @@ pub(crate) async fn review_led(
 
 /// What `outcome`, the answer of `name` to a `review` call, says to the lead: a machine of before
 /// the review of a led session answers that review is no tool another machine calls.
-fn older_review(outcome: Outcome, _name: &str) -> Outcome {
-    outcome
+fn older_review(outcome: Outcome, name: &str) -> Outcome {
+    match outcome {
+        Outcome::Refused(text)
+            if text.contains("\"review\" is not a tool another machine calls") =>
+        {
+            Outcome::Refused(format!(
+                "refused: {name} needs updating to review a session it runs for you: update \
+                 {name}, then call again"
+            ))
+        }
+        other => other,
+    }
 }
 
 fn called(
