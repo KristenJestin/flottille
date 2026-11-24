@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
 const MOUNT_ATTR_RDONLY: u64 = 0x1;
 
 /// `struct mount_attr` of `mount_setattr(2)`, its first version.
@@ -28,6 +29,35 @@ struct MountAttr {
     attr_clr: u64,
     propagation: u64,
     userns_fd: u64,
+}
+
+/// `struct open_how` of `openat2(2)`.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// `path` opened with `flags` without following a link anywhere on its way: the descriptor, or
+/// -1 and `errno` (`ENOSYS` before Linux 5.6, `ELOOP` for a link). A system call alone, which a
+/// child may make before its program.
+pub(crate) fn open_unfollowed(path: &CStr, flags: libc::c_int) -> libc::c_long {
+    let how = OpenHow {
+        flags: (flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: libc::RESOLVE_NO_SYMLINKS,
+    };
+    // SAFETY: a C string and a structure alive for the call.
+    unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    }
 }
 
 /// The variable that plays a kernel refusing user namespaces, read by a test build only: the
@@ -128,6 +158,11 @@ pub fn sandbox() -> serde_json::Value {
     warnings.extend(bus_replaced().then_some(BUS_REPLACED_GAP));
     let unlent = crate::pushed::unlent();
     let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
+    // What a confined command's `ssh` refuses of the root-owned files its settings include.
+    if namespaces == Namespaces::Available {
+        warnings.extend(copies_failed());
+        warnings.extend(crate::ssh_owned::gaps());
+    }
     // Where no push is lifted, the agent's lending to one is moot.
     match crate::pushed::unlifted() {
         Some(why) => warnings.push(crate::pushed::unlifted_said(&why)),
@@ -197,6 +232,8 @@ struct Copies {
 struct Copy {
     staged: CString,
     target: CString,
+    /// The file read (device, inode): the copy covers it, never another put at its path since.
+    id: (u64, u64),
     text: Vec<u8>,
     tree: libc::c_int,
 }
@@ -360,31 +397,30 @@ impl Plan {
 
     /// The plan, which also puts a copy of each file, with its text, over it, read-only and owned
     /// by the user in the namespace (`ssh_owned.rs`). None where a path cannot be a C string.
-    pub fn giving(mut self, copies: Vec<(PathBuf, Vec<u8>)>) -> Option<Plan> {
+    pub fn giving(mut self, copies: Vec<crate::ssh_owned::Copied>) -> Option<Plan> {
         let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).ok();
+        // Said by every command, with copies or none: a failure lasts until one gets them.
+        self.copies.failed = failed();
         // Any folder that is there does to stage them: what it holds is hidden for that time only.
         let Some(staging) = copies
             .first()
-            .and_then(|(target, _)| target.parent())
+            .and_then(|copied| copied.path.parent())
             .map(Path::to_owned)
         else {
             return Some(self);
         };
         let mut files = Vec::new();
-        for (n, (target, text)) in copies.into_iter().enumerate() {
+        for (n, copied) in copies.into_iter().enumerate() {
             files.push(Copy {
                 staged: c(&staging.join(format!(".flottille-copy-{n}")))?,
-                target: c(&target)?,
-                text,
+                target: c(&copied.path)?,
+                id: copied.id,
+                text: copied.text,
                 tree: -1,
             });
         }
-        self.copies = Copies {
-            staging: Some(c(&staging)?),
-            files,
-            failed: failed(),
-            ..Copies::default()
-        };
+        self.copies.staging = Some(c(&staging)?);
+        self.copies.files = files;
         Some(self)
     }
 }
@@ -524,11 +560,20 @@ impl Plan {
                 }
             }
             // At best: a command started without them meets the refusal of `ssh` alone, where
-            // failing its start would fail every command, git's and the daemon's too.
-            if let Err(error) = give(&mut self.copies)
-                && let Some(failed) = self.copies.failed
-            {
-                failed.store(error.raw_os_error().unwrap_or(libc::EIO), Ordering::Relaxed);
+            // failing its start would fail every command, git's and the daemon's too. But never
+            // over a file system of the copies that stayed: it may be writable.
+            let given = give(&mut self.copies);
+            let errno = |error: &io::Error| error.raw_os_error().unwrap_or(libc::EIO);
+            let said = match &given {
+                Ok(()) => 0,
+                Err(Failed::Without(error)) => errno(error),
+                Err(Failed::Left(error)) => errno(error) | LEFT,
+            };
+            if let Some(failed) = self.copies.failed {
+                failed.store(said, Ordering::Relaxed);
+            }
+            if let Err(Failed::Left(error)) = given {
+                return Err(error);
             }
             for (kept, tree) in self.kept.iter().zip(self.trees.iter_mut()) {
                 let fd = libc::syscall(
@@ -613,14 +658,27 @@ impl Plan {
     }
 }
 
+/// Why the copies were not given.
+enum Failed {
+    /// The command starts without them.
+    Without(io::Error),
+    /// Their file system could not be taken away from over the folder it was mounted on: the
+    /// command must not start.
+    Left(io::Error),
+}
+
+/// Said with the error when their file system was left (`Failed::Left`).
+const LEFT: i32 = 1 << 30;
+
 /// Writes each copy into a file system of the namespace's own mounted on `staging`, makes it
 /// read-only, takes each file out of it, takes the file system away, and puts each file over its
-/// target. A target gone since the plan was made is not there to cover. Whatever fails, the file
-/// system does not stay over `staging`.
+/// target, opened without following a link on its way. A target gone since the plan was made, or
+/// another file than the one read, is not covered. A file system that cannot be taken away fails
+/// the start (`Failed::Left`).
 ///
 /// # Safety
 /// In the child, before its program: plain system calls on what the plan allocated.
-unsafe fn give(given: &mut Copies) -> io::Result<()> {
+unsafe fn give(given: &mut Copies) -> Result<(), Failed> {
     #[cfg(test)]
     let detach = match given.kept_up {
         // Refused by the kernel: an expiry cannot be detached.
@@ -642,7 +700,8 @@ unsafe fn give(given: &mut Copies) -> io::Result<()> {
             c"tmpfs".as_ptr(),
             flags,
             c"mode=0755".as_ptr().cast(),
-        ) as libc::c_long)?;
+        ) as libc::c_long)
+        .map_err(Failed::Without)?;
         let staged = stage(staging, copies, flags);
         if staged.is_err() {
             for copy in copies.iter_mut().filter(|copy| copy.tree >= 0) {
@@ -650,25 +709,51 @@ unsafe fn give(given: &mut Copies) -> io::Result<()> {
             }
         }
         // What the staging folder held before, shown again, whatever came of the copies.
-        check(libc::umount2(staging.as_ptr(), detach) as libc::c_long)?;
-        staged?;
+        check(libc::umount2(staging.as_ptr(), detach) as libc::c_long).map_err(Failed::Left)?;
+        staged.map_err(Failed::Without)?;
         for copy in copies.iter() {
-            let moved = libc::syscall(
-                libc::SYS_move_mount,
-                copy.tree,
-                c"".as_ptr(),
-                libc::AT_FDCWD,
-                copy.target.as_ptr(),
-                MOVE_MOUNT_F_EMPTY_PATH,
-            );
-            let error = io::Error::last_os_error();
+            let moved = cover(copy);
             libc::close(copy.tree);
-            if moved != 0 && error.raw_os_error() != Some(libc::ENOENT) {
-                return Err(error);
-            }
+            moved.map_err(Failed::Without)?;
         }
     }
     Ok(())
+}
+
+/// Moves `copy`'s file onto its target, opened without following a link on its way, when it is
+/// still the file read. A kernel without `openat2` (before Linux 5.6) covers none: the walk read
+/// none there either.
+///
+/// # Safety
+/// As `give`.
+unsafe fn cover(copy: &Copy) -> io::Result<()> {
+    // SAFETY: as the function says.
+    unsafe {
+        let target = open_unfollowed(&copy.target, libc::O_PATH);
+        if target < 0 {
+            let error = io::Error::last_os_error();
+            // Gone, or a link on its way now: not the file read, not covered.
+            return match error.raw_os_error() {
+                Some(libc::ENOENT | libc::ELOOP) => Ok(()),
+                _ => Err(error),
+            };
+        }
+        let target = target as libc::c_int;
+        let mut stat: libc::stat = std::mem::zeroed();
+        let mut result = check(libc::fstat(target, &mut stat) as libc::c_long);
+        if result.is_ok() && (stat.st_dev, stat.st_ino) == copy.id {
+            result = check(libc::syscall(
+                libc::SYS_move_mount,
+                copy.tree,
+                c"".as_ptr(),
+                target,
+                c"".as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+            ));
+        }
+        libc::close(target);
+        result
+    }
 }
 
 /// Writes each copy into the file system on `staging`, makes it read-only and takes each file out
@@ -748,11 +833,24 @@ fn failed() -> Option<&'static AtomicI32> {
     (page != 0).then(|| unsafe { &*(page as *const AtomicI32) })
 }
 
-/// Why a confined command started without the copies of the files `ssh` includes, the last time
-/// one did.
-pub fn copies_failed() -> Option<io::Error> {
-    let errno = failed()?.load(Ordering::Relaxed);
-    (errno != 0).then(|| io::Error::from_raw_os_error(errno))
+/// Why the last confined command started without the copies of the files `ssh` includes, or was
+/// refused its start for them, as `flottille doctor` and the daemon's log say it: none once one
+/// started with them.
+pub fn copies_failed() -> Option<String> {
+    let said = failed()?.load(Ordering::Relaxed);
+    let error = io::Error::from_raw_os_error(said & !LEFT);
+    match said {
+        0 => None,
+        _ if said & LEFT != 0 => Some(format!(
+            "a command was refused its start: the file system its ssh settings were copied in \
+             could not be taken away ({error}), and would have stayed writable over a folder ssh \
+             reads"
+        )),
+        _ => Some(format!(
+            "the ssh settings of a command could not be copied ({error}): its ssh refuses the \
+             files root owns that they include (Bad owner or permissions)"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -888,7 +986,11 @@ mod tests {
         let gone = temp.path().join("gone/ssh_config");
         let mut plan = plan(&[temp.path().to_owned()], &[], &[], None)
             .unwrap()
-            .giving(vec![(gone, b"Host *\n".to_vec())])
+            .giving(vec![crate::ssh_owned::Copied {
+                path: gone,
+                id: (0, 0),
+                text: b"Host *\n".to_vec(),
+            }])
             .unwrap();
         let mut command = std::process::Command::new("true");
         // SAFETY: as in `landlock::confine`.
@@ -915,8 +1017,14 @@ mod tests {
     }
 
     /// The copy of `target` with `text`, as `ssh_owned::copies` gives it.
-    fn copy_of(target: &Path, text: &str) -> Vec<(PathBuf, Vec<u8>)> {
-        vec![(target.to_owned(), text.as_bytes().to_vec())]
+    fn copy_of(target: &Path, text: &str) -> Vec<crate::ssh_owned::Copied> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(target).unwrap();
+        vec![crate::ssh_owned::Copied {
+            path: target.to_owned(),
+            id: (meta.dev(), meta.ino()),
+            text: text.as_bytes().to_vec(),
+        }]
     }
 
     #[test]
@@ -934,10 +1042,15 @@ mod tests {
         std::fs::write(folder.join("b.conf"), "b\n").unwrap();
         let mut plan = plan(&[], &[], &[], None)
             .unwrap()
-            .giving(vec![
-                (folder.join("a.conf"), b"a\n".to_vec()),
-                (folder.join("b.conf"), b"b\n".to_vec()),
-            ])
+            .giving(
+                [
+                    copy_of(&folder.join("a.conf"), "a\n"),
+                    copy_of(&folder.join("b.conf"), "b\n"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            )
             .unwrap();
         // The second copy staged where the first is: written, it fails.
         plan.copies.files[1].staged = plan.copies.files[0].staged.clone();

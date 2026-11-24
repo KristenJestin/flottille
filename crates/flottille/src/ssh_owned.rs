@@ -9,9 +9,10 @@
 //! the namespace. The text is root's, which no run can write; it is read for that alone, and
 //! never logged nor shown.
 
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 /// The machine's `ssh` configuration.
 const SYSTEM_CONFIG: &str = "/etc/ssh/ssh_config";
@@ -32,45 +33,87 @@ const COPIES_MAX: usize = 64;
 /// The bytes of a file read, at most.
 const CONFIG_MAX: u64 = 1024 * 1024;
 
+/// A file given to a confined command as its own: its real path, the file it was when read
+/// (device and inode), and what it held.
+pub struct Copied {
+    pub path: PathBuf,
+    pub id: (u64, u64),
+    pub text: Vec<u8>,
+}
+
 /// Each root-owned file the machine's configuration and the user's include, with its text now:
 /// its real path (links followed, as `ssh` opens it) and what it holds.
-pub fn copies() -> Vec<(PathBuf, Vec<u8>)> {
-    // A command's child cannot log: a failure of one is said here, at a later start, once.
-    static SAID: AtomicBool = AtomicBool::new(false);
-    if let Some(error) = crate::mounts::copies_failed()
-        && !SAID.swap(true, Ordering::Relaxed)
+pub fn copies() -> Vec<Copied> {
+    // A command's child cannot log: a failure of one is said here, at a later start, once for as
+    // long as it lasts.
+    static SAID: Mutex<Option<String>> = Mutex::new(None);
+    let failed = crate::mounts::copies_failed();
+    if let Ok(mut said) = SAID.lock()
+        && *said != failed
     {
-        eprintln!(
-            "flottille daemon: a command started without the root-owned files ssh includes, \
-             which ssh then refuses ({error})"
-        );
+        if let Some(failed) = &failed {
+            eprintln!("flottille daemon: {failed}");
+        }
+        *said = failed;
     }
     // SAFETY: getuid cannot fail.
     if unsafe { libc::getuid() } == 0 {
         return Vec::new();
     }
-    let system = match std::env::var_os(SYSTEM).filter(|_| cfg!(debug_assertions)) {
-        Some(system) => PathBuf::from(system),
-        None => PathBuf::from(SYSTEM_CONFIG),
-    };
-    let mut copies = copies_of(&system, crate::pushed::account(), 0);
+    let mut copies = walk(&system(), crate::pushed::account(), 0).copies;
     if let Some(failing) = std::env::var_os(FAILING).filter(|_| cfg!(debug_assertions))
         && Path::new(&failing).is_file()
     {
-        copies.insert(0, (Path::new(&failing).join("ssh_config"), Vec::new()));
+        copies.insert(
+            0,
+            Copied {
+                path: Path::new(&failing).join("ssh_config"),
+                id: (0, 0),
+                text: Vec::new(),
+            },
+        );
     }
     copies
 }
 
+/// What a confined command's `ssh` still refuses of the files root owns that its settings
+/// include, each in a line `flottille doctor` says.
+pub fn gaps() -> Vec<String> {
+    // SAFETY: getuid cannot fail.
+    if unsafe { libc::getuid() } == 0 {
+        return Vec::new();
+    }
+    gaps_of(&system(), crate::pushed::account(), 0)
+}
+
+/// The machine's configuration, or the test's.
+fn system() -> PathBuf {
+    match std::env::var_os(SYSTEM).filter(|_| cfg!(debug_assertions)) {
+        Some(system) => PathBuf::from(system),
+        None => PathBuf::from(SYSTEM_CONFIG),
+    }
+}
+
 /// The files `owner` owns that `system` and the `account`'s `~/.ssh/config` include, with their
 /// text: root's at every start, the test's own in a test.
-fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<(PathBuf, Vec<u8>)> {
+#[cfg(test)]
+fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<Copied> {
+    walk(system, account, owner).copies
+}
+
+/// What the walk of the files `owner` owns leaves to `ssh`'s refusal, in the user's words.
+fn gaps_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<String> {
+    walk(system, account, owner).gaps
+}
+
+fn walk<'a>(system: &Path, account: Option<&'a Path>, owner: u32) -> Walk<'a> {
     let mut walk = Walk {
         account,
         owner,
         ssh: None,
         seen: 0,
         copies: Vec::new(),
+        gaps: Vec::new(),
     };
     // `ssh` reads a relative `Include` of the machine's configuration in its folder, of the
     // user's in `~/.ssh`.
@@ -84,12 +127,7 @@ fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<(PathBuf,
             walk.visit(&ssh.join("config"), &ssh, 0);
         }
     }
-    walk.copies
-}
-
-/// What the walk of `copies_of` leaves to `ssh`'s refusal, in the user's words.
-fn gaps_of(_system: &Path, _account: Option<&Path>, _owner: u32) -> Vec<String> {
-    Vec::new()
+    walk
 }
 
 /// A walk of the files `ssh` includes. What a confined run can write never steers it: the
@@ -97,20 +135,29 @@ fn gaps_of(_system: &Path, _account: Option<&Path>, _owner: u32) -> Vec<String> 
 /// first), and the user's only inside `~/.ssh`, read-only to a confined run, as the lent push
 /// reads it (`pushed::includes`). A run in Full writes `~/.ssh` as the user does: what it names
 /// there is still given only when root owns it, a file the user reads already. Each file is
-/// opened without following a link nor waiting on a FIFO, and judged on what was opened.
+/// opened without following a link on its way nor waiting on a FIFO, and judged on what was
+/// opened. What it cannot give, `ssh` refuses, and it is said (`gaps`).
 struct Walk<'a> {
     account: Option<&'a Path>,
     owner: u32,
     /// `~/.ssh` and its real path, once the user's configuration is walked.
     ssh: Option<(PathBuf, PathBuf)>,
     seen: usize,
-    copies: Vec<(PathBuf, Vec<u8>)>,
+    copies: Vec<Copied>,
+    gaps: Vec<String>,
 }
 
 impl Walk<'_> {
     /// Gives `file` when `ssh` would read it and it is the owner's, and follows what it includes.
     fn visit(&mut self, file: &Path, folder: &Path, depth: usize) {
-        if depth > INCLUDES_MAX || self.seen >= FILES_MAX {
+        if depth > INCLUDES_MAX {
+            return;
+        }
+        if self.seen >= FILES_MAX {
+            self.gap(format!(
+                "the ssh settings include more than {FILES_MAX} files: a run's ssh refuses those \
+                 past them that root owns (Bad owner or permissions)"
+            ));
             return;
         }
         self.seen += 1;
@@ -120,19 +167,39 @@ impl Walk<'_> {
         if let Some((_, real)) = &self.ssh
             && !path.starts_with(real)
         {
+            self.outside(&path);
             return;
         }
         let Some((meta, text)) = read(&path) else {
+            if std::fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.is_file() && meta.len() > CONFIG_MAX && self.owns(&meta))
+            {
+                self.gap(format!(
+                    "{}, which the ssh settings include, is larger than 1 MB: a run's ssh \
+                     refuses it (Bad owner or permissions)",
+                    path.display()
+                ));
+            }
             return;
         };
-        // As `ssh` judges an included file: owned by root or the user, written by no one else.
+        // As `ssh` judges an included file, and the user's own configuration: owned by root or
+        // the user, written by no one else. The machine's own is not judged.
         let read_by_ssh = meta.mode() & 0o022 == 0;
-        let given = depth > 0 && read_by_ssh && meta.uid() == self.owner;
-        if given
-            && self.copies.len() < COPIES_MAX
-            && !self.copies.iter().any(|(done, _)| *done == path)
-        {
-            self.copies.push((path.clone(), text.clone()));
+        let judged = depth > 0 || self.ssh.is_some();
+        let given = judged && read_by_ssh && self.owns(&meta);
+        if given && !self.copies.iter().any(|done| done.path == path) {
+            if self.copies.len() < COPIES_MAX {
+                self.copies.push(Copied {
+                    path: path.clone(),
+                    id: (meta.dev(), meta.ino()),
+                    text: text.clone(),
+                });
+            } else {
+                self.gap(format!(
+                    "the ssh settings include more than {COPIES_MAX} files root owns: a run's \
+                     ssh refuses those past them (Bad owner or permissions)"
+                ));
+            }
         }
         if self.ssh.is_none() && depth > 0 && !given {
             return;
@@ -147,55 +214,119 @@ impl Walk<'_> {
             }
             for pattern in patterns {
                 for found in self.expanded(pattern, folder) {
-                    if self.seen >= FILES_MAX {
-                        return;
-                    }
                     self.visit(&found, folder, depth + 1);
                 }
             }
         }
     }
 
-    /// The files the `Include` pattern names, as `ssh` reads it: `~` the account's home, a
-    /// relative path in `folder`; in the user's configuration, inside `~/.ssh` alone. A pattern
-    /// with a token, a variable or a class of characters names none here.
-    fn expanded(&self, pattern: &str, folder: &Path) -> Vec<PathBuf> {
-        if let (Some((ssh, _)), Some(account)) = (&self.ssh, self.account) {
-            return crate::pushed::includes(pattern, ssh, account).unwrap_or_default();
+    /// The files the `Include` pattern names, as `ssh` reads it: in the user's configuration,
+    /// `~` the account's home and a relative path in `~/.ssh`, inside `~/.ssh` alone (one outside
+    /// is said, not followed); in the machine's, a relative path in `folder`, and no `~`, which
+    /// `ssh` refuses there with the whole configuration. A pattern with a token, a variable or a
+    /// class of characters names none here.
+    fn expanded(&mut self, pattern: &str, folder: &Path) -> Vec<PathBuf> {
+        if let (Some((ssh, _)), Some(account)) = (self.ssh.clone(), self.account) {
+            return match crate::pushed::includes(pattern, &ssh, account) {
+                Ok(found) => found,
+                Err(_) => {
+                    let path = match pattern.strip_prefix("~/") {
+                        Some(rest) => account.join(rest),
+                        None => ssh.join(pattern),
+                    };
+                    if !pattern.starts_with('~') || pattern.starts_with("~/") {
+                        for found in globbed(&path) {
+                            if let Ok(real) = found.canonicalize() {
+                                self.outside(&real);
+                            }
+                        }
+                    }
+                    Vec::new()
+                }
+            };
         }
-        if pattern.contains(['$', '%', '[', '\\', '{']) {
+        if pattern.contains(['$', '%', '[', '\\', '{']) || pattern.starts_with('~') {
             return Vec::new();
         }
-        let path = match pattern.strip_prefix("~/") {
-            Some(rest) => match self.account {
-                Some(account) => account.join(rest),
-                None => return Vec::new(),
-            },
-            None if pattern.starts_with('~') => return Vec::new(),
-            None => folder.join(pattern),
-        };
-        let rest = path.strip_prefix("/").unwrap_or(&path);
-        flottille_core::glob::expand(Path::new("/"), &rest.to_string_lossy())
-            .map(|found| {
-                found
-                    .into_iter()
-                    .map(|rest| Path::new("/").join(rest))
-                    .collect()
-            })
-            .unwrap_or_default()
+        globbed(&folder.join(pattern))
+    }
+
+    /// Whether the walk's owner owns what `meta` says.
+    fn owns(&self, meta: &std::fs::Metadata) -> bool {
+        meta.uid() == self.owner
+    }
+
+    /// Says a file of the owner's the user's configuration includes from outside `~/.ssh`: not
+    /// followed, so that no run steers the walk, and so refused by `ssh`.
+    fn outside(&mut self, real: &Path) {
+        if std::fs::metadata(real).is_ok_and(|meta| meta.is_file() && self.owns(&meta)) {
+            self.gap(format!(
+                "{}, which ~/.ssh/config includes from outside ~/.ssh, is root's: a run's ssh \
+                 refuses it (Bad owner or permissions). Copy it into ~/.ssh and include the copy",
+                real.display()
+            ));
+        }
+    }
+
+    fn gap(&mut self, gap: String) {
+        if !self.gaps.contains(&gap) {
+            self.gaps.push(gap);
+        }
     }
 }
 
+/// The paths `pattern`, an absolute path with `*` and `?`, matches, as `glob(3)` finds them for
+/// `ssh`: through a link to a folder too, a hidden name matched only by a part that starts with a
+/// dot, sorted.
+fn globbed(pattern: &Path) -> Vec<PathBuf> {
+    let mut found = vec![PathBuf::from("/")];
+    for part in pattern.components() {
+        let part = match part {
+            Component::Normal(part) => part,
+            Component::ParentDir => "..".as_ref(),
+            _ => continue,
+        };
+        let mut next = Vec::new();
+        for path in found {
+            let wild = part.as_bytes().iter().any(|b| matches!(b, b'*' | b'?'));
+            if !wild {
+                let named = path.join(part);
+                if std::fs::symlink_metadata(&named).is_ok() {
+                    next.push(named);
+                }
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if let (Some(name), Some(part)) = (name.to_str(), part.to_str())
+                    && flottille_core::glob::matches(part, name)
+                {
+                    next.push(path.join(name));
+                }
+            }
+        }
+        found = next;
+    }
+    found.sort();
+    found
+}
+
 /// What the regular file at `path`, a real path, holds, with what it was when opened: none for a
-/// link put there since, a FIFO, a device, a folder or a file past the size read.
+/// link on its way put there since, a FIFO, a device, a folder or a file past the size read. A
+/// kernel without `openat2` (before Linux 5.6) reads none.
 fn read(path: &Path) -> Option<(std::fs::Metadata, Vec<u8>)> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
+    use std::os::fd::FromRawFd;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let fd = crate::mounts::open_unfollowed(&path, libc::O_RDONLY | libc::O_NONBLOCK);
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: a descriptor just opened, owned by the file alone.
+    let file = unsafe { std::fs::File::from_raw_fd(fd as libc::c_int) };
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > CONFIG_MAX {
         return None;
@@ -342,8 +473,8 @@ mod tests {
         unsafe { libc::getuid() }
     }
 
-    fn given(copies: &[(PathBuf, Vec<u8>)]) -> Vec<PathBuf> {
-        copies.iter().map(|(path, _)| path.clone()).collect()
+    fn given(copies: &[Copied]) -> Vec<PathBuf> {
+        copies.iter().map(|copied| copied.path.clone()).collect()
     }
 
     #[test]
