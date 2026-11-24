@@ -2227,8 +2227,11 @@ fn share_files(
             .filter_map(|entry| {
                 let name = entry["name"].as_str()?;
                 let file = needs.files.iter().find(|file| file.entry == name)?;
-                (entry["for"].as_str() == Some(&file_use(&needs.project, &file.path)))
-                    .then(|| name.to_owned())
+                // A copy received from another machine is not this file of `from`'s: it is made
+                // again, and the name being taken, refused.
+                (entry["for"].as_str() == Some(&file_use(&needs.project, &file.path))
+                    && entry["shared_from"].as_str().is_none_or(str::is_empty))
+                .then(|| name.to_owned())
             })
             .collect(),
         Err(why) => {

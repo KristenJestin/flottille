@@ -152,12 +152,17 @@ impl Step {
 
 /// The steps of a card that needs files: each file's, then the approval's, each with its mark.
 struct Run {
+    /// The needs these steps were made for: another list of files is another run.
+    needs: Needs,
+    /// Allow was clicked on these steps: what an earlier run's Allow still says is not theirs.
+    started: bool,
     steps: Vec<Step>,
     marks: Vec<(Entity<Status>, Entity<StateIcon>)>,
 }
 
 impl Run {
-    fn new(files: usize, cx: &mut Context<Waiting>) -> Run {
+    fn new(needs: &Needs, cx: &mut Context<Waiting>) -> Run {
+        let files = needs.files.len();
         let marks = (0..=files)
             .map(|_| {
                 let status = cx.new(|_| Status::new(AgentState::Idle));
@@ -169,6 +174,8 @@ impl Run {
             })
             .collect();
         Run {
+            needs: needs.clone(),
+            started: false,
             steps: vec![Step::Waiting; files + 1],
             marks,
         }
@@ -292,11 +299,22 @@ impl Waiting {
             }
         }
         for card in &cards {
-            if let Some(needs) = &card.needs
-                && !self.runs.contains_key(&card.number)
-            {
-                let run = Run::new(needs.files.len(), cx);
-                self.runs.insert(card.number, run);
+            // A daemon may list other files for the same card: its steps begin again, with none of
+            // the marks of the files it listed before.
+            match &card.needs {
+                Some(needs)
+                    if self
+                        .runs
+                        .get(&card.number)
+                        .is_none_or(|run| run.needs != *needs) =>
+                {
+                    let run = Run::new(needs, cx);
+                    self.runs.insert(card.number, run);
+                }
+                None => {
+                    self.runs.remove(&card.number);
+                }
+                _ => {}
             }
         }
         self.runs
@@ -372,7 +390,9 @@ impl Waiting {
         why: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(run) = self.runs.get_mut(&number) {
+        if let Some(run) = self.runs.get_mut(&number)
+            && run.started
+        {
             run.set(at, step, cx);
         }
         if let Some(why) = why {
@@ -402,6 +422,7 @@ impl Waiting {
         let Some(run) = self.runs.get_mut(&number) else {
             return;
         };
+        run.started = true;
         let files = run.steps.len() - 1;
         let from_step = run.steps[..files]
             .iter()
@@ -689,9 +710,11 @@ impl Waiting {
                 card.needs
                     .as_ref()
                     .zip(self.runs.get(&number))
+                    .filter(|(needs, run)| run.needs == **needs)
                     .map(|(needs, run)| {
+                        // Other files are another block: it unfolds and fades in as one does.
                         presence(
-                            id("allow-files-block"),
+                            id(&format!("allow-files-block{}", files_key(needs))),
                             true,
                             files_block(number, needs, run, p),
                         )
@@ -1020,6 +1043,17 @@ impl Render for Waiting {
     }
 }
 
+/// What tells one list of files from another, for the id of their block.
+fn files_key(needs: &Needs) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    needs
+        .files
+        .iter()
+        .for_each(|file| (&file.path, &file.entry).hash(&mut hasher));
+    format!("-{:x}", hasher.finish())
+}
+
 /// The files a held launch needs, on its card: where they go, what Allow does with them, then one
 /// step each and the approval's, each with its mark and its word.
 fn files_block(number: u64, needs: &Needs, run: &Run, p: Palette) -> impl IntoElement {
@@ -1046,6 +1080,7 @@ fn files_block(number: u64, needs: &Needs, run: &Run, p: Palette) -> impl IntoEl
             state.tone(),
             ElementId::Name(format!("allow-word-{number}-{at}").into()),
         )
+        .wrapped(true)
         .time(state.word());
         match object {
             Some(object) => row.object(object),

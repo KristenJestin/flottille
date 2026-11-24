@@ -34,6 +34,9 @@ pub struct StepRow {
     time: Option<SharedString>,
     /// The time is a count going up: it fades in when it first shows, not at each tick.
     ticking: bool,
+    /// The verb is read whole, not glanced at (a path to consent to): it wraps over lines and the
+    /// object goes under it, instead of the verb being cut.
+    wrapped: bool,
     time_id: ElementId,
     tone: StepTone,
     on_click: Option<OnClick>,
@@ -55,6 +58,7 @@ impl StepRow {
             object: None,
             time: None,
             ticking: false,
+            wrapped: false,
             time_id: time_id.into(),
             tone,
             on_click: None,
@@ -74,6 +78,12 @@ impl StepRow {
     /// The time is still counting (the step runs): its text changes every tick without fading.
     pub fn ticking(mut self, ticking: bool) -> Self {
         self.ticking = ticking;
+        self
+    }
+
+    /// The verb wraps over as many lines as it needs, and the object is on the line under it.
+    pub fn wrapped(mut self, wrapped: bool) -> Self {
+        self.wrapped = wrapped;
         self
     }
 
@@ -119,12 +129,15 @@ impl RenderOnce for StepRow {
                 .test_support()
         });
         let clickable = self.on_click.is_some();
+        let wrapped = self.wrapped;
         let id = self.id.clone();
+        let verb = self.verb.clone();
         let mut row = div()
             .id(self.id)
             .aria_label(SharedString::from(said))
             .min_h(px(30.))
             .px(px(14.))
+            .when(wrapped, |d| d.py(px(4.)))
             .flex()
             .items_center()
             .gap(px(10.))
@@ -145,20 +158,38 @@ impl RenderOnce for StepRow {
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .items_baseline()
-                    .gap(px(5.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(self.verb)
+                    .when(wrapped, |d| d.flex_col().items_start().gap(px(2.)))
+                    .when(!wrapped, |d| {
+                        d.items_baseline()
+                            .gap(px(5.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                    })
+                    .child(match wrapped {
+                        // Whole, over lines: a path has no space, GPUI breaks it where the line ends.
+                        true => div()
+                            .id(ElementId::Name(format!("{id}-path").into()))
+                            .aria_label(verb)
+                            .min_w_0()
+                            .max_w_full()
+                            .whitespace_normal()
+                            .child(self.verb)
+                            .test_support()
+                            .into_any_element(),
+                        false => self.verb.into_any_element(),
+                    })
                     .when_some(self.object, |d, object| {
                         d.child(tipped_when_cut(
                             div()
                                 .id(ElementId::Name(format!("{id}-object").into()))
+                                .aria_label(object.clone())
                                 .min_w_0()
+                                .when(wrapped, |d| d.max_w_full())
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .mono(12.)
-                                .child(object.clone()),
+                                .child(object.clone())
+                                .test_support(),
                             object,
                             window,
                             cx,
