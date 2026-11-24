@@ -1126,8 +1126,19 @@ local child's work; nothing moves your branch.*
   answer is sent before the session's setup goes on, so that a setup that fails at once is never
   heard of first. The caller's machine marks its record of the launch `started` or `refused`
   (`ended` when a started one is told refused); an answer that comes before the record of the
-  launch's place is never undone by it, and one sent again is taken once. A refused launch leaves
-  no row under its pilot and counts in no cap. A handed session's caller is told too: it waited
+  launch's place is never undone by it, and the call then answers what was decided, never that it
+  waits (#1317). The user answers a launch once: an answer to a launch answered already is refused,
+  but the one stored, sent again by a machine that did not hear it was taken, which changes nothing.
+  The caller is never left waiting: a held launch with no session there, or whose answer cannot be
+  kept there, is told refused; an allowed one whose setup a restart of that machine cut never
+  starts and is told so (`… was approved by the user, but nothing was done: it could not start
+  there: Flottille stopped there while it was setting it up.`); a launch with no request number is
+  named by its title (`Your launch "Docs" on server …`). The window keys a held session by its
+  request and its machine (a name may hold spaces and dots), each machine counting its own, and says
+  a session started when the call itself answers that the user allowed it before it returned. A restart
+  there never stops a session that ran: an allowed launch whose workspace is ready and whose session
+  was briefed only has its answer settled again. A refused launch leaves no row under its
+  pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
   a `led` or `handed` launch whose caller is itself a session another agent started (here, or on
@@ -1777,6 +1788,17 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **An allowed launch whose setup a restart cut is refused, not resumed** (#1317): the daemon that
+  starts again finds the request allowed and its answer never stored; it refuses the launch, removes
+  its workspace and tells the caller, which launches it again. Resuming it (laying its files again,
+  then its settings) could come later; refusing is the simpler and leaves nothing half made.
+- **An answer that cannot be kept tells the caller refused** (#1317): when the store refuses the
+  user's answer to a held launch, the caller is told nothing was done, while the launch there stays
+  held until its session ends; the refusal that end sends is a second answer, which the caller's
+  machine refuses.
+- **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
+  stored, only one whose workspace is still preparing or whose session was never briefed is refused;
+  one that ran is left running and its answer is stored again, since its caller was told approved.
 - **A method the user's door refuses for a child here is refused for a child of another machine
   too, whole** (#1304): the user's two ways out stay (`agent.answer` and `agent.stop`, while its
   parent's machine is off), nothing else of the user reaches it. `agent.mode` is refused rather
@@ -1794,6 +1816,7 @@ on a real phone, by hand, and reported.
   could be drawn over it. It is now the first line of what scrolls, so no text is ever drawn over
   another; the kit has no opaque, fixed header for what scrolls to pass under, and none is drawn
   here. A fixed header can come later, in the kit first.
+
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
   with the link's own refusal rather than run as any root's: the agent is answered `refused by
