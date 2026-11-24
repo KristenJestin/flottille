@@ -4535,7 +4535,7 @@ impl Shell {
             if sessions.is_empty() {
                 continue;
             }
-            sessions.sort_by(|a, b| b.active_at.cmp(&a.active_at));
+            sessions.sort_by_key(|a| std::cmp::Reverse(a.active_at));
             blocks.push(crate::project::MachineSessions {
                 machine: home.machine.clone(),
                 icon: home.icon.clone(),
