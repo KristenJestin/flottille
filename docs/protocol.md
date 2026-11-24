@@ -1322,14 +1322,18 @@ that follows over a link reads none of them. A draft is the user's own words: no
 log holds one, and no agent is ever given one. `draft.*` is answered by a task of its own, its
 pictures decoded and written off the runtime's threads.
 
-- `draft.get {kind, target}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
+- `draft.get {kind, target, machine?}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
   "data"}]}}` (the pictures in base64): `kind` is `session` (`target` is the agent's id, a
   session's composer) or `project` (`target` is the project's name, the first message of a new
   session). `not-found` when the agent or the project does not exist, when the session was
   forgotten (it ended and cannot be resumed, or its kept week is over) or its project is gone:
   such a composer has no draft, and the window says nothing of it. `invalid-params` for another
-  `kind`.
-- `draft.set {kind, target, text, images?}` keeps the draft, in place of the one there was, and
+  `kind`. `machine` names the machine the session or the project is of, when it is not this
+  one's (a window that shows another machine's pages): such a draft is kept by this daemon, under
+  that machine's name, and never sent to it; this daemon knows nothing of the session or the
+  project there, so it checks nothing of them (no `not-found`), and a draft of this machine's own
+  (no `machine`) is never the same as one of another machine's of the same name.
+- `draft.set {kind, target, machine?, text, images?}` keeps the draft, in place of the one there was, and
   answers `{"kept"}`. `images` replaces the pictures (the composer's limits hold: 20, 5 MiB each,
   png, jpeg, gif or webp); left out, those the draft has stay. A draft with no text beyond
   blanks and no picture is forgotten (`{"kept": false}`), which is how emptying a composer is
@@ -1338,10 +1342,10 @@ pictures decoded and written off the runtime's threads.
   and this one does not are removed once it commits. The same `not-found` as `draft.get` for a
   session forgotten or a project gone: a write that comes late (a pending wait, the close of a
   window) never brings a draft back.
-- `draft.clear {kind, target}` forgets the draft and its pictures; a session or a project that is
+- `draft.clear {kind, target, machine?}` forgets the draft and its pictures; a session or a project that is
   gone is forgotten all the same.
-- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>"]}`: which composers hold
-  one, never what.
+- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>",
+  "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
@@ -1522,8 +1526,17 @@ was removed on 2026-11-21).
   projects are the same one when their `remotes` are equal and not empty. A machine whose list
   came before projects were listed says `null` for them. A session is `{"id", "title", "project", "state",
   "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
-  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  `pilot` the session of the agent that leads it on that machine, or `null`;
+  `pilot_elsewhere` `{"machine", "agent"}` the agent of another machine that leads it, that
+  machine's name and the agent's id there, as the session's machine said it (`pilots`), or
+  `null`: said only of a session of that machine's own list and only naming a member machine
+  other than it, and the window puts the row under that agent's only when that machine lists it,
+  never under a session of this machine (`docs/remote.md`, "One list of every machine"); never its
   conversation. The event `remote.sessions {name}` says that a machine's list changed.
+  Between machines of two builds: `sessions` keeps its closed shape (a field a machine of before
+  does not know makes it refuse the whole list), what is new beside it travels as a message of its
+  own (`projects`, `pilots`) that a machine of before refuses alone, and a machine that receives
+  none of them draws the list as before.
 - `remote.close {request}` keeps the user's close of a session of another machine: `request` is
   `agent.stop {agent}` for that machine, signed by the client with the device key as any request
   for another machine. This machine stores it before it sends it, sends it once that machine is

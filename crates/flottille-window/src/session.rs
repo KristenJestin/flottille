@@ -31,8 +31,8 @@ use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
     Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
     changed, changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line,
-    presence, presence_of, section_label, selectable, space, text_region, tint, tipped_when_cut,
-    toast, toggle_id, turning,
+    presence, presence_of, section_label, selectable, space, text_region, tint, tipped,
+    tipped_when_cut, toast, toggle_id, turning,
 };
 use gpui_kit::base::input::{
     Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
@@ -8614,6 +8614,20 @@ impl Render for SessionRail {
         let several = repositories.len() > 1;
         let forge_pending = self.place.as_ref().is_some_and(|place| place.forge_pending);
         let mut lines: Vec<AnyElement> = Vec::new();
+        // The icon before each repository says where the session works, as the sidebar's does.
+        let (place_icon, place_said) = match &self.workspace {
+            None => (
+                Icon::Folder,
+                SharedString::from("Works in the project folder itself"),
+            ),
+            Some(_) => (
+                Icon::Branch,
+                SharedString::from(match self.place.as_ref().and_then(|p| p.folder.as_ref()) {
+                    Some(folder) => format!("Works in a workspace of its own: {folder}"),
+                    None => "Works in a workspace of its own".to_owned(),
+                }),
+            ),
+        };
         for (path, name, facts, status) in repositories {
             let changes = match facts {
                 RepositoryFacts::Changes(Some(c)) if c.added == 0 && c.removed == 0 => {
@@ -8678,20 +8692,22 @@ impl Render for SessionRail {
                             .gap(space::SM)
                             .text_size(px(13.))
                             .medium()
-                            .child(
+                            .child(tipped(
                                 div()
                                     .id(ElementId::Name(
                                         format!("rail-repository-{name}-icon").into(),
                                     ))
+                                    .aria_label(place_said.clone())
                                     .w(px(FACT_ICON))
                                     .flex_none()
                                     .child(
-                                        icon(Icon::Repository)
-                                            .size(px(FACT_ICON))
-                                            .text_color(p.faint),
-                                    )
-                                    .test_support(),
-                            )
+                                        icon(place_icon).size(px(FACT_ICON)).text_color(p.faint),
+                                    ),
+                                place_said.clone(),
+                                FACT_ICON,
+                                window,
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .id(ElementId::Name(
@@ -8959,14 +8975,10 @@ impl Render for SessionRail {
             .filter(|_| self.workspace.is_some());
         let ticket_error = self.ticket_error.clone();
         let mut facts: Vec<(&str, String)> = Vec::new();
-        match (&self.workspace, &self.place) {
-            (Some(_), Some(place)) => {
-                if !place.bases.is_empty() {
-                    facts.push(("From", place.bases.join(", ")));
-                }
-            }
-            (None, _) => facts.push(("Place", "the project folder".into())),
-            _ => {}
+        if let (Some(_), Some(place)) = (&self.workspace, &self.place)
+            && !place.bases.is_empty()
+        {
+            facts.push(("From", place.bases.join(", ")));
         }
         let workspace = div()
             .id("rail-workspace")
@@ -9162,8 +9174,7 @@ impl Render for SessionRail {
     }
 }
 
-/// The size of every value in the Workspace section's facts (From, Place, Machine, Ticket,
-/// Pull request).
+/// The size of every value in the Workspace section's facts (From, Ticket, Pull request).
 const FACT_SIZE: f32 = 12.;
 
 /// The width of the icon column of the Workspace section's lines.
@@ -9200,7 +9211,6 @@ fn workspace_skeleton() -> impl IntoElement {
         .child(skeleton_line("rail-skeleton-repository".to_owned(), 80.))
         .child(skeleton_line("rail-skeleton-ticket".to_owned(), 150.))
         .child(skeleton_line("rail-skeleton-from".to_owned(), 60.))
-        .child(skeleton_line("rail-skeleton-machine".to_owned(), 56.))
         .test_support()
 }
 
@@ -9586,6 +9596,7 @@ impl Reply {
     pub fn new(
         shell: WeakEntity<Shell>,
         asks: crate::actions::Actions,
+        machine: Option<String>,
         session: String,
         project: String,
         window: &mut Window,
@@ -9638,7 +9649,10 @@ impl Reply {
             cx.new(|_| SessionOptions::new(shell.clone(), session.clone()).asking(asks.clone()));
         let reply = Self {
             asks,
-            keeping: Keeping::new(DraftKey::Session(session.clone())),
+            keeping: Keeping::new(DraftKey::Session {
+                machine,
+                agent: session.clone(),
+            }),
             session,
             project,
             commands: None,

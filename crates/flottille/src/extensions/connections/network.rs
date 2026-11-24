@@ -326,35 +326,90 @@ pub fn hold() -> ! {
 /// The pids of the processes that answer on the sockets of agent-browser's daemons in the socket
 /// folder `sockets` and the folders in it (`<session>.sock`; a namespace puts a session's in a
 /// subfolder), as the kernel says (`SO_PEERCRED`), never as a file says: 0 for one whose process
-/// is gone or unknown, which no network holds, and for one that stops accepting, which fails
-/// closed. A socket nobody answers on is no browser's. Never through a link.
+/// is gone or unknown, which no network holds, and for whatever cannot be told, which fails
+/// closed: a socket that cannot be connected to whatever the error (it stops accepting, its path
+/// is too long for a socket address, its mode refuses us, nobody listens on it any more), a link
+/// named as a socket (agent-browser follows it), a folder or an entry that cannot be read.
 pub fn daemons(sockets: &Path) -> Vec<u32> {
-    use std::os::unix::fs::FileTypeExt;
-    let Ok(listed) = std::fs::read_dir(sockets) else {
-        return Vec::new();
-    };
-    let mut pids = Vec::new();
-    for entry in listed.flatten() {
-        // The type of the entry itself, never of what a link leads to.
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_dir() {
-            pids.extend(daemons(&entry.path()));
-        } else if kind.is_socket() && entry.path().extension().is_some_and(|kind| kind == "sock") {
-            match connect_at_once(&entry.path()) {
-                Ok(stream) => pids.push(
-                    peer(&stream)
-                        .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
-                        .unwrap_or(0),
-                ),
-                // Alive, and not accepting: no browser that serves is, so none a network holds.
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => pids.push(0),
-                Err(_) => {}
-            }
+    connected(sockets)
+        .into_iter()
+        .map(|(_, result)| match result {
+            Ok(stream) => peer(&stream)
+                .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
+                .unwrap_or(0),
+            Err(_) => 0,
+        })
+        .collect()
+}
+
+/// Whether a daemon may still be alive on a socket of the socket folder `sockets`: one that
+/// accepts, or that cannot be told (it does not accept at once, its path is too long, its mode
+/// refuses us). Only a socket nobody listens on is a browser that ended, which keeps nothing.
+pub fn alive(sockets: &Path) -> bool {
+    connected(sockets)
+        .iter()
+        .any(|(_, result)| result.as_ref().map_or_else(|error| !dead(error), |_| true))
+}
+
+/// The sockets of the socket folder `sockets` (and the folders in it) that nobody listens on any
+/// more removed: a browser that crashed leaves its file, and holds nothing. One that cannot be
+/// told (any other error) stays, and counts as outside (`daemons`).
+pub fn swept(sockets: &Path) {
+    for (path, result) in connected(sockets) {
+        if result.as_ref().is_err_and(dead) {
+            let _ = std::fs::remove_file(path);
         }
     }
-    pids
+}
+
+/// Whether `error` says nobody is behind the socket: refused, or the file went.
+fn dead(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    )
+}
+
+/// A connection, or its error, to each socket of agent-browser's in `sockets` and the folders in
+/// it, never through a link. What cannot be looked at is an error too, never skipped: a folder
+/// or an entry that cannot be read, and a link named as a socket.
+fn connected(sockets: &Path) -> Vec<(PathBuf, io::Result<std::os::unix::net::UnixStream>)> {
+    use std::os::unix::fs::FileTypeExt;
+    let listed = match std::fs::read_dir(sockets) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => return vec![(sockets.to_owned(), Err(error))],
+    };
+    let mut found = Vec::new();
+    for entry in listed {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                found.push((sockets.to_owned(), Err(error)));
+                continue;
+            }
+        };
+        let path = entry.path();
+        // The type of the entry itself, never of what a link leads to.
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                found.push((path, Err(error)));
+                continue;
+            }
+        };
+        let named_as_socket = path.extension().is_some_and(|kind| kind == "sock");
+        if kind.is_dir() {
+            found.extend(connected(&path));
+        } else if kind.is_socket() && named_as_socket {
+            let result = connect_at_once(&path);
+            found.push((path, result));
+        } else if kind.is_symlink() && named_as_socket {
+            let error = io::Error::other("a link named as a socket");
+            found.push((path, Err(error)));
+        }
+    }
+    found
 }
 
 /// A connection to the socket at `path` that never waits for the daemon to accept it: a daemon
@@ -419,6 +474,7 @@ fn peer(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn a_record_of_a_process_that_took_the_pid_since_is_not_found() {
@@ -519,5 +575,120 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the check is held by a daemon that does not accept");
         assert_eq!(found, vec![0]);
+    }
+
+    /// A socket in a folder whose path is longer than a socket address holds: bound by a short
+    /// path through the folder's descriptor, and listed by its long one.
+    fn bound_too_long(sockets: &Path) -> (std::fs::File, std::os::unix::net::UnixListener) {
+        let mut deep = sockets.to_owned();
+        while deep.as_os_str().len() < 140 {
+            deep.push("a-folder-of-a-long-name");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let folder = std::fs::File::open(&deep).unwrap();
+        let by_descriptor = format!("/proc/self/fd/{}/default.sock", folder.as_raw_fd());
+        let listener = std::os::unix::net::UnixListener::bind(&by_descriptor).unwrap();
+        (folder, listener)
+    }
+
+    #[test]
+    fn a_socket_that_cannot_be_reached_counts_as_outside() {
+        // Fails closed on every error, not on "would block" alone: a socket whose path is too
+        // long for a socket address, and one nobody listens on any more, are sockets the check
+        // cannot tell, so none is skipped.
+        let sockets = tempfile::tempdir().unwrap();
+        let (_folder, _listener) = bound_too_long(sockets.path());
+        assert_eq!(daemons(sockets.path()), vec![0], "a path too long");
+        // Its listener gone: the file stays, and a connect is refused.
+        let gone = tempfile::tempdir().unwrap();
+        drop(listening(&gone.path().join("default.sock")));
+        assert_eq!(daemons(gone.path()), vec![0], "a socket nobody listens on");
+    }
+
+    #[test]
+    fn a_subfolder_that_cannot_be_read_counts_as_outside() {
+        // Nobody can tell what a folder holds that cannot be listed: a browser may answer in it.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads every folder: nothing to refuse
+        }
+        let sockets = tempfile::tempdir().unwrap();
+        let hidden = sockets.path().join("other");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let found = daemons(sockets.path());
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(found, vec![0]);
+    }
+
+    #[test]
+    fn a_link_named_as_a_socket_counts_as_outside() {
+        // agent-browser follows it to the daemon it leads to: never skipped.
+        let sockets = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _there = listening(&elsewhere.path().join("x.sock"));
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("x.sock"),
+            sockets.path().join("default.sock"),
+        )
+        .unwrap();
+        assert_eq!(daemons(sockets.path()), vec![0]);
+    }
+
+    #[test]
+    fn a_socket_that_refuses_to_be_connected_to_counts_as_outside() {
+        // EACCES: the file's permissions keep the connection from being made, and what answers
+        // behind it cannot be told.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root connects through any mode
+        }
+        let sockets = tempfile::tempdir().unwrap();
+        let path = sockets.path().join("default.sock");
+        let _listener = listening(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(daemons(sockets.path()), vec![0]);
+        assert!(alive(sockets.path()), "a socket that cannot be told");
+    }
+
+    #[test]
+    fn a_daemon_that_stops_accepting_is_alive() {
+        let sockets = tempfile::tempdir().unwrap();
+        let path = sockets.path().join("default.sock");
+        let _listener = listening(&path);
+        let mut kept = Vec::new();
+        while let Ok(stream) = connect_at_once(&path) {
+            kept.push(stream);
+            assert!(kept.len() < 10_000, "the backlog never fills");
+        }
+        assert!(alive(sockets.path()));
+    }
+
+    #[test]
+    fn a_socket_nobody_listens_on_is_not_alive() {
+        let sockets = tempfile::tempdir().unwrap();
+        drop(listening(&sockets.path().join("default.sock")));
+        assert!(!alive(sockets.path()));
+    }
+
+    #[test]
+    fn a_socket_whose_path_is_too_long_is_alive() {
+        // It cannot be connected to, so what answers behind it cannot be told: its profile stays.
+        let sockets = tempfile::tempdir().unwrap();
+        let (_folder, _listener) = bound_too_long(sockets.path());
+        assert!(alive(sockets.path()));
+    }
+
+    #[test]
+    fn a_socket_nobody_listens_on_is_swept_and_a_live_one_is_not() {
+        let sockets = tempfile::tempdir().unwrap();
+        let live = sockets.path().join("live.sock");
+        let _listener = listening(&live);
+        let stale = sockets.path().join("other/stale.sock");
+        drop(listening(&stale));
+        let link = sockets.path().join("link.sock");
+        std::os::unix::fs::symlink(&stale, &link).unwrap();
+        swept(sockets.path());
+        assert!(live.exists(), "a live socket was removed");
+        assert!(!stale.exists(), "a stale socket was kept");
+        assert!(link.is_symlink(), "a link was removed");
     }
 }

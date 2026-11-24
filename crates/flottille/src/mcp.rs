@@ -581,7 +581,8 @@ const SERVED: [Definition; 33] = [
                 "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
                 "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "create: the branch it starts from in place of the base rule, on the remote: one for every repository, or {path: branch}. Its pull requests target it."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
-                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
+                "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."},
+                "machine": {"type": "string", "description": "remove: the machine of a session or child you started on another machine, whose workspace there it removes, judged there; left out, this machine."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2633,8 +2634,13 @@ async fn played_whole(
         }
         _ => None,
     };
+    // The removal of the workspace of a session or child this agent started there: done there.
+    let removal_there = match grant.tools.contains(&tool) && !replaced && removed.is_none() {
+        true => crate::across::removal_aimed(daemon, &grant.agent, tool, &args),
+        false => None,
+    };
     // Its answer comes as that machine shaped it: masked, escaped and cut there; masked here too.
-    let shaped = away.is_some() || launch_read.is_some();
+    let shaped = away.is_some() || launch_read.is_some() || removal_there.is_some();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2657,6 +2663,13 @@ async fn played_whole(
         crate::across::forward(daemon, grant, tool, &args, away).await
     } else if let Some(launch) = &launch_read {
         crate::across::read_launch(daemon, grant, tool, &args, launch).await
+    } else if let Some(removal) = removal_there {
+        // Judged by the machine the workspace is on, as a removal of its own agents': nothing
+        // of it here.
+        match removal {
+            Ok(launch) => crate::across::remove_there(daemon, grant, &args, &launch).await,
+            Err(why) => Outcome::Refused(why),
+        }
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -2727,9 +2740,13 @@ async fn played_whole(
                             // and a pull request approved or blocked, by `forge` or by a line,
                             // and the worklog's token sent to another site or entry, a
                             // worklog deleted, a connection written, and a pull request's code
-                            // run by its review.
+                            // run by its review. So is, asked from another machine, a removal
+                            // that would lose what did not go back there.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
+                                && !(crate::across::is_stand_in(&grant.agent)
+                                    && removes_a_workspace(tool, &args)
+                                    && crate::actions::removal_loses(&says))
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
                                 && !gate::asks_launch_elsewhere(&ask)
@@ -2980,7 +2997,21 @@ pub async fn judged_off(
         {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
-        judged(&daemon, &grant, &tool, &args)
+        let judged = judged(&daemon, &grant, &tool, &args);
+        // For the tests of what is written between a card and what is done: the card is made,
+        // `<file>.reached` says so, and the call waits while the file exists.
+        if cfg!(debug_assertions)
+            && tool == "workspace"
+            && let Some(file) = std::env::var_os("FLOTTILLE_TEST_AFTER_CARD_FILE")
+                .map(std::path::PathBuf::from)
+                .filter(|file| file.exists())
+        {
+            let _ = std::fs::write(file.with_extension("reached"), "");
+            while file.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        judged
     };
     match tokio::task::spawn_blocking(judging).await {
         Ok(judged) => judged,
