@@ -6677,6 +6677,55 @@ mod tests {
     }
 
     #[test]
+    fn a_child_that_ends_is_not_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let made = |id: &str, parent: Option<&str>, depth: u32, led: bool| Agent {
+            id: id.into(),
+            parent: parent.map(str::to_owned),
+            depth,
+            led,
+            launched_by: led.then(|| "pilot0000000".to_owned()),
+            reopens: true,
+            native_id: Some(format!("session-{id}")),
+            ..an_agent()
+        };
+        // A root, its local child, a child of an agent of another machine (no parent here,
+        // below depth 0) and a session led from another machine (a root, with its pilot).
+        let agents = [
+            made("root00000000", None, 0, false),
+            made("local0000000", Some("root00000000"), 1, false),
+            made("remote000000", None, 1, false),
+            made("led000000000", None, 0, true),
+        ];
+        for agent in &agents {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+
+        for agent in &agents {
+            let ended = AgentChange {
+                state: Some(AgentState::Ended),
+                ..AgentChange::default()
+            };
+            store.change_agent(&agent.id, ended, None).unwrap();
+        }
+
+        let reopens = |id: &str| store.agent(id).unwrap().unwrap().reopens;
+        assert!(!reopens("local0000000"));
+        assert!(!reopens("remote000000"));
+        assert!(reopens("root00000000"));
+        assert!(reopens("led000000000"));
+        let kept: Vec<_> = store
+            .kept_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect();
+        assert_eq!(kept, ["led000000000", "root00000000"]);
+    }
+
+    #[test]
     fn a_leave_is_granted_only_while_both_sessions_are_live() {
         let mut store = Store::open_in_memory().unwrap();
         let writer = an_agent();

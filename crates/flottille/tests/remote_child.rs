@@ -10,6 +10,7 @@ use crate::remote_launch::{
     Machine, a_while, allowing, eventually, launch_ask, pc_and_server, prompted, sent_with,
     server_user,
 };
+use crate::remote_led::led_on_server;
 
 use common::mcp::{Mcp, server_of};
 use flottille_link::MachineMessage;
@@ -801,6 +802,57 @@ fn a_kept_root_session_is_still_kept() {
         .unwrap()
         .iter()
         .find(|agent| agent["id"] == own.as_str())
+        .unwrap()["resumable"]
+        .clone();
+    assert_eq!(listed, true);
+}
+
+#[test]
+fn a_child_of_another_machine_that_ends_is_not_kept() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // Its agent opened a session it could resume: the store says so while the child lives.
+    assert!(reopens(&server, &child));
+
+    ended(&server, &child);
+
+    // Cleared with its end, so that the sweep never finds it among the sessions kept.
+    assert!(!reopens(&server, &child));
+}
+
+#[test]
+fn a_led_session_of_another_machine_ended_and_kept_survives_the_sweep() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let (led, _root, _text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    ended(&server, &child);
+    ended(&server, &led);
+    assert!(reopens(&server, &led));
+    off(&server);
+    // The child as a release of before kept it: a sweep that forgot it has run.
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE agents SET depth = 0, reopens = 1, native_id = coalesce(native_id, 'kept-child') \
+         WHERE id = ?1",
+        [&child],
+    )
+    .unwrap();
+    drop(db);
+    let forgotten = kept_image(&server, &child);
+    let kept = kept_image(&server, &led);
+
+    on(&server);
+
+    eventually("the sweep forgot the old child's session", || {
+        !forgotten.exists()
+    });
+    assert!(kept.exists());
+    assert!(reopens(&server, &led));
+    let listed = server.user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == led.as_str())
         .unwrap()["resumable"]
         .clone();
     assert_eq!(listed, true);
