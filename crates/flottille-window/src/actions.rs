@@ -1705,11 +1705,12 @@ impl Actions {
                 self.updates.clone(),
                 self.bounds,
             );
+            let here = self.aim.as_ref().and_then(crate::machines::Aim::machine);
             std::thread::Builder::new()
                 .name("flottille-allow".into())
                 .spawn(move || {
                     let ask = (session, number, needs, from_step);
-                    allow_sharing(&local, &shown, sign, ask, bounds, &updates);
+                    allow_sharing(&local, (&shown, here), sign, ask, bounds, &updates);
                 })
                 .expect("a thread for an Allow that shares files");
             return;
@@ -2087,12 +2088,11 @@ fn signed_by_device(
         .ask_within(method, params, bound)?
 }
 
-/// [`Command::AllowSharing`]: what `from` holds already is read first, so that an entry made
-/// before (by hand, or by an Allow that failed further on) is shared, never made again; then each
-/// file is made and shared in turn, and the first step refused ends it, the launch still held.
+/// [`Command::AllowSharing`]: the files made and shared as [`share_files`] does, for the machine
+/// shown alone; the first step refused ends it, the launch still held; then the launch allowed.
 fn allow_sharing(
     local: &Connect,
-    shown: &Connect,
+    (shown, here): (&Connect, Option<String>),
     sign: Option<Sign>,
     (session, number, needs, from_step): (String, u64, crate::waiting::Needs, usize),
     bounds: Bounds,
@@ -2119,7 +2119,30 @@ fn allow_sharing(
             bounds.quick,
         )
     };
-    if !share_files(&needs, from_step, &needs.to, on_from, &told) {
+    // The machine shown, which the approval is sent to: this one when no other is in front.
+    let here = match here {
+        Some(here) => Ok(here),
+        None => ask_alone(local, "remote.machines", json!({}), bounds.quick)
+            .and_then(|asked| asked)
+            .and_then(|machines| {
+                machines["this"]["name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "this machine is no member of the user's yet".to_owned())
+            }),
+    };
+    let here = match here {
+        Ok(here) => here,
+        Err(why) => {
+            told(
+                None,
+                Step::Waiting,
+                Some(format!("Nothing is shared: {why}")),
+            );
+            return;
+        }
+    };
+    if !share_files(&needs, from_step, &here, on_from, &told) {
         return;
     }
     if !told(None, Step::Allowing, None) {
@@ -2148,30 +2171,59 @@ fn allow_sharing(
 }
 
 /// The files of an Allow ([`Command::AllowSharing`]) from `from_step` on, each made an entry on
-/// `from` unless it is one already, and shared, `on_from` asking `from`, each step `told` as it
-/// goes: whether every one is shared. `here` is the machine the launch is held on.
+/// `from` unless it is the file's own already, and shared, `on_from` asking `from`, each step
+/// `told` as it goes: whether every one is shared. `here` is the machine the launch is held on.
+///
+/// What the card lists is what the user consents to, and the daemon shown may lie: the files go
+/// to `here` alone, each into the entry its project and path name, and an entry of that name is
+/// shared only when it is bound to that file; any other is left to `vault.from_file`, which
+/// refuses it.
 fn share_files(
     needs: &crate::waiting::Needs,
     from_step: usize,
-    _here: &str,
+    here: &str,
     on_from: impl Fn(&str, Value) -> Result<Value, String>,
     told: impl Fn(Option<usize>, crate::waiting::Step, Option<String>) -> bool,
 ) -> bool {
     use crate::waiting::Step;
+    use flottille_core::vault::{entry_for, file_use};
+    if needs.to != here {
+        let why = format!(
+            "Its files would go to {}, not to {here} where the launch is held: nothing is shared",
+            needs.to
+        );
+        told(None, Step::Waiting, Some(why));
+        return false;
+    }
+    for (at, file) in needs.files.iter().enumerate() {
+        let own = entry_for(&needs.project, &file.path);
+        if file.entry != own {
+            let why = format!(
+                "{} is not shared: its entry would be {}, not {own}",
+                file.path, file.entry
+            );
+            told(Some(at), Step::NotMade, Some(why));
+            return false;
+        }
+    }
+    // The entries that are their file's already, made before (by hand from the file, or by an
+    // Allow that failed further on).
     let made: HashSet<String> = match on_from("vault.list", json!({})) {
         Ok(listed) => listed["entries"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .filter_map(|entry| {
+                let name = entry["name"].as_str()?;
+                let file = needs.files.iter().find(|file| file.entry == name)?;
+                (entry["for"].as_str() == Some(&file_use(&needs.project, &file.path)))
+                    .then(|| name.to_owned())
+            })
             .collect(),
         Err(why) => {
-            let path = needs.files.get(from_step).map_or("", |file| &file.path);
-            told(
-                Some(from_step),
-                Step::NotMade,
-                Some(format!("{path} was not made: {why}")),
-            );
+            // No file is to blame: the card says it, its rows as they were.
+            let why = format!("The vault of {} cannot be read: {why}", needs.from);
+            told(None, Step::Waiting, Some(why));
             return false;
         }
     };

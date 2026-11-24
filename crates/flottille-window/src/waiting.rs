@@ -591,19 +591,23 @@ impl Waiting {
                         .test_support(),
                 )
             })
-            .when(card.needs.is_some(), |d| {
-                let to = card.needs.as_ref().map_or("", |needs| needs.to.as_str());
+            .when_some(card.needs.as_ref(), |d, needs| {
                 let said = format!(
-                    "Deny leaves on {to} the entries already shared: each is bound to its file \
-                     alone."
+                    "Deny leaves on {} the entries already shared: each is bound to its file \
+                     alone.",
+                    needs.to
                 );
-                d.child(
-                    div()
-                        .id(id("approval-shared-stay"))
-                        .aria_label(SharedString::from(said.clone()))
-                        .child(SharedString::from(said))
-                        .test_support(),
-                )
+                // Said once a file is shared, and only then: before, Deny leaves nothing.
+                let shared = self
+                    .runs
+                    .get(&number)
+                    .is_some_and(|run| run.steps[..run.steps.len() - 1].contains(&Step::Shared));
+                let line = div()
+                    .id(id("approval-shared-stay"))
+                    .aria_label(SharedString::from(said.clone()))
+                    .child(SharedString::from(said))
+                    .test_support();
+                d.child(presence(id("approval-shared-stay-block"), shared, line).space(space::SM))
             })
             .when_some(card.source.clone(), |d, source| {
                 d.child(
@@ -879,7 +883,17 @@ impl Waiting {
             false => "Allow".into(),
         };
         let shown = changed(&id("allow-label"), &label, window, cx);
-        let viewer = crate::machines::held(cx).filter(|held| !held.offline);
+        // The shares are signed for `from`: its rights are what count, whichever machine is in
+        // front.
+        let viewer = self
+            .page
+            .upgrade()
+            .map(|page| page.read(cx).shell())
+            .and_then(|shell| shell.upgrade())
+            .and_then(|shell| {
+                let machines = shell.read(cx).machines().read(cx).machines();
+                crate::machines::sharing_held(&needs.from, machines)
+            });
         let mut button = Button::primary(id("allow"), label)
             .disabled(busy || viewer.is_some())
             .on_click(
@@ -993,10 +1007,14 @@ fn files_block(number: u64, needs: &Needs, run: &Run, p: Palette) -> impl IntoEl
         1 => "1 file".to_owned(),
         files => format!("{files} files"),
     };
-    let head = format!("From {} → to {} · {count}", needs.from, needs.to);
+    let head = format!(
+        "From {} → to {} · {} · {count}",
+        needs.from, needs.to, needs.project
+    );
     let consent = format!(
-        "Allow makes each entry on {} from its file and shares it with {}, then allows the launch.",
-        needs.from, needs.to
+        "Allow makes each entry on {} from its file of {} and shares it with {}, then allows the \
+         launch.",
+        needs.from, needs.project, needs.to
     );
     let row = |at: String, step: usize, verb: String, object: Option<String>| {
         let state = run.steps[step];

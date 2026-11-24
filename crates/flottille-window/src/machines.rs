@@ -1362,6 +1362,13 @@ pub fn holding(front: Option<&str>, machines: Option<&Machines>) -> Option<Holdi
         })
 }
 
+/// Why this device signs no share of what the machine `from` holds, when it signs none: `from` is
+/// off, or this device may only view it. This machine's own are this device's.
+pub fn sharing_held(from: &str, machines: Option<&Machines>) -> Option<Holding> {
+    let this = machines.and_then(|machines| machines.this.as_deref());
+    holding(Some(from).filter(|from| this != Some(*from)), machines)
+}
+
 /// What [`Held`] says now.
 pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
     cx.try_global::<Held>().and_then(|held| held.0.clone())
