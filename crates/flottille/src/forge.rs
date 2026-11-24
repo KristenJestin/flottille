@@ -2968,7 +2968,7 @@ async fn follow_retarget(daemon: &Arc<Daemon>, forge: &Forge, on: Retarget<'_>) 
         );
     }
     let why = format!("its pull request #{number} was moved onto it on the forge");
-    workspaces::move_base(daemon, &workspace, repository, to, &why)
+    workspaces::move_base(daemon, &workspace, repository, (&recorded, to), &why)
         .map(|said| format!(" {said}"))
         .unwrap_or_default()
 }
@@ -3590,7 +3590,13 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
                 forge.slug()
             )
         };
-        let moved = workspaces::move_base(daemon, &workspace, &checkout.path, &followed.to, &why);
+        let moved = workspaces::move_base(
+            daemon,
+            &workspace,
+            &checkout.path,
+            (&recorded, &followed.to),
+            &why,
+        );
         match moved {
             Some(moved) => format!("{forge_said} {moved}"),
             None => forge_said.to_owned(),
