@@ -632,3 +632,90 @@ fn agent_resume_is_refused_on_an_ended_child_of_another_machine() {
 
     assert_eq!(server.agent(&child)["state"], "ended");
 }
+
+/// What a session kept to be resumed holds here: an image of one of its messages.
+fn kept_image(server: &Machine, agent: &str) -> std::path::PathBuf {
+    let image = server
+        .user
+        .path(&format!("data/flottille/images/{agent}/screen.png"));
+    std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+    std::fs::write(&image, "an image of the export").unwrap();
+    image
+}
+
+/// `agent` stopped by the user and ended.
+fn ended(server: &Machine, agent: &str) {
+    server
+        .user
+        .call("agent.stop", json!({"agent": agent}))
+        .unwrap();
+    eventually("the agent ended", || {
+        server.agent(agent)["state"] == "ended"
+    });
+}
+
+/// A child of `pc`'s root on `server` that ended before the upgrade that made it a child, and a
+/// session of the server's own that ended too, both stored as a release of before left them: a
+/// root's place for the child, each session kept to be resumed, with an image. The server is
+/// off; the ids of the child and of the server's own session.
+fn kept_before_the_upgrade(pc: &Machine, server: &Machine) -> (String, String) {
+    let (child, _launch, _mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    let (own, _mcp) = server.root("auto");
+    ended(server, &child);
+    ended(server, &own);
+    off(server);
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE agents SET depth = 0, reopens = 1, native_id = coalesce(native_id, 'kept-child') \
+         WHERE id = ?1",
+        [&child],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE agents SET reopens = 1, native_id = coalesce(native_id, 'kept-root') \
+         WHERE id = ?1",
+        [&own],
+    )
+    .unwrap();
+    drop(db);
+    (child, own)
+}
+
+/// Whether the store says `agent`'s session is kept to be resumed.
+fn reopens(server: &Machine, agent: &str) -> bool {
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.query_row("SELECT reopens FROM agents WHERE id = ?1", [agent], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+#[test]
+fn an_ended_child_of_another_machine_kept_before_the_upgrade_is_forgotten() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _own) = kept_before_the_upgrade(&pc, &server);
+    let image = kept_image(&server, &child);
+
+    on(&server);
+
+    eventually("the child's session forgotten", || {
+        !image.exists() && !reopens(&server, &child)
+    });
+    assert_eq!(server.agent(&child)["depth"], 1);
+}
+
+#[test]
+fn a_kept_root_session_is_still_kept() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, own) = kept_before_the_upgrade(&pc, &server);
+    let forgotten = kept_image(&server, &child);
+    let kept = kept_image(&server, &own);
+
+    on(&server);
+
+    // The sweep ran: it forgot the child's session.
+    eventually("the child's session forgotten", || !forgotten.exists());
+    assert!(kept.exists());
+    assert!(reopens(&server, &own));
+    assert_eq!(server.agent(&own)["resumable"], true);
+}
