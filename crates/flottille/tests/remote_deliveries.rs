@@ -1015,18 +1015,14 @@ fn a_message_sent_from_another_machine_is_masked_with_the_receiver_s_place() {
 
 #[test]
 fn a_brief_from_another_machine_is_masked_with_the_receiver_s_place() {
-    // The setup copies the project's `.env` into the workspace each child works in.
-    let (_hub, pc, server) = pc_and_server(
-        server_user(allowing()),
-        Some("\n[[setup]]\ncopy = [\".env\"]\n"),
-    );
+    // The setup puts the secret in the workspace each child works in, as a copied `.env` is.
+    let user = server_user(allowing());
+    let file = user.path("export.env");
+    std::fs::write(&file, format!("EXPORT_KEY={SERVER_SECRET}\n")).unwrap();
+    let setup = format!("\n[[setup]]\nrun = \"cp {} .env\"\n", file.display());
+    let (_hub, pc, server) = pc_and_server(user, Some(&setup));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("auto");
-    std::fs::write(
-        server.folder().join(".env"),
-        format!("EXPORT_KEY={SERVER_SECRET}\n"),
-    )
-    .unwrap();
 
     let answer = launched(
         &mcp,
