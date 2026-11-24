@@ -382,11 +382,19 @@ impl Adapter {
         env: &BTreeMap<String, String>,
     ) -> Option<String> {
         // Anywhere in a word: a shell's line (`sh -c 'TMPDIR=… agent-browser mcp'`) sets it too.
+        // A name starts there, so that `XDG_CONFIG_HOME=` is said as itself and not as `HOME`.
         let in_command = FOLDERS_OF_THE_BROWSER.iter().find_map(|name| {
             let assigned = format!("{name}=");
             words
                 .iter()
-                .any(|word| word.contains(&assigned))
+                .any(|word| {
+                    word.match_indices(&assigned).any(|(at, _)| {
+                        !word[..at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|before| before.is_ascii_alphanumeric() || before == '_')
+                    })
+                })
                 .then_some(("the server's command", "the connection's command", *name))
         });
         let (sets, from, named) = in_command.or_else(|| {
