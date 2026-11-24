@@ -4254,6 +4254,10 @@ mod tests {
             one family tool with actions (as forge and tickets), guidance read on demand (as \
             skill_read), or tool search for rarely used families. A tool cannot be withheld by \
             context.";
+        // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
+        // definition's size (2,915 characters, measured on that branch), before it is listed
+        // short as the other rarely used families are.
+        const ROUTINE: usize = 2_915;
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
             ("a root", true, false),
@@ -4262,10 +4266,11 @@ mod tests {
         ] {
             let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, false);
             let names = served(&claude::PROVIDER, &list);
+            let coming = if root { 1 } else { 0 };
             assert!(
-                names.len() <= TOOLS,
+                names.len() + coming <= TOOLS,
                 "{} tools for {role}, at most {TOOLS}. {advice}",
-                names.len()
+                names.len() + coming
             );
             let chars: usize = names
                 .into_iter()
@@ -4273,7 +4278,8 @@ mod tests {
                     let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
                     tool.unwrap().len()
                 })
-                .sum();
+                .sum::<usize>()
+                + coming * ROUTINE;
             biggest = biggest.max(chars);
         }
         assert!(

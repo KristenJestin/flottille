@@ -420,6 +420,50 @@ fn a_2026_07_28_client_with_server_discover_lists_and_calls_the_tools() {
 // Files.
 
 #[test]
+fn a_rarely_used_family_reads_its_guidance_on_demand() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+
+    // Listed short: what it is, an example and where its guide is; the arguments by name and
+    // type, their sentences in the guide.
+    let tools = mcp.tools();
+    let services = tools.iter().find(|t| t["name"] == "services").unwrap();
+    let description = services["description"].as_str().unwrap();
+    assert!(description.contains("{\"action\": \"guide\"}"), "{description}");
+    assert!(description.contains("{\"action\": \"start\""), "{description}");
+    let properties = &services["inputSchema"]["properties"];
+    assert!(properties["ask_before_running"]["description"].is_null(), "{properties}");
+    assert_eq!(properties["ask_before_running"]["type"], "boolean");
+    let actions = properties["action"]["enum"].as_array().unwrap();
+    assert!(actions.contains(&json!("guide")), "{actions:?}");
+
+    // The first call works and brings the guide whole: the description and each argument's.
+    let (first, guide) = mcp.call_with_guide("services", json!({"action": "list"}));
+    assert!(!first.error, "{}", first.text);
+    let guide = guide.expect("the first call brings the guide");
+    for said in [
+        "stop is always held for the user",
+        "ask_before_running: add, edit: held for approval each time an agent starts it",
+    ] {
+        assert!(guide.contains(said), "{said}: {guide}");
+    }
+    let (again, guide) = mcp.call_with_guide("services", json!({"action": "list"}));
+    assert!(!again.error, "{}", again.text);
+    assert_eq!(again.text, first.text);
+    assert_eq!(guide, None, "given once");
+
+    // Asked for: the guide is the answer, judged by nobody, and the next call works without it.
+    let (asked, guide) = mcp.call_with_guide("setup", json!({"action": "guide"}));
+    assert!(!asked.error, "{}", asked.text);
+    assert_eq!(guide, None);
+    assert!(asked.text.contains("for_each_repository"), "{}", asked.text);
+    assert!(asked.text.contains("to: move: its new number."), "{}", asked.text);
+    let (listed, guide) = mcp.call_with_guide("setup", json!({"action": "list"}));
+    assert!(!listed.error, "{}", listed.text);
+    assert_eq!(guide, None, "already read");
+}
+
+#[test]
 fn writing_a_file_never_read_is_refused() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
