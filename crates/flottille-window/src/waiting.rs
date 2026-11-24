@@ -266,6 +266,11 @@ impl Waiting {
         self.renders
     }
 
+    /// How far the section's cards are scrolled, as a distance down from their top.
+    pub fn scrolled(&self) -> gpui_kit::Pixels {
+        -self.scroll.offset().y
+    }
+
     /// The card the user was sent to, while it is lit.
     pub fn pointed(&self) -> Option<u64> {
         self.pointed

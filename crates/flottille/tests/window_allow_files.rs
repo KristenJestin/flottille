@@ -584,6 +584,15 @@ fn a_failed_allow_brings_its_error_and_buttons_into_view(cx: &mut TestAppContext
     );
 }
 
+/// How far the cards of "Waiting for you" are scrolled.
+fn scrolled(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    let page = page_of(shell, cx).expect("the session's page");
+    cx.update(|_, cx| {
+        let waiting = page.read(cx).waiting(cx);
+        waiting.read(cx).scrolled()
+    })
+}
+
 #[gpui_kit::test]
 fn a_successful_allow_scrolls_nothing(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
@@ -592,21 +601,26 @@ fn a_successful_allow_scrolls_nothing(cx: &mut TestAppContext) {
     open_page(&shell, &agent, cx);
     the_card_lists_its_files(&shell, number, cx);
     scroll_cards_down(&shell, number, cx);
-    let before = bounds_of(cx, format!("allow-{number}")).map(|found| found.top());
+    let before = scrolled(&shell, cx);
     cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
-    // Each step reaches the page: the card's buttons stay where they were while it goes.
+    // Each step reaches the page: the section stays where the user put it while it goes.
     let deadline = Instant::now() + WAIT;
     while !pending(&server).is_empty() {
         step(&shell, cx);
-        let now = bounds_of(cx, format!("allow-{number}")).map(|found| found.top());
-        assert_eq!(now, before, "the section scrolled while the steps went");
+        assert_eq!(
+            scrolled(&shell, cx),
+            before,
+            "the section scrolled while the steps went"
+        );
         assert!(Instant::now() < deadline, "the launch was never allowed");
     }
     for _ in 0..20 {
         advance(cx, Duration::from_millis(16));
-        if let Some(now) = bounds_of(cx, format!("allow-{number}")).map(|found| found.top()) {
-            assert_eq!(Some(now), before, "the section scrolled once allowed");
-        }
+        assert_eq!(
+            scrolled(&shell, cx),
+            before,
+            "the section scrolled once allowed"
+        );
     }
 }
 
@@ -624,30 +638,23 @@ fn the_user_s_own_scroll_after_a_failed_allow_is_left_alone(cx: &mut TestAppCont
         label(cx, format!("approval-error-{number}")).is_some()
     });
     settle(&shell, cx);
-    let in_view = bounds_of(cx, format!("allow-{number}")).unwrap().top();
+    let in_view = scrolled(&shell, cx);
 
     // The user scrolls back up to read the files: the section stays where they put it.
-    let over = gpui_kit::point(
-        bounds_of(cx, format!("allow-{number}")).unwrap().center().x,
-        in_view - px(40.),
-    );
+    let section = bounds_of(cx, "rail-waiting".to_owned()).unwrap();
     cx.simulate_event(gpui_kit::ScrollWheelEvent {
-        position: over,
+        position: section.center(),
         delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(200.))),
         ..Default::default()
     });
     settle(&shell, cx);
-    let moved = bounds_of(cx, format!("allow-{number}")).unwrap().top();
+    let moved = scrolled(&shell, cx);
     assert!(
-        moved > in_view,
+        moved < in_view,
         "the user scrolled up: {moved:?} {in_view:?}"
     );
     advance(cx, Duration::from_secs(2));
-    assert_eq!(
-        bounds_of(cx, format!("allow-{number}")).unwrap().top(),
-        moved,
-        "the section was brought back"
-    );
+    assert_eq!(scrolled(&shell, cx), moved, "the section was brought back");
 }
 
 /// A daemon that lists `files` (path and entry) for the card `number`, whatever it listed before:
