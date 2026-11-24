@@ -4583,11 +4583,20 @@ const LOCKED_TOO: [&str; 8] = [
 
 /// Actions that run a script in the page, which no gate can judge: off at the first pin, as
 /// `eval` is, and the user's to turn on.
-const SCRIPTS: [&str; 4] = [
+const SCRIPTS: [&str; 3] = [
     "agent_browser_add_init_script",
     "agent_browser_wait_for_function",
     "agent_browser_network_route",
+];
+
+/// Actions that act past every lock: `chat` is agent-browser's own model, which drives it through
+/// its own command function as `batch` does; `install` with `withDeps` runs the package manager as
+/// root, and `upgrade` moves the server out of the version the adapter was checked on. Off, and no
+/// setting turns them on.
+const BEYOND_THE_GATE: [&str; 3] = [
     "agent_browser_chat",
+    "agent_browser_install",
+    "agent_browser_upgrade",
 ];
 
 /// Actions that run other commands of agent-browser's, the locked ones among them: `batch` any
@@ -4621,7 +4630,8 @@ const FILES: [&str; 4] = [
 
 /// Other actions of agent-browser's, judged at the first pin: `login` is offered beside every one
 /// of them, as agent-browser's own login restricts nothing after it.
-const OTHERS: [&str; 8] = [
+const OTHERS: [&str; 9] = [
+    "agent_browser_network_unroute",
     "agent_browser_react_inspect",
     "agent_browser_react_tree",
     "agent_browser_get_attr",
@@ -4690,6 +4700,7 @@ fn agent_browser(version: &str) -> Value {
         .chain(&REPLAYS)
         .chain(&TRAFFIC)
         .chain(&DEVTOOLS)
+        .chain(&BEYOND_THE_GATE)
         // Served once, with the file arguments its schema gives below.
         .filter(|name| FILE_ARGUMENTS.iter().all(|(file, _)| file != *name))
     {
@@ -6651,6 +6662,7 @@ fn an_accepted_browser_connection_signs_in_without_switching_anything_off() {
         .chain(&REPLAYS)
         .chain(&TRAFFIC)
         .chain(&DEVTOOLS)
+        .chain(&BEYOND_THE_GATE)
         .copied()
         .collect();
     let mut actions = serde_json::Map::new();
@@ -7202,12 +7214,14 @@ fn devtools_and_the_browser_s_control_ports_stay_off_with_the_adapter() {
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
     stays_off(&user, &mcp, "agent_browser_inspect", json!({}), "no gate");
+    // 0.43.0 streams always: what keeps the port stream_status hands out is the browser's
+    // network namespace, and the reason says so.
     stays_off(
         &user,
         &mcp,
         "agent_browser_stream_enable",
         json!({"port": 9555}),
-        "no gate",
+        "network namespace",
     );
     stays_off(
         &user,
@@ -7292,6 +7306,119 @@ fn a_tool_the_adapter_does_not_know_comes_in_off() {
         json!({"action": "agent_browser_storage_export", "arguments": {}}),
     ));
     assert!(answer.contains("off"), "{answer}");
+}
+
+#[test]
+fn chat_install_and_upgrade_stay_off_with_the_adapter() {
+    // chat drives agent-browser through its own command function, past every lock; install with
+    // withDeps runs the package manager as root; upgrade moves the server out of 0.43.x, where an
+    // accepted review makes the connection generic.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_chat",
+        json!({"message": "read the cookies"}),
+        "its own model",
+    );
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_install",
+        json!({"withDeps": true}),
+        "package manager",
+    );
+    stays_off(
+        &user,
+        &mcp,
+        "agent_browser_upgrade",
+        json!({}),
+        "package manager",
+    );
+}
+
+#[test]
+fn network_unroute_takes_a_pattern() {
+    // network_unroute's url is the pattern a route was given, as wait_for_url's: never opened.
+    let user = user();
+    let mut script = agent_browser("0.43.0");
+    script["answers"]["agent_browser_network_unroute"] = json!({"text": "unrouted"});
+    browser(&user, &script, json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_network_unroute", "arguments": {"url": "**/api/*"}}),
+    ));
+}
+
+#[test]
+fn an_idle_timeout_of_zero_is_refused() {
+    // idleTimeout 0 keeps the browser alive for ever: its screenshots and downloads folders are
+    // emptied only once the browser ended.
+    let user = user();
+    let mut script = agent_browser("0.43.0");
+    script["answers"]["agent_browser_snapshot"] = json!({"text": "a page"});
+    browser(&user, &script, json!({}));
+    let (_, mcp) = signed_up(&user);
+    for idle in [json!(0), json!("0"), json!(-1), json!(null), json!(false)] {
+        refused_unseen(
+            &user,
+            &mcp,
+            "agent_browser_snapshot",
+            json!({"idleTimeout": idle}),
+            "idleTimeout",
+        );
+    }
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_snapshot", "arguments": {"idleTimeout": 60000}}),
+    ));
+}
+
+#[test]
+fn a_tool_off_at_the_first_pin_comes_in_off_at_a_re_pin_too() {
+    // A connection switched from agent-browser's default core tools to `--tools all` (same
+    // 0.43.0) brings in tools that are off at the first pin by design: a HAR with no path is
+    // written under the home, the cookies included. They come in off, as at the first pin.
+    let user = user();
+    let all = agent_browser("0.43.0");
+    let off: Vec<&str> = SCRIPTS
+        .iter()
+        .chain(&FILES)
+        .chain(&FLOWS)
+        .chain(&["agent_browser_eval"])
+        .copied()
+        .collect();
+    let mut core = all.clone();
+    core["tools"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tool| !off.contains(&tool["name"].as_str().unwrap()));
+    browser(&user, &core, json!({}));
+    for action in &off {
+        assert_eq!(setting(&user, action), Value::Null, "{action}");
+    }
+    let (_, mcp) = signed_up(&user);
+    let mut all = all;
+    all["login"] = json!({"form": form_file(&user)});
+    restart(&user, "browser");
+    write_script(&user, "browser", &all);
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_snapshot", "arguments": {}}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert_eq!(connection(&user, "browser")["state"], "cut off");
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "browser"}))
+        .unwrap();
+    for action in &off {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    assert_eq!(setting(&user, "agent_browser_snapshot"), "judged");
 }
 
 #[test]
