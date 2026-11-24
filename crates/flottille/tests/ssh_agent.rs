@@ -2820,7 +2820,8 @@ fn update(user: &User, link: &Path, a: &Path, own: &Path) {
 fn a_dotfiles_update_that_relinks_the_git_config_keeps_the_push_lent() {
     let (user, _agent, _bus) = user();
     // A link in a folder of its own, which no run can change: the settings of the user's
-    // dotfiles manager, its folder below the home.
+    // dotfiles manager, its folder below the home. The versions are under `home/dots`, kept
+    // read-only to every run since the start, so the new one is no file a run could have written.
     let link = user.path("home/gitlink/config");
     let (user, a, own) = dotfiles(user, &link);
     let mcp = session(&user, SSH_REMOTE);
