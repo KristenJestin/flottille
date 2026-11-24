@@ -105,14 +105,30 @@ fn logged(user: &User, name: &str, event: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The command of the fake server of the connection `name`: for `browser`, the fake run as
+/// `agent-browser`, the only program a browser connection's command may name.
 fn command_of(user: &User, name: &str) -> Value {
+    let program = match name {
+        "browser" => as_agent_browser(user),
+        _ => fake_mcp(),
+    };
     json!([
-        fake_mcp(),
+        program,
         "--script",
         script_file(user, name),
         "--log",
         log_file(user, name)
     ])
+}
+
+/// The fake server under the name `agent-browser`, in the user's temporary folder.
+fn as_agent_browser(user: &User) -> PathBuf {
+    let program = user.path("bin/agent-browser");
+    if !program.exists() {
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(fake_mcp(), &program).unwrap();
+    }
+    program
 }
 
 fn turn_on(user: &User) {
@@ -7649,23 +7665,49 @@ fn browser_command_after(user: &User, words: &[&str]) -> Value {
     json!(command)
 }
 
-/// Login is refused, by `named`, at the login and at the review, and nothing was typed.
-fn login_and_review_refused(user: &User, mcp: &Mcp, named: &str) {
-    let said = refused(mcp.call(
+/// The server of `browser` never started, its review refused by `named` (never the value), and
+/// login refused with nothing typed.
+fn never_started(user: &User, mcp: &Mcp, named: &str) {
+    assert!(logged(user, "browser", "start").is_empty(), "{named}");
+    let refused_review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap_err();
+    assert!(
+        refused_review.1.contains(named),
+        "{named}: {refused_review:?}"
+    );
+    assert!(
+        !refused_review.1.contains("/tmp/elsewhere"),
+        "{named}: {refused_review:?}"
+    );
+    let failing = connection(user, "browser")["failing"].to_string();
+    assert!(failing.contains(named), "{named}: {failing}");
+    assert!(!failing.contains("/tmp/elsewhere"), "{named}: {failing}");
+    refused(mcp.call(
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    assert!(said.contains(named), "{named}: {said}");
-    assert!(said.contains("password"), "{named}: {said}");
-    assert!(!said.contains("/tmp/elsewhere"), "{named}: {said}");
+    assert!(logged(user, "browser", "start").is_empty(), "{named}");
     assert!(logged(user, "browser", "login").is_empty(), "{named}");
     assert!(form(user).is_none(), "{named}");
-    let review = user
-        .call("connection.review", json!({"name": "browser"}))
-        .unwrap();
-    let said = review["adapter"]["said"].as_str().unwrap();
-    assert!(said.contains(named), "{named}: {review}");
-    assert!(!said.contains("/tmp/elsewhere"), "{named}: {review}");
+}
+
+#[test]
+fn a_connection_whose_command_moves_the_browser_s_folders_is_never_started() {
+    for named in ["AGENT_BROWSER_SOCKET_DIR", "HOME"] {
+        let user = user();
+        let assignment = format!("{named}=/tmp/elsewhere");
+        let added = browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"command": browser_command_after(&user, &["env", &assignment])}),
+        );
+        assert_eq!(added["given"], false, "{named}: {added}");
+        let (_, mcp) = signed_up(&user);
+        never_started(&user, &mcp, named);
+    }
 }
 
 #[test]
@@ -7688,9 +7730,10 @@ fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
         } else {
             named.to_owned()
         };
-        login_and_review_refused(&user, &mcp, &said);
+        never_started(&user, &mcp, &said);
     }
-    // An edit after the user accepted a clean command is refused as well.
+    // An edit after the user accepted a clean command is refused as well: its server is not
+    // started again.
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
@@ -7699,20 +7742,24 @@ fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
     std::fs::remove_file(form_file(&user)).ok();
-    let before = logged(&user, "browser", "login").len();
+    let logins = logged(&user, "browser", "login").len();
     user.call(
         "connection.edit",
         json!({"name": "browser", "command": browser_command_after(
             &user, &["env", "AGENT_BROWSER_SOCKET_DIR=/tmp/elsewhere"])}),
     )
     .unwrap();
-    let said = refused(mcp.call(
+    let starts = logged(&user, "browser", "start").len();
+    refused(mcp.call(
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    assert!(said.contains("AGENT_BROWSER_SOCKET_DIR"), "{said}");
-    assert!(!said.contains("/tmp/elsewhere"), "{said}");
-    assert_eq!(logged(&user, "browser", "login").len(), before);
+    let failing = connection(&user, "browser")["failing"].to_string();
+    assert!(failing.contains("AGENT_BROWSER_SOCKET_DIR"), "{failing}");
+    assert!(!failing.contains("/tmp/elsewhere"), "{failing}");
+    assert_eq!(logged(&user, "browser", "start").len(), starts);
+    assert_eq!(logged(&user, "browser", "login").len(), logins);
+    assert!(form(&user).is_none());
 }
 
 #[test]
@@ -7736,8 +7783,96 @@ fn a_connection_whose_command_starts_with_a_launcher_is_refused() {
         let (_, mcp) = signed_up(&user);
         // Said by the launcher's own name, its folder left out.
         let program = launcher[0].rsplit('/').next().unwrap();
-        login_and_review_refused(&user, &mcp, &format!("starts with {program}"));
+        never_started(&user, &mcp, &format!("starts with {program}"));
     }
+}
+
+/// The connection `browser` on a program that is not agent-browser (the fake under its own name,
+/// as `node -e '…' mcp` would be), pinned while its server said it was agent-browser 0.42.0, a
+/// version no adapter applies to; the script then says 0.43.0, which the adapter applies to.
+fn browser_by_another_program(user: &User) -> (String, Mcp) {
+    let mut command = command_of(user, "browser");
+    command[0] = json!(fake_mcp());
+    command.as_array_mut().unwrap().push(json!("mcp"));
+    let added = browser_declared(
+        user,
+        &agent_browser("0.42.0"),
+        json!({}),
+        &[],
+        json!({"command": command}),
+    );
+    assert_eq!(added["given"], true, "{added}");
+    let mut script = agent_browser("0.43.0");
+    script["login"] = json!({"form": form_file(user)});
+    write_script(user, "browser", &script);
+    signed_up(user)
+}
+
+/// Sets, in the store, the version that the connection's `column` (`pin` or `seen`) says its
+/// server announced, as a Flottille before this check would have stored it.
+fn stored_version(user: &User, name: &str, column: &str, version: &str) {
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let changed = db
+        .execute(
+            &format!(
+                "UPDATE ext_connections_connections \
+                 SET {column} = json_set({column}, '$.server.version', ?1) WHERE name = ?2"
+            ),
+            rusqlite::params![version, name],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+#[test]
+fn an_accepted_connection_whose_command_does_not_name_agent_browser_is_not_started_again() {
+    let user = user();
+    let (_, mcp) = browser_by_another_program(&user);
+    // Accepted with the adapter by a Flottille that did not check the command.
+    stored_version(&user, "browser", "pin", "0.43.0");
+    restart(&user, "browser");
+    let starts = logged(&user, "browser", "start").len();
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    let failing = connection(&user, "browser")["failing"].to_string();
+    assert!(failing.contains("flottille-fake-mcp"), "{failing}");
+    assert_eq!(logged(&user, "browser", "start").len(), starts);
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn an_accept_of_a_connection_whose_command_does_not_name_agent_browser_is_refused() {
+    let user = user();
+    browser_by_another_program(&user);
+    // Reviewed as agent-browser 0.43.0 by a Flottille that did not check the command, and not
+    // accepted yet.
+    stored_version(&user, "browser", "seen", "0.43.0");
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE ext_connections_connections SET pin = NULL, pinned_for = NULL \
+         WHERE name = 'browser'",
+        [],
+    )
+    .unwrap();
+    let refused_accept = user
+        .call("connection.accept", json!({"name": "browser"}))
+        .unwrap_err();
+    assert!(
+        refused_accept.1.contains("flottille-fake-mcp"),
+        "{refused_accept:?}"
+    );
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let pin: Option<String> = db
+        .query_row(
+            "SELECT pin FROM ext_connections_connections WHERE name = 'browser'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pin, None);
+    assert_ne!(connection(&user, "browser")["state"], "ready");
 }
 
 #[test]

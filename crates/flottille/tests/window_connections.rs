@@ -71,9 +71,22 @@ fn write_script(user: &User, name: &str, script: &Value) {
     std::fs::write(script_file(user, name), script.to_string()).unwrap();
 }
 
+/// The command of the fake server of the connection `name`: for `browser`, the fake run as
+/// `agent-browser`, the only program a browser connection's command may name.
 fn command_of(user: &User, name: &str) -> Vec<String> {
+    let program = match name {
+        "browser" => {
+            let program = user.path("bin/agent-browser");
+            if !program.exists() {
+                std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(fake_mcp(), &program).unwrap();
+            }
+            program
+        }
+        _ => fake_mcp(),
+    };
     vec![
-        fake_mcp().display().to_string(),
+        program.display().to_string(),
         "--script".into(),
         script_file(user, name).display().to_string(),
         "--log".into(),

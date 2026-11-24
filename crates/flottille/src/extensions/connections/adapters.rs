@@ -1792,6 +1792,113 @@ pub fn provide(socket: &Path) -> std::process::ExitCode {
 mod tests {
     use super::*;
 
+    fn words(line: &[&str]) -> Vec<String> {
+        line.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// Why agent-browser's adapter refuses the command `line`, if it does.
+    fn refused(line: &[&str]) -> Option<String> {
+        AGENT_BROWSER.command_refused(&words(line))
+    }
+
+    #[test]
+    fn agent_browser_run_by_a_package_runner_is_accepted() {
+        for line in [
+            &["agent-browser", "mcp"][..],
+            &["/opt/tools/bin/agent-browser", "--headed", "mcp"],
+            &["npx", "agent-browser", "mcp"],
+            &["npx", "-y", "agent-browser@0.43.0", "mcp"],
+            &["pnpm", "dlx", "agent-browser", "mcp"],
+            &["pnpm", "exec", "agent-browser", "mcp"],
+            &["bunx", "agent-browser", "mcp"],
+            // An argument of agent-browser's own that holds `HOME=` as text.
+            &[
+                "agent-browser",
+                "--user-agent",
+                "HOME=/tmp/elsewhere",
+                "mcp",
+            ],
+        ] {
+            assert_eq!(refused(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_package_runner_running_env_that_unsets_the_browser_s_folders_is_refused() {
+        let said = refused(&[
+            "pnpm",
+            "exec",
+            "env",
+            "-u",
+            "AGENT_BROWSER_SOCKET_DIR",
+            "-u",
+            "TMPDIR",
+            "agent-browser",
+            "mcp",
+        ])
+        .expect("refused");
+        assert!(said.contains("env"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_envdir_is_refused() {
+        let said = refused(&["envdir", "/tmp/vars", "agent-browser", "mcp"]).expect("refused");
+        assert!(said.contains("starts with envdir"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_node_e_is_refused() {
+        let said = refused(&["node", "-e", "require('agent-browser')", "mcp"]).expect("refused");
+        assert!(said.contains("starts with node"), "{said}");
+    }
+
+    #[test]
+    fn a_command_through_another_wrapper_is_refused() {
+        for (line, named) in [
+            (
+                &["chpst", "-e", "/tmp/vars", "agent-browser", "mcp"][..],
+                "chpst",
+            ),
+            (
+                &["setpriv", "--reset-env", "agent-browser", "mcp"],
+                "setpriv",
+            ),
+            (&["flatpak", "run", "org.example.Browser", "mcp"], "flatpak"),
+            (&["toolbox", "run", "agent-browser", "mcp"], "toolbox"),
+            (&["sh", "-c", "agent-browser mcp"], "sh"),
+            (&["npx", "-c", "agent-browser mcp"], "-c"),
+            (
+                &[
+                    "npx",
+                    "env",
+                    "AGENT_BROWSER_SOCKET_DIR=/tmp/x",
+                    "agent-browser",
+                    "mcp",
+                ],
+                "AGENT_BROWSER_SOCKET_DIR",
+            ),
+            (
+                &[
+                    "npx",
+                    "--node-options=--require=/tmp/x.js",
+                    "agent-browser",
+                    "mcp",
+                ],
+                "--node-options",
+            ),
+            (
+                &["npx", "-p", "another-package", "agent-browser", "mcp"],
+                "-p",
+            ),
+            (&["HOME=/tmp/x", "agent-browser", "mcp"], "HOME"),
+            (&["pnpm", "exec", "node", "agent-browser", "mcp"], "node"),
+        ] {
+            let said = refused(line).unwrap_or_else(|| panic!("not refused: {line:?}"));
+            assert!(said.contains(named), "{line:?}: {said}");
+            assert!(!said.contains("/tmp/x"), "{line:?}: {said}");
+        }
+    }
+
     #[test]
     fn a_version_is_three_numbers_and_nothing_more() {
         assert_eq!(version("0.43.0"), Some((0, 43, 0)));
