@@ -372,6 +372,9 @@ pub struct Shell {
     unlisted: std::collections::BTreeMap<String, String>,
     /// The notifications of other machines asked to be marked read, once each.
     marked_there: HashSet<(String, u64)>,
+    /// How many connections each other machine's bell links made, and how many reads of its
+    /// ended sessions were started: what a test counts of what is asked there.
+    asked_there: HashMap<String, (Arc<std::sync::atomic::AtomicUsize>, usize)>,
     /// The pages of other machines' sessions last shown, one a machine, still following their
     /// session: coming back shows it at once.
     kept_pages: HashMap<String, Entity<SessionPage>>,
@@ -938,6 +941,7 @@ impl Shell {
             ended_there: HashMap::new(),
             unlisted: std::collections::BTreeMap::new(),
             marked_there: HashSet::new(),
+            asked_there: HashMap::new(),
             kept_pages: HashMap::new(),
             heard: true,
             silent: None,
@@ -1181,7 +1185,12 @@ impl Shell {
         for name in wanted {
             let aim = crate::machines::Aim::default();
             aim.set(Some((name.clone(), key.clone())));
-            let connect = aim.connect(self.local.clone());
+            let aimed = aim.connect(self.local.clone());
+            let dials = self.asked_there.entry(name.clone()).or_default().0.clone();
+            let connect: link::Connect = Arc::new(move || {
+                dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                aimed()
+            });
             let (updates, end) = link::Updates::from(self.sender.clone()).of(&name).ending();
             link::spawn_bell_into(connect.clone(), updates);
             self.bells.insert(
@@ -1233,10 +1242,11 @@ impl Shell {
     }
 
     /// Asks `machine` for its ended sessions, off the UI thread, on its bell link's connection.
-    fn ask_ended_of(&self, machine: &str) {
+    fn ask_ended_of(&mut self, machine: &str) {
         let Some(bell) = self.bells.get(machine) else {
             return;
         };
+        self.asked_there.entry(machine.to_owned()).or_default().1 += 1;
         let (connect, updates) = (
             bell.connect.clone(),
             link::Updates::from(self.sender.clone()).of(machine),
@@ -1352,6 +1362,18 @@ impl Shell {
             .get(machine)
             .is_some_and(|bell| bell.read.is_some())
             && (self.ended_there.contains_key(machine) || self.unlisted.contains_key(machine))
+    }
+
+    /// How many connections the bell links of `machine` made.
+    pub fn bell_dials(&self, machine: &str) -> usize {
+        self.asked_there.get(machine).map_or(0, |(dials, _)| {
+            dials.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    /// How many reads of the ended sessions of `machine` were started.
+    pub fn ended_reads(&self, machine: &str) -> usize {
+        self.asked_there.get(machine).map_or(0, |(_, reads)| *reads)
     }
 
     /// Asks `machine` to mark notifications read, on its bell link's connection; the link reads
@@ -7039,6 +7061,11 @@ impl BellList {
                 )
             })
             .collect()
+    }
+
+    /// What needs the user and what is new, every machine's.
+    pub fn counts(&self) -> (usize, usize) {
+        self.counts
     }
 
     /// The panel's order: each session's key, then the keys of its notifications.

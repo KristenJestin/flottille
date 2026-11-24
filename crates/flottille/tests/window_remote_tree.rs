@@ -1550,3 +1550,142 @@ fn an_ended_session_of_another_machine_is_in_ended(cx: &mut TestAppContext) {
     settle(&shell, cx);
     assert!(!ended_rows(&shell, cx).contains(&row));
 }
+
+/// Stops `server`'s daemon and waits until `pc` and its window see it off.
+fn server_off(pc: &Machine, server: &Machine, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(shell, cx, "the window sees server off", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| !server.online())
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn an_off_machine_s_bell_is_not_asked_again_and_again(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the bell and Ended read the server", |cx| {
+        shell.read_with(cx, |s, _| s.bell_reached("server"))
+    });
+
+    // Off, server is not dialled again and again while it stays off.
+    server_off(&pc, &server, &shell, cx);
+    settle(&shell, cx);
+    let before = shell.read_with(cx, |s, _| s.bell_dials("server"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        step(&shell, Duration::from_millis(16), cx);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let after = shell.read_with(cx, |s, _| s.bell_dials("server"));
+    assert!(
+        after <= before + 1,
+        "server was dialled {} times in 3 seconds off",
+        after - before
+    );
+}
+
+#[gpui_kit::test]
+fn an_off_machine_s_notifications_leave_the_bell(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+    let id = request_noted(&server, &agent);
+    let (shell, cx, _row) = the_led_row(&pc, &agent, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    let key = format!("n-{id}@server");
+    until(&shell, cx, "the bell holds server's request", |cx| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    settle(&shell, cx);
+    let counts = shell.read_with(cx, |s, cx| s.bell_list().read(cx).counts());
+
+    // Off, its request leaves the bell, folding away, and is no longer counted.
+    server_off(&pc, &server, &shell, cx);
+    until(&shell, cx, "server's request leaves the bell", |cx| {
+        !shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    let item = format!("bell-item-{key}");
+    let going = heights(cx, &item);
+    assert!(
+        going.iter().any(|height| *height > 0.),
+        "the row folds away, it does not vanish: {going:?}"
+    );
+    settle(&shell, cx);
+    assert!(heights(cx, &item).is_empty(), "gone once folded");
+    let now = shell.read_with(cx, |s, cx| s.bell_list().read(cx).counts());
+    assert!(now.0 < counts.0, "{counts:?} then {now:?}");
+}
+
+#[gpui_kit::test]
+fn opening_ended_twice_reads_each_machine_once(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    ended_on_server(&server);
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the bell and Ended read the server", |cx| {
+        shell.read_with(cx, |s, _| s.bell_reached("server"))
+    });
+    settle(&shell, cx);
+    let before = shell.read_with(cx, |s, _| s.ended_reads("server"));
+
+    // Opened twice before server answers, "Ended" reads it once.
+    shell.update(cx, |s, cx| {
+        s.ended_opened(cx);
+        s.ended_opened(cx);
+    });
+    settle(&shell, cx);
+    let after = shell.read_with(cx, |s, _| s.ended_reads("server"));
+    assert_eq!(after, before + 1, "reads of server's ended sessions");
+}
+
+#[gpui_kit::test]
+fn an_ended_row_of_another_machine_opens_that_machine_s_page(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = ended_on_server(&server);
+    let row = elsewhere_id("server", &agent);
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the Ended group", |cx| {
+        shell.read_with(cx, |s, _| s.ended().is_some())
+    });
+    if !shell.read_with(cx, |s, cx| s.ended().unwrap().read(cx).is_open()) {
+        toggle_ended(&shell, cx);
+    }
+    until(&shell, cx, "server's ended session is in Ended", |cx| {
+        ended_rows(&shell, cx).contains(&row) && present(cx, session_id(&row))
+    });
+    settle(&shell, cx);
+
+    cx.update(|window, cx| window.click(session_id(&row), cx));
+    until(&shell, cx, "server's page of the ended session", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.selected() == Some(&Selection::Session(row.clone()))
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn mark_all_read_marks_read_on_the_other_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "ask");
+    let agent = held_on_server(&mcp, &server);
+    let id = request_noted(&server, &agent);
+    let (shell, cx, _row) = the_led_row(&pc, &agent, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    let key = format!("n-{id}@server");
+    until(&shell, cx, "the bell holds server's request", |cx| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).order().contains(&key))
+    });
+    settle(&shell, cx);
+
+    cx.update(|window, cx| window.click("bell-mark-all", cx));
+    eventually("server says its notification was read", || {
+        noted_read(&server, id)
+    });
+}
