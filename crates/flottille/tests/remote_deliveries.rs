@@ -8,11 +8,11 @@
 use crate::common;
 use crate::remote_asks::{led_on_server, offline};
 use crate::remote_launch::{
-    Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server, prompted,
-    refused, restarted, sent_with, server_user, titled,
+    Machine, a_while, allowing, done, eventually, folder_of, id_in, launched, pair, pc_and_server,
+    prompted, refused, restarted, sent_with, server_user, titled,
 };
 
-use common::mcp::Mcp;
+use common::mcp::{Mcp, server_of};
 use flottille_core::store::Store;
 use flottille_link::{Call, Deliver, MachineMessage};
 use serde_json::{Value, json};
@@ -873,5 +873,173 @@ fn a_secret_cut_in_half_in_a_delivery_from_another_machine_is_masked() {
         0,
         "{:#?}",
         pc.prompts()
+    );
+}
+
+/// A secret only the server knows, in a secret file of the place of its agents.
+pub(crate) const SERVER_SECRET: &str = "server-only-d4w9z6r1b8";
+
+/// `SERVER_SECRET` written in the `.env` of the folder of `agent` of `server`.
+pub(crate) fn with_server_secret(server: &Machine, agent: &str) {
+    std::fs::write(
+        folder_of(&server.agent(agent)).join(".env"),
+        format!("EXPORT_KEY={SERVER_SECRET}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_report_for_a_removed_workspace_never_holds_the_deliveries_behind_it() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    pc.user
+        .call("workspace.create", json!({"project": "app", "name": "w"}))
+        .unwrap();
+    eventually("the workspace ready", || {
+        pc.user
+            .call("workspace.show", json!({"project": "app", "name": "w"}))
+            .unwrap()["state"]
+            == "ready"
+    });
+    // A parent that works in the workspace `w` of pc, with a child on the server.
+    let opened = pc.user.received_requests("session/new").len();
+    let parent = pc
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (url, authorization) = server_of(&pc.user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    eventually("the parent's first turn", || {
+        pc.agent(&parent)["state"] == "idle"
+    });
+    pc.user
+        .call("agent.mode", json!({"agent": parent, "mode": "auto"}))
+        .unwrap();
+    let answer = launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    );
+    let launch = launch_in(done(&answer));
+    // The parent ends and the user removes its workspace: nothing is left of its place to read.
+    pc.user
+        .call("agent.stop", json!({"agent": parent}))
+        .unwrap();
+    eventually("the parent ended", || {
+        pc.agent(&parent)["state"] != "idle" && pc.agent(&parent)["state"] != "running"
+    });
+    let removed = pc.user.run(&["workspace", "remove", "app", "w"]);
+    assert!(removed.status.success(), "{}", pc.log());
+
+    let deliver = |id: &str, body: &str| {
+        MachineMessage::Deliver(Box::new(Deliver {
+            id: id.into(),
+            launch: launch.clone(),
+            agent: parent.clone(),
+            kind: "child-report".into(),
+            body: body.into(),
+            urgency: "urgent".into(),
+            ended: false,
+        }))
+    };
+    let answers = sent_with(
+        &server.stand_in(),
+        &pc,
+        vec![
+            deliver("d1", "First report, for a place that is gone."),
+            deliver("d2", "Second report, behind the first."),
+        ],
+    );
+
+    // Neither is kept for later: the first would hold the second, and all that follows it.
+    for answer in &answers {
+        let answer = answer.as_ref().unwrap_or_else(|why| panic!("{why}"));
+        assert!(answer["later"].is_null(), "{answer}");
+    }
+    for text in ["First report", "Second report"] {
+        assert!(stored_or_prompted(&pc, text) > 0, "{text}: {}", pc.log());
+    }
+}
+
+#[test]
+fn an_answer_for_an_unknown_agent_is_dropped_not_kept() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+
+    let answers = sent_with(
+        &server.stand_in(),
+        &pc,
+        vec![MachineMessage::Deliver(Box::new(Deliver {
+            id: "approval-7".into(),
+            launch: "request-7".into(),
+            agent: "aaaaaaaaaaaa".into(),
+            kind: "approval".into(),
+            body: "Approved.".into(),
+            urgency: "urgent".into(),
+            ended: false,
+        }))],
+    );
+
+    // Refused for good, so that its sender forgets it and nothing waits behind it.
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("waits for no answer"), "{refused}");
+}
+
+#[test]
+fn a_message_sent_from_another_machine_is_masked_with_the_receiver_s_place() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    with_server_secret(&server, &child);
+
+    let sent = mcp.call(
+        "agent_send",
+        json!({"agent_id": child, "message": format!("Sign the export with {SERVER_SECRET} now.")}),
+    );
+
+    done(&sent);
+    prompted(&server, "Sign the export with [masked] now.");
+    assert_eq!(
+        stored_or_prompted(&server, SERVER_SECRET),
+        0,
+        "{:#?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn a_brief_from_another_machine_is_masked_with_the_receiver_s_place() {
+    // The setup copies the project's `.env` into the workspace each child works in.
+    let (_hub, pc, server) = pc_and_server(
+        server_user(allowing()),
+        Some("\n[[setup]]\ncopy = [\".env\"]\n"),
+    );
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+    std::fs::write(
+        server.folder().join(".env"),
+        format!("EXPORT_KEY={SERVER_SECRET}\n"),
+    )
+    .unwrap();
+
+    let answer = launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": format!("Sign the export tests with {SERVER_SECRET}.")}),
+    );
+
+    done(&answer);
+    prompted(&server, "Sign the export tests with [masked].");
+    assert_eq!(
+        stored_or_prompted(&server, SERVER_SECRET),
+        0,
+        "{:#?}",
+        server.prompts()
     );
 }
