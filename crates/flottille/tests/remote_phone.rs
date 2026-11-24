@@ -244,7 +244,7 @@ fn a_notice_due_while_the_hub_is_down_is_never_dismissed() {
 
     hub.start_again();
     connected(&server);
-    let phone = Phone::pair(&hub, "pixel");
+    let phone = Phone::pair(&hub, "tablet");
     server
         .user
         .call("notifications.read", json!({"session": id}))
