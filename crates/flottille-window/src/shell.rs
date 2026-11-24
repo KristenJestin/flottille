@@ -6021,6 +6021,12 @@ impl Render for Shell {
                     this.tell_presence(window.is_window_active(), true)
                 }),
             )
+            // Reading by the wheel is an input too; no scroll in the window stops it on its way.
+            .on_scroll_wheel(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
             .size_full()
             .relative()
             .bg(p.bg)
