@@ -6,7 +6,10 @@
 //! each with its own temporary HOME and XDG folders and fake agents.
 
 use crate::common;
-use crate::remote_deliveries::{child_on_server, launch_in, off, prompts_with, script};
+use crate::remote_deliveries::{
+    PC_SECRET, child_on_server, launch_in, off, prompts_with, script, stored_or_prompted,
+    with_pc_secret,
+};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
     pc_and_server_as, prompted, refused, sent_with, server_user, titled,
@@ -1140,6 +1143,30 @@ fn an_answer_of_another_machine_is_taken_only_for_the_request_awaited_from_it_an
     for body in ["From the laptop.", "Replayed", "Never asked."] {
         assert_eq!(prompts_with(&pc, body), 0, "{body}");
     }
+}
+
+#[test]
+fn an_approval_answer_from_another_machine_is_masked_with_the_caller_s_env() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    let (asker, asking) = caller(&pc, &server, "ask");
+    let number = held(&asking.call("session_read", json!({"session": night})));
+    with_pc_secret(&pc);
+
+    let key = server.stand_in();
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![answer_of(
+            &format!("approval-{number}"),
+            number,
+            &asker,
+            &format!("Approved, sign with {PC_SECRET} there."),
+        )],
+    );
+
+    assert!(answers[0].is_ok(), "{:?}", answers[0]);
+    prompted(&pc, "Approved, sign with [masked] there.");
+    assert_eq!(stored_or_prompted(&pc, PC_SECRET), 0, "{:#?}", pc.prompts());
 }
 
 #[test]

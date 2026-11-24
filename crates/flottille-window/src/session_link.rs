@@ -385,6 +385,8 @@ pub struct PlaceFacts {
     /// is on (the project folder).
     pub repositories: Vec<(String, RepositoryFacts)>,
     pub branch: Option<String>,
+    /// The workspace's own folder (a workspace).
+    pub folder: Option<String>,
     pub bases: Vec<String>,
     /// Each repository's pull request (a workspace).
     pub pulls: Vec<PullRequest>,
@@ -1055,6 +1057,7 @@ impl Link {
             statuses: RepositoryStatus::of_workspace(&shown),
             repositories,
             branch: shown["branch"].as_str().map(str::to_owned),
+            folder: shown["folder"].as_str().map(str::to_owned),
             bases,
             pulls: forge.pulls,
             forge_problem: forge.problem,
