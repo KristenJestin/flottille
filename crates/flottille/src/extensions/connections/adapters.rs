@@ -40,7 +40,8 @@ pub struct Adapter {
     /// The server's actions off at the first pin, which the user may turn on: those that run a
     /// script in the page, which no gate can judge.
     scripts: &'static [&'static str],
-    /// The same, for those that write the page's traffic to a file, which no masking reaches.
+    /// The same, for those that write the page's traffic, or what was typed in it, to a file,
+    /// which no masking reaches.
     files: &'static [&'static str],
     /// Its actions whose `url` is a pattern matched against an address, never opened: every
     /// other `url` must be a web address (`web_address`).
@@ -94,6 +95,10 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_network_har_stop",
         "agent_browser_trace_start",
         "agent_browser_trace_stop",
+        // A recorded session saved as a flow, in a file agent-browser writes itself: what a
+        // login types may be in it.
+        "agent_browser_flow_save",
+        "agent_browser_flow_steps",
     ],
     patterns: &["agent_browser_wait_for_url", "agent_browser_network_route"],
     locked: &[
@@ -362,8 +367,8 @@ impl Adapter {
             self.scripts.join(", ")
         )];
         said.push(format!(
-            "{} write the page's traffic to a file, which is not masked: they are off at the \
-             first review, and the user may turn them on",
+            "{} write the page's traffic, or what was typed in it, to a file, which is not \
+             masked: they are off at the first review, and the user may turn them on",
             self.files.join(", ")
         ));
         said.push(
@@ -772,8 +777,9 @@ pub fn shown(
 }
 
 /// The browser's environment, applied after the connection's own variables (a connection's env
-/// never moves a folder of [`FOLDERS_OF_THE_BROWSER`]): no display of the daemon's own, never the session bus address,
-/// whether the browser is shown or not, and the display folder's variables (`shown`, a
+/// never moves a folder of [`FOLDERS_OF_THE_BROWSER`]): no display of the daemon's own, never the
+/// session bus address, whether the browser is shown or not, and the display folder's variables
+/// (`shown`, a
 /// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
 /// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
 /// name the connection's socket folder in its vault folder ([`sockets`]), so they reach the same
@@ -820,8 +826,10 @@ pub fn display(
 }
 
 /// The variables [`display`] sets, or removes, for the browser: where agent-browser puts its
-/// socket, and where Chrome writes its profile, caches and crash dumps.
-pub const FOLDERS_OF_THE_BROWSER: [&str; 9] = [
+/// socket, and where Chrome writes its profile, caches and crash dumps; and `HOME`, which moves
+/// where agent-browser looks for the Chrome it downloaded and where Chrome reads `~/.pki/nssdb`.
+pub const FOLDERS_OF_THE_BROWSER: [&str; 10] = [
+    "HOME",
     "AGENT_BROWSER_SOCKET_DIR",
     "TMPDIR",
     "AGENT_BROWSER_SCREENSHOT_DIR",
@@ -1019,7 +1027,7 @@ fn emptied(folder: &Path) {
 /// one of the other sessions, which `agent-browser close` leaves), whose profile it uses and
 /// which of the folder's profiles is whose is not known.
 fn emptied_once_ended(vault: &Path) {
-    let answering = sockets_in(vault).is_some_and(|sockets| !network::daemons(&sockets).is_empty());
+    let answering = sockets_in(vault).is_some_and(|sockets| network::alive(&sockets));
     if !answering {
         emptied_files(vault);
     }
@@ -1061,19 +1069,30 @@ pub async fn network(
     Ok(network)
 }
 
-/// The browsers that answer on the socket folder of `vault` and do not run in `network`. Each
-/// socket is connected to, which blocks: on a thread of its own.
+/// The browsers that answer on the socket folder of `vault` and do not run in `network`.
 async fn outside(network: &Network, vault: &crate::display::Folder) -> Vec<u32> {
-    let Some(sockets) = sockets_in(vault.path()) else {
-        return Vec::new();
-    };
-    tokio::task::spawn_blocking(move || network::daemons(&sockets))
+    answering(vault.path())
         .await
-        // Not known: as a browser outside, so nothing is filled.
-        .unwrap_or_else(|_| vec![0])
         .into_iter()
         .filter(|pid| !network.holds(*pid))
         .collect()
+}
+
+/// The pids behind the sockets of the socket folder of the vault folder `vault` (0 for one that
+/// cannot be told). Each socket is connected to, which blocks: on a thread of its own.
+async fn answering(vault: &Path) -> Vec<u32> {
+    let Some(sockets) = sockets_in(vault) else {
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || {
+        // A crashed browser's socket file stays in the kept socket folders: nobody listens, so it
+        // is not outside, and counting it would block every login.
+        network::swept(&sockets);
+        network::daemons(&sockets)
+    })
+    .await
+    // Not known: as a browser outside, so nothing is filled.
+    .unwrap_or_else(|_| vec![0])
 }
 
 /// `agent-browser close` (`--all` its sessions when `all`), in `network` when there is one.
@@ -1998,5 +2017,25 @@ mod tests {
         emptied_once_ended(vault.path());
         assert!(!profile.exists(), "a crashed browser's profile was kept");
         assert!(vault.path().join(TEMPORARY).is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_socket_left_by_a_crashed_browser_does_not_block_the_login() {
+        // A browser that crashed leaves its socket file, and the socket folders are kept: nobody
+        // listens on it, so it holds nothing and is not outside. A live one still is.
+        let vault = tempfile::tempdir().unwrap();
+        let sockets = vault.path().join(format!("{SOCKETS}abc"));
+        std::fs::create_dir_all(sockets.join("other")).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(sockets.join("crashed.sock")).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(sockets.join("other/crashed.sock")).unwrap());
+        assert!(
+            answering(vault.path()).await.is_empty(),
+            "a crashed browser's socket"
+        );
+        assert!(!sockets.join("crashed.sock").exists());
+        assert!(!sockets.join("other/crashed.sock").exists());
+        let _live = std::os::unix::net::UnixListener::bind(sockets.join("live.sock")).unwrap();
+        assert_eq!(answering(vault.path()).await.len(), 1, "a live browser");
+        assert!(sockets.join("live.sock").exists());
     }
 }

@@ -7,8 +7,10 @@
 use crate::common;
 use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, release, script};
 use crate::remote_launch::{
-    Machine, allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
+    Machine, a_while, allowing, eventually, launch_ask, pc_and_server, prompted, sent_with,
+    server_user,
 };
+use crate::remote_led::led_on_server;
 
 use common::mcp::{Mcp, server_of};
 use flottille_link::MachineMessage;
@@ -257,6 +259,84 @@ fn a_child_on_another_machine_stops_with_its_parent() {
         "{:#}",
         server.agent(&child)
     );
+}
+
+/// `pc`'s fake agents die at a message `die now` and cannot be loaded again: one sent it fails.
+fn dying(pc: &crate::remote_launch::Machine) {
+    pc.user
+        .fake_script(json!({"load_error": "the session is lost", "turns": [
+        {"when": "die now", "do": [{"die": 3}]}]}));
+}
+
+#[test]
+fn a_child_on_another_machine_stops_with_its_failed_parent() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    dying(&pc);
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    let root = pc.agents()[0]["id"].as_str().unwrap().to_owned();
+
+    pc.user
+        .call("agent.send", json!({"agent": root, "message": "die now"}))
+        .unwrap();
+
+    eventually("the parent failed on pc", || {
+        pc.agent(&root)["state"] == "failed"
+    });
+    eventually("the child ended on server", || {
+        server.agent(&child)["state"] == "ended"
+    });
+    assert_eq!(
+        server.agent(&child)["state_reason"],
+        "its parent failed",
+        "{:#}",
+        server.agent(&child)
+    );
+}
+
+#[test]
+fn a_stop_is_kept_whatever_the_queue_for_an_offline_machine_holds() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    let root = pc.agents()[0]["id"].as_str().unwrap().to_owned();
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+    // The queue for server filled with messages to the child, until one more is refused.
+    let mut sent = 0;
+    loop {
+        let answer = mcp.call(
+            "agent_send",
+            json!({"agent_id": child, "message": format!("Kept message {sent}.")}),
+        );
+        if answer.error || answer.text.starts_with("refused") {
+            assert!(
+                answer.text.contains("messages wait for server"),
+                "{}",
+                answer.text
+            );
+            break;
+        }
+        sent += 1;
+        assert!(sent <= 100, "the queue for server is never full");
+    }
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+    on(&server);
+    server.wait_for("pc");
+
+    eventually("the child ended on server", || {
+        server.agent(&child)["state"] == "ended"
+    });
+    assert_eq!(
+        server.agent(&child)["state_reason"],
+        "its parent stopped",
+        "{:#}",
+        server.agent(&child)
+    );
+    // The stop replaced what it made useless: no message kept for the child reached it.
+    a_while();
+    assert_eq!(prompts_with(&server, "Kept message"), 0);
 }
 
 /// A child of `pc`'s root held in its first turn on `server`: its id.
@@ -631,4 +711,150 @@ fn agent_resume_is_refused_on_an_ended_child_of_another_machine() {
     refused_as_a_child(&server, &child, "agent.resume", json!({"agent": child}));
 
     assert_eq!(server.agent(&child)["state"], "ended");
+}
+
+/// What a session kept to be resumed holds here: an image of one of its messages.
+fn kept_image(server: &Machine, agent: &str) -> std::path::PathBuf {
+    let image = server
+        .user
+        .path(&format!("data/flottille/images/{agent}/screen.png"));
+    std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+    std::fs::write(&image, "an image of the export").unwrap();
+    image
+}
+
+/// `agent` stopped by the user and ended.
+fn ended(server: &Machine, agent: &str) {
+    server
+        .user
+        .call("agent.stop", json!({"agent": agent}))
+        .unwrap();
+    eventually("the agent ended", || {
+        server.agent(agent)["state"] == "ended"
+    });
+}
+
+/// A child of `pc`'s root on `server` that ended before the upgrade that made it a child, and a
+/// session of the server's own that ended too, both stored as a release of before left them: a
+/// root's place for the child, each session kept to be resumed, with an image. The server is
+/// off; the ids of the child and of the server's own session.
+fn kept_before_the_upgrade(pc: &Machine, server: &Machine) -> (String, String) {
+    let (child, _launch, _mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    let (own, _mcp) = server.root("auto");
+    ended(server, &child);
+    ended(server, &own);
+    off(server);
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE agents SET depth = 0, reopens = 1, native_id = coalesce(native_id, 'kept-child') \
+         WHERE id = ?1",
+        [&child],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE agents SET reopens = 1, native_id = coalesce(native_id, 'kept-root') \
+         WHERE id = ?1",
+        [&own],
+    )
+    .unwrap();
+    drop(db);
+    (child, own)
+}
+
+/// Whether the store says `agent`'s session is kept to be resumed.
+fn reopens(server: &Machine, agent: &str) -> bool {
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.query_row("SELECT reopens FROM agents WHERE id = ?1", [agent], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+#[test]
+fn an_ended_child_of_another_machine_kept_before_the_upgrade_is_forgotten() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _own) = kept_before_the_upgrade(&pc, &server);
+    let image = kept_image(&server, &child);
+
+    on(&server);
+
+    eventually("the child's session forgotten", || {
+        !image.exists() && !reopens(&server, &child)
+    });
+    assert_eq!(server.agent(&child)["depth"], 1);
+}
+
+#[test]
+fn a_kept_root_session_is_still_kept() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, own) = kept_before_the_upgrade(&pc, &server);
+    let forgotten = kept_image(&server, &child);
+    let kept = kept_image(&server, &own);
+
+    on(&server);
+
+    // The sweep ran: it forgot the child's session.
+    eventually("the child's session forgotten", || !forgotten.exists());
+    assert!(kept.exists());
+    assert!(reopens(&server, &own));
+    let listed = server.user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == own.as_str())
+        .unwrap()["resumable"]
+        .clone();
+    assert_eq!(listed, true);
+}
+
+#[test]
+fn a_child_of_another_machine_that_ends_is_not_kept() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // Its agent opened a session it could resume: the store says so while the child lives.
+    assert!(reopens(&server, &child));
+
+    ended(&server, &child);
+
+    // Cleared with its end, so that the sweep never finds it among the sessions kept.
+    assert!(!reopens(&server, &child));
+}
+
+#[test]
+fn a_led_session_of_another_machine_ended_and_kept_survives_the_sweep() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // Its slot is free again for the led session.
+    ended(&server, &child);
+    let (led, _root, _text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    ended(&server, &led);
+    assert!(reopens(&server, &led));
+    off(&server);
+    // The child as a release of before kept it: a sweep that forgot it has run.
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE agents SET depth = 0, reopens = 1, native_id = coalesce(native_id, 'kept-child') \
+         WHERE id = ?1",
+        [&child],
+    )
+    .unwrap();
+    drop(db);
+    let forgotten = kept_image(&server, &child);
+    let kept = kept_image(&server, &led);
+
+    on(&server);
+
+    eventually("the sweep forgot the old child's session", || {
+        !forgotten.exists()
+    });
+    assert!(kept.exists());
+    assert!(reopens(&server, &led));
+    let listed = server.user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == led.as_str())
+        .unwrap()["resumable"]
+        .clone();
+    assert_eq!(listed, true);
 }

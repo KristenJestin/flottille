@@ -33,9 +33,9 @@ use zeroize::Zeroizing;
 
 pub use control::{
     Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
-    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, PairProof, Paired, Pairing, PresenceOf,
-    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Transcript,
-    arrive, relays_in_memory,
+    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, Notice, NoticeId, NoticeKind, PairProof,
+    Paired, Pairing, PresenceOf, Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream,
+    Tls, ToDevice, Transcript, arrive, relays_in_memory,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{
@@ -55,7 +55,8 @@ pub use request::{
     runs_agents,
 };
 pub use sessions::{
-    LightProject, LightSession, MOST_SESSIONS, ProjectList, STATES, SessionList, TITLE_LIMIT,
+    LightPilot, LightProject, LightSession, MOST_SESSIONS, PilotList, ProjectList, STATES,
+    SessionList, TITLE_LIMIT,
 };
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;

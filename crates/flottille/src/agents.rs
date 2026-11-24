@@ -1491,15 +1491,17 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
 }
 
 /// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
-/// more, and what their tools printed goes with them.
+/// more, and what their tools printed goes with them. A child of another machine's agent that
+/// ended before a release made it a child (#1304) was kept as a root: its session is a child's,
+/// never kept, and goes at once. A child that ends now is not among them: its end clears
+/// `reopens` (`Store::change_agent`) and its own task forgets its session.
 pub fn forget_kept_sessions(daemon: &Daemon) {
     let now = now_ms();
     for agent in daemon.read(Store::kept_sessions).unwrap_or_default() {
         let Some(ended_at) = agent.ended_at else {
             continue;
         };
-        if !tree::keeps_session(&agent)
-            || now.saturating_sub(ended_at) < tree::KEPT_MS
+        if (tree::keeps_session(&agent) && now.saturating_sub(ended_at) < tree::KEPT_MS)
             || stopping(daemon, &agent.id)
         {
             continue;

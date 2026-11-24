@@ -1735,8 +1735,10 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The ended or failed roots whose session is kept to be resumed: those the sweep forgets in
-    /// time.
+    /// The ended or failed sessions marked as kept to be resumed: those the sweep looks at. A root
+    /// is kept for `tree::KEPT_MS`. A child of another machine's agent that a release of before
+    /// kept as a root is among them too, to be forgotten at once: since a child's end clears
+    /// `reopens`, no other child is.
     pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state IN ('ended', 'failed') \
@@ -1757,7 +1759,7 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let now = now_ms();
         if let Some(state) = change.state {
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE agents SET state = ?2, state_reason = ?3, \
                  ended_at = CASE WHEN ?4 THEN ?5 ELSE ended_at END \
                  WHERE id = ?1 AND state NOT IN ('ended', 'failed')",
@@ -1769,6 +1771,16 @@ impl Store {
                     now
                 ],
             )?;
+            // A child's session is never kept to be resumed (`tree::keeps_session`): its end
+            // says so, so that the sweep never finds it among the kept sessions and forgets
+            // what its own task forgets.
+            if changed > 0 && state.is_final() {
+                transaction.execute(
+                    "UPDATE agents SET reopens = 0 \
+                     WHERE id = ?1 AND (parent IS NOT NULL OR depth > 0)",
+                    params![id],
+                )?;
+            }
         }
         // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
         // So does a wait for the quota's reset: an ended session is never resumed by it.
@@ -3673,11 +3685,13 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let projects = before
-            .and_then(|before| serde_json::from_str::<Value>(&before).ok())
-            .and_then(|before| before.get("projects").cloned());
-        if let (Some(projects), Some(list)) = (projects, list.as_object_mut()) {
-            list.entry("projects").or_insert(projects);
+        // What the machine says beside its sessions stays until it says it again.
+        let before = before.and_then(|before| serde_json::from_str::<Value>(&before).ok());
+        for part in ["projects", "pilots"] {
+            let kept = before.as_ref().and_then(|before| before.get(part).cloned());
+            if let (Some(kept), Some(list)) = (kept, list.as_object_mut()) {
+                list.entry(part).or_insert(kept);
+            }
         }
         transaction.execute(
             "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
@@ -3697,6 +3711,20 @@ impl Store {
         projects: &Value,
         at: u64,
     ) -> Result<()> {
+        self.keep_machine_part(machine, name, "projects", projects, at)
+    }
+
+    /// Keeps `value` as the `part` of the list of the machine of key `machine` (named `name`), told
+    /// at `at` beside the sessions it told (none yet when this is the first it says): its
+    /// `projects`, or the `pilots` of another machine of its led sessions.
+    pub fn keep_machine_part(
+        &mut self,
+        machine: &str,
+        name: &str,
+        part: &str,
+        value: &Value,
+        at: u64,
+    ) -> Result<()> {
         let transaction = self.connection.transaction()?;
         let before: Option<String> = transaction
             .query_row(
@@ -3709,7 +3737,7 @@ impl Store {
             .and_then(|before| serde_json::from_str::<Value>(&before).ok())
             .filter(Value::is_object)
             .unwrap_or_else(|| serde_json::json!({"sessions": []}));
-        list["projects"] = projects.clone();
+        list[part] = value.clone();
         transaction.execute(
             "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3",
@@ -6674,6 +6702,55 @@ mod tests {
             ids(store.kept_sessions().unwrap()),
             ["failed000000", "kept00000000"]
         );
+    }
+
+    #[test]
+    fn a_child_that_ends_is_not_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let made = |id: &str, parent: Option<&str>, depth: u32, led: bool| Agent {
+            id: id.into(),
+            parent: parent.map(str::to_owned),
+            depth,
+            led,
+            launched_by: led.then(|| "root00000000".to_owned()),
+            reopens: true,
+            native_id: Some(format!("session-{id}")),
+            ..an_agent()
+        };
+        // A root, its local child, a child of an agent of another machine (no parent here,
+        // below depth 0) and a session led by an agent (a root: its pilot is not its parent).
+        let agents = [
+            made("root00000000", None, 0, false),
+            made("local0000000", Some("root00000000"), 1, false),
+            made("remote000000", None, 1, false),
+            made("led000000000", None, 0, true),
+        ];
+        for agent in &agents {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+
+        for agent in &agents {
+            let ended = AgentChange {
+                state: Some(AgentState::Ended),
+                ..AgentChange::default()
+            };
+            store.change_agent(&agent.id, ended, None).unwrap();
+        }
+
+        let reopens = |id: &str| store.agent(id).unwrap().unwrap().reopens;
+        assert!(!reopens("local0000000"));
+        assert!(!reopens("remote000000"));
+        assert!(reopens("root00000000"));
+        assert!(reopens("led000000000"));
+        let kept: Vec<_> = store
+            .kept_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect();
+        assert_eq!(kept, ["led000000000", "root00000000"]);
     }
 
     #[test]

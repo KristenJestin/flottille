@@ -30,7 +30,7 @@ fn hex_of(machine: &Machine) -> String {
 
 /// A session led by `pc`'s root (in `mode`), started on `server` with `brief`: its id there, the
 /// root's id, the launch's answer and the root's MCP session.
-fn led_on_server(
+pub(crate) fn led_on_server(
     pc: &Machine,
     server: &Machine,
     brief: &str,
@@ -656,6 +656,8 @@ fn a_pilot_ended_stop_from_a_machine_that_did_not_start_the_session_is_refused()
 fn ending_a_pilot_lists_its_led_sessions_on_other_machines() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let folder = crate::remote_launch::folder_of(&server.agent(&session));
+    std::fs::write(folder.join("notes.txt"), "draft\n").unwrap();
 
     let ending = pc
         .user
@@ -668,12 +670,186 @@ fn ending_a_pilot_lists_its_led_sessions_on_other_machines() {
     assert_eq!(sessions[0]["title"], "Finish the export", "{ending:#}");
     assert_eq!(sessions[0]["machine"], "server", "{ending:#}");
     assert_eq!(sessions[0]["project"], "app", "{ending:#}");
+    // Asked there: what its workspace holds that is not saved, as that machine reads it.
+    assert_eq!(sessions[0]["state"], "uncommitted", "{ending:#}");
+    let losses = sessions[0]["losses"].to_string();
+    assert!(losses.contains("notes.txt"), "{ending:#}");
+    assert!(!losses.contains("unknown (on server)"), "{ending:#}");
+}
+
+#[test]
+fn the_end_confirmation_says_unknown_when_the_other_machine_does_not_answer() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+
+    let asked = std::time::Instant::now();
+    let ending = pc
+        .user
+        .call("agent.ending", json!({"agent": root}))
+        .unwrap();
+
+    // Linked to no one now: said at once, the wait is not what answers.
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        asked.elapsed()
+    );
+    let sessions = ending["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{ending:#}");
+    assert_eq!(sessions[0]["id"], session.as_str(), "{ending:#}");
     assert_eq!(sessions[0]["state"], "unknown", "{ending:#}");
     assert_eq!(
         sessions[0]["losses"],
         json!(["unknown (on server)"]),
         "{ending:#}"
     );
+}
+
+#[test]
+fn the_end_confirmation_gives_up_on_a_machine_that_answers_too_slowly() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let slow = server.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+
+    let asked = std::time::Instant::now();
+    let ending = pc
+        .user
+        .call("agent.ending", json!({"agent": root}))
+        .unwrap();
+    let waited = asked.elapsed();
+    std::fs::remove_file(&slow).unwrap();
+
+    // Linked, but not answering: it is waited for 3 seconds, not for as long as it takes.
+    assert!(
+        waited >= std::time::Duration::from_millis(2900),
+        "{waited:?}"
+    );
+    assert!(waited < std::time::Duration::from_secs(6), "{waited:?}");
+    let sessions = ending["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{ending:#}");
+    assert_eq!(sessions[0]["id"], session.as_str(), "{ending:#}");
+    assert_eq!(sessions[0]["state"], "unknown", "{ending:#}");
+    assert_eq!(
+        sessions[0]["losses"],
+        json!(["unknown (on server)"]),
+        "{ending:#}"
+    );
+}
+
+#[test]
+fn the_losses_from_another_machine_are_masked_of_the_secrets_of_the_pilot_s_place() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    std::fs::write(
+        crate::remote_launch::folder_of(&pc.agent(&root)).join(".env"),
+        "EXPORT_TOKEN=orchid-7731-lantern\n",
+    )
+    .unwrap();
+    // A file the other machine names in what it holds unsaved, and that is a secret here.
+    let folder = crate::remote_launch::folder_of(&server.agent(&session));
+    std::fs::write(folder.join("orchid-7731-lantern.txt"), "draft\n").unwrap();
+
+    let ending = pc
+        .user
+        .call("agent.ending", json!({"agent": root}))
+        .unwrap();
+
+    let losses = ending["sessions"][0]["losses"].to_string();
+    assert!(losses.contains(".txt"), "{ending:#}");
+    assert!(!losses.contains("orchid-7731-lantern"), "{ending:#}");
+}
+
+#[test]
+fn the_losses_of_a_session_are_not_read_by_a_machine_that_did_not_start_it() {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let (_laptop, key) = laptop_of(&hub, &server);
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-l1",
+            &launch_in(&text),
+            &root,
+            &session,
+            "session_losses",
+            json!({}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("did not start"), "{refused}");
+}
+
+#[test]
+fn the_losses_of_a_child_are_not_read_by_its_parent() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    ))
+    .to_owned();
+    let child = id_in(&text);
+    prompted(&server, "Write the tests of the export.");
+    let key = pc.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-l2",
+            &launch_in(&text),
+            &root,
+            &child,
+            "session_losses",
+            json!({}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(
+        refused.contains("only a session the caller leads"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn the_losses_of_a_handed_session_are_not_read_by_the_machine_that_handed_it() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    let text = done(&launched(
+        &mcp,
+        json!({"kind": "handed", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    ))
+    .to_owned();
+    let session = id_in(&text);
+    prompted(&server, "Finish the export.");
+    let key = pc.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![call_of(
+            "call-l3",
+            &launch_in(&text),
+            &root,
+            &session,
+            "session_losses",
+            json!({}),
+        )],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("handed to the user"), "{refused}");
 }
 
 #[test]
@@ -707,6 +883,75 @@ fn a_pilot_ended_while_the_machine_is_off_ends_them_when_it_is_back() {
         "its parent stopped",
         "{:#}",
         server.agent(&child)
+    );
+}
+
+#[test]
+fn every_machine_is_told_the_pilot_of_another_machine_of_a_led_session() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    // Server tells the machines it links to the pilot of its session, by its machine's name and
+    // its id there: never in the list's `pilot`, which every machine takes as it did.
+    let told = || {
+        pc.user.call("remote.sessions", json!({})).unwrap()["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|machine| machine["name"] == "server")
+            .flat_map(|machine| machine["sessions"].as_array().cloned().unwrap_or_default())
+            .find(|listed| listed["id"] == session.as_str())
+    };
+    eventually("pc is told the pilot of server's session", || {
+        told().is_some_and(|listed| !listed["pilot_elsewhere"].is_null())
+    });
+    let listed = told().unwrap();
+    assert_eq!(
+        listed["pilot_elsewhere"],
+        json!({"machine": "pc", "agent": root}),
+        "{listed:#}"
+    );
+    assert!(listed["pilot"].is_null(), "{listed:#}");
+    // Server says it of its own list too, as its window reads it while another machine is in
+    // front.
+    let this = server.user.call("remote.sessions", json!({})).unwrap()["this"].clone();
+    let own = this
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == session.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{this:#}"));
+    assert_eq!(
+        own["pilot_elsewhere"],
+        json!({"machine": "pc", "agent": root}),
+        "{own:#}"
+    );
+}
+
+#[test]
+fn a_failed_pilot_does_not_end_its_led_session_on_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.user
+        .fake_script(json!({"load_error": "the session is lost", "turns": [
+        {"when": "die now", "do": [{"die": 3}]}]}));
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+
+    pc.user
+        .call("agent.send", json!({"agent": root, "message": "die now"}))
+        .unwrap();
+
+    eventually("the pilot failed on pc", || {
+        pc.agent(&root)["state"] == "failed"
+    });
+    // It can be resumed: what it leads goes on, there as here.
+    a_while();
+    a_while();
+    let there = server.agent(&session);
+    assert!(
+        !matches!(there["state"].as_str(), Some("ended" | "failed")),
+        "{there:#}"
     );
 }
 

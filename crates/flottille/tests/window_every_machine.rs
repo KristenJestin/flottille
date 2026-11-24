@@ -2382,12 +2382,12 @@ fn another_machine_s_pull_request_is_kept_after_a_refresh(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
+fn a_project_draft_of_another_machine_is_kept_here_and_answered_to_the_composer_that_typed_it(
     cx: &mut TestAppContext,
 ) {
-    // The window keeps every draft on this machine's daemon (`docs/remote.md`): the server's
-    // page writes it through its own pages, and its answer comes back to the composer that typed
-    // it, not to this machine's composer of the same project.
+    // The window keeps every draft on this machine's daemon (`docs/remote.md`), under the machine
+    // it is of: the server's page writes it through its own pages, and its answer comes back to
+    // the composer that typed it, not to this machine's composer of the same project.
     let (_hub, pc, _server, here, _there) = two_machines();
     let relay = Relay::default();
     let (shell, cx) = window(&pc, &relay, cx);
@@ -2414,7 +2414,10 @@ fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
     });
     eventually("this machine's daemon keeps it", || {
         pc.user
-            .call("draft.get", json!({"kind": "project", "target": "app"}))
+            .call(
+                "draft.get",
+                json!({"kind": "project", "target": "app", "machine": "server"}),
+            )
             .is_ok_and(|draft| draft.to_string().contains("Plan the release"))
     });
     until(
@@ -2423,4 +2426,111 @@ fn a_project_draft_typed_on_another_machine_is_written_there_after_leaving_it(
         "its answer reaches the composer that typed it",
         |cx| composer.read_with(cx, |c, _| c.drafts_unanswered()) == 0,
     );
+}
+
+/// What this machine's daemon keeps of the draft of `kind` `target` of the server (`machine`
+/// `Some`) or of this machine's own.
+fn kept_draft(user: &User, kind: &str, target: &str, machine: Option<&str>) -> Option<String> {
+    let mut params = json!({"kind": kind, "target": target});
+    if let Some(machine) = machine {
+        params["machine"] = json!(machine);
+    }
+    let answer = user.call("draft.get", params).ok()?;
+    answer["draft"]["text"].as_str().map(str::to_owned)
+}
+
+#[gpui_kit::test]
+fn a_draft_of_another_machine_s_session_is_read_back(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, first);
+    open_there(&shell, cx, &there);
+    let reply = reply_there(&shell, cx, &there);
+    until(&shell, cx, "the composer heard what its draft is", |cx| {
+        reply.read_with(cx, |reply, _| reply.draft_was_read())
+    });
+
+    click(cx, "reply-field");
+    cx.simulate_input("Half an answer");
+    shell.update(cx, |shell, cx| shell.closing(cx));
+    eventually("this machine's daemon keeps the server's draft", || {
+        kept_draft(&pc.user, "session", &there, Some("server")).as_deref() == Some("Half an answer")
+    });
+    // A draft never travels to a machine: the server knows nothing of it.
+    assert_eq!(kept_draft(&server.user, "session", &there, None), None);
+
+    let (shell, cx) = window(&pc, &relay, second);
+    open_there(&shell, cx, &there);
+    let reply = reply_there(&shell, cx, &there);
+    until(&shell, cx, "the draft is back in its composer", |cx| {
+        reply.read_with(cx, |reply, cx| {
+            reply.field().read(cx).value() == "Half an answer"
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_draft_of_another_machine_is_not_this_machine_s_draft_of_the_same_name(
+    first: &mut TestAppContext,
+    second: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, first);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's page of app is drawn", |cx| {
+        present(cx, "composer-field")
+            && shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    });
+    let composer = shell.read_with(cx, |s, _| s.composer_of("app").cloned().unwrap());
+    until(&shell, cx, "the server's draft of app is read", |cx| {
+        composer.read_with(cx, |c, _| c.draft_was_read())
+    });
+    click(cx, "composer-field");
+    cx.simulate_input("Plan the release");
+    shell.update(cx, |shell, cx| shell.closing(cx));
+    eventually("this machine's daemon keeps the server's draft", || {
+        kept_draft(&pc.user, "project", "app", Some("server")).as_deref()
+            == Some("Plan the release")
+    });
+    assert_eq!(
+        kept_draft(&pc.user, "project", "app", None),
+        None,
+        "this machine's project app holds the server's draft"
+    );
+    assert_eq!(kept_draft(&server.user, "project", "app", None), None);
+
+    // Another window: this machine's page of app is empty, the server's has its draft.
+    let (shell, cx) = window(&pc, &relay, second);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(None, "app", window, cx)
+    });
+    until(&shell, cx, "this machine's page of app is drawn", |cx| {
+        present(cx, "composer-field") && shell.read_with(cx, |s, _| s.machine_shown()).is_none()
+    });
+    let here_composer = shell.read_with(cx, |s, _| s.composer_of("app").cloned().unwrap());
+    until(&shell, cx, "this machine's draft of app is read", |cx| {
+        here_composer.read_with(cx, |c, _| c.draft_was_read())
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        here_composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string()),
+        "",
+        "the server's draft shows in this machine's composer of the same name"
+    );
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine_for(Some("server".to_owned()), "app", window, cx)
+    });
+    until(&shell, cx, "the server's draft is back", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.composer_of("app")
+                    .is_some_and(|c| c.read(cx).field().read(cx).value() == "Plan the release")
+        })
+    });
 }

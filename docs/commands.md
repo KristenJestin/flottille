@@ -177,11 +177,26 @@ machine's `/etc/ssh/ssh_config` and the user's `~/.ssh/config` include (followed
 makes, read-only, and put over the file at its own path: the same name and text, owned by the
 user in the run. The text is root's, which no run can write; nothing of it is logged or shown. A
 file `ssh` would refuse anyway, one its group or others may write, is not copied, so that `ssh`
-still refuses it. What a run can write steers none of it: the machine's configuration is followed
-only through root's files, the user's only inside `~/.ssh` (as the lent push reads it), and each
-file is opened without following a link or waiting on a FIFO, then judged on what was opened, up
-to 1 MB. A copy that cannot be made fails no command: it starts without the copies, `ssh` refuses
-as before, and the daemon's log says it once. Two
+still refuses it; a `~` in an `Include` of the machine's configuration is not followed either,
+since `ssh` refuses it there. A root-owned `~/.ssh/config` is copied as what it includes is, and
+a wildcard of the machine's configuration is expanded through a link to a folder, as `ssh` does
+(a link-following expansion is for the machine's configuration alone: in `~/.ssh` the lent push's
+own, which follows none, applies). What a run can write steers none of it: the machine's
+configuration is followed only through root's files, the user's only inside `~/.ssh` (as the lent
+push reads it), no pattern names more than 1024 paths over a whole walk, and each file is opened without following a link
+anywhere on its path (`openat2`, Linux 5.6 or later: none is copied on an older kernel) or
+waiting on a FIFO, then judged on what was opened, up to 1 MB. Each copy covers a file with the
+device and inode of the one read, its path opened again in the run's namespace without following
+a link: another file put there since is not covered. A copy that cannot be made fails no command: it starts
+without the copies, `ssh` refuses as before, and `flottille doctor` says it until a command gets
+them again. A file system of the copies that cannot be taken away from over the folder it was
+made on fails the start instead: the run is refused, and `flottille doctor` says why. What is
+still left to `ssh`'s refusal is said by `flottille doctor`, one line each: more than 64 root-owned
+files included, a root-owned file larger than 1 MB, and a root-owned file the user's
+configuration includes from outside `~/.ssh` (which no start looks at, and doctor reads through
+no link, so that no run steers what the daemon reads: copy it into `~/.ssh`), more than 1024
+paths named by the patterns of the includes, and more than 256 files included when one past that
+is root's. Two
 other ways were weighed and set aside. Mapping root into the namespace too needs a setuid helper
 (`newuidmap`), which an unprivileged daemon does not have. Running a run's fetches outside the
 sandbox, as the push the gate let through, would read the repository's settings, which the run
