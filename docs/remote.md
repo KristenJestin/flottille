@@ -1197,8 +1197,7 @@ to be told.
 
 **The workspace there is removed as one here** (#1278). The answer of the launch names it (`in
 workspace login there, …`), and `agent_stop` says it stays, as on one machine. The `workspace`
-tool's `remove` takes the same
-optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
+tool's `remove` takes the same optional `machine` as `agent_launch`: the caller's daemon sends it, through `call` and judged by
 nothing here, to that machine, only for the workspace there of a session or child that very agent
 started (`refused: you started no session or child on server whose workspace is login: …`
 otherwise, nothing sent). That machine checks again that the workspace is the one it made for
