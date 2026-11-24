@@ -620,7 +620,7 @@ choosing one brings it in front, and every tab that is a machine's (Agents, Appr
 and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
 that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
 machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
-window keeps; one line under the tabs says it while another machine is shown (`This window
+window keeps; one line, the first of what scrolls under the tabs, says it while another machine is shown (`This window
 (appearance, version) stays this machine's, pc, whichever machine is chosen above.`). Settings, Machines is the hub's list, the same from
 every machine. **Add project** asks first on which machine (radios: this one first, then the runners,
 each with its role and state; Next), then the folder there (Back returns to the machine): on
@@ -1707,6 +1707,11 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **The sentence of another machine's Settings scrolls with the sections** (#1293): `This window
+  (appearance, version) stays this machine's…` was a fixed line under the tabs, and what scrolled
+  could be drawn over it. It is now the first line of what scrolls, so no text is ever drawn over
+  another; the kit has no opaque, fixed header for what scrolls to pass under, and none is drawn
+  here. A fixed header can come later, in the kit first.
 - **A machine of before refuses a launch whose caller an agent started** (#1275): `launched` is a
   field it does not know, and a launch is read with no unknown field, so the launch is refused
   with the link's own refusal rather than run as any root's: the agent is answered `refused by
