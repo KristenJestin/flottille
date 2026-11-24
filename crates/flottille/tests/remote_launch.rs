@@ -16,7 +16,8 @@ use common::User;
 use common::mcp::{Answer, Mcp, server_of};
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Git, GitOffer, GitPlace, Hello, LaunchAsk, Link, MachineMessage, Message, PublicKey, Traffic,
+    Git, GitOffer, GitPlace, Hello, LaunchAsk, Link, MachineMessage, Message, PublicKey, Role,
+    Traffic,
 };
 use serde_json::{Value, json};
 
@@ -55,6 +56,12 @@ impl TestHub {
 
     fn url(&self) -> String {
         format!("http://{}", self.address)
+    }
+
+    /// The role of the device `name` changed, as the hub's host changes it.
+    pub(crate) fn change_role(&self, name: &str, role: Role) {
+        self.served
+            .with_hub(|hub| hub.change_role(name, role).map(|_| ()).unwrap());
     }
 
     /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.

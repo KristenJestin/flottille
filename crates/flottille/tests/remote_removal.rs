@@ -5,12 +5,14 @@
 //! throwaway repositories.
 
 use crate::common::mcp::Answer;
-use crate::remote_deliveries::{launch_in, release, script};
+use crate::remote_deliveries::{answered, launch_in, off, on, release, script};
 use crate::remote_launch::{
     Machine, allowing, done, eventually, folder_of, id_in, launched, pc_and_server, prompted,
-    refused, server_user,
+    refused, sent_with, server_user,
 };
 
+use flottille_core::store::{LaunchFilter, Store};
+use flottille_link::{Call, MachineMessage, Role};
 use serde_json::{Value, json};
 
 /// A session led by a root of `pc` in Auto, started on `server` with `brief`: its id there, the
@@ -174,4 +176,340 @@ fn a_workspace_on_another_machine_is_removed_only_by_the_agent_that_started_its_
     assert!(text.contains("started no session"), "{text}");
     assert!(folder_of(&agent).exists());
     assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+/// The references `pc` holds of what came back from other machines.
+fn came_back(pc: &Machine) -> String {
+    pc.git(
+        &pc.folder(),
+        &["for-each-ref", "--format=%(refname)", "refs/flottille/"],
+    )
+}
+
+/// The id of `pc`'s root that `mcp` is the MCP session of: the one whose parent is none.
+fn root_id(pc: &Machine) -> String {
+    pc.agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A `workspace` call as `pc`'s daemon sends it for its root `caller`, of the session `agent` it
+/// started with the launch `launch`.
+fn removal_call(id: &str, launch: &str, caller: &str, agent: &str, args: Value) -> MachineMessage {
+    MachineMessage::Call(Box::new(Call {
+        id: id.into(),
+        launch: launch.into(),
+        caller: caller.into(),
+        agent: agent.into(),
+        tool: "workspace".into(),
+        arguments: args.to_string(),
+        project: "app".into(),
+        ..Call::default()
+    }))
+}
+
+#[test]
+fn a_device_that_may_only_view_removes_nothing_and_takes_no_commit() {
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, _launch, mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let agent = server.agent(&session);
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    commit_all(&server, &there, "export.txt", "the export");
+    hub.change_role("pc", Role::Viewer);
+    eventually("server sees pc as a viewer", || {
+        server.user.call("remote.members", json!({})).unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member["name"] == "pc" && member["role"] == "viewer")
+    });
+
+    let answer = mcp.call(
+        "workspace",
+        json!({"action": "remove", "name": workspace, "machine": "server"}),
+    );
+
+    let text = refused(&answer);
+    assert!(text.contains("pc may only view"), "{text}");
+    // Refused before anything of it was done: no commit sent to a device that may only view.
+    assert_eq!(came_back(&pc), "");
+    assert!(there.exists());
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_name() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+    let first = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "First export", "brief": "One."}),
+    );
+    let first = (id_in(done(&first)), launch_in(done(&first)));
+    // pc's branch, made again from a root of its own: server recognises its project no more and
+    // makes another, where the second launch's workspace takes the same name.
+    let repo = pc.folder();
+    pc.git(&repo, &["checkout", "--quiet", "--orphan", "fresh"]);
+    pc.git(&repo, &["add", "--all"]);
+    pc.git(&repo, &["commit", "--quiet", "-m", "fresh"]);
+    pc.git(&repo, &["branch", "--quiet", "-M", "feat/export"]);
+    let second = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Second export", "brief": "Two."}),
+    );
+    let second = (id_in(done(&second)), launch_in(done(&second)));
+    let (one, two) = (server.agent(&first.0), server.agent(&second.0));
+    assert_eq!(one["workspace"], two["workspace"], "{one:#}\n{two:#}");
+    assert_ne!(one["project"], two["project"], "{one:#}\n{two:#}");
+    let workspace = one["workspace"].as_str().unwrap().to_owned();
+    let (one_there, two_there) = (folder_of(&one), folder_of(&two));
+    ended_there(&server, &first.0);
+    ended_there(&server, &second.0);
+    prompted(&pc, "Your following of it is over.");
+    eventually("both ends told", || {
+        pc.prompts()
+            .iter()
+            .filter(|prompt| prompt.contains("Your following of it is over."))
+            .count()
+            == 2
+    });
+    let caller = root_id(&pc);
+    let key = pc.stand_in();
+
+    // Each removal names its launch: the workspace removed is that launch's, whichever project
+    // the other is in, asked and allowed alike.
+    for (n, (session, launch), gone, kept) in [
+        (1, &second, &two_there, Some(&one_there)),
+        (2, &first, &one_there, None),
+    ] {
+        let answers = sent_with(
+            &key,
+            &server,
+            vec![removal_call(
+                &format!("rm{n}"),
+                launch,
+                &caller,
+                session,
+                json!({"action": "remove", "name": workspace}),
+            )],
+        );
+        let answer = answers[0].clone().unwrap();
+        let text = answer["text"].as_str().unwrap_or_default();
+        let at = text
+            .find("request #")
+            .unwrap_or_else(|| panic!("not held: {answer:#}"))
+            + "request #".len();
+        let number: u64 = text[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap();
+        server
+            .user
+            .call("approval.approve", json!({"number": number}))
+            .unwrap();
+        eventually("the workspace of the launch named removed", || {
+            !gone.exists()
+        });
+        if let Some(kept) = kept {
+            assert!(kept.exists(), "the other launch's workspace was removed");
+        }
+    }
+}
+
+#[test]
+fn in_full_a_removal_from_another_machine_that_would_lose_work_is_held() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("full");
+    let switched = server
+        .user
+        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
+    assert!(switched.status.success(), "{}", pc.log());
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Finish the export",
+            "brief": "Finish the export."}),
+    );
+    let session = id_in(done(&answer));
+    prompted(&server, "Finish the export.");
+    let agent = server.agent(&session);
+    assert_eq!(agent["gate_mode"], "full", "{agent:#}");
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    // Work never committed, which cannot come back.
+    std::fs::write(there.join("draft.txt"), "a draft\n").unwrap();
+    ended_there(&server, &session);
+
+    let answer = mcp.call(
+        "workspace",
+        json!({"action": "remove", "name": workspace, "machine": "server"}),
+    );
+
+    // Held for the user there, as the removal of its own workspace is in Full on one machine.
+    let number = held(&answer);
+    let asked = request(&server, number);
+    assert!(asked["says"].to_string().contains("draft.txt"), "{asked:#}");
+    assert!(there.exists());
+}
+
+#[test]
+fn a_removal_there_is_refused_for_another_workspace_a_handed_session_or_another_action() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, launch, mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let agent = server.agent(&session);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    let handed = launched(
+        &mcp,
+        json!({"kind": "handed", "machine": "server", "title": "Let go", "brief": "Yours."}),
+    );
+    let handed_session = id_in(done(&handed));
+    let handed_agent = server.agent(&handed_session);
+    let handed_launch = Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .launches("in", None, LaunchFilter::Agent(&handed_session))
+        .unwrap()
+        .pop()
+        .unwrap()
+        .launch;
+    ended_there(&server, &session);
+    let caller = root_id(&pc);
+    let key = pc.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![
+            // A workspace that is not the launch's.
+            removal_call(
+                "w1",
+                &launch,
+                &caller,
+                &session,
+                json!({"action": "remove", "name": "elsewhere"}),
+            ),
+            // The workspace of a session handed to the user.
+            removal_call(
+                "w2",
+                &handed_launch,
+                &caller,
+                &handed_session,
+                json!({"action": "remove", "name": handed_agent["workspace"]}),
+            ),
+            // An action other than remove.
+            removal_call(
+                "w3",
+                &launch,
+                &caller,
+                &session,
+                json!({"action": "create", "name": "more"}),
+            ),
+        ],
+    );
+
+    let first = answers[0].clone().unwrap();
+    assert_eq!(first["outcome"], "refused", "{first:#}");
+    let text = first["text"].as_str().unwrap();
+    assert!(
+        text.contains("the workspace elsewhere is not the one of agent"),
+        "{text}"
+    );
+    let second = answers[1].clone().unwrap_err();
+    assert!(second.contains("handed to the user"), "{second}");
+    let third = answers[2].clone().unwrap_err();
+    assert!(third.contains("only remove is"), "{third}");
+    assert!(folder_of(&agent).exists());
+    assert!(folder_of(&handed_agent).exists());
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn a_child_removes_no_workspace_on_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, _launch, mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let agent = server.agent(&session);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    ended_there(&server, &session);
+    script(
+        &pc,
+        json!([{"when": "Tidy the server.", "times": 1, "do": [
+            {"mcp": {"tool": "workspace", "arguments":
+                {"action": "remove", "name": workspace, "machine": "server"}}}
+        ]}]),
+    );
+
+    done(&mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "Tidy", "brief": "Tidy the server."}),
+    ));
+
+    // A child manages no workspace, here or there: refused before anything is sent.
+    answered(
+        &pc,
+        "the agent the user talks to manages the project's workspaces",
+    );
+    assert!(folder_of(&agent).exists());
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn another_action_than_remove_on_another_machine_is_refused_in_words() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let answer = mcp.call(
+        "workspace",
+        json!({"action": "create", "name": "more", "machine": "server"}),
+    );
+
+    let text = refused(&answer);
+    assert!(
+        text.contains("with machine, workspace only removes"),
+        "{text}"
+    );
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn an_end_told_once_its_workspace_is_gone_says_nothing_of_commits_that_came_back() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "report", "arguments": {"text": "The export is reported."}}}
+        ]}]),
+    );
+    let (session, _launch, _mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let agent = server.agent(&session);
+    let there = folder_of(&agent);
+    let workspace = agent["workspace"].as_str().unwrap().to_owned();
+    commit_all(&server, &there, "export.txt", "the export");
+    release(&server);
+    // Every commit came back with its report.
+    prompted(&pc, "it reported");
+    off(&pc);
+    ended_there(&server, &session);
+    // The user of the server removes it: nothing is lost, all of it came back.
+    server
+        .user
+        .call(
+            "workspace.remove",
+            json!({"project": "app", "name": workspace}),
+        )
+        .unwrap();
+    eventually("the workspace removed", || !there.exists());
+
+    on(&pc);
+
+    let woken = prompt_with(&pc, "Your following of it is over.");
+    assert!(!woken.contains("could not come back"), "{woken}");
 }
