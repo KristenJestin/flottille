@@ -1172,13 +1172,25 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     Ok(agent)
 }
 
-/// Starts the ended `agent` again on its own session: the write of `agent.resume`.
+/// Starts the ended `agent` again on its own session: the write of `agent.resume`. The room of
+/// its pilot in its machine's cap is checked in this very write, as for a new session
+/// ([`write_new`]): a pilot whose sessions all ended counts again with this one.
 pub(crate) fn resume_write(daemon: &Arc<Daemon>, agent: &Agent) -> Result<Agent, Failure> {
-    let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
-        Some((agent, event)) => Ok((Some(agent), Some(event))),
-        None => Ok((None, None)),
+    let pilot = agent.launched_by.as_ref().or(agent.detached_from.as_ref());
+    let resumed = daemon.write(|store| {
+        if let Some(pilot) = pilot
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Err(why), None));
+        }
+        match store.resume_agent(&agent.id)? {
+            Some((agent, event)) => Ok((Ok(Some(agent)), Some(event))),
+            None => Ok((Ok(None), None)),
+        }
     })?;
-    resumed.ok_or_else(|| Failure::refused(format!("agent {} was resumed already", agent.id)))
+    resumed
+        .map_err(Failure::refused)?
+        .ok_or_else(|| Failure::refused(format!("agent {} was resumed already", agent.id)))
 }
 
 /// Writes the agent `made` made.
