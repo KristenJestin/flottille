@@ -122,6 +122,12 @@ of such a project takes over the sessions and workspaces it holds, as they were.
 back while its removal waits for the agents to stop, the project and its file stay, and the result
 says so.
 
+The window shows such a project on its own machine only, after the user's list, with its sessions
+and the words "settings file missing" under its name. It has no page (its click folds and unfolds
+its sessions) and its menu offers Remove… alone, with the confirmation of any project, which says
+what is kept and why. Its row folds away once the daemon no longer lists it: a workspace kept
+because it holds work keeps the row.
+
 A failure partway (an agent still running after the wait, a workspace git could not remove)
 stops there and leaves the project known; the refusal says what failed and what was done
 already, and asking again goes on from there. A workspace kept is not a failure: the project is
