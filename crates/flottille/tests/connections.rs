@@ -5044,7 +5044,9 @@ fn a_confined_run_finds_no_chrome_profile_in_the_temporary_folder() {
     // agent-browser makes Chrome's profile, which holds its cookies, in the temporary folder: the
     // daemon's own is the runs' too. While the browser runs, a run in Ask and in Auto lists the
     // daemon's temporary folder and finds nothing of it.
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
+        .with_allowing_judge();
     let temporary = user.path("tmp");
     std::fs::create_dir(&temporary).unwrap();
     let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
@@ -6028,7 +6030,9 @@ impl Drop for Closed {
 /// browser), and the program to run: none, said, when this machine lacks either. Its Auto judge
 /// allows everything.
 fn real_user() -> Option<(User, PathBuf)> {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_fake_agent_browser(&fake_mcp())
+        .with_allowing_judge();
     // The test's runtime folder is under `/tmp`, so the sandbox rules each entry of `/tmp` and
     // not `/tmp` itself (`landlock.rs`): Chrome makes its profile in a temporary folder of the
     // test's own, as it does in `/tmp` on a machine whose runtime folder is `/run/user/<uid>`.
@@ -7789,6 +7793,10 @@ fn a_call_to_a_connection_whose_command_was_refused_says_it_is_flottille_s_refus
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
     user.call(
         "connection.edit",
         json!({"name": "browser", "command": browser_command_after(
