@@ -824,8 +824,9 @@ fn a_child_of_another_machine_that_ends_is_not_kept() {
 fn a_led_session_of_another_machine_ended_and_kept_survives_the_sweep() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
-    let (led, _root, _text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    // Its slot is free again for the led session.
     ended(&server, &child);
+    let (led, _root, _text, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
     ended(&server, &led);
     assert!(reopens(&server, &led));
     off(&server);

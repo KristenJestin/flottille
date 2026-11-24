@@ -6684,13 +6684,13 @@ mod tests {
             parent: parent.map(str::to_owned),
             depth,
             led,
-            launched_by: led.then(|| "pilot0000000".to_owned()),
+            launched_by: led.then(|| "root00000000".to_owned()),
             reopens: true,
             native_id: Some(format!("session-{id}")),
             ..an_agent()
         };
         // A root, its local child, a child of an agent of another machine (no parent here,
-        // below depth 0) and a session led from another machine (a root, with its pilot).
+        // below depth 0) and a session led by an agent (a root: its pilot is not its parent).
         let agents = [
             made("root00000000", None, 0, false),
             made("local0000000", Some("root00000000"), 1, false),
