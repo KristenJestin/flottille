@@ -1037,6 +1037,7 @@ fn removing_a_group_from_its_menu_keeps_its_projects_and_folds_it_away(cx: &mut 
 
     from_menu(&id, group_remove_id(&id), &shell, cx);
     // Half-way: the heading is still there, folding away with its gap.
+    step(&shell, FRAME, cx);
     step(&shell, PANEL / 2, cx);
     assert!(present(cx, group_header_id(&id)), "the heading folds away");
     let half = bounds(cx, head).size.height;
