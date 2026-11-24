@@ -1183,10 +1183,20 @@ pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
     let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
         "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
         "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
-    daemon.write(|store| {
+    // The pilot's room in its machine's cap is checked in this very write: one session that makes
+    // it count again, and another caller, never pass the cap together.
+    let refused = daemon.write(|store| {
+        if let Some(pilot) = &agent.launched_by
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Some(why), None));
+        }
         let event = store.create_agent(agent, ("agent.created", data.clone()))?;
-        Ok(((), event))
+        Ok((None, Some(event)))
     })?;
+    if let Some(why) = refused {
+        return Err(Failure::refused(why));
+    }
     crate::extensions::heard(daemon, &[("agent.created", data)]);
     Ok(())
 }
