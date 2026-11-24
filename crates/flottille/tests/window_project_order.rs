@@ -1072,6 +1072,8 @@ fn removing_a_group_from_its_menu_keeps_its_projects_and_folds_it_away(cx: &mut 
 #[gpui_kit::test]
 fn a_folded_group_shows_its_strongest_mark(cx: &mut TestAppContext) {
     let user = user();
+    // The agent works until it is stopped.
+    user.fake_script(json!({"turns": [{"when": "HANG", "do": [{"hang": true}]}]}));
     project(&user, "app");
     let answer = user
         .call("agent.start", json!({"project": "app", "message": "hello"}))
