@@ -5,7 +5,7 @@
 //! throwaway repositories.
 
 use crate::common;
-use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, script};
+use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, release, script};
 use crate::remote_launch::{
     Machine, allowing, eventually, launch_ask, pc_and_server, prompted, sent_with, server_user,
 };
@@ -302,32 +302,76 @@ fn refused_as_a_child(server: &Machine, child: &str, method: &str, params: Value
     refused
 }
 
-#[test]
-fn agent_unqueue_is_refused_on_a_child_of_another_machine() {
-    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
-    let child = working_child(&pc, &server);
+/// A message `pc`'s root sends its child on `server` while the child's first turn is held: the
+/// child's id, and the id of the delivery it waits as on `server`.
+fn queued_by_the_parent(pc: &Machine, server: &Machine) -> (String, String) {
+    script(
+        server,
+        json!([{"when": "Write the tests of the export.", "times": 1,
+            "do": [{"hold": "release"}]}]),
+    );
+    let (child, _launch, mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    prompted(server, "Write the tests of the export.");
+    let sent = mcp.call(
+        "agent_send",
+        json!({"agent_id": child, "message": "Cover the CSV export too."}),
+    );
+    assert!(!sent.error, "{}", sent.text);
+    let mut delivery = None;
+    eventually("the parent's message queued", || {
+        delivery = queued(server, &child);
+        delivery.is_some()
+    });
+    (child, delivery.unwrap())
+}
 
-    // Whatever the delivery: a child's messages are its parent's, never the user's to move.
+/// The delivery `agent` waits on `server`, if any.
+fn queued(server: &Machine, agent: &str) -> Option<String> {
+    let db = rusqlite::Connection::open_with_flags(
+        server.user.path("state/flottille/flottille.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.query_row(
+        "SELECT id FROM deliveries WHERE agent = ?1 AND state = 'queued'",
+        [agent],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+#[test]
+fn agent_unqueue_keeps_the_message_the_parent_of_a_child_of_another_machine_queued() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, delivery) = queued_by_the_parent(&pc, &server);
+
     refused_as_a_child(
         &server,
         &child,
         "agent.unqueue",
-        json!({"agent": child, "delivery": "d-1"}),
+        json!({"agent": child, "delivery": delivery}),
     );
+
+    assert_eq!(queued(&server, &child), Some(delivery));
+    release(&server);
+    prompted(&server, "Cover the CSV export too.");
 }
 
 #[test]
-fn agent_send_now_is_refused_on_a_child_of_another_machine() {
+fn agent_send_now_leaves_the_message_the_parent_of_a_child_of_another_machine_queued() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
-    let child = working_child(&pc, &server);
+    let (child, delivery) = queued_by_the_parent(&pc, &server);
 
-    // Whatever the delivery: a child's messages are its parent's, never the user's to move.
     refused_as_a_child(
         &server,
         &child,
         "agent.send_now",
-        json!({"agent": child, "delivery": "d-1"}),
+        json!({"agent": child, "delivery": delivery}),
     );
+
+    // Its turn goes on, the message waits it out.
+    assert_eq!(server.agent(&child)["state"], "working");
+    assert_eq!(queued(&server, &child), Some(delivery));
 }
 
 #[test]
@@ -463,7 +507,7 @@ fn a_report_of_a_child_of_another_machine_is_no_notification_of_the_user() {
 }
 
 #[test]
-fn a_remote_child_stored_by_an_older_release_is_stopped_after_its_local_children() {
+fn a_remote_child_stored_by_an_older_release_is_put_above_its_local_children() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
     // A child of the server's own session, which an older release had started under the remote
@@ -498,6 +542,112 @@ fn a_remote_child_stored_by_an_older_release_is_stopped_after_its_local_children
     let depths = (
         server.agent(&child)["depth"].clone(),
         server.agent(&grandchild)["depth"].clone(),
+        server.agent(&local)["depth"].clone(),
     );
-    assert_eq!(depths, (json!(1), json!(2)), "{depths:?}");
+    // The server's own session, a root, stays one.
+    assert_eq!(depths, (json!(1), json!(2), json!(0)), "{depths:?}");
+}
+
+/// A child of `pc`'s root on `server`, and a child of the server's own that sits under it, as an
+/// older release, or a deeper depth limit, let the remote child start: their ids.
+fn child_with_a_local_child(pc: &Machine, server: &Machine) -> (String, String) {
+    let (child, _launch, _mcp) = child_on_server(pc, server, "Write the tests of the export.");
+    let (local, mcp) = server.root("auto");
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "Check the export", "brief": "Check the CSV export."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let grandchild = server
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"] == local.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    off(server);
+    let db = rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    db.execute(
+        "UPDATE agents SET parent = ?1, depth = 2 WHERE id = ?2",
+        [&child, &grandchild],
+    )
+    .unwrap();
+    drop(db);
+    on(server);
+    (child, grandchild)
+}
+
+#[test]
+fn agent_mode_does_not_set_the_mode_of_a_local_child_of_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, grandchild) = child_with_a_local_child(&pc, &server);
+    let before = server.agent(&child)["gate_mode"].clone();
+
+    let refused = server
+        .user
+        .call("agent.mode", json!({"agent": grandchild, "mode": "full"}))
+        .unwrap_err()
+        .1;
+
+    assert!(refused.contains("of pc"), "{refused}");
+    assert!(refused.contains("mode"), "{refused}");
+    assert_eq!(server.agent(&child)["gate_mode"], before);
+}
+
+#[test]
+fn a_local_child_of_a_child_of_another_machine_is_refused_naming_where_the_user_writes() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, grandchild) = child_with_a_local_child(&pc, &server);
+
+    let refused = server
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": grandchild, "message": "Check the PDF export too."}),
+        )
+        .unwrap_err()
+        .1;
+
+    assert!(
+        refused.contains(&format!("agent {grandchild} is a child of agent {child}")),
+        "{refused}"
+    );
+    // Not the remote child, which the user does not write to either: its root, on pc.
+    assert!(
+        !refused.contains(&format!("its root, agent {child}")),
+        "{refused}"
+    );
+    assert!(refused.contains("on pc"), "{refused}");
+}
+
+#[test]
+fn agent_reload_tools_is_refused_on_a_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    refused_as_a_child(
+        &server,
+        &child,
+        "agent.reload_tools",
+        json!({"agent": child}),
+    );
+}
+
+#[test]
+fn agent_resume_is_refused_on_an_ended_child_of_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // The user's way out, while its parent's machine is off.
+    server
+        .user
+        .call("agent.stop", json!({"agent": child}))
+        .unwrap();
+    eventually("the child ended", || {
+        server.agent(&child)["state"] == "ended"
+    });
+
+    refused_as_a_child(&server, &child, "agent.resume", json!({"agent": child}));
+
+    assert_eq!(server.agent(&child)["state"], "ended");
 }

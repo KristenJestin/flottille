@@ -9300,6 +9300,140 @@ mod tests {
         }
     }
 
+    /// A store at `path` holding `agents` (id, parent, depth) and, for each `(agent, kind, caller
+    /// depth)`, a launch `in` that started it: an agent of another machine's, as a release of
+    /// before stored it.
+    fn stored_tree(
+        path: &Path,
+        agents: &[(&str, Option<&str>, u32)],
+        launched: &[(&str, &str, Option<u32>)],
+    ) {
+        let mut store = Store::open(path).unwrap();
+        for (id, parent, _) in agents {
+            let agent = Agent {
+                id: (*id).into(),
+                parent: parent.map(Into::into),
+                ..an_agent()
+            };
+            store
+                .create_agent(&agent, ("agent.created", json!({"agent": id})))
+                .unwrap();
+        }
+        for (number, (agent, kind, depth)) in launched.iter().enumerate() {
+            let asked = match depth {
+                Some(depth) => json!({"asked": {"depth": depth}}),
+                None => json!({"asked": {}}),
+            };
+            store
+                .record_launch(&Launch {
+                    launch: format!("launch-{number}"),
+                    kind: (*kind).into(),
+                    state: "started".into(),
+                    agent: Some((*agent).into()),
+                    asked,
+                    ..a_launch_in()
+                })
+                .unwrap();
+        }
+        // The depths as that release left them, which the store's own writes never set so.
+        for (id, _, depth) in agents {
+            store
+                .connection
+                .execute(
+                    "UPDATE agents SET depth = ?1 WHERE id = ?2",
+                    params![depth, id],
+                )
+                .unwrap();
+        }
+    }
+
+    fn depths(path: &Path, ids: &[&str]) -> Vec<u32> {
+        let store = Store::open(path).unwrap();
+        ids.iter()
+            .map(|id| store.agent(id).unwrap().unwrap().depth)
+            .collect()
+    }
+
+    #[test]
+    fn a_remote_child_a_beta_moved_alone_takes_its_local_children_one_lower() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        // The beta put the remote child at depth 1 and left its local child at 1.
+        stored_tree(
+            &path,
+            &[("remote", None, 1), ("local", Some("remote"), 1)],
+            &[("remote", "child", None)],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [1, 2]);
+    }
+
+    #[test]
+    fn a_remote_child_of_a_caller_below_its_root_takes_the_caller_s_depth_plus_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[("remote", None, 0), ("local", Some("remote"), 1)],
+            &[("remote", "child", Some(2))],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [3, 4]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_never_lower_a_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[("remote", None, 3), ("local", Some("remote"), 5)],
+            &[("remote", "child", Some(1))],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [3, 5]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_never_move_a_root_of_this_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        // A root the user started, its child, and a session another machine's agent led here:
+        // roots all but the child, which no launch of a child names.
+        stored_tree(
+            &path,
+            &[
+                ("root", None, 0),
+                ("child", Some("root"), 1),
+                ("led", None, 0),
+            ],
+            &[("led", "led", Some(0))],
+        );
+
+        assert_eq!(depths(&path, &["root", "child", "led"]), [0, 1, 0]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_are_set_once_however_often_the_store_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[
+                ("remote", None, 0),
+                ("local", Some("remote"), 1),
+                ("below", Some("local"), 2),
+            ],
+            &[("remote", "child", None)],
+        );
+
+        let first = depths(&path, &["remote", "local", "below"]);
+        let second = depths(&path, &["remote", "local", "below"]);
+
+        assert_eq!(first, [1, 2, 3]);
+        assert_eq!(second, first);
+    }
+
     #[test]
     fn a_launch_update_never_resurrects_a_workspace_id_cleared_since() {
         let mut store = Store::open_in_memory().unwrap();
