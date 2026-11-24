@@ -8734,8 +8734,8 @@ impl Drop for Weston {
 fn weston(user: &User, name: &str) -> Result<Weston, String> {
     let child = std::process::Command::new("weston")
         .args([
+            // No `--fake-seat`: Weston 14 refuses it, and the headless backend needs none.
             "--backend=headless",
-            "--fake-seat",
             &format!("--socket={name}"),
         ])
         .env_clear()
