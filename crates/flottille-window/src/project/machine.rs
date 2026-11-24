@@ -35,6 +35,8 @@ pub struct MachineBlock {
     data: MachineSessions,
     /// The sessions as last drawn: one that comes unfolds, one that goes folds away.
     rows: Listing<SessionLine>,
+    /// The times ago as last drawn: the block is drawn again when one of them changes.
+    shown_times: Vec<String>,
 }
 
 impl MachineBlock {
@@ -43,11 +45,26 @@ impl MachineBlock {
             shell,
             data,
             rows: Listing::default(),
+            shown_times: Vec::new(),
         }
     }
 
     pub fn data(&self) -> &MachineSessions {
         &self.data
+    }
+
+    /// Whether a text that moves with the time changed since it was drawn.
+    pub(super) fn times_changed(&self, now: u64) -> bool {
+        self.times(now) != self.shown_times
+    }
+
+    /// The texts that move with the time: the sessions' times ago.
+    fn times(&self, now: u64) -> Vec<String> {
+        self.data
+            .sessions
+            .iter()
+            .map(|s| ago(now, s.active_at))
+            .collect()
     }
 
     pub(super) fn set(&mut self, data: MachineSessions, cx: &mut Context<Self>) {
@@ -113,6 +130,7 @@ impl Render for MachineBlock {
             reduce,
         );
         let now = now_ms();
+        self.shown_times = self.times(now);
         let rows: Vec<_> = self
             .rows
             .rows()

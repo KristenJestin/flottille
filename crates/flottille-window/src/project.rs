@@ -564,6 +564,17 @@ impl ProjectPage {
                 block.update(cx, |_, cx| cx.notify());
             }
         }
+        for block in page
+            .read(cx)
+            .machine_blocks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if block.read(cx).times_changed(now) {
+                block.update(cx, |_, cx| cx.notify());
+            }
+        }
     }
 }
 
