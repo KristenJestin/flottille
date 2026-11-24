@@ -250,7 +250,7 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
             .as_array()
             .is_some_and(|agents| agents.iter().any(|agent| agent == "claude"))
     });
-    let (_root, mcp) = pc.root("auto");
+    let (caller, mcp) = pc.root("auto");
     let first = launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "First export", "brief": "One."}),
@@ -277,7 +277,6 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
     // by the test, is never asked to take.
     ended_there(&server, &first.0);
     ended_there(&server, &second.0);
-    let caller = root_id(&pc);
     let key = pc.stand_in();
 
     // Each removal names its launch: the workspace removed is that launch's, whichever project
