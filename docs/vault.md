@@ -840,11 +840,14 @@ The gaps, where the platform does not allow more:
   its paths.** The server reaches the profile, so an action that reads or writes a file by a path
   the agent gives would follow a link a run planted to it; the adapter keeps those actions off or
   refuses their path, any `url` argument is a web address, never a `file:` one, and an action
-  that runs other commands (`batch`, `flow_run`) is off (`docs/extensions.md`, "Adapters"): the
+  that runs other commands (`batch`, `flow_run`, `chat`) is off, as are `install` (root, through
+  sudo) and `upgrade` (out of the version the adapter was checked on; `docs/extensions.md`, "Adapters"): the
   cookies, storage, saved state and a request's headers are no action's answer. What the user
   turns on still reaches them: `eval` reads the page's storage and the part of `document.cookie`
   that is not `HttpOnly`, and a HAR or a trace is written to agent-browser's own folder under the
-  home, which runs read and write: it holds the page's traffic, its cookies among it;
+  home, which runs read and write: it holds the page's traffic, its cookies among it. Those
+  actions are off at every pin alike, a re-pin that switches the server's tools included, never
+  judged;
 - **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
   can write what is the user's under the home: agent-browser itself where the user installed it
   there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under

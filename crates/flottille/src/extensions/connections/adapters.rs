@@ -57,6 +57,10 @@ pub struct Adapter {
     file_arguments: &'static [(&'static str, &'static [&'static str])],
     /// Arguments every one of its actions takes though no schema says them, refused on each.
     hidden_arguments: &'static [&'static str],
+    /// The argument that says how long the browser may sit idle before it closes, which an action
+    /// that starts it takes: it must be a number above 0, as 0 keeps the browser alive, and no
+    /// close ever empties its screenshots and downloads folders.
+    idle_argument: &'static str,
     /// Why they are.
     pub locked_why: &'static str,
     /// Its own actions, served by Flottille.
@@ -90,7 +94,6 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_wait_for_function",
         "agent_browser_add_init_script",
         "agent_browser_network_route", // serves a body of its own for the page's requests
-        "agent_browser_chat",          // agent-browser's own model, through an external gateway
     ],
     files: &[
         "agent_browser_network_har_start",
@@ -102,7 +105,12 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_flow_save",
         "agent_browser_flow_steps",
     ],
-    patterns: &["agent_browser_wait_for_url", "agent_browser_network_route"],
+    patterns: &[
+        "agent_browser_wait_for_url",
+        "agent_browser_network_route",
+        // The pattern a route was given, as network_route's own url.
+        "agent_browser_network_unroute",
+    ],
     locked: &[
         "agent_browser_auth_delete",
         "agent_browser_auth_list",
@@ -156,8 +164,17 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         // As get_cdp_url: DevTools, a stream's WebSocket and the dashboard drive the browser
         // from a local port no token guards.
         "agent_browser_inspect",
-        "agent_browser_stream_enable",
         "agent_browser_dashboard_start",
+        // 0.43.0 streams always ("Streaming is always enabled"), so this lock changes nothing:
+        // what protects the port stream_status hands out is the browser's network namespace.
+        "agent_browser_stream_enable",
+        // Past every lock, as batch: chat is agent-browser's own model, which drives it through
+        // its own command function; install with withDeps runs the package manager as root
+        // through sudo; upgrade moves the server out of 0.43.x, after which an accepted review
+        // makes the connection generic (no locks, no url or file refusals).
+        "agent_browser_chat",
+        "agent_browser_install",
+        "agent_browser_upgrade",
     ],
     // Every other tool of 0.43.0's `tools/list --tools all`. webmcp_invoke takes params as an
     // object, which the server gives agent-browser as JSON, never its `@file` form; 0.43.0
@@ -221,7 +238,6 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_set_offline",
         "agent_browser_set_headers",
         "agent_browser_set_media",
-        "agent_browser_network_unroute",
         "agent_browser_storage_set",
         "agent_browser_storage_clear",
         "agent_browser_cookies_set",
@@ -276,8 +292,6 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_skills_path",
         "agent_browser_doctor",
         "agent_browser_dashboard_stop",
-        "agent_browser_install",
-        "agent_browser_upgrade",
     ],
     // The same, where the path is optional: without one the server writes to its own folder,
     // which Flottille puts in the vault folder (`display`) or which only the user turns on
@@ -306,6 +320,7 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "namespace",
         "capture",
     ],
+    idle_argument: "idleTimeout",
     locked_why: "agent-browser's own logins keep passwords in its own store or take them as \
                  arguments, and its plugins run commands with its credential providers: \
                  Flottille's vault is the only way to sign in, with the action login; connect and \
@@ -318,8 +333,13 @@ pub static AGENT_BROWSER: Adapter = Adapter {
                  reaches the profile however that path is made; network_requests and \
                  network_request give a request's headers and body, its Authorization and \
                  cookies among them; batch and flow_run run any command of agent-browser's, \
-                 the locked ones among them; inspect, stream_enable and dashboard_start open a \
-                 local port that drives the browser with no gate",
+                 the locked ones among them, and so does chat, agent-browser's own model, which \
+                 drives it through its own command function; install with withDeps runs the \
+                 package manager as root, and upgrade moves the server out of the version this \
+                 adapter was checked on, after which no lock applies; inspect and \
+                 dashboard_start open a local port that drives the browser with no gate; \
+                 stream_enable changes nothing, agent-browser 0.43 streams always, and what \
+                 protects the port stream_status hands out is the browser's network namespace",
     actions: &[Own {
         name: LOGIN,
         description: "Signs in to a site in the browser with a vault entry of the user's: \
@@ -456,7 +476,10 @@ impl Adapter {
             || self.file_arguments.iter().any(|(name, _)| *name == action)
     }
 
-    /// The setting of a new action at the first pin, if the adapter sets one.
+    /// The setting of an action new to a pin, or changed, if the adapter sets one, at the first
+    /// pin and at every one after it: off where it does not know the action, or keeps it off, or
+    /// where it is off by design (`scripts`, `files`). A re-pin that switches the server's tools
+    /// (agent-browser's default ones to `--tools all`) brings those in off, as the first did.
     pub fn first(&self, action: &str) -> Option<&'static str> {
         if !self.knows(action)
             || self.locks(action)
@@ -466,12 +489,6 @@ impl Adapter {
             return Some("off");
         }
         None
-    }
-
-    /// The setting of an action new to the pin, or changed, at a pin after the first, if the
-    /// adapter sets one: off where it does not know it.
-    pub fn again(&self, action: &str) -> Option<&'static str> {
-        (!self.knows(action)).then_some("off")
     }
 
     pub fn own(&self, action: &str) -> Option<&'static Own> {
@@ -540,21 +557,40 @@ impl Adapter {
         ))
     }
 
+    /// Why a call of `action` with `arguments` is refused: an idle timeout that is not a number
+    /// above 0 (`idle_argument`). 0 keeps the browser alive, so its screenshots and downloads,
+    /// emptied once it ended, stay where a run can reach them; the unit is the server's own, and
+    /// the adapter does not state a floor beyond 0.
+    pub fn refuses_idle(&self, action: &str, arguments: &Value) -> Option<String> {
+        let idle = arguments.get(self.idle_argument)?;
+        if idle.as_f64().is_some_and(|idle| idle > 0.0) {
+            return None;
+        }
+        Some(format!(
+            "{action} takes {} only as a number above 0 while Flottille's adapter applies: 0 \
+             keeps the browser alive, and the screenshots and downloads of its folders are \
+             emptied only once it ended",
+            self.idle_argument
+        ))
+    }
+
     /// What it changes, a sentence each, as the review says it.
     pub fn changed(&self, config: &Path) -> Vec<String> {
         let mut said = vec![format!(
             "{} run a script in the page, which no gate can judge: they are off at the first \
-             review, and the user may turn them on",
+             review and at any later one they come in with, and the user may turn them on",
             self.scripts.join(", ")
         )];
         said.push(format!(
             "{} write the page's traffic, or what was typed in it, to a file, which is not \
-             masked: they are off at the first review, and the user may turn them on",
+             masked: they are off at the first review and at any later one they come in with, and the user may \
+             turn them on",
             self.files.join(", ")
         ));
         said.push(
             "a url its actions open must be http or https with a host: a javascript: or a data: \
-             one runs in the page"
+             one runs in the page; an idleTimeout must be a number above 0, as 0 keeps the \
+             browser alive"
                 .to_owned(),
         );
         said.push(format!(

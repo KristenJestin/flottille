@@ -1678,6 +1678,7 @@ fn decide<'a>(
         adapter
             .refuses_url(&action.name, &arguments)
             .or_else(|| adapter.refuses_files(&action.name, &arguments))
+            .or_else(|| adapter.refuses_idle(&action.name, &arguments))
     }) {
         return Err(why);
     }
@@ -2980,9 +2981,9 @@ fn review_first(name: &str) -> Failure {
 }
 
 /// The settings `accept` writes for `listing`: kept where the action did not change from the pin
-/// of `row`, judged where it is new or changed (or as the adapter that applies says: at the first
-/// pin, and at every pin for an action it does not know), then those the user named; off where
-/// that adapter keeps it off, whatever is named.
+/// of `row`, judged where it is new or changed (or as the adapter that applies says, at every pin
+/// the same: off for an action it keeps off, runs a script or writes a file by design, or does not
+/// know), then those the user named; off where that adapter keeps it off, whatever is named.
 fn settings_of_accept(
     row: &Row,
     listing: &Listing,
@@ -2997,10 +2998,7 @@ fn settings_of_accept(
             .and_then(|pin| pin.action(&action.name))
             .filter(|had| *had == action)
             .map(|_| setting_of(row, &action.name).to_owned());
-        let first = adapter.and_then(|adapter| match row.pin {
-            None => adapter.first(&action.name),
-            Some(_) => adapter.again(&action.name),
-        });
+        let first = adapter.and_then(|adapter| adapter.first(&action.name));
         let setting = match adapter.is_some_and(|adapter| adapter.locks(&action.name)) {
             true => "off".to_owned(),
             false => kept.unwrap_or_else(|| first.unwrap_or("judged").to_owned()),
