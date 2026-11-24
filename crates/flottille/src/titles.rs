@@ -65,7 +65,7 @@ pub fn session_title(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcom
         Ok(None) => return Outcome::Failed(format!("there is no agent {}", grant.agent)),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
-    if agent.parent.is_some() {
+    if agent.is_child() {
         return Outcome::Refused(
             "refused: a child's title is the one its parent gave it with agent_launch".to_owned(),
         );
@@ -120,4 +120,44 @@ pub fn rename(daemon: &Arc<Daemon>, agent: &Agent, title: &str) -> Result<Value,
     let title = secrets::mask(title, &std::env::vars_os().collect());
     daemon.write(|store| Ok(((), store.retitle_agent(&agent.id, &title, BY_USER)?)))?;
     Ok(json!({"agent": agent.id, "title": title, "by": BY_USER}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_child_of_another_machine_s_agent_titles_no_session_even_given_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = crate::tree::tests::a_child_of_another_machine();
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &child);
+        let grant = Grant {
+            agent: child.id.clone(),
+            epoch: 0,
+            tools: Vec::new(),
+            place: crate::place::Place {
+                project: "app".into(),
+                workspace: None,
+                root: dir.path().into(),
+                repositories: Vec::new(),
+                branch: String::new(),
+                variables: Default::default(),
+                home: None,
+            },
+            launched: false,
+            reads: None,
+        };
+
+        let outcome = session_title(&daemon, &grant, json!({"title": "Rework the login page"}));
+
+        assert!(
+            matches!(&outcome, Outcome::Refused(why) if why.contains("a child's title")),
+            "refused as a child's"
+        );
+        let kept = daemon
+            .read(|store| store.agent(&child.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.title, child.title);
+    }
 }

@@ -1037,14 +1037,28 @@ const EXTENSION_MIGRATIONS: &str = "
 ";
 
 /// A child an agent of another machine launched here was stored with no parent at depth 0 before
-/// #1274, a root's place: it is at depth 1, a child's, as its launch says (`docs/remote.md`, "A
-/// tree across machines"). Made at every open rather than as a numbered migration: it changes
-/// nothing once done, as such a child is never stored so again, and every check of a root then
-/// reads the depth alone.
+/// #1274, a root's place, and a beta of it put it at depth 1 but left the agents it had started
+/// here at theirs: each is put at its place in the tree (`docs/remote.md`, "A tree across
+/// machines"), the remote child at its caller's depth plus one, as its launch says (1 when it
+/// says none), and each agent under it one lower than its parent, so that a stop ordered by depth
+/// ends them before it. A depth is only ever raised, never lowered, and an agent no launch of a
+/// child names, nor any under it, is left alone: made at every open rather than as a numbered
+/// migration, it changes nothing once done.
 const REMOTE_CHILDREN_DEPTH: &str = "
-    UPDATE agents SET depth = 1
-    WHERE parent IS NULL AND depth = 0
-      AND id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child');
+    WITH RECURSIVE placed(id, level) AS (
+        SELECT agents.id, max(agents.depth, 1 + coalesce((
+            SELECT max(json_extract(launches.asked, '$.asked.depth')) FROM launches
+            WHERE launches.way = 'in' AND launches.kind = 'child' AND launches.agent = agents.id
+              AND json_valid(launches.asked)
+        ), 0))
+        FROM agents
+        WHERE agents.parent IS NULL
+          AND agents.id IN (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child')
+        UNION ALL
+        SELECT agents.id, placed.level + 1 FROM agents JOIN placed ON agents.parent = placed.id
+    )
+    UPDATE agents SET depth = placed.level FROM placed
+    WHERE placed.id = agents.id AND placed.level > agents.depth;
 ";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1722,7 +1736,7 @@ impl Store {
     }
 
     /// The ended or failed roots whose session is kept to be resumed: those the sweep forgets in
-    /// time.
+    /// time. A child of another machine's agent kept by a release of before is among them.
     pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT {AGENT_COLUMNS} FROM agents WHERE state IN ('ended', 'failed') \
@@ -9292,6 +9306,140 @@ mod tests {
             asked: json!({}),
             at: 1,
         }
+    }
+
+    /// A store at `path` holding `agents` (id, parent, depth) and, for each `(agent, kind, caller
+    /// depth)`, a launch `in` that started it: an agent of another machine's, as a release of
+    /// before stored it.
+    fn stored_tree(
+        path: &Path,
+        agents: &[(&str, Option<&str>, u32)],
+        launched: &[(&str, &str, Option<u32>)],
+    ) {
+        let mut store = Store::open(path).unwrap();
+        for (id, parent, _) in agents {
+            let agent = Agent {
+                id: (*id).into(),
+                parent: parent.map(Into::into),
+                ..an_agent()
+            };
+            store
+                .create_agent(&agent, ("agent.created", json!({"agent": id})))
+                .unwrap();
+        }
+        for (number, (agent, kind, depth)) in launched.iter().enumerate() {
+            let asked = match depth {
+                Some(depth) => json!({"asked": {"depth": depth}}),
+                None => json!({"asked": {}}),
+            };
+            store
+                .record_launch(&Launch {
+                    launch: format!("launch-{number}"),
+                    kind: (*kind).into(),
+                    state: "started".into(),
+                    agent: Some((*agent).into()),
+                    asked,
+                    ..a_launch_in()
+                })
+                .unwrap();
+        }
+        // The depths as that release left them, which the store's own writes never set so.
+        for (id, _, depth) in agents {
+            store
+                .connection
+                .execute(
+                    "UPDATE agents SET depth = ?1 WHERE id = ?2",
+                    params![depth, id],
+                )
+                .unwrap();
+        }
+    }
+
+    fn depths(path: &Path, ids: &[&str]) -> Vec<u32> {
+        let store = Store::open(path).unwrap();
+        ids.iter()
+            .map(|id| store.agent(id).unwrap().unwrap().depth)
+            .collect()
+    }
+
+    #[test]
+    fn a_remote_child_a_beta_moved_alone_takes_its_local_children_one_lower() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        // The beta put the remote child at depth 1 and left its local child at 1.
+        stored_tree(
+            &path,
+            &[("remote", None, 1), ("local", Some("remote"), 1)],
+            &[("remote", "child", None)],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [1, 2]);
+    }
+
+    #[test]
+    fn a_remote_child_of_a_caller_below_its_root_takes_the_caller_s_depth_plus_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[("remote", None, 0), ("local", Some("remote"), 1)],
+            &[("remote", "child", Some(2))],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [3, 4]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_never_lower_a_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[("remote", None, 3), ("local", Some("remote"), 5)],
+            &[("remote", "child", Some(1))],
+        );
+
+        assert_eq!(depths(&path, &["remote", "local"]), [3, 5]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_never_move_a_root_of_this_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        // A root the user started, its child, and a session another machine's agent led here:
+        // roots all but the child, which no launch of a child names.
+        stored_tree(
+            &path,
+            &[
+                ("root", None, 0),
+                ("child", Some("root"), 1),
+                ("led", None, 0),
+            ],
+            &[("led", "led", Some(0))],
+        );
+
+        assert_eq!(depths(&path, &["root", "child", "led"]), [0, 1, 0]);
+    }
+
+    #[test]
+    fn the_remote_children_s_depths_are_set_once_however_often_the_store_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        stored_tree(
+            &path,
+            &[
+                ("remote", None, 0),
+                ("local", Some("remote"), 1),
+                ("below", Some("local"), 2),
+            ],
+            &[("remote", "child", None)],
+        );
+
+        let first = depths(&path, &["remote", "local", "below"]);
+        let second = depths(&path, &["remote", "local", "below"]);
+
+        assert_eq!(first, [1, 2, 3]);
+        assert_eq!(second, first);
     }
 
     #[test]

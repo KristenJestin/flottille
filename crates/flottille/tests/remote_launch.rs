@@ -16,7 +16,8 @@ use common::User;
 use common::mcp::{Answer, Mcp, server_of};
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Git, GitOffer, GitPlace, Hello, LaunchAsk, Link, MachineMessage, Message, PublicKey, Traffic,
+    Git, GitOffer, GitPlace, Hello, LaunchAsk, Link, MachineMessage, Message, PublicKey, Role,
+    Traffic,
 };
 use serde_json::{Value, json};
 
@@ -57,6 +58,12 @@ impl TestHub {
         format!("http://{}", self.address)
     }
 
+    /// `name` made a viewer, as the hub's host does.
+    pub(crate) fn make_viewer(&self, name: &str) {
+        self.served
+            .with_hub(|hub| hub.change_role(name, Role::Viewer).unwrap());
+    }
+
     /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.
     fn code(&self) -> String {
         let url = self.url();
@@ -80,10 +87,12 @@ pub(crate) fn runner_user() -> User {
     let claude = user.path("home/.claude");
     let stopping = user.path("stopping");
     let slow = user.path("slow-call");
+    let unsettled = user.path("unsettled");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
         .with_env("FLOTTILLE_TEST_SLOW_CALL_FILE", slow.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_UNSETTLED_FILE", unsettled.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
@@ -2183,4 +2192,420 @@ fn a_held_child_allowed_there_is_told_allowed_before_its_setup_fails() {
         allowed < failed,
         "the failure came before the answer:\n{all}"
     );
+}
+
+#[test]
+fn a_launch_held_elsewhere_is_withdrawn_when_its_caller_ends() {
+    // No judge on server: the launch is held for its user.
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Held child",
+            "brief": "Write the tests."}),
+    ));
+    let held = titled(&server, "Held child");
+    assert_eq!(launch_states(&server), vec!["held"]);
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+
+    // Withdrawn there: nobody waits for it any more, and the user is told why.
+    eventually("the launch withdrawn on server", || {
+        launch_states(&server) == vec!["refused"]
+    });
+    let shown = server.agent(held["id"].as_str().unwrap());
+    assert_eq!(shown["state"], "ended", "{shown:#}");
+    assert_eq!(
+        shown["state_reason"],
+        format!("withdrawn: agent {root} of pc, which asked for it, ended").as_str(),
+        "{shown:#}"
+    );
+    let pending: Vec<Value> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request["state"] == "pending")
+        .collect();
+    assert!(pending.is_empty(), "{pending:#?}");
+}
+
+#[test]
+fn a_launch_not_yet_answered_is_stopped_when_its_caller_ends() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    // pc records what server answered only once this file is gone.
+    let slow = pc.user.path("slow-call");
+    std::fs::write(&slow, "").unwrap();
+    let launching = std::thread::spawn(move || {
+        launched(
+            &mcp,
+            json!({"kind": "child", "machine": "server", "title": "Late child",
+                "brief": "Write the tests."}),
+        )
+    });
+    let child = titled(&server, "Late child");
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+    eventually("the caller ended on pc", || {
+        pc.agent(&root)["state"] == "ended"
+    });
+    std::fs::remove_file(&slow).unwrap();
+    launching.join().expect("the launching thread ended");
+
+    eventually("the child ended on server", || {
+        server.agent(child["id"].as_str().unwrap())["state"] == "ended"
+    });
+    // Stopped as the children of its parent are, not withdrawn as a held launch is.
+    let stopped = server.agent(child["id"].as_str().unwrap());
+    assert_eq!(stopped["state_reason"], "its parent stopped", "{stopped:#}");
+}
+
+/// The name of the one launch `pc` recorded on another machine, and the id the user's answer
+/// there was sent under, once it came.
+fn answered_launch(pc: &Machine) -> (String, String) {
+    let store = rusqlite::Connection::open(pc.user.path("state/flottille/flottille.db")).unwrap();
+    let launch: String = store
+        .query_row("SELECT launch FROM launches WHERE way = 'out'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let stored: String = store
+        .query_row(
+            "SELECT id FROM deliveries WHERE id LIKE 'decided-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let id = stored
+        .strip_prefix(&format!("decided-{launch}-"))
+        .unwrap()
+        .to_owned();
+    (launch, id)
+}
+
+#[test]
+fn a_second_answer_after_a_refusal_is_taken_only_as_the_one_stored() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused once");
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+    prompt_with(&pc, "was refused by the user. Nothing was done.");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    let (launch, stored) = answered_launch(&pc);
+    let key = server.stand_in();
+    let answer = |id: &str, body: &str, ended: bool| {
+        MachineMessage::Deliver(Box::new(flottille_link::Deliver {
+            id: id.into(),
+            launch: launch.clone(),
+            agent: root.clone(),
+            kind: "approval".into(),
+            body: body.into(),
+            urgency: "urgent".into(),
+            ended,
+        }))
+    };
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![
+            // Another answer to the refused launch: a caller would read it approved.
+            answer(
+                "another",
+                &format!(
+                    "Request #{number} on server (agent_launch) was approved by the user, and \
+                     Flottille has now done it. Its result:\n\nStarted a session led by you, \
+                     approved after all."
+                ),
+                false,
+            ),
+            // The refusal sent again, by a machine that did not hear it was taken.
+            answer(
+                &stored,
+                &format!(
+                    "Request #{number} on server (agent_launch) was refused by the user. Nothing \
+                     was done."
+                ),
+                true,
+            ),
+        ],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("answered already"), "{refused}");
+    assert!(answers[1].is_ok(), "{:?}", answers[1]);
+    a_while();
+    assert!(
+        !pc.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("approved after all")),
+        "a second answer reached the caller"
+    );
+    assert_eq!(launches_out(&pc), vec!["refused"]);
+}
+
+#[test]
+fn a_new_refusal_after_the_launch_was_approved_is_refused_as_answered_already() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Approved once");
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    prompt_with(&pc, &format!("Request #{number} on server"));
+    eventually("the launch recorded as started", || {
+        launches_out(&pc) == vec!["started"]
+    });
+    let (launch, _) = answered_launch(&pc);
+    let key = server.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![MachineMessage::Deliver(Box::new(flottille_link::Deliver {
+            id: "another".into(),
+            launch,
+            agent: root,
+            kind: "approval".into(),
+            body: format!(
+                "Request #{number} on server (agent_launch) was refused by the user. Nothing \
+                 was done."
+            ),
+            urgency: "urgent".into(),
+            ended: true,
+        }))],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(refused.contains("answered already"), "{refused}");
+    a_while();
+    assert_eq!(launches_out(&pc), vec!["started"]);
+}
+
+#[test]
+fn a_restart_there_after_an_allowed_launch_ran_leaves_its_session_running() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Running on");
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    prompt_with(&pc, &format!("Request #{number} on server"));
+    let session = titled(&server, "Running on")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the session briefed", || {
+        deliveries_of(&server, "brief-%") > 0
+    });
+    // Its answer was told, but the store did not keep that it was: the daemon stopped there.
+    changed_while_stopped(
+        &server,
+        &format!("DELETE FROM deliveries WHERE id = 'approval-{number}';"),
+    );
+
+    a_while();
+    assert!(
+        !matches!(
+            server.agent(&session)["state"].as_str(),
+            Some("ended" | "stopped" | "failed")
+        ),
+        "{}",
+        server.agent(&session)
+    );
+    assert_eq!(launches_out(&pc), vec!["started"]);
+    assert!(
+        !pc.prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Flottille stopped there")),
+        "its caller was told it was cut"
+    );
+    eventually("its answer settled again", || {
+        deliveries_of(&server, &format!("approval-{number}")) == 1
+    });
+}
+
+/// How many deliveries of `machine` have an id like `pattern`.
+fn deliveries_of(machine: &Machine, pattern: &str) -> i64 {
+    let store =
+        rusqlite::Connection::open(machine.user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE id LIKE ?1",
+            [pattern],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// `server`'s daemon stopped, `change` made to its store, and started again.
+fn changed_while_stopped(server: &Machine, change: &str) {
+    let stopped = server.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", server.log());
+    {
+        let store =
+            rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+        store.execute_batch(change).unwrap();
+    }
+    server.user.status();
+}
+
+#[test]
+fn a_held_launch_with_no_agent_tells_its_caller_once_answered() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "No agent");
+    changed_while_stopped(
+        &server,
+        "UPDATE launches SET agent = NULL WHERE way = 'in';",
+    );
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("was approved by the user, but nothing was done"),
+        "{told}"
+    );
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    assert!(rows_under_pilots(&pc).is_empty());
+}
+
+#[test]
+fn a_restart_there_during_the_setup_of_an_allowed_launch_tells_its_caller() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Cut by a restart");
+
+    // Allowed, settled started, its setup going on: the daemon stopped before it told anyone.
+    changed_while_stopped(
+        &server,
+        &format!(
+            "UPDATE approval_requests SET state = 'allowed', decision = 'once', decided_at = 1 \
+             WHERE number = {number}; UPDATE launches SET state = 'started' WHERE way = 'in';"
+        ),
+    );
+
+    let told = prompt_with(&pc, &format!("Request #{number} on server (agent_launch)"));
+    assert!(
+        told.contains("was approved by the user, but nothing was done"),
+        "{told}"
+    );
+    assert!(told.contains("Flottille stopped"), "{told}");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+    eventually("its workspace removed there", || {
+        workspaces(&server).is_empty()
+    });
+}
+
+#[test]
+fn a_held_launch_with_no_request_number_never_says_request_0_when_it_ends() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    held_launch(&pc, &server, &mcp, "No number");
+    changed_while_stopped(
+        &server,
+        "UPDATE launches SET request = NULL WHERE way = 'in';",
+    );
+    let session = titled(&server, "No number");
+
+    server
+        .user
+        .call("agent.stop", json!({"agent": session["id"]}))
+        .unwrap();
+
+    let told = prompt_with(
+        &pc,
+        "its session there ended before the user of server decided",
+    );
+    assert!(!told.contains("Request #0"), "{told}");
+    assert!(told.contains("No number"), "{told}");
+    eventually("the launch recorded as refused", || {
+        launches_out(&pc) == vec!["refused"]
+    });
+}
+
+/// A setup that is still going when a test stops the daemon.
+const SLOW_SETUP: &str = "[[setup]]\nrun = \"sleep 600\"\n";
+
+/// A launch of `kind` held on `server`, whose setup lasts (`SLOW_SETUP`), then allowed there while
+/// its store refused to keep that answer, its setup still going when the daemon there stopped and
+/// started again: its caller was told it was approved first.
+fn told_approved_then_cut(pc: &Machine, server: &Machine, mcp: &Mcp, kind: &str) {
+    done(&launched(
+        mcp,
+        json!({"kind": kind, "machine": "server", "title": "Cut once told",
+            "brief": "Do the work."}),
+    ));
+    let number = server.requests()[0]["number"].as_u64().unwrap();
+    let unsettled = server.user.path("unsettled");
+    std::fs::write(&unsettled, "").unwrap();
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    prompted(
+        pc,
+        &format!("Request #{number} on server (agent_launch) was approved by the user, and"),
+    );
+    eventually("the launch recorded as started", || {
+        launches_out(pc) == vec!["started"]
+    });
+    assert!(!unsettled.exists(), "its answer was kept");
+    restarted(server);
+}
+
+#[test]
+fn a_led_session_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "led");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
+}
+
+#[test]
+fn a_child_told_approved_then_cut_by_a_restart_there_tells_its_caller_it_ended() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    server.register(SLOW_SETUP);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    told_approved_then_cut(&pc, &server, &mcp, "child");
+
+    let told = prompt_with(&pc, "Flottille stopped there while it was setting it up");
+    assert!(told.contains("nothing was done"), "{told}");
+    eventually("the launch recorded as ended", || {
+        launches_out(&pc) == vec!["ended"]
+    });
 }

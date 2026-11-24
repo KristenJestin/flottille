@@ -74,6 +74,10 @@ const GENERAL_BLOCKS: [&str; 7] = [
     "version",
 ];
 
+/// What comes before the blocks among the children of what scrolls: the line of another
+/// machine's page (`SettingsPage::own_line`).
+const LEADING_CHILDREN: usize = 1;
+
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
 
@@ -568,7 +572,9 @@ impl SettingsPage {
             .iter()
             .position(|key| *key == block)
             .expect("a block of the tab");
-        self.scroll.scroll_to_top_of_item(at);
+        // The sentence of another machine's page is the first child of what scrolls (#1366): the
+        // blocks come after it, drawn or not.
+        self.scroll.scroll_to_top_of_item(at + LEADING_CHILDREN);
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
@@ -2742,8 +2748,7 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
-            .child(column(self.own_line(cx).into_any_element()));
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
         // plays again), after the tabs.
         let page = div()
@@ -2759,6 +2764,9 @@ impl Render for SettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
+            // The sentence of another machine's page is the first line of what scrolls: it goes
+            // with the sections, so that no text is ever drawn over it or under it (#1293).
+            .child(column(self.own_line(cx).into_any_element()))
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
@@ -2845,8 +2853,9 @@ impl SettingsPage {
         )
     }
 
-    /// One line under the tabs while another machine is shown, whichever tab: the appearance and
-    /// the version are this window's, and stay this machine's.
+    /// One line at the top of what scrolls, under the tabs, while another machine is shown,
+    /// whichever tab: the appearance and the version are this window's, and stay this machine's.
+    /// It scrolls with the sections, never a fixed line that they could pass under.
     fn own_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let this = self
@@ -2861,17 +2870,21 @@ impl SettingsPage {
                  machine is chosen above."
             ))
         });
+        // Its gap to the first section is inside it, so that it folds away with it.
         presence_of("settings-own-block", said, move |said| {
             div()
-                .id("settings-own")
-                .aria_label(said.clone())
-                .text_size(px(12.5))
-                .text_color(p.mute)
-                .child(said)
-                .test_support()
+                .pb(space::XL)
+                .child(
+                    div()
+                        .id("settings-own")
+                        .aria_label(said.clone())
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(said)
+                        .test_support(),
+                )
                 .into_any_element()
         })
-        .space(space::MD)
     }
 }
 

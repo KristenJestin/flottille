@@ -194,8 +194,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.send" => {
             let mut asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "writes to it")?;
-            refuse_remote_child(daemon, &agent)?;
+            refuse_any_child(daemon, &agent, "writes to it")?;
             refuse_final(&agent)?;
             let upload = asked.upload.take();
             take_upload(daemon, (&mut asked.images, &mut asked.texts), upload).await?;
@@ -270,19 +269,19 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.quota_resume" => {
             let asked: AgentQuotaResume = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "chooses when it resumes")?;
+            refuse_any_child(daemon, &agent, "chooses when it resumes")?;
             crate::quota::choose(daemon, &agent, asked.resume)
         }
         "agent.unqueue" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "takes back a message")?;
+            refuse_any_child(daemon, &agent, "takes back a message")?;
             deliveries::withdraw(daemon, &agent.id, &asked.delivery, asked.images)
         }
         "agent.send_now" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "sends a message now")?;
+            refuse_any_child(daemon, &agent, "sends a message now")?;
             deliveries::send_now(daemon, &agent.id, &asked.delivery)
         }
         "agent.image" => {
@@ -309,7 +308,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.reload_tools" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "reloads its tools")?;
+            refuse_any_child(daemon, &agent, "reloads its tools")?;
             refuse_final(&agent)?;
             let asked = daemon
                 .agents
@@ -329,7 +328,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.resume" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "resumes it")?;
+            refuse_any_child(daemon, &agent, "resumes it")?;
             crate::projects::refuse_removing(daemon, &agent.project)?;
             if !agent.state.is_final() {
                 return Err(Failure::refused(format!(
@@ -372,7 +371,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.rename" => {
             let asked: flottille_core::protocol::AgentRename = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "names it, with agent_launch")?;
+            refuse_any_child(daemon, &agent, "names it, with agent_launch")?;
             crate::titles::rename(daemon, &agent, &asked.title)
         }
         "agent.ending" => {
@@ -405,8 +404,23 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     ),
                 )
             })?;
-            // A tree has one mode, its root's.
-            let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
+            // A tree has one mode, its root's: a child of another machine's agent, and every
+            // agent under it, has its root there, and no switch here sets its mode apart from it.
+            let root = tree::root_of(daemon, &asked.agent);
+            if let Some((caller, machine, kind)) = crate::launches::launched_from(daemon, &root)
+                && kind == "child"
+            {
+                let whose = if root == asked.agent {
+                    format!("a child of agent {caller} of {machine}")
+                } else {
+                    format!("under agent {root}, a child of agent {caller} of {machine}")
+                };
+                return Err(Failure::refused(format!(
+                    "agent {} is {whose}: its mode is its session's, set on {machine}",
+                    asked.agent
+                )));
+            }
+            let agent = find(daemon, &root)?;
             let was = agent.gate_mode;
             // A switch to Full the user signed from a device is kept, for a launch on another
             // machine to start in Full there; any other switch forgets it.
@@ -512,7 +526,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
-            refuse_child(daemon, &agent, "cancels its turn")?;
+            refuse_any_child(daemon, &agent, "cancels its turn")?;
             let (answer, answered) = oneshot::channel();
             let task = daemon
                 .agents
@@ -571,9 +585,17 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
         return Ok(());
     };
     let root = tree::root_of(daemon, &agent.id);
+    // A root that is itself a child of another machine's agent is not the user's either: theirs
+    // is that tree's root, on that machine.
+    let theirs = match crate::launches::launched_from(daemon, &root) {
+        Some((caller, machine, kind)) if kind == "child" => {
+            format!("the root of agent {caller}'s tree, on {machine}")
+        }
+        _ => format!("its root, agent {root}"),
+    };
     Err(Failure::refused(format!(
         "agent {} is a child of agent {parent}: only its parent {does}; the user writes to and \
-         stops its root, agent {root}",
+         stops {theirs}",
         agent.id
     )))
 }
@@ -581,14 +603,20 @@ fn refuse_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failur
 /// A child an agent of another machine launched here belongs to that agent: only it writes to
 /// it. The user still answers its questions and stops it, the ways out while that machine is off
 /// (`docs/remote.md`, "Where a question goes when the parent is off").
-fn refuse_remote_child(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+fn refuse_remote_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failure> {
     match crate::launches::launched_from(daemon, &agent.id) {
         Some((caller, machine, kind)) if kind == "child" => Err(Failure::refused(format!(
-            "agent {} is a child of agent {caller} of {machine}: only its parent writes to it",
+            "agent {} is a child of agent {caller} of {machine}: only its parent {does}",
             agent.id
         ))),
         _ => Ok(()),
     }
+}
+
+/// [`refuse_child`] for a child wherever its parent is: here, or on another machine.
+fn refuse_any_child(daemon: &Daemon, agent: &Agent, does: &str) -> Result<(), Failure> {
+    refuse_child(daemon, agent, does)?;
+    refuse_remote_child(daemon, agent, does)
 }
 
 fn refuse_final(agent: &Agent) -> Result<(), Failure> {
@@ -1463,15 +1491,16 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
 }
 
 /// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
-/// more, and what their tools printed goes with them.
+/// more, and what their tools printed goes with them. A child of another machine's agent that
+/// ended before a release made it a child (#1304) was kept as a root: its session is a child's,
+/// never kept, and goes at once.
 pub fn forget_kept_sessions(daemon: &Daemon) {
     let now = now_ms();
     for agent in daemon.read(Store::kept_sessions).unwrap_or_default() {
         let Some(ended_at) = agent.ended_at else {
             continue;
         };
-        if !tree::keeps_session(&agent)
-            || now.saturating_sub(ended_at) < tree::KEPT_MS
+        if (tree::keeps_session(&agent) && now.saturating_sub(ended_at) < tree::KEPT_MS)
             || stopping(daemon, &agent.id)
         {
             continue;

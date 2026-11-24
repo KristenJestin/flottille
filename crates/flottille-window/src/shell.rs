@@ -71,6 +71,9 @@ const SIDEBAR: f32 = 280.;
 const SIDEBAR_MEDIUM: f32 = 260.;
 /// How often the times ago are looked at; a row is drawn again only when its text changes.
 const CLOCK: Duration = Duration::from_secs(30);
+/// How often at most an input at the window is told to the daemon: well within the 2 minutes the
+/// phone waits for (`crate::machines::Remote::presence`).
+const PRESENCE_EVERY: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -376,6 +379,10 @@ pub struct Shell {
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
     _clock: Task<()>,
+    /// What this window last told of the user (`client.presence`): whether it was focused, and
+    /// when it last told an input, which is told again past `PRESENCE_EVERY` only.
+    told_focus: Option<bool>,
+    told_input: Option<std::time::Instant>,
 }
 
 type Forms = (Entity<Composer>, Entity<NewWorkspace>);
@@ -792,6 +799,11 @@ impl Shell {
         });
         cx.observe_window_bounds(window, |this, window, cx| this.relayout(false, window, cx))
             .detach();
+        // Whether the user is at this window tells whether the phone is (`client.presence`).
+        cx.observe_window_activation(window, |this, window, _| {
+            this.tell_presence(window.is_window_active(), false)
+        })
+        .detach();
         let mut shell = Self {
             seen,
             restart: Arc::new(restart_flottille),
@@ -900,6 +912,8 @@ impl Shell {
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
+            told_focus: None,
+            told_input: None,
         };
         shell.relayout(true, window, cx);
         // The colours the user chose, kept by the daemon for every window.
@@ -907,6 +921,27 @@ impl Shell {
         // Given once the window is built: a root built after would take it back.
         cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
+    }
+
+    /// Tells this machine's daemon whether the user is at this window, and that they gave it an
+    /// input: the phone is told only while the user is away (`docs/remote.md`,
+    /// "Notifications"). An input is told at most every `PRESENCE_EVERY`, the focus at once.
+    fn tell_presence(&mut self, focused: bool, input: bool) {
+        let now = std::time::Instant::now();
+        let same = self.told_focus == Some(focused);
+        if input {
+            let recent = self
+                .told_input
+                .is_some_and(|at| now.saturating_duration_since(at) < PRESENCE_EVERY);
+            if same && recent {
+                return;
+            }
+            self.told_input = Some(now);
+        } else if same {
+            return;
+        }
+        self.told_focus = Some(focused);
+        self.remote.presence(focused, input);
     }
 
     /// What this machine's daemon said of the user's machines.
@@ -2547,6 +2582,10 @@ impl Shell {
 
     pub fn main(&self) -> &Entity<MainArea> {
         &self.main
+    }
+
+    pub fn sidebar(&self) -> &Entity<Sidebar> {
+        &self.sidebar
     }
 
     /// The vault's section, whichever page is shown: its form is a dialog over that page.
@@ -5983,6 +6022,23 @@ impl Render for Shell {
         div()
             .id("shell")
             .track_focus(&self.focus)
+            // Any input, wherever it goes: the user is at this window.
+            .capture_any_mouse_down(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
+            .capture_key_down(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
+            // Reading by the wheel is an input too; no scroll in the window stops it on its way.
+            .on_scroll_wheel(
+                cx.listener(|this, _, window, _| {
+                    this.tell_presence(window.is_window_active(), true)
+                }),
+            )
             .size_full()
             .relative()
             .bg(p.bg)

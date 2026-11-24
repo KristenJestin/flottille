@@ -123,8 +123,9 @@ fn serving(remote: &Remote) -> Result<Arc<Daemon>, Refused> {
 }
 
 /// Whether a test plays a machine slow to record what its agent waits for once another machine
-/// answered its call: in a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE` names exists.
-fn playing_slow_call() -> bool {
+/// answered its call or its launch, or slow to answer the End confirmation's `session_losses`: in
+/// a test build, while the file `FLOTTILLE_TEST_SLOW_CALL_FILE` names exists.
+pub(crate) fn playing_slow_call() -> bool {
     cfg!(debug_assertions)
         && std::env::var_os("FLOTTILLE_TEST_SLOW_CALL_FILE")
             .is_some_and(|file| std::path::Path::new(&file).exists())
@@ -574,6 +575,28 @@ pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, st
         approval::URGENT,
         false,
         !started,
+    );
+}
+
+/// Tells the agent of another machine that asked the allowed `launch`, which may have heard it was
+/// approved already, that it never ran: as the end of the session it started, which it takes
+/// whether that answer reached it or not, where it refuses a second answer (#1374). A handed
+/// session's caller hears only the user's answer.
+pub(crate) fn tell_stopped(daemon: &Arc<Daemon>, launch: &Launch, body: &str) {
+    let kind = match launch.kind.as_str() {
+        "child" => "child-failed",
+        "led" => crate::subscriptions::TURN_ENDED,
+        _ => return tell_decided(daemon, launch, body, false),
+    };
+    kept_for_caller(
+        daemon,
+        launch,
+        None,
+        kind,
+        body,
+        approval::URGENT,
+        false,
+        true,
     );
 }
 
@@ -1085,6 +1108,22 @@ fn delivered(
         true => format!("decided-{}-{}", deliver.launch, deliver.id),
         false => format!("{}-{}", deliver.launch, deliver.id),
     };
+    // The user answers a launch once: an answer to one answered already is taken only as the
+    // one stored, sent again by a machine that did not hear it was taken, and changes nothing.
+    if decided && !undecided(&launch) {
+        let stored = daemon
+            .read(|store| store.delivery(&id))
+            .map_err(|error| Refused::Now(error.to_string()))?
+            .is_some();
+        return match stored {
+            true => Ok(json!({})),
+            false => Err(format!(
+                "launch {} on {name} was answered already: the user answers it once",
+                deliver.launch
+            )
+            .into()),
+        };
+    }
     deliveries::deliver(
         daemon,
         &deliver.agent,
@@ -1107,11 +1146,15 @@ fn delivered(
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     } else if deliver.ended {
+        // A session that ended there before the user's answer reached this machine never ran
+        // for it: refused, as that answer would have said (#1374).
         daemon
             .write(|store| {
-                store
-                    .end_launch(&machine, &launch.launch)
-                    .map(|()| ((), None))
+                match undecided(&launch) {
+                    true => store.decide_launch(&machine, &launch.launch, "refused"),
+                    false => store.end_launch(&machine, &launch.launch),
+                }
+                .map(|()| ((), None))
             })
             .map_err(|error| Refused::Now(error.to_string()))?;
     }
@@ -1142,10 +1185,14 @@ fn delivered(
 }
 
 /// Whether a delivery of `kind` for `agent` is of `launch`: one its agent started, not refused,
-/// or the user's answer that refused it, sent again by a machine that did not hear it was taken
-/// (stored once by its id).
+/// or the user's answer to it, which `delivered` takes on a refused launch only as the one stored.
 fn delivered_to(launch: &Launch, agent: &str, kind: &str) -> bool {
     launch.caller == agent && (launch.state != "refused" || kind == "approval")
+}
+
+/// Whether the user there has not answered `launch` yet, held for them.
+fn undecided(launch: &Launch) -> bool {
+    matches!(launch.state.as_str(), "held" | "accepted")
 }
 
 /// A `call` the machine of `from` sent: done as the tool would be here, only when the agent that
@@ -1160,19 +1207,119 @@ pub(crate) async fn serve_call(
         Err(refused) => Err(refused),
         // A session its agent did not start: served as a call of this machine's agents is.
         Ok(daemon) if call.launch.is_empty() && call.tool != "approval_answer" => {
-            session_call(&daemon, &remote, &from, *call, None).await
+            session_call(&daemon, &remote, &from, *call, None, false).await
         }
+        // The review of a session its agent leads here: served as the same call of a pilot of
+        // this machine, and only that review.
+        Ok(daemon) if call.tool == REVIEW => match led_review(&daemon, &remote, &from, &call) {
+            Ok(()) => session_call(&daemon, &remote, &from, *call, None, true).await,
+            Err(refused) => Err(refused),
+        },
         // A read of a session or child its agent started here: served by the same tool as one it
         // did not start, that session or child read as its starter reads it on one machine.
         Ok(daemon) if READS.contains(&call.tool.as_str()) => {
             match own_launch(&daemon, &remote, &from, &call) {
-                Ok(launch) => session_call(&daemon, &remote, &from, *call, launch.agent).await,
+                Ok(launch) => {
+                    session_call(&daemon, &remote, &from, *call, launch.agent, false).await
+                }
                 Err(refused) => Err(refused),
             }
         }
+        // What a led session's workspace holds that is not saved, for its pilot's End
+        // confirmation: read here, where it is.
+        Ok(daemon) if call.tool == LOSSES => losses_here(&daemon, &remote, &from, &call).await,
         Ok(daemon) => called(&daemon, &remote, &from, *call),
     };
     received.answer(answer_of(answer, "a call"));
+}
+
+/// The review tool, which the pilot of a session of this machine calls from another machine to
+/// start that session's review, and for nothing else.
+const REVIEW: &str = "review";
+
+/// Whether `call`, a `review` of the machine of `from`, is the one it may send: the start of the
+/// review of the session its agent leads here, `{"action": "start", "agent": <that session>}`.
+/// Its own change, a pull request, a pass and a report are no review of that session.
+fn led_review(
+    daemon: &Daemon,
+    remote: &Remote,
+    from: &PublicKey,
+    call: &Call,
+) -> Result<(), Refused> {
+    let launch = own_launch(daemon, remote, from, call)?;
+    let asked: Value = serde_json::from_str(&call.arguments)
+        .map_err(|_| "the call's arguments are not JSON".to_owned())?;
+    if launch.kind != "led" || asked != json!({"action": "start", "agent": call.agent}) {
+        return Err(
+            "from another machine, review only starts the review of a session its pilot leads \
+             here: {\"action\": \"start\", \"agent\": \"<that session>\"}"
+                .to_owned()
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// `review {start, agent}` of `lead` aimed at `id`, a session it leads on another machine: sent
+/// there and judged there, as the same call of a pilot of that machine; its findings go to that
+/// session, and `lead` is told of them as of a session it leads here. `None` when it leads no
+/// such session.
+pub(crate) async fn review_led(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    lead: &Agent,
+    id: &str,
+) -> Option<Outcome> {
+    if daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+    let launch = daemon
+        .read(|store| store.launches("out", None, LaunchFilter::Agent(id)))
+        .ok()?
+        .into_iter()
+        .find(|launch| {
+            launch.caller == lead.id && launch.kind == "led" && launch.state != "refused"
+        })?;
+    let name = machine_name(daemon, &launch);
+    let session = match launch.asked["title"].as_str().map(str::trim) {
+        Some(title) if !title.is_empty() => format!("the session \"{title}\" (agent {id})"),
+        _ => format!("the session agent {id}"),
+    };
+    let aim = Aim {
+        machine: &launch.machine,
+        name: &name,
+        agent: id,
+        launch: &launch.launch,
+        session,
+        // Nothing comes back from a review that was refused: the lead calls again.
+        woken: false,
+    };
+    let args = json!({"action": "start", "agent": id});
+    Some(older_review(
+        forward_to(daemon, grant, REVIEW, &args, aim).await,
+        &name,
+    ))
+}
+
+/// What `outcome`, the answer of `name` to a `review` call, says to the lead: a machine of before
+/// the review of a led session answers that review is no tool another machine calls.
+fn older_review(outcome: Outcome, name: &str) -> Outcome {
+    match outcome {
+        Outcome::Refused(text)
+            if text.contains("\"review\" is not a tool another machine calls") =>
+        {
+            Outcome::Refused(format!(
+                "refused: {name} needs updating to review a session it runs for you: update \
+                 {name}, then call again"
+            ))
+        }
+        other => other,
+    }
 }
 
 fn called(
@@ -1278,7 +1425,14 @@ fn called(
             if agent.state.is_final() {
                 format!("{} has {} already.", named(&agent), agent.state.as_str())
             } else {
+                // Still held for the user, it never started: withdrawn, said as its caller's end.
+                let held = launch.state == "held";
+                let withdrawn = |how: &str| {
+                    format!("withdrawn: agent {caller} of {name}, which asked for it, {how}")
+                };
                 let reason = match (child, args["why"].as_str()) {
+                    (_, Some(PARENT_STOPPED | PILOT_ENDED)) if held => withdrawn("ended"),
+                    (_, Some(PARENT_FAILED)) if held => withdrawn("failed"),
                     (true, Some(PARENT_STOPPED)) => crate::tree::ITS_PARENT_STOPPED.to_owned(),
                     (true, Some(PARENT_FAILED)) => crate::tree::ITS_PARENT_FAILED.to_owned(),
                     (true, _) => format!("stopped by its parent, agent {caller} of {name}"),
@@ -1482,29 +1636,181 @@ fn started_elsewhere_by(daemon: &Daemon, caller: &str) -> Vec<(Launch, String)> 
 /// (`docs/tools.md`, "Sessions an agent starts").
 pub(crate) fn ended(daemon: &Arc<Daemon>, agent: &str, failed: bool) {
     for (launch, name) in started_elsewhere_by(daemon, agent) {
-        let why = match (launch.kind.as_str(), failed) {
-            ("child", false) => PARENT_STOPPED,
-            ("child", true) => PARENT_FAILED,
-            (_, false) => PILOT_ENDED,
-            (_, true) => continue,
-        };
-        let args = json!({"agent_id": launch.agent, "why": why});
-        match keep_call(daemon, &launch, "agent_stop", &args) {
-            Ok(()) => {
-                let _ = daemon.write(|store| {
-                    store
-                        .end_launch(&launch.machine, &launch.launch)
-                        .map(|()| ((), None))
-                });
-            }
-            Err(error) => eprintln!(
-                "flottille daemon: agent {} that agent {agent} started on {name} is not stopped \
-                 with it: {error}",
-                launch.agent.as_deref().unwrap_or_default(),
-            ),
-        }
+        stop_started(daemon, &launch, &name, failed);
     }
 }
+
+/// The launch `launch` of this machine on another, its agent named now: when its caller ended
+/// while its code travelled, before [`ended`] could see the agent it started, that agent stops
+/// there as it would have then. Whether its caller is gone.
+pub(crate) fn recorded(daemon: &Arc<Daemon>, launch: &Launch) -> bool {
+    let caller = daemon
+        .read(|store| store.agent(&launch.caller))
+        .ok()
+        .flatten();
+    let Some(caller) = caller.filter(|caller| caller.state.is_final()) else {
+        return false;
+    };
+    let name = machine_name(daemon, launch);
+    let failed = caller.state == flottille_core::agent::AgentState::Failed;
+    stop_started(daemon, launch, &name, failed);
+    true
+}
+
+/// The agent `launch` started on the machine `name` stops there, its caller ended (or `failed`):
+/// a child with its parent, a led session with its pilot unless it failed (it can be resumed).
+fn stop_started(daemon: &Arc<Daemon>, launch: &Launch, name: &str, failed: bool) {
+    if launch.agent.is_none() {
+        return;
+    }
+    let why = match (launch.kind.as_str(), failed) {
+        ("child", false) => PARENT_STOPPED,
+        ("child", true) => PARENT_FAILED,
+        ("led", false) => PILOT_ENDED,
+        _ => return,
+    };
+    let args = json!({"agent_id": launch.agent, "why": why});
+    match keep_stop(daemon, launch, name, &args) {
+        Ok(()) => {
+            let _ = daemon.write(|store| {
+                store
+                    .end_launch(&launch.machine, &launch.launch)
+                    .map(|()| ((), None))
+            });
+        }
+        Err(error) => eprintln!(
+            "flottille daemon: agent {} that agent {} started on {name} is not stopped with it: \
+             {error}",
+            launch.agent.as_deref().unwrap_or_default(),
+            launch.caller,
+        ),
+    }
+}
+
+/// Keeps the stop of the agent of `launch` for its machine `name`, and sends it when it can. Never
+/// refused for want of room: a stop is never lost. It replaces what it makes useless, the calls
+/// kept for that launch (a message, a following, an earlier stop), so that one stop of a launch
+/// is kept at most, and the queue grows by no more than the launches it ends.
+/// A message kept for that launch and not yet sent is forgotten without a `remote.delivery_dropped`
+/// event: its caller ended, nobody is left to be told it did not go.
+fn keep_stop(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    name: &str,
+    args: &Value,
+) -> Result<(), String> {
+    let id = format!("stop-{}", launch.launch);
+    let message = MachineMessage::Call(Box::new(Call {
+        id: id.clone(),
+        launch: launch.launch.clone(),
+        caller: launch.caller.clone(),
+        agent: launch.agent.clone().unwrap_or_default(),
+        tool: "agent_stop".to_owned(),
+        arguments: args.to_string(),
+        ..Call::default()
+    }));
+    let stop = outgoing(&launch.machine, &launch.launch, name, id, &message, false);
+    daemon
+        .write(|store| {
+            for kept in store.outgoing(Some(&launch.machine))? {
+                let call = !kept.back
+                    && matches!(
+                        serde_json::from_value(kept.message.clone()),
+                        Ok(MachineMessage::Call(_))
+                    );
+                if call && kept.launch == launch.launch {
+                    store.forget_outgoing(&kept.id)?;
+                }
+            }
+            store.keep_outgoing(&stop).map(|()| ((), None))
+        })
+        .map_err(|error| format!("it cannot be kept: {error}"))?;
+    send_kept(daemon, &launch.machine);
+    Ok(())
+}
+
+/// The call a pilot's machine sends for what a session it leads there holds that is not saved:
+/// a machine's own, never an agent's tool.
+const LOSSES: &str = "session_losses";
+
+/// How long the End confirmation waits for the machines of the sessions it lists: past it, what
+/// one did not answer is `unknown (on <machine>)`.
+pub(crate) const LOSSES_WAIT: Duration = Duration::from_secs(3);
+
+/// What the machine `from` asks, for its pilot's End confirmation, of the session its agent leads
+/// here: what its workspace holds that is not saved, as `agent.ending` says it here.
+async fn losses_here(
+    daemon: &Arc<Daemon>,
+    remote: &Remote,
+    from: &PublicKey,
+    call: &Call,
+) -> Result<Value, Refused> {
+    let launch = own_launch(daemon, remote, from, call)?;
+    if launch.kind != "led" {
+        return Err(format!("{LOSSES} reads only a session the caller leads").into());
+    }
+    while playing_slow_call() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let agent = daemon
+        .read(|store| store.agent(&call.agent))
+        .map_err(|error| Refused::Now(error.to_string()))?
+        .ok_or_else(|| format!("there is no agent {}", call.agent))?;
+    let (state, losses) = crate::tree::losses_of(daemon, &agent).await;
+    Ok(json!({"state": state, "losses": losses}))
+}
+
+/// What the machine of `launch`, a session led from here, says its workspace holds that is not
+/// saved, asked until `until`: `None` when it is off, does not answer in time, or cannot (a
+/// machine of before). What it says is masked and cut, as any answer of another machine.
+pub(crate) async fn losses_there(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    until: tokio::time::Instant,
+) -> Option<(String, Vec<String>)> {
+    let name = machine_name(daemon, launch);
+    let (link, _) = crate::link::remote_of(daemon).ok()?.link_to(&name).ok()?;
+    let call = Call {
+        id: format!(
+            "call-{}",
+            flottille_core::agent::new_id().unwrap_or_default()
+        ),
+        launch: launch.launch.clone(),
+        caller: launch.caller.clone(),
+        agent: launch.agent.clone()?,
+        tool: LOSSES.to_owned(),
+        arguments: "{}".to_owned(),
+        ..Call::default()
+    };
+    let message = Message::Machine(MachineMessage::Call(Box::new(call)));
+    let answer = tokio::time::timeout_at(until, link.send(&message))
+        .await
+        .ok()?
+        .ok()?;
+    let state = answer["state"]
+        .as_str()
+        .filter(|state| matches!(*state, "clean" | "uncommitted" | "unpushed" | "unknown"))?;
+    // Masked of the secrets of the pilot's place, as every answer a tool of its own gets (`here`).
+    let secrets = daemon
+        .read(|store| store.agent(&launch.caller))
+        .ok()
+        .flatten()
+        .and_then(|pilot| crate::mcp::grant_of(daemon, &pilot).ok())
+        .map(|grant| grant.place.secret_values())
+        .unwrap_or_default();
+    let known = Secrets::new(&std::env::vars_os().collect(), &secrets);
+    let losses = answer["losses"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .take(MOST_LOSSES)
+        .map(|loss| masked_and_cut(loss, &known, ERROR_LIMIT))
+        .collect();
+    Some((state.to_owned(), losses))
+}
+
+/// The most losses of one session another machine's answer is read for.
+const MOST_LOSSES: usize = 200;
 
 /// The launch from the machine of `from` that `call` names, of the session or child its caller
 /// started here and still calls; the refusal otherwise.
@@ -2210,13 +2516,15 @@ fn stand_in_cap(name: &str) -> String {
 /// judge and the same tool, the caller stood in for by an agent of its own (`stand_in`), in its
 /// tree's mode (Full only with the user's signed switch). A `viewer` device's agents only read.
 /// `reads`: the session or child of this machine the caller started, which it reads as its
-/// starter (`Grant::reads`).
+/// starter (`Grant::reads`). `review`: the call is the review of the session it leads here
+/// (`led_review`), the one call for which it is given the review tool.
 async fn session_call(
     daemon: &Arc<Daemon>,
     remote: &Arc<Remote>,
     from: &PublicKey,
     call: Call,
     reads: Option<String>,
+    review: bool,
 ) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
@@ -2252,8 +2560,13 @@ async fn session_call(
             .to_owned()
             .into());
     }
-    let tool = stand_in_tools()
+    let tools: Vec<&'static str> = stand_in_tools()
         .into_iter()
+        .chain(review.then_some(REVIEW))
+        .collect();
+    let tool = tools
+        .iter()
+        .copied()
         .find(|tool| *tool == call.tool)
         .ok_or_else(|| format!("{:?} is not a tool another machine calls", call.tool))?;
     let args: Value = serde_json::from_str(&call.arguments)
@@ -2291,6 +2604,7 @@ async fn session_call(
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
     let grant = Arc::new(crate::mcp::Grant {
         reads,
+        tools,
         ..stand_in_grant(daemon, &agent)
     });
     let played = crate::mcp::played_for(daemon, &grant, tool, args, &call.id).await;
@@ -2750,6 +3064,28 @@ mod tests {
             session: "agent ab12".to_owned(),
             woken: true,
         }
+    }
+
+    #[test]
+    fn a_machine_of_before_the_review_is_told_to_be_updated() {
+        let said = "refused by server: \"review\" is not a tool another machine calls".to_owned();
+
+        let told = text_of(older_review(Outcome::Refused(said), "server"));
+
+        assert!(told.contains("server needs updating"), "{told}");
+        assert!(
+            !told.contains("is not a tool another machine calls"),
+            "{told}"
+        );
+    }
+
+    #[test]
+    fn another_refusal_of_a_review_is_left_as_it_is() {
+        let said = "refused by server: no.".to_owned();
+
+        let told = text_of(older_review(Outcome::Refused(said.clone()), "server"));
+
+        assert_eq!(told, said);
     }
 
     fn text_of(outcome: Outcome) -> String {

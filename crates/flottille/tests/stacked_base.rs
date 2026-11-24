@@ -18,6 +18,11 @@ const STACKED: &str = "chore/2-start";
 /// the forge's), with `main` and the branch `chore/2-start` on it, and its ready workspace `login`
 /// started from `chore/2-start` on the branch `app/login`, pushed.
 fn project(user: &User, origin: &str, forge: &str) {
+    project_from(user, origin, forge, STACKED);
+}
+
+/// The same, the workspace started from the branch `stacked`.
+fn project_from(user: &User, origin: &str, forge: &str, stacked: &str) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -33,11 +38,11 @@ fn project(user: &User, origin: &str, forge: &str) {
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
     user.git(&folder, &["push", "--quiet", "origin", "main"]);
-    user.git(&folder, &["switch", "--quiet", "-c", STACKED]);
+    user.git(&folder, &["switch", "--quiet", "-c", stacked]);
     std::fs::write(folder.join("parent.md"), "the parent\n").unwrap();
     user.git(&folder, &["add", "."]);
     user.git(&folder, &["commit", "--quiet", "-m", "the parent"]);
-    user.git(&folder, &["push", "--quiet", "origin", STACKED]);
+    user.git(&folder, &["push", "--quiet", "origin", stacked]);
     user.git(&folder, &["switch", "--quiet", "main"]);
     user.git(&folder, &["remote", "set-url", "origin", origin]);
     user.write_project_file(
@@ -52,11 +57,11 @@ fn project(user: &User, origin: &str, forge: &str) {
         .call(
             "workspace.create",
             json!({"project": "app", "name": "login", "offline": true,
-                "bases": {".": STACKED}}),
+                "bases": {".": stacked}}),
         )
         .unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
-    assert_eq!(base_of(user), STACKED);
+    assert_eq!(base_of(user), stacked);
     let worktree = user.path("data/flottille/workspaces/app/login");
     user.git(
         &worktree,
@@ -115,9 +120,9 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// A call the gate holds, allowed by the user: the answer the agent is handed for it, an error
-/// when it was not done.
-fn allowed(user: &User, answer: Answer) -> Answer {
+/// A call the gate holds, allowed by the user: the id of its answer, which comes as a delivery
+/// once it is done.
+fn approved(user: &User, answer: &Answer) -> String {
     assert!(!answer.error, "{}", answer.text);
     let number: u64 = answer
         .text
@@ -127,14 +132,26 @@ fn allowed(user: &User, answer: Answer) -> Answer {
         .unwrap_or_else(|| panic!("not held: {}", answer.text));
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
+    format!("approval-{number}")
+}
+
+/// The answer the agent is handed for an approved call, once it is done: an error when it was
+/// not done.
+fn done(user: &User, id: &str) -> Answer {
     let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
-    let id = format!("approval-{number}");
-    eventually("the answer", || store().delivery(&id).unwrap().is_some());
-    let text = store().delivery(&id).unwrap().unwrap().body;
+    eventually("the answer", || store().delivery(id).unwrap().is_some());
+    let text = store().delivery(id).unwrap().unwrap().body;
     Answer {
         error: !text.contains("and Flottille has now done it"),
         text,
     }
+}
+
+/// A call the gate holds, allowed by the user: the answer the agent is handed for it, an error
+/// when it was not done.
+fn allowed(user: &User, answer: Answer) -> Answer {
+    let id = approved(user, &answer);
+    done(user, &id)
 }
 
 /// A write of `forge`, allowed by the user.
@@ -639,4 +656,141 @@ fn a_stacked_branch_gone_with_no_merged_pull_request_is_said_to_be_a_guess() {
     let said = told(&user, &id);
     assert!(said.contains("not found on"), "{said}");
     assert!(!said.contains("merged and deleted"), "{said}");
+}
+
+#[test]
+fn a_base_changed_meanwhile_is_not_overwritten_by_a_retarget() {
+    // A retarget onto the successor of the gone stacked base reads the base, then asks the forge
+    // (slowly); a merge of the same workspace moves the base to main meanwhile. The retarget's
+    // decision was made on the old base: it leaves the newer one.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let mut slow = github("release", &["main", "release"], merged_parent("release"));
+    slow["list_delay_ms"] = json!(4000);
+    user.gh_script(slow);
+    let (_, mcp) = agent(&user);
+
+    let held = mcp.call(
+        "forge",
+        json!({"action": "edit", "repository": ".", "number": 12, "base": "release"}),
+    );
+    let retarget = approved(&user, &held);
+    eventually("the retarget asking where the base went", || {
+        !gh_starting(&user, "pr list -R github.com/acme/app --head chore/2-start").is_empty()
+    });
+
+    user.gh_script(github("main", &["main", "release"], merged_parent("main")));
+    let merged = write(
+        &user,
+        &mcp,
+        json!({"action": "merge", "repository": ".", "method": "squash"}),
+    );
+    assert!(!merged.error, "{}", merged.text);
+    assert_eq!(base_of(&user), "main");
+
+    let moved = done(&user, &retarget);
+    assert!(!moved.error, "{}", moved.text);
+    assert_eq!(base_of(&user), "main", "{}", moved.text);
+}
+
+#[test]
+fn a_network_error_on_a_branch_named_with_404_is_not_a_gone_branch() {
+    // gh prints the URL of a call that dropped, and the URL holds the branch's name: `1404` is
+    // not a 404. Nothing is gone, so nothing moves and nothing is guessed.
+    let stacked = "fix/1404-x";
+    let user = User::with_fake_agent().with_fake_gh();
+    project_from(
+        &user,
+        "git@github.com:acme/app.git",
+        "{ kind = \"github\", repository = \"acme/app\" }",
+        stacked,
+    );
+    let mut script = github("main", &["main"], json!({}));
+    script["branch_fail"] = json!({"acme/app": {stacked: format!(
+        "Get \"https://api.github.com/repos/acme/app/branches/{stacked}\": dial tcp: i/o timeout"
+    )}});
+    user.gh_script(script);
+    let (_, mcp) = agent(&user);
+
+    let merged = write(
+        &user,
+        &mcp,
+        json!({"action": "merge", "repository": ".", "method": "squash"}),
+    );
+    assert_eq!(base_of(&user), stacked, "{}", merged.text);
+    assert!(!merged.text.contains("moved from"), "{}", merged.text);
+}
+
+#[test]
+fn a_retarget_onto_the_successor_of_a_gone_stacked_base_is_followed() {
+    // Guard: the base is gone, its merged pull request went into `release`, which is outside the
+    // rule (`main`): a retarget onto it is where the base went, so the workspace follows.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github(
+        STACKED,
+        &["main", "release"],
+        merged_parent("release"),
+    ));
+    let (id, mcp) = agent(&user);
+
+    let moved = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "repository": ".", "number": 12, "base": "release"}),
+    );
+    assert!(!moved.error, "{}", moved.text);
+    assert_eq!(base_of(&user), "release");
+    assert!(
+        told(&user, &id).contains(&format!("moved from {STACKED} to release")),
+        "{}",
+        told(&user, &id)
+    );
+}
+
+#[test]
+fn a_branch_with_a_percent_sign_is_found_on_the_forge() {
+    // Guard: `%` is the one character of a branch name a path reads as its own: the branch is
+    // asked for as `%25`, on GitHub and on Bitbucket Cloud, and found, so the base stays.
+    let stacked = "fix/100%-x";
+    let user = User::with_fake_agent().with_fake_gh();
+    project_from(
+        &user,
+        "git@github.com:acme/app.git",
+        "{ kind = \"github\", repository = \"acme/app\" }",
+        stacked,
+    );
+    user.gh_script(github(stacked, &["main", stacked], json!({})));
+    let (_, mcp) = agent(&user);
+    let merged = write(
+        &user,
+        &mcp,
+        json!({"action": "merge", "repository": ".", "method": "squash"}),
+    );
+    assert!(!merged.error, "{}", merged.text);
+    assert_eq!(base_of(&user), stacked);
+    assert_eq!(gh_starting(&user, "pr merge").len(), 1);
+    assert!(
+        gh_starting(&user, "api repos/acme/app/branches/")
+            .iter()
+            .any(|call| call.starts_with("api repos/acme/app/branches/fix/100%25-x ")),
+        "{:?}",
+        gh_starting(&user, "api")
+    );
+
+    let user = User::with_fake_agent().with_fake_bkt();
+    project_from(
+        &user,
+        "git@bitbucket.org:acme/app.git",
+        "{ kind = \"bitbucket-cloud\", repository = \"acme/app\" }",
+        stacked,
+    );
+    let mut script = cloud(stacked, vec![], &["main"]);
+    script["api"]["/repositories/acme/app/refs/branches/fix/100%25-x"] = json!({"name": stacked});
+    user.bkt_script(script);
+    let (_, mcp) = agent(&user);
+    let merged = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+    assert!(!merged.error, "{}", merged.text);
+    assert_eq!(base_of(&user), stacked);
+    assert_eq!(bkt_starting(&user, "pr merge").len(), 1);
 }
