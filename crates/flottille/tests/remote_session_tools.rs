@@ -264,6 +264,63 @@ fn stopping_a_session_it_did_not_start_is_held_for_the_user_as_on_one_machine() 
     prompted(&pc, "was approved by the user");
 }
 
+/// A held call of pc's caller, `agent_stop` of the night lead, on the server, which the user has
+/// not answered yet: the request's number. The next keeping of a message for pc is played as
+/// `waiting` messages already waiting for it (empty: the most, 100).
+fn held_stop(
+    pc: &Machine,
+    server: &Machine,
+    night: &str,
+    waiting: &str,
+) -> (u64, std::path::PathBuf) {
+    let (_root, mcp) = caller(pc, server, "full");
+    let number = held(&mcp.call("agent_stop", json!({"agent_id": NIGHT})));
+    assert_eq!(server.agent(night)["state"], "idle");
+    let full = server.user.path("kept-full");
+    std::fs::write(&full, waiting).unwrap();
+    (number, full)
+}
+
+#[test]
+fn the_user_s_answer_to_a_held_call_of_another_machine_is_kept_past_the_cap() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    // As many messages wait for pc as may be kept: the answer is kept all the same.
+    let (number, full) = held_stop(&pc, &server, &night, "");
+
+    approve(&server, number);
+
+    eventually("the session ended", || {
+        server.agent(&night)["state"] == "ended"
+    });
+    prompted(&pc, "was approved by the user");
+    assert!(!full.exists(), "the answer's keeping was played full");
+}
+
+#[test]
+fn the_user_s_answer_to_a_held_call_past_the_hard_ceiling_is_dropped_with_its_inbox_entry() {
+    let (_hub, pc, server, night) = night_lead("runner");
+    // As many messages wait for pc as an answer may be kept beyond: the most, and the launches
+    // held at once (`MOST_KEPT` and `MOST_HELD`, 100 and 4).
+    let (number, full) = held_stop(&pc, &server, &night, "104");
+
+    approve(&server, number);
+
+    eventually("an inbox entry for the answer not kept", || {
+        server.user.call("inbox.list", json!({})).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                let text = entry["text"].as_str().unwrap_or_default();
+                entry["kind"] == "dropped"
+                    && text.contains(&format!("request #{number}"))
+                    && text.contains("pc")
+                    && text.contains("was not sent")
+            })
+    });
+    assert!(!full.exists(), "the answer's keeping was played full");
+}
+
 #[test]
 fn a_session_of_an_offline_machine_is_listed_with_its_state_and_a_call_says_why() {
     let (_hub, pc, server, night) = night_lead("runner");
