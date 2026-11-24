@@ -581,12 +581,12 @@ pub(crate) fn tell_decided(daemon: &Arc<Daemon>, launch: &Launch, body: &str, st
 /// Tells the agent of another machine that asked the allowed `launch`, which may have heard it was
 /// approved already, that it never ran: as the end of the session it started, which it takes
 /// whether that answer reached it or not, where it refuses a second answer (#1374). A handed
-/// session's caller hears only the user's answer.
+/// session's caller, which hears nothing of the session that ran, hears this end as a led one's
+/// does: it was told the session started (#1385).
 pub(crate) fn tell_stopped(daemon: &Arc<Daemon>, launch: &Launch, body: &str) {
     let kind = match launch.kind.as_str() {
         "child" => "child-failed",
-        "led" => crate::subscriptions::TURN_ENDED,
-        _ => return tell_decided(daemon, launch, body, false),
+        _ => crate::subscriptions::TURN_ENDED,
     };
     kept_for_caller(
         daemon,
