@@ -993,7 +993,9 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
 }
 
 /// Removes `workspace`, made of code that came, unless work other than that code is in it. What it
-/// holds is read, then what the removal would lose; `between` runs after the first read.
+/// holds is read first, then what the removal would lose, which it checks again: a file written
+/// between the two reads, even one said lost the same, differs from the first, and the workspace
+/// is kept. `between` runs after the first read.
 async fn remove_unless_work_came(
     daemon: &Arc<Daemon>,
     workspace: &flottille_core::workspace::Workspace,
@@ -1002,11 +1004,11 @@ async fn remove_unless_work_came(
     if workspace.repositories.iter().any(|r| r.laid.is_none()) {
         return Err("it is not made only of code that came".to_owned());
     }
-    let losses = crate::workspaces::losses(daemon, &workspace.project, &workspace.name)
+    let digest = crate::workspaces::digest(workspace)
         .await
         .map_err(|failure| failure.message)?;
     between().await;
-    let digest = crate::workspaces::digest(workspace)
+    let losses = crate::workspaces::losses(daemon, &workspace.project, &workspace.name)
         .await
         .map_err(|failure| failure.message)?;
     crate::workspaces::remove_with_project(daemon.clone(), workspace, Some((&losses, &digest)))
