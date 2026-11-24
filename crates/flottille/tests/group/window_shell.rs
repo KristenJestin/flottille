@@ -33,6 +33,8 @@ mod window_connections;
 mod window_developer_reports;
 #[path = "../window_drafts.rs"]
 mod window_drafts;
+#[path = "../window_every_machine.rs"]
+mod window_every_machine;
 #[path = "../window_first_frame.rs"]
 mod window_first_frame;
 #[path = "../window_folds.rs"]

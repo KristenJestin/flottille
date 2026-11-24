@@ -185,7 +185,7 @@ impl ProjectPrograms {
 }
 
 pub struct ProgramChecks {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     read: Option<ProjectPrograms>,
     /// How many reads were asked: an answer to an older one never replaces a newer one's.
@@ -206,7 +206,7 @@ pub fn refused_toast(why: &str) -> Toast {
 }
 
 impl ProgramChecks {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,

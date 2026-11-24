@@ -24,7 +24,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::channel::mpsc::UnboundedSender;
 use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
@@ -63,7 +62,7 @@ use crate::conversation::{
 use crate::end_led::{self, LedEnd};
 use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
-use crate::link::{Connect, Update};
+use crate::link::{Connect, Updates};
 use crate::links_card::{LinksCard, Open};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
@@ -263,7 +262,7 @@ fn local_offset(ms: u64) -> i64 {
 #[derive(Clone)]
 pub struct Follow {
     pub connect: Connect,
-    pub updates: UnboundedSender<Update>,
+    pub updates: Updates,
     pub opener: Opener,
 }
 
@@ -289,6 +288,10 @@ pub struct Opened {
 
 pub struct SessionPage {
     shell: WeakEntity<Shell>,
+    /// Its session's machine (`None`: this one), and the actions it asks that machine with:
+    /// given when the page is made, never the machine shown when it asks (#1271).
+    machine: Option<String>,
+    asks: crate::actions::Actions,
     opened: Opened,
     follow: Follow,
     layout: Layout,
@@ -427,6 +430,7 @@ impl SessionPage {
         reply: Entity<Reply>,
         ask_dock: Entity<crate::ask_dock::AskDock>,
         follow: Follow,
+        (machine, asks): (Option<String>, crate::actions::Actions),
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -457,6 +461,8 @@ impl SessionPage {
         let _reply = cx.observe(&reply, |this, _, cx| this.sync_pending(cx));
         let mut page = Self {
             shell: shell.clone(),
+            machine,
+            asks: asks.clone(),
             follow,
             layout,
             status,
@@ -474,7 +480,7 @@ impl SessionPage {
             reply,
             room: ask_dock.read(cx).cells(),
             ask_dock,
-            queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone())),
+            queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone()).asking(asks.clone())),
             command_panel,
             run_drawer,
             watching: None,
@@ -1257,7 +1263,7 @@ impl SessionPage {
 
     /// [`SessionPage::select`], for the window's history going back to a place: it does not
     /// record it again.
-    /// Opened by a switch to the machine it runs on: its header, its conversation and its
+    /// Opened from the row of another machine's session: its header, its conversation and its
     /// composer enter staggered, as a page that shows up.
     pub fn arrive(&mut self, cx: &mut Context<Self>) {
         if !self.arrived {
@@ -1309,10 +1315,13 @@ impl SessionPage {
     }
 
     /// Asks the daemon, off the UI thread.
-    fn perform(&self, command: Command, cx: &mut Context<Self>) {
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+    fn perform(&self, command: Command, _: &mut Context<Self>) {
+        self.asks.send(command);
+    }
+
+    /// The machine of its session, `None` for this one.
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
     }
 
     /// What the daemon answered to a ticket linked from the rail: the rail says why when it was
@@ -1600,8 +1609,7 @@ impl SessionPage {
                 session: self.shown.clone(),
                 name,
             };
-            // The shell is handing this page its updates: it asks once they are over.
-            crate::commands::perform_later(&self.shell, command, cx);
+            self.asks.send(command);
         }
     }
 
@@ -1619,7 +1627,7 @@ impl SessionPage {
             session: self.shown.clone(),
             name: file.to_owned(),
         };
-        crate::commands::perform_later(&self.shell, command, cx);
+        self.asks.send(command);
     }
 
     /// A picture read back from the daemon: the rows that show it draw it. A pasted text comes
@@ -1872,16 +1880,14 @@ impl SessionPage {
         &mut self,
         seq: u64,
         answers: Vec<flottille_core::question::Answer>,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) {
         let command = Command::AnswerQuestion {
             session: self.opened.id.clone(),
             seq,
             answers,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
     }
 
     /// What the daemon answered to the answer of the question of `seq`.
@@ -2213,7 +2219,12 @@ impl Render for SessionPage {
                 cx,
             ))
             .child({
-                let (shell, id) = (self.shell.clone(), self.opened.id.clone());
+                // Another machine's session is known in the window by its row.
+                let id = match &self.machine {
+                    Some(machine) => crate::model::elsewhere_id(machine, &self.opened.id),
+                    None => self.opened.id.clone(),
+                };
+                let shell = self.shell.clone();
                 Button::icon("session-rename", Icon::Edit, "Rename the session").on_click(
                     move |_, window, cx| {
                         shell
@@ -6180,7 +6191,7 @@ impl Render for Row {
                     .detail(SharedString::from(agent.runs_on.clone()))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         let Some(page) = page.upgrade() else {
                             return;
                         };
@@ -6191,7 +6202,7 @@ impl Render for Row {
                                 let (machine, agent) = (there.machine.clone(), there.agent.clone());
                                 shell
                                     .update(cx, |shell, cx| {
-                                        shell.open_elsewhere(machine, agent, cx)
+                                        shell.open_elsewhere(machine, agent, window, cx)
                                     })
                                     .ok();
                             }
@@ -7899,11 +7910,11 @@ fn remote_row(
                         ))),
                 ),
         )
-        .on_click(move |_, _, cx| {
+        .on_click(move |_, window, cx| {
             if let Some(shell) = &shell {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.open_elsewhere(machine.clone(), agent.clone(), cx)
+                        shell.open_elsewhere(machine.clone(), agent.clone(), window, cx)
                     })
                     .ok();
             }
@@ -8957,7 +8968,6 @@ impl Render for SessionRail {
             (None, _) => facts.push(("Place", "the project folder".into())),
             _ => {}
         }
-        facts.push(("Machine", "this PC".into()));
         let workspace = div()
             .id("rail-workspace")
             .flex()
@@ -8977,6 +8987,8 @@ impl Render for SessionRail {
                 !self.place_known,
                 workspace_skeleton(),
                 div()
+                    .id("rail-workspace-read")
+                    .test_support()
                     .flex()
                     .flex_col()
                     .child(presence(
@@ -9496,7 +9508,8 @@ pub fn pending_part(key: u64, part: &str) -> ElementId {
 /// the daemon sends the instructions of each command the message uses with it. Each command the
 /// message uses is a chip in the text, where it was typed, as each picture is (#773, #846).
 pub struct Reply {
-    shell: WeakEntity<Shell>,
+    /// The actions of its session's machine, given when it is made (#1271).
+    asks: crate::actions::Actions,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
     session: String,
     project: String,
@@ -9572,6 +9585,7 @@ pub struct Reply {
 impl Reply {
     pub fn new(
         shell: WeakEntity<Shell>,
+        asks: crate::actions::Actions,
         session: String,
         project: String,
         window: &mut Window,
@@ -9619,10 +9633,11 @@ impl Reply {
                 },
             ),
         ];
-        let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
-        let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
+        let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()).asking(asks.clone()));
+        let options =
+            cx.new(|_| SessionOptions::new(shell.clone(), session.clone()).asking(asks.clone()));
         let reply = Self {
-            shell,
+            asks,
             keeping: Keeping::new(DraftKey::Session(session.clone())),
             session,
             project,
@@ -9708,6 +9723,11 @@ impl Reply {
         self.sending
     }
 
+    /// An interruption was asked and not answered yet.
+    pub fn is_interrupting(&self) -> bool {
+        self.interrupting
+    }
+
     /// The messages sent and not recorded yet, the oldest first.
     pub fn pending(&self) -> &[Pending] {
         &self.pending
@@ -9738,10 +9758,7 @@ impl Reply {
     /// update is over: the shell may be the one updating (it started or answered something).
     fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
         if let Some(write) = self.draft_to_write(cx, false) {
-            let shell = self.shell.clone();
-            cx.defer(move |cx| {
-                shell.update(cx, |shell, _| shell.perform(write)).ok();
-            });
+            self.asks.send(write);
         }
     }
 
@@ -9785,11 +9802,9 @@ impl Reply {
         self.keeping.read_failed(cx, Self::read_draft_again);
     }
 
-    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+    fn read_draft_again(&mut self, _: &mut Context<Self>) {
         let key = self.keeping.key().clone();
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
-            .ok();
+        self.asks.send(Command::DraftRead { key });
     }
 
     /// The daemon answered a write of the draft.
@@ -10007,9 +10022,7 @@ impl Reply {
             session: self.session.clone(),
             resume: !on,
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
         cx.notify();
     }
 
@@ -10096,9 +10109,7 @@ impl Reply {
         let command = Command::Interrupt {
             session: self.session.clone(),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
         cx.notify();
     }
 
@@ -10209,12 +10220,11 @@ impl Reply {
 
     /// Asks the daemon for the project's commands: the `/` list offers them, and the chips know
     /// them.
-    fn list_commands(&self, cx: &mut Context<Self>) {
+    fn list_commands(&self, _: &mut Context<Self>) {
         let command = Command::Commands {
             project: self.project.clone(),
         };
-        // Later: the shell may be the one setting the text, as it hands a reply its answer.
-        crate::commands::perform_later(&self.shell, command, cx);
+        self.asks.send(command);
     }
 
     /// The project's commands, as the daemon listed them.
@@ -10290,11 +10300,9 @@ impl Reply {
                 let command = Command::ReloadTools {
                     session: self.session.clone(),
                 };
-                self.shell
-                    .update(cx, |shell, _| shell.perform(command))
-                    .ok();
+                self.asks.send(command);
             } else {
-                crate::extensions::review::start(&self.shell, &self.session, cx);
+                crate::extensions::review::start(&self.asks, &self.session);
             }
             cx.notify();
             return;
@@ -10516,9 +10524,7 @@ impl Reply {
             texts: pending.texts.clone(),
             compact: self.compact_offer(),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.asks.send(command);
         cx.notify();
     }
 
