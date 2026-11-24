@@ -210,6 +210,11 @@ pub fn applying(listing: &Listing) -> Option<&'static Adapter> {
     }
 }
 
+/// The adapter whose program the server's command `words` runs, if one does.
+pub fn named_by(words: &[String]) -> Option<&'static Adapter> {
+    ALL.iter().copied().find(|adapter| adapter.named_by(words))
+}
+
 /// `MAJOR.MINOR.PATCH`, nothing more: a pre-release or a build is no version an adapter was
 /// checked on.
 fn version(text: &str) -> Option<(u64, u64, u64)> {
@@ -373,77 +378,187 @@ impl Adapter {
     /// Why login is refused when the server's command or the connection's environment names a
     /// variable that says where agent-browser puts its socket and Chrome its profile, caches and
     /// crash dumps (`FOLDERS_OF_THE_BROWSER`): Flottille sets them, last, in the vault folder,
-    /// and the connection, which an agent can propose an edit of, is not to move them. A word of
-    /// the command holding `NAME=value` is one a launcher (`env`, a shell) would set after
-    /// Flottille did.
+    /// and the connection, which an agent can propose an edit of, is not to move them.
     pub fn moves_folders(
         &self,
         words: &[String],
         env: &BTreeMap<String, String>,
     ) -> Option<String> {
-        // Anywhere in a word: a shell's line (`sh -c 'TMPDIR=… agent-browser mcp'`) sets it too.
-        // A name starts there, so that `XDG_CONFIG_HOME=` is said as itself and not as `HOME`.
-        let in_command = FOLDERS_OF_THE_BROWSER.iter().find_map(|name| {
-            let assigned = format!("{name}=");
-            words
+        let why = self.folder_set(words).map(command_sets).or_else(|| {
+            let named = FOLDERS_OF_THE_BROWSER
                 .iter()
-                .any(|word| {
-                    word.match_indices(&assigned).any(|(at, _)| {
-                        !word[..at]
-                            .chars()
-                            .next_back()
-                            .is_some_and(|before| before.is_ascii_alphanumeric() || before == '_')
-                    })
-                })
-                .then_some(("the server's command", "the connection's command", *name))
-        });
-        let (sets, from, named) = in_command.or_else(|| {
-            FOLDERS_OF_THE_BROWSER
-                .iter()
-                .find(|name| env.contains_key(**name))
-                .map(|name| {
-                    (
-                        "the connection's environment",
-                        "the connection's env",
-                        *name,
-                    )
-                })
+                .find(|name| env.contains_key(**name))?;
+            Some(sets_a_folder(
+                "the connection's environment",
+                "the connection's env",
+                named,
+            ))
         })?;
-        Some(format!(
-            "login is refused while {sets} sets {named}: Flottille sets it for the browser, in \
-             the connection's vault folder, which no run reaches, so that the socket that drives \
-             the browser with no gate, its profile (cookies, the password filled) and its crash \
-             dumps stay out of their reach; one the connection moved would put them where a run \
-             reads them. The user takes {named} out of {from}"
-        ))
+        Some(format!("login is refused while {why}"))
     }
 
-    /// Why login is refused when the server's command does not start with its program: a
-    /// launcher (`LAUNCHERS_OF_A_COMMAND`) or an assignment `NAME=value` would run agent-browser
-    /// with an environment, a shell or a process of its own choosing, after Flottille set the
-    /// browser's. Said by the launcher's name, or the variable's, never a value.
+    /// Why login is refused when the server's command does not run the adapter's program itself
+    /// (`not_itself`).
     pub fn launched(&self, words: &[String]) -> Option<String> {
-        let first = words.first()?;
-        let program = std::path::Path::new(first)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(first);
-        let starts = if let Some((name, _)) = first.split_once('=') {
-            format!("an assignment of {name}")
-        } else if LAUNCHERS_OF_A_COMMAND.contains(&program) {
-            program.to_owned()
-        } else {
-            return None;
-        };
+        let why = self.not_itself(words)?;
+        Some(format!("login is refused while {why}"))
+    }
+
+    /// Why the adapter's server is not started, nor its connection accepted, with the server's
+    /// command `words`: it sets one of the browser's folders before the program, or does not run
+    /// the program itself. Flottille sets the folders before it runs the command, so anything
+    /// between the two (`env`, a shell, a sandbox) would put the browser's socket, which drives
+    /// it with no gate, and its profile where a run reaches them.
+    pub fn command_refused(&self, words: &[String]) -> Option<String> {
+        let why = self
+            .folder_set(words)
+            .map(command_sets)
+            .or_else(|| self.not_itself(words))?;
+        Some(format!("{} is not started while {why}", self.server))
+    }
+
+    /// Whether the server's command runs the adapter's program, through any wrapper the gate
+    /// unwraps: its server is checked before its first start, as the adapter's.
+    pub fn named_by(&self, words: &[String]) -> bool {
+        self.reached(words).named
+    }
+
+    /// The folder variable an assignment sets before the program, in any layer of the command.
+    /// The program's own arguments are its own: one that holds `HOME=` as text sets nothing.
+    fn folder_set(&self, words: &[String]) -> Option<&'static str> {
+        let reached = self.reached(words);
+        FOLDERS_OF_THE_BROWSER.into_iter().find(|name| {
+            reached.before.iter().any(|word| {
+                crate::gate::assignment(word) && word.split_once('=').map(|(n, _)| n) == Some(*name)
+            })
+        })
+    }
+
+    /// Why the server's command does not run the adapter's program itself: the program, its path
+    /// or a package runner's spec of it (`agent-browser@0.43.0`), run directly or by a chain of
+    /// plain package runners (`RUNNERS`, with no word but `RUNNER_WORDS` before what they run).
+    /// Every other program before it is refused, whatever it is: a list of the wrappers that set
+    /// an environment (`env`, `envdir`, `chpst`, `setpriv`, `flatpak`, a shell, `node -e`…) is
+    /// never whole.
+    fn not_itself(&self, words: &[String]) -> Option<String> {
+        let what = self.reached(words).refused?;
         Some(format!(
-            "login is refused while the server's command starts with {starts}: a connection's \
-             command names its program directly, since a launcher or an assignment before it \
-             runs agent-browser with an environment, a shell or a process of the command's \
-             choosing, after Flottille set where the browser keeps its socket, its profile and \
-             the password filled. The user starts the connection's command with its program"
+            "the server's command {what}: a connection to {server} runs {server} itself, by its \
+             name or its path, or through npx, bunx, pnpm or yarn with dlx or exec and no option \
+             but -y, since anything between them could set the environment after Flottille set \
+             where the browser keeps its socket, which drives it with no gate, its profile and \
+             the password filled. The user starts the connection's command with {server}",
+            server = self.server
         ))
     }
 
+    /// How the server's command reaches the adapter's program, layer after layer as the gate
+    /// unwraps them.
+    fn reached(&self, words: &[String]) -> Reached {
+        let layers = crate::gate::layers(words).unwrap_or_else(|_| vec![words.to_vec()]);
+        let mut reached = Reached::default();
+        for (at, layer) in layers.iter().enumerate() {
+            // Assignments in front of a program, as a shell's line has them.
+            let set = layer
+                .iter()
+                .take_while(|word| crate::gate::assignment(word))
+                .count();
+            reached.before.extend(layer[..set].iter().cloned());
+            if let Some((name, _)) = layer
+                .first()
+                .filter(|_| set > 0)
+                .and_then(|w| w.split_once('='))
+            {
+                reached
+                    .refused
+                    .get_or_insert_with(|| format!("sets {name} before its program"));
+            }
+            let Some(first) = layer.get(set) else {
+                break;
+            };
+            let program = crate::gate::base(first);
+            if program == self.server
+                || program
+                    .strip_prefix(self.server)
+                    .is_some_and(|rest| rest.starts_with('@'))
+            {
+                reached.named = true;
+                return reached;
+            }
+            // The words between the program and what it runs: all of them when what it runs is
+            // not its end (a line it splits).
+            let end = match layers.get(at + 1) {
+                Some(next) if layer.ends_with(next) => layer.len() - next.len(),
+                _ => layer.len(),
+            };
+            reached.before.extend(layer[set..end].iter().cloned());
+            if reached.refused.is_some() {
+                continue;
+            }
+            reached.refused = if !RUNNERS.contains(&program) {
+                Some(match at + set {
+                    0 => format!("starts with {program}"),
+                    _ => format!("runs {program}"),
+                })
+            } else {
+                let passed = layer[set + 1..end]
+                    .iter()
+                    .find(|word| !RUNNER_WORDS.contains(&word.as_str()));
+                match passed {
+                    // An option by its name alone: its value may be a path or a secret.
+                    Some(word) => Some(format!(
+                        "passes {} to {program}",
+                        word.split('=').next().unwrap_or(word)
+                    )),
+                    None if end == layer.len() => Some(format!("runs nothing with {program}")),
+                    None => None,
+                }
+            };
+        }
+        reached
+            .refused
+            .get_or_insert_with(|| format!("runs no {}", self.server));
+        reached
+    }
+}
+
+/// What `Adapter::reached` found of a server's command.
+#[derive(Default)]
+struct Reached {
+    /// The words before the program, of every layer: the wrappers, their options and the
+    /// assignments they make.
+    before: Vec<String>,
+    /// Why it does not run the program itself, by names alone, never a value.
+    refused: Option<String>,
+    /// Whether a layer runs the program.
+    named: bool,
+}
+
+/// The package runners that run a package's program as it was given, with the environment they
+/// were given.
+const RUNNERS: &[&str] = &["npx", "bunx", "pnpm", "yarn"];
+
+/// The words a package runner may have before what it runs: anything else could choose another
+/// package (`-p`), a shell (`-c`) or Node's own options (`--node-options`).
+const RUNNER_WORDS: &[&str] = &["-y", "--yes", "dlx", "exec", "--"];
+
+/// That `sets` (the server's command, the connection's environment) sets the folder variable
+/// `named`, and from where the user takes it out.
+fn sets_a_folder(sets: &str, from: &str, named: &str) -> String {
+    format!(
+        "{sets} sets {named}: Flottille sets it for the browser, in the connection's vault \
+         folder, which no run reaches, so that the socket that drives the browser with no gate, \
+         its profile (cookies, the password filled) and its crash dumps stay out of their reach; \
+         one the connection moved would put them where a run reads them. The user takes {named} \
+         out of {from}"
+    )
+}
+
+fn command_sets(named: &str) -> String {
+    sets_a_folder("the server's command", "the connection's command", named)
+}
+
+impl Adapter {
     /// Why login is refused when an option agent-browser itself calls unsafe (those its
     /// `--allowed-domains` rejects, `UNSAFE`) is set by the server's command, the connection's
     /// environment, or the environment the daemon started with, which agent-browser inherits:
@@ -477,59 +592,6 @@ impl Adapter {
         ))
     }
 }
-
-/// Programs that run another one, with an environment, a shell, a user, a process or a sandbox
-/// of their own: a connection's command that starts with one does not name its program.
-const LAUNCHERS_OF_A_COMMAND: &[&str] = &[
-    "env",
-    "sh",
-    "bash",
-    "zsh",
-    "dash",
-    "ksh",
-    "mksh",
-    "ash",
-    "fish",
-    "csh",
-    "tcsh",
-    "busybox",
-    "nohup",
-    "setsid",
-    "nice",
-    "ionice",
-    "chrt",
-    "taskset",
-    "timeout",
-    "time",
-    "stdbuf",
-    "unbuffer",
-    "command",
-    "chronic",
-    "exec",
-    "xargs",
-    "sudo",
-    "doas",
-    "su",
-    "runuser",
-    "pkexec",
-    "systemd-run",
-    "flatpak-spawn",
-    "unshare",
-    "nsenter",
-    "firejail",
-    "bwrap",
-    "chroot",
-    "prlimit",
-    "strace",
-    "ltrace",
-    "script",
-    "watch",
-    "tmux",
-    "screen",
-    "dtach",
-    "abduco",
-    "ssh",
-];
 
 /// The options agent-browser itself calls unsafe beside a list of allowed domains, and the
 /// variables it reads as each: another profile, a session saved or restored, a browser reached

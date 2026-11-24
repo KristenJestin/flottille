@@ -2917,6 +2917,13 @@ async fn accept_checked(
             (Some(seen), Some(seen_for)) if *seen_for == digest => seen.clone(),
             _ => return Err(review_first(&name)),
         };
+        // A listing seen before the command was checked at each start is not pinned with it.
+        if let (Some(adapter), Reach::Command(words)) =
+            (adapters::applying(&listing), &declaration.reach)
+            && let Some(why) = adapter.command_refused(words)
+        {
+            return Err(Failure::refused(format!("{name} is not accepted: {why}")));
+        }
         let settings = settings_of_accept(&row, &listing, &params)?;
         let pin = || {
             // A review that started a server before the pin is written would be met against the
