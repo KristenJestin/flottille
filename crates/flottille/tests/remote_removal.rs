@@ -139,7 +139,8 @@ fn commits_made_after_the_last_report_come_back_when_the_session_ends() {
     let there = folder_of(&server.agent(&session));
     commit_all(&server, &there, "export.txt", "the export");
     release(&server);
-    prompted(&pc, "The export is reported.");
+    // Its pilot is woken by its report, the commits it made so far come back with it.
+    prompted(&pc, "it reported");
     let reference = format!("refs/flottille/machines/server/{launch}/feat/export");
     assert_eq!(last_of(&pc, &reference), "the export");
     // Work committed after its report, which no report brings back.
