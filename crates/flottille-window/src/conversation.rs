@@ -1493,6 +1493,9 @@ impl Conversation {
             strings(&data["raw_output"], &mut texts);
             if texts.iter().any(|text| text.contains(STARTED_SESSION)) {
                 changes.extend(self.push(started_session(title)));
+            } else if texts.iter().any(|text| approved_before_return(text)) {
+                // The user there allowed it before this call returned: no held entry waits for it.
+                changes.extend(self.push(started_session(title)));
             } else if let Some(held) = texts.iter().find_map(|text| held_launch(text)) {
                 self.held_sessions.insert(held, title);
             }
@@ -1819,12 +1822,19 @@ fn launched_after_approval(body: &str) -> Option<(u64, Option<String>)> {
 fn held_launch(text: &str) -> Option<(u64, Option<String>)> {
     let number = held_request(text)?;
     let (_, rest) = text.split_once(&format!("request #{number}"))?;
+    // The name may hold spaces and dots: it ends where the sentence's fixed ending begins
+    // (`approvals::waiting`).
     let machine = rest
         .strip_prefix(" on ")
-        .and_then(|rest| rest.split_whitespace().next())
-        // The sentence's own period: a name may hold a dot.
-        .map(|machine| machine.strip_suffix('.').unwrap_or(machine).to_owned());
+        .and_then(|rest| rest.split_once(". This action"))
+        .map(|(machine, _)| machine.to_owned());
     Some((number, machine))
+}
+
+/// Whether `text` is what `agent_launch` answers when the user of the other machine allowed the
+/// launch before the call returned (`launches.rs`, `answer_to_caller`).
+fn approved_before_return(text: &str) -> bool {
+    text.contains("(agent_launch) was approved by the user there before this call returned")
 }
 
 /// The request a held call's answer names (`… request #4 …`).
