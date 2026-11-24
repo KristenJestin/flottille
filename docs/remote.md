@@ -891,7 +891,8 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   machine may send"; `remote.sessions` says them), and the copy kept for a machine that is off
   holds them too, so that its projects stay in the sidebar, greyed. A machine whose list came before projects were
   listed says none: its sessions' project names, and the projects it offers, are matched by name,
-  as before. What another machine lists matches a project of this machine only by the remotes this
+  as before; so are a project's switches when a repository has no remote ("Defaults taken, to
+  confirm"). What another machine lists matches a project of this machine only by the remotes this
   machine's own daemon says of it. The message is
   one a machine of before does not know, so that it refuses it alone (`not a message a machine may
   send`) and goes on taking the sessions: the protocol number is not raised, two machines of
@@ -1927,11 +1928,13 @@ on a real phone, by hand, and reported.
   out while its providers are not read; a start it cannot run is refused there, and said. This
   machine "can run" when its role is a runner: its providers are not looked at either, so that the
   page that opens does not change as they are read (its composer says when none is ready).
-- **A project with no remote is matched by no other machine's, in the switches as in the sidebar**
-  (#1410): the name is the fallback only for a machine that does not say its projects' remotes (a
-  machine of before), so that the page, the start choice, the settings switch and the sidebar's
-  row keep one match. A project of one machine only, whose repository has no remote, is offered on
-  no other machine of the same name.
+- **A project with no remote is matched by its name in a shared project's switches, not in the
+  sidebar** (#1410): the start choice and the settings switch match by the remotes when both
+  projects say them, else by the name, as they did before (a machine of before, a repository with
+  no remote); the sidebar's rows, and so the page's blocks, keep "the same project" above, where a
+  project with no remote matches none. So two projects of the same name with no remote are two
+  rows, and each one's switches still offer the other's machine. Matching them in the sidebar too
+  would change its rows.
 - **The machine chosen for a shared project is kept with the sidebar's folds** (#1266, `starts`
   under `sidebar`), not under a key of its own as the arrangement is: two windows choosing at the
   same moment may keep one choice, which is harmless (the next choice writes it again).
