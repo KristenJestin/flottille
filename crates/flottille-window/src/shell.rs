@@ -7666,7 +7666,7 @@ fn nested(
     cx: &mut Context<Shell>,
 ) -> Vec<Entity<SessionRow>> {
     // The place of each session's pilot among them, when it is one of them.
-    let pilots: Vec<Option<usize>> = live
+    let mut pilots: Vec<Option<usize>> = live
         .iter()
         .map(|session| {
             let pilot = session.pilot.as_deref().filter(|p| *p != session.id)?;
@@ -7682,7 +7682,17 @@ fn nested(
         .filter(|&at| pilots[at].is_none())
         .map(|at| (at, true, None))
         .collect();
-    while let Some((at, shown, tie)) = stack.pop() {
+    loop {
+        let Some((at, shown, tie)) = stack.pop() else {
+            // A row no walk reached sits in a loop of pilots, which the model drops; if one got
+            // here, it is a root, so that no row of the project is ever left out.
+            let Some(at) = (0..live.len()).find(|at| !placed.contains(at)) else {
+                break;
+            };
+            pilots[at] = None;
+            stack.push((at, true, None));
+            continue;
+        };
         if !placed.insert(at) {
             continue;
         }

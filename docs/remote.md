@@ -924,7 +924,11 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   `led_by`, the stand-in of its pilot, and its `launched_from`). A row whose pilot is in another
   project row, or is no row, stays among its own project's and says who leads it (`led by agent
   r1 of pc`), as a session led from another project does. A session detached is the user's: under
-  no row.
+  no row. A member machine is not trusted to be right: when two machines' claims close a loop of
+  any length (`s1` of server under `r1` of lab, `r1` under `s1`), the window drops the claim that
+  would close it, and any row it still finds in no walk from a root it draws as a root, so a lying
+  `pilots` never hides, moves or duplicates a row. A row whose line gains its machine's mark, once
+  its pilot's list comes, fades from one line to the other.
 - **A machine that is off.** Its sessions stay in the list, greyed, with `server offline since
   22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
   machine's list for this: each live root session's title, project, state and last exchange, never
