@@ -6582,7 +6582,12 @@ fn an_accepted_browser_connection_signs_in_without_switching_anything_off() {
     browser(&user, &script, json!({}));
     // The user accepted it with every action judged that a setting can turn on, as a connection
     // reviewed before this change may be.
-    let locked: Vec<&str> = OWN_LOGINS.iter().chain(&LOCKED_TOO).copied().collect();
+    let locked: Vec<&str> = OWN_LOGINS
+        .iter()
+        .chain(&LOCKED_TOO)
+        .chain(&PROFILE_LOCKED)
+        .copied()
+        .collect();
     let mut actions = serde_json::Map::new();
     for tool in script["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
