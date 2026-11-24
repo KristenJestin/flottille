@@ -177,9 +177,11 @@ and which judges a URL the agent built (`tools.md`, "The web").
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
-`agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
+`agent_launch`, and it cannot do anything the gate did not see (in Full, what a command it runs
+does is the user's own, §7.1). Nor can it drive the daemon from
 a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
-"Transport"). The agent's own permission
+"Transport"), but in Full, where nothing confines a command, one it runs can start a process
+that does not descend from it (`systemd-run --user`), which the daemon then accepts. The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
 ### 4.3 The tools an agent gets (first milestones)
@@ -711,9 +713,10 @@ says what kind of call it is, and the session's **mode** says who answers it.
   every end of a line whose program the gate does not know, so that no wrapper turns them into
   calls to judge.
 
-Only a push the gate read and let through goes out: every run's environment rewrites push URLs
-to nowhere, but a run that is itself a `git push` the user, the judge or Full mode allowed (`docs/tools.md`,
-"Tasks and runs").
+Only a push the gate read and let through goes out: in Ask and Auto, every run's environment
+rewrites push URLs to nowhere, but a run that is itself a `git push` the user or the judge allowed
+(`docs/tools.md`, "Tasks and runs"). In Full a run has no such environment: a push from a script
+is neither walled nor checked (the gate still reads a `git push` that is a line of its own).
 
 What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
 a malformed call, a login printed, the daemon driven from a command.
@@ -762,15 +765,25 @@ with says so. Reading another session says the mode of that session's tree too.
   the first message of a session to another it did not start, whose leave only the user gives
   (§7.2), a tracker change that would send the worklog's token to another site or name
   another entry for it (`docs/tickets.md`, "Logging time"), and a worklog deleted
-  (`docs/tickets.md`, "Correcting a worklog"). Bare mode
-  stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
-  keep the user's logins and Flottille itself included. Each call it let through is recorded as
+  (`docs/tickets.md`, "Correcting a worklog"). **A command it runs is the user's own, as in
+  their terminal**: no namespace, no Landlock and the daemon's environment, as a command the user
+  typed, so that the real `git`, `gh`, `bkt`, `acli` and `ssh` work there. **Nothing is held
+  back from it**: their keys, SSH agent, display, sign-ins and keyring, and Flottille's own
+  folders, its vault and the key that signs as this device (`docs/vault.md`, `docs/remote.md`).
+  Flottille says so: in the mode's line, to the agent at the switch, and in the project's map.
+  Leaving Full confines the next command again, and the agent is told; a command started in Full
+  keeps what it started with (`docs/tools.md`, "In Full, a run is the user's own"). It is given
+  its project's map at its start and again at the switch: its repositories with their folder,
+  forge, remote, base branch and command line, its tracker and its place. Bare mode stays, the
+  sandbox does not: the agent has only Flottille's tools, `run` stays its only way, and every
+  refusal below stays a refusal of the gate, those that keep the user's logins and Flottille
+  itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
   and its step in the session says "allowed by Full mode". The control draws Full in the alarm
   colour, so that it is never on by mistake. A request made before the switch stays the user's to
   answer. **Its limit:** code the agent runs (an interpreter's inline code, a script it wrote) acts
-  with the user's rights, and the gate does not see what that code touches; only a sandbox would
-  close that. The refusals below protect the user from an agent's direct or accidental use of
+  with the user's rights, and the gate does not see what that code touches: in Full, no sandbox
+  closes that. A hardened Full (a filtered bus, the vault encrypted at rest) is not built. The refusals below protect the user from an agent's direct or accidental use of
   what must never be touched; they are **not a sandbox**: a program the agent runs may still do
   any of it on its own. The same holds for a connection's server (`extensions.md`,
   "Connections"): the gate sees the action called and its arguments, never what the server then
@@ -1096,8 +1109,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   machine of the user together (a session of another machine carries that machine's name on its
   second line, `server`, greyed with `server offline since 22:14` while it is off,
   `docs/remote.md`, "One list of every machine"; every page works on any of those machines, Settings and
-  Add project choosing which, a page of another machine naming it once in its path line, `server /
-  Settings / Agents`, `docs/remote.md`, "Built (#1182)"). **Each project row says where it lives**: with
+  Add project choosing which, without anything else switching: the list stays this machine's, each
+  machine has its own connections, kept open, and a page of another machine reads that machine
+  only, `docs/remote.md`, "Built (#1271)"). **Each project row says where it lives**: with
   another machine paired, a mark after its name for every machine that has it (at the end of the row,
   before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
   included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this

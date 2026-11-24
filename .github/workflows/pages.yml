@@ -1,0 +1,45 @@
+# Publishes `site/` on GitHub Pages: Flottille's client metadata document (`site/oauth/client.json`,
+# docs/reference/mcp-authorization.md, section 2) is served from it, and its address is the client
+# id authorization servers know Flottille by. Only that folder is published, nothing else of the
+# repository. Pages is enabled once, by hand, with its source set to GitHub Actions.
+name: pages
+
+on:
+  push:
+    branches: [dev]
+    paths: ['site/**']
+  workflow_dispatch:
+
+permissions: {}
+
+# One publication after another, the last one wins; one in progress is never cut.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: site
+          persist-credentials: false
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # To publish, and to prove to Pages that this workflow is the one that may.
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

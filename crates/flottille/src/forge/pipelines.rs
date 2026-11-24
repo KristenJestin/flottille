@@ -12,7 +12,7 @@ use serde_norway::Value as Yaml;
 use super::followed::{self, Started};
 use super::{
     Forge, ForgeCall, NO_FORGE, bitbucket, chosen, ci, declared_forge, events, gh_json, gh_text,
-    logs, place_checkouts, signed_in, yaml,
+    logs, place_checkouts, signed_in_for, yaml,
 };
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
@@ -262,7 +262,7 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
         );
     }
     if matches!(forge, Forge::GitHub { .. })
-        && let Err(problem) = signed_in().await
+        && let Err(problem) = signed_in_for(matches!(action, "run" | "step")).await
     {
         return Outcome::Failed(problem);
     }

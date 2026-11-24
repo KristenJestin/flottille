@@ -429,6 +429,9 @@ Parameters that do not fit a method are answered `invalid-params`.
 No parameters. The result is `{"projects": [...], "errors": [...]}`: the projects by name, and the
 files that cannot be used, each `{"name", "file", "message"}` (`file` is `projects/<name>.toml`, the
 message starts with the key at fault). A file with an error does not hide the other projects.
+It also holds `unconfigured`: the projects with no file at all that the store still holds live
+sessions or workspaces of, each `{"name", "sessions", "workspaces"}` (the sessions are every agent
+not ended, a child whose root ended included). `project.remove` removes them as any project ("Removing a project", `docs/projects.md`).
 
 #### `project.show`
 
@@ -506,6 +509,11 @@ The result says what was done:
  "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
  "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
 ```
+
+A project whose file was gone when the removal began has no file to remove, and one that came
+back during the wait (put back by hand, or by `project.add`) is kept with its file: the result is
+then `{"removed": null, "project_kept": "…", "stopped", "workspaces"}`, what was asked of the agents,
+runs and workspaces done.
 
 `branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
 touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
@@ -2426,9 +2434,13 @@ whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `us
 `{"agent"}`. Reads, changing nothing, what ending the session of `agent` ends besides it: the
 sessions it leads and theirs in turn, in its project and in others, those that have not ended
 (`docs/tools.md`, "The pilot ends"). Answers `{"agent", "sessions": [{"id", "title", "project",
-"workspace", "state", "losses"}]}`, `workspace` `null` in the project's folder, `state` what its
+"workspace", "state", "losses", "machine"?}]}`, `workspace` `null` in the project's folder, `state` what its
 workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
-`unpushed` or `unknown`), `losses` each as a sentence. The window reads it for its confirmation.
+`unpushed` or `unknown`), `losses` each as a sentence. A session it leads on another machine,
+which ends there with it, is listed too, with `machine` its name, `project` its project there and
+`state` `unknown` and `losses` `["unknown (on <machine>)"]`: what its workspace holds is not
+asked there, so that the answer never waits on another machine. The window reads it for its
+confirmation, each session on another machine said with its machine.
 
 #### `agent.detach`
 
@@ -2859,13 +2871,21 @@ reaches them. A method that names no program Flottille signs in is `not-found`.
 
 #### `signin.list`
 
-`{}`. Every program, the agents first in the providers' order, then the forges and trackers, those
-the registered projects use first: `{"programs": [{"program", "title", "kind", "host", "found",
-"path", "version", "signed_in", "account", "can_sign_in", "line", "sign_out_line", "running"}]}`.
+`{"checked"?, "program"?}`. Every program, the agents first in the providers' order, then the
+forges and trackers (`gh`, `acli`, `bkt`, `glab`), always in that order, whatever the registered
+projects use: `{"programs": [{"program", "title", "kind", "host", "found", "path", "version",
+"signed_in", "account", "problem", "checking", "can_sign_in", "line", "sign_out_line",
+"running"}]}`. With `"checked": false` no check runs: each row says what is known without one
+(`found`, `host`, `can_sign_in`, `running`) and `"checking": true`, and the caller asks each
+check alone with `"program"`, which answers that one row, checked (`checking` false). The window
+does so, so that a row says it is being checked until its own result arrives, and no row waits for
+another. `problem` is why a forge's or a tracker's check could not be made: the command line's first
+error line, masked, or `no answer in N s` (`signed_in` is `null` then, and a sign-in is never
+offered: `docs/forges.md`, "The programs it needs"), else `null`.
 `kind` is `agent` or `forge`; `host` the one a forge program is checked for (the first a project
 names, else `github.com`, `gitlab.com` or `bitbucket.org`; the Jira site for `acli`, `null` when no
 project names one), `null` for an agent. `signed_in` is what the program's own status says
-(`null` when it is not installed or could not say), `account` the account's name it says (`gh`'s
+(`null` when it is not installed or could not say, `problem` saying why for the forges), `account` the account's name it says (`gh`'s
 login, Claude's email), masked to its first letter and its domain's (`o***`, `s***@e***`), else
 `null`. `can_sign_in` is `true` when Flottille can run its
 sign-in here; `line` is the line to type in a terminal on that machine when it cannot

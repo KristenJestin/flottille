@@ -38,7 +38,7 @@ use crate::project_settings::Reveal;
 use crate::runs::{CommandRow, address_link, ready_mark};
 use crate::session::{WorkspaceActions, removal_toast, seconds, workspace_menu};
 use crate::session_link::{PullRequest, TicketFacts};
-use crate::shell::{Selection, Shell, now_ms};
+use crate::shell::{Selection, now_ms};
 use crate::tasks::{ProjectTasks, TaskInfo};
 use crate::tree::place_name;
 
@@ -146,7 +146,7 @@ fn standing(status: &RepositoryStatus) -> String {
 
 /// A place of Work.
 pub struct PlaceBlock {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     page: WeakEntity<ProjectPage>,
     project: String,
     /// The page's tasks and runs, and the drawer a run opens in.
@@ -201,7 +201,7 @@ pub struct PlaceBlock {
 
 impl PlaceBlock {
     pub(super) fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         page: WeakEntity<ProjectPage>,
         project: String,
         tasks: WeakEntity<ProjectTasks>,
@@ -595,9 +595,7 @@ impl PlaceBlock {
             name,
             ticket: Some(typed),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
     }
 
     /// Whether a text that moves with the time changed since it was drawn.
@@ -635,9 +633,7 @@ impl PlaceBlock {
         };
         self.busy = Some(busy);
         self.confirming = false;
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        self.shell.perform(command, cx);
         cx.notify();
     }
 

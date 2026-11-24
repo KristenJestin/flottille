@@ -41,7 +41,7 @@ const MODES: [(&str, &str, &str, Tone); 3] = [
     (
         "full",
         "Full",
-        "Nothing is asked: the agent acts as you.",
+        "Nothing is held back: commands run as yours, with your keys, sign-ins and keyring, the vault included. They can also act as this machine: control Flottille, switch other sessions or machines.",
         Tone::Fail,
     ),
 ];
@@ -49,6 +49,8 @@ const AUTO: &str = "auto";
 
 pub struct ModeSwitch {
     shell: WeakEntity<Shell>,
+    /// How it asks its session's machine, given when its session's page is made (#1271).
+    asks: Option<crate::actions::Actions>,
     /// The ids of its elements, `reply-mode` or `start-mode`.
     prefix: &'static str,
     /// The root agent, whose mode its whole tree takes at its start; empty when the control is
@@ -68,9 +70,16 @@ pub struct ModeSwitch {
 }
 
 impl ModeSwitch {
+    /// Asks through `asks`, its session's machine's actions, whichever machine is shown.
+    pub fn asking(mut self, asks: crate::actions::Actions) -> Self {
+        self.asks = Some(asks);
+        self
+    }
+
     pub fn new(shell: WeakEntity<Shell>, session: String) -> Self {
         Self {
             shell,
+            asks: None,
             prefix: "reply-mode",
             session,
             mode: None,
@@ -181,9 +190,7 @@ impl ModeSwitch {
             session: self.session.clone(),
             mode: wanted.to_owned(),
         };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        crate::commands::ask(&self.shell, &self.asks, command, cx);
         cx.notify();
     }
 }
@@ -262,5 +269,20 @@ impl Render for ModeSwitch {
                 ))
             })
             .test_support()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MODES;
+
+    #[test]
+    fn the_mode_picker_says_what_full_lends() {
+        let (_, said, line, _) = MODES.iter().find(|(word, ..)| *word == "full").unwrap();
+        assert_eq!(*said, "Full");
+        assert!(line.starts_with("Nothing is held back"), "{line}");
+        assert!(line.contains("commands run as yours"), "{line}");
+        assert!(line.contains("keyring, the vault included"), "{line}");
+        assert!(line.contains("act as this machine"), "{line}");
     }
 }

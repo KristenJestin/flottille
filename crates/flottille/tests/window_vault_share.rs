@@ -416,8 +416,8 @@ fn share_with_shares_the_entry_of_the_machine_shown(cx: &mut TestAppContext) {
         })
     });
     settle(cx);
-    shell.update(cx, |shell, cx| {
-        shell.choose_machine(Some("server".to_owned()), cx)
+    shell.update_in(cx, |shell, window, cx| {
+        shell.choose_machine(Some("server".to_owned()), window, cx)
     });
     until(&shell, cx, "the server is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()) == Some("server".to_owned())

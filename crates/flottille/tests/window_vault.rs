@@ -277,8 +277,8 @@ fn the_vault_creates_with_new_entry_and_saves_with_add(cx: &mut TestAppContext) 
     assert_eq!(
         label_of("vault-sentence", cx).as_deref(),
         Some(
-            "Secrets agents use without seeing them. Your keyring keeps them; agents see only \
-             their names and what they are for."
+            "Secrets agents use through Flottille's tools, without seeing them in Ask and Auto. \
+             In Full, a command they run can read them. Your keyring keeps them."
         )
     );
     assert_eq!(

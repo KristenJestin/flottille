@@ -355,13 +355,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let waited = agent.waiting_on_answer;
             let failed = (agent.state == AgentState::Failed)
                 .then(|| agent.state_reason.clone().unwrap_or_default());
-            let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
-                Some((agent, event)) => Ok((Some(agent), Some(event))),
-                None => Ok((None, None)),
-            })?;
-            let agent = resumed.ok_or_else(|| {
-                Failure::refused(format!("agent {} was resumed already", agent.id))
-            })?;
+            let agent = resume_write(daemon, &agent)?;
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
@@ -413,6 +407,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             })?;
             // A tree has one mode, its root's.
             let agent = find(daemon, &tree::root_of(daemon, &asked.agent))?;
+            let was = agent.gate_mode;
             // A switch to Full the user signed from a device is kept, for a launch on another
             // machine to start in Full there; any other switch forgets it.
             let signed = match mode {
@@ -436,6 +431,17 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Ok(((), event))
             })?;
             let agent = find(daemon, &agent.id)?;
+            match (was, mode) {
+                (GateMode::Full, GateMode::Full) => {}
+                (_, GateMode::Full) => crate::project_map::tell_switched_to_full(daemon, &agent),
+                (GateMode::Full, GateMode::Ask) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Ask")
+                }
+                (GateMode::Full, GateMode::Auto) => {
+                    crate::project_map::tell_left_full(daemon, &agent, "Auto")
+                }
+                _ => {}
+            }
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.options" => {
@@ -965,7 +971,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
 /// checked.
 pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     crate::projects::refuse_removing(daemon, &project.name)?;
-    let (place, folder, repositories) = match &new.workspace {
+    let (place, folder, repositories, branch) = match &new.workspace {
         // An extension's agent that reads a place of the extension's own (a pull request's copy).
         None if new.launched.as_ref().is_some_and(|l| l.at.is_some()) => {
             let at = new.launched.as_ref().and_then(|l| l.at.clone()).unwrap();
@@ -973,6 +979,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                 "the copy of a pull request".to_owned(),
                 at.clone(),
                 vec![(".".to_owned(), at.clone(), at)],
+                String::new(),
             )
         }
         None => {
@@ -987,7 +994,12 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     (r.path.clone(), folder.clone(), folder)
                 })
                 .collect();
-            ("main".to_owned(), project.folder.clone(), repositories)
+            (
+                "main".to_owned(),
+                project.folder.clone(),
+                repositories,
+                String::new(),
+            )
         }
         Some(name) => {
             let workspace = daemon
@@ -1025,7 +1037,13 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     (r.path.clone(), workspace.folder_of(&r.path), original)
                 })
                 .collect();
-            (format!("workspace {name}"), workspace.folder, repositories)
+            let branch = workspace.branch.clone();
+            (
+                format!("workspace {name}"),
+                workspace.folder,
+                repositories,
+                branch,
+            )
         }
     };
     // Refused now rather than failed later: the user can act on it before anything is written.
@@ -1097,8 +1115,19 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         },
         &files,
     );
-    if let Some(launched) = &new.launched {
-        instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+    match &new.launched {
+        Some(launched) => {
+            instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+        }
+        // Masked as the rest of the session's part: the project's file is the user's to write.
+        None => instructions.push_str(&format!(
+            "\n\n{}",
+            flottille_core::secrets::mask(
+                &crate::project_map::map(project, &place, &folder, &branch),
+                &std::env::vars_os().collect(),
+            )
+            .trim_end()
+        )),
     }
     let agent = Agent {
         id: match new.id {
@@ -1143,15 +1172,46 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     Ok(agent)
 }
 
+/// Starts the ended `agent` again on its own session: the write of `agent.resume`. The room of
+/// its pilot in its machine's cap is checked in this very write, as for a new session
+/// ([`write_new`]): a pilot whose sessions all ended counts again with this one.
+pub(crate) fn resume_write(daemon: &Arc<Daemon>, agent: &Agent) -> Result<Agent, Failure> {
+    let pilot = agent.launched_by.as_ref().or(agent.detached_from.as_ref());
+    let resumed = daemon.write(|store| {
+        if let Some(pilot) = pilot
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Err(why), None));
+        }
+        match store.resume_agent(&agent.id)? {
+            Some((agent, event)) => Ok((Ok(Some(agent)), Some(event))),
+            None => Ok((Ok(None), None)),
+        }
+    })?;
+    resumed
+        .map_err(Failure::refused)?
+        .ok_or_else(|| Failure::refused(format!("agent {} was resumed already", agent.id)))
+}
+
 /// Writes the agent `made` made.
 pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
     let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
         "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
         "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
-    daemon.write(|store| {
+    // The pilot's room in its machine's cap is checked in this very write: one session that makes
+    // it count again, and another caller, never pass the cap together.
+    let refused = daemon.write(|store| {
+        if let Some(pilot) = &agent.launched_by
+            && let Some(why) = crate::across::pilot_refused(store, pilot)?
+        {
+            return Ok((Some(why), None));
+        }
         let event = store.create_agent(agent, ("agent.created", data.clone()))?;
-        Ok(((), event))
+        Ok((None, Some(event)))
     })?;
+    if let Some(why) = refused {
+        return Err(Failure::refused(why));
+    }
     crate::extensions::heard(daemon, &[("agent.created", data)]);
     Ok(())
 }

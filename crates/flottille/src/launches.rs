@@ -319,6 +319,12 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
+    // Its pilot follows it from here, as a session it leads here: held, from now on too, since its
+    // first wake may come before anything else is heard of it.
+    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent) {
+        crate::subscriptions::lead_elsewhere(daemon, &caller.id, session, &asked.title, machine)
+            .map_err(refused)?;
+    }
     Ok(Outcome::Done(answer_to_caller(
         kind_word(asked.kind),
         &asked.title,
@@ -399,8 +405,20 @@ fn answer_to_caller(
             &format!("#{number} on {machine}."),
             1,
         );
+        let follows = match kind {
+            "led" => {
+                "it runs as a session led by you: each end of its turns wakes you as a local led \
+                 session's does, and session_send reaches it"
+            }
+            "child" => {
+                "it runs as your child: its report, questions and failure come to you as a local \
+                 child's do, and agent_send reaches it"
+            }
+            _ => "it runs as the user's session, handed over",
+        };
         return format!(
-            "{waiting}\nIt will run as {named} on {machine} {place}, once allowed. {back}"
+            "{waiting}\nIt will run as {named} on {machine} {place}, once allowed. {back} Once \
+             the user allows it there, {follows}."
         );
     }
     match kind {
@@ -412,14 +430,18 @@ fn answer_to_caller(
         ),
         "led" => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
-             of {machine}, not your child: the user sees it there and may talk to it. It asks you \
-             its questions: a delivery [flottille:session-turn-ended] wakes you at each end of \
-             its turns, with its last message. Answer with session_send, relay to the user \
-             with ask, or do nothing; session_read reads it. {back}"
+             of {machine}, not your child: the user sees it there and may talk to it, and the \
+             agent_* tools do not reach it. It asks you its questions: a delivery \
+             [flottille:session-turn-ended] wakes you at each end of its turns, with its last \
+             message, kept while this machine is off. Answer with session_send, relay to the user \
+             with ask, or do nothing; session_read reads it, and forge unsubscribe with its \
+             session stops the wakes. {back}"
         ),
         _ => format!(
             "Started a session for the user, {named}, on {machine}, {place}, handed over. It is \
-             the user's. {back}"
+             the user's, not your child: the user follows it in the window and the agent_* tools \
+             do not reach it. You hear nothing more of it unless it writes to you; you can write \
+             to it with session_send. {back}"
         ),
     }
 }
@@ -960,24 +982,7 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
             return;
         };
         let (project, name) = (workspace.project.clone(), workspace.name.clone());
-        let removed = async {
-            if workspace.repositories.iter().any(|r| r.laid.is_none()) {
-                return Err("it is not made only of code that came".to_owned());
-            }
-            let losses = crate::workspaces::losses(&daemon, &project, &name)
-                .await
-                .map_err(|failure| failure.message)?;
-            let digest = crate::workspaces::digest(&workspace)
-                .await
-                .map_err(|failure| failure.message)?;
-            crate::workspaces::remove_with_project(
-                daemon.clone(),
-                &workspace,
-                Some((&losses, &digest)),
-            )
-            .await
-            .map_err(|failure| failure.message)
-        };
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {});
         if let Err(why) = removed.await {
             eprintln!(
                 "flottille daemon: the workspace {name} of project {project}, made of a launch \
@@ -985,6 +990,32 @@ fn remove_workspace(daemon: &Arc<Daemon>, id: i64, agent: Option<String>) {
             );
         }
     });
+}
+
+/// Removes `workspace`, made of code that came, unless something in it changes while it is read:
+/// the function does not tell the code that came from other work, it refuses only what moves
+/// between its two reads. What it holds is read first, then what the removal would lose, which it
+/// checks again: a file written between the two reads, even one said lost the same, differs from
+/// the first, and the workspace is kept. `between` runs after the first read.
+async fn remove_unless_work_came(
+    daemon: &Arc<Daemon>,
+    workspace: &flottille_core::workspace::Workspace,
+    between: impl AsyncFnOnce(),
+) -> Result<(), String> {
+    if workspace.repositories.iter().any(|r| r.laid.is_none()) {
+        return Err("it is not made only of code that came".to_owned());
+    }
+    let digest = crate::workspaces::digest(workspace)
+        .await
+        .map_err(|failure| failure.message)?;
+    between().await;
+    let losses = crate::workspaces::losses(daemon, &workspace.project, &workspace.name)
+        .await
+        .map_err(|failure| failure.message)?;
+    crate::workspaces::remove_with_project(daemon.clone(), workspace, Some((&losses, &digest)))
+        .await
+        .map_err(|failure| failure.message)
+        .map(|_| ())
 }
 
 /// Refused when what `git` says of the code it sends is not the launch's: its project, one of its
@@ -1110,6 +1141,18 @@ async fn with_agent(
     let role = crate::roles::role(role).ok_or_else(|| format!("there is no role {role}"))?;
     let mode =
         GateMode::parse(launch.asked["mode"].as_str().unwrap_or_default()).unwrap_or_default();
+    // A led or handed session records the agent that started it as one started here does: the
+    // caller, stood in for here.
+    let led = launch.kind == "led";
+    let pilot = match !child {
+        true => Some(crate::across::pilot_stand_in(
+            daemon,
+            &launch,
+            &asked.project,
+            mode,
+        )?),
+        false => None,
+    };
     let agent = agents::create(
         daemon,
         &project,
@@ -1127,8 +1170,8 @@ async fn with_agent(
             model: asked.model.clone(),
             effort: asked.effort.clone(),
             gate_mode: Some(mode),
-            launched_by: None,
-            led: false,
+            launched_by: pilot,
+            led,
             launched: None,
         },
     )
@@ -1567,4 +1610,113 @@ pub(crate) fn started_here(daemon: &Daemon, agent: &str) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|launch| launch.state == "started")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flottille_core::workspace::{Base, Workspace, Worktree};
+
+    /// Runs `git` in `dir`, in a home and a configuration of its own.
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let nowhere = std::ffi::OsStr::new("/dev/null");
+        let name = std::ffi::OsStr::new("Test");
+        let email = std::ffi::OsStr::new("test@example.org");
+        let env = [
+            ("GIT_CONFIG_GLOBAL", nowhere),
+            ("GIT_CONFIG_NOSYSTEM", std::ffi::OsStr::new("1")),
+            ("GIT_AUTHOR_NAME", name),
+            ("GIT_COMMITTER_NAME", name),
+            ("GIT_AUTHOR_EMAIL", email),
+            ("GIT_COMMITTER_EMAIL", email),
+        ];
+        crate::git::output_with(dir, args, crate::git::Class::Work, &env)
+            .await
+            .unwrap();
+    }
+
+    /// A workspace made of code that came (a repository laid), in a throwaway repository, with
+    /// `notes.txt` written in it and not committed: what the sender's work was.
+    async fn made_of_code_that_came(dir: &std::path::Path) -> (Arc<Daemon>, Workspace) {
+        let project = dir.join("app");
+        let folder = dir.join("workspace");
+        std::fs::create_dir_all(&project).unwrap();
+        git(&project, &["init", "--quiet", "-b", "main"]).await;
+        std::fs::write(project.join("a.txt"), "a\n").unwrap();
+        git(&project, &["add", "a.txt"]).await;
+        git(&project, &["commit", "--quiet", "-m", "first"]).await;
+        let commit = crate::git::output(&project, &["rev-parse", "HEAD"], crate::git::Class::Read)
+            .await
+            .unwrap()
+            .trim()
+            .to_owned();
+        let at = folder.to_string_lossy().into_owned();
+        git(&project, &["worktree", "add", "--quiet", "-b", "fix", &at]).await;
+        std::fs::write(folder.join("notes.txt"), "one\n").unwrap();
+        let mut workspace = Workspace {
+            id: 0,
+            project: "app".into(),
+            name: "workspace".into(),
+            branch: "fix".into(),
+            folder,
+            project_folder: project,
+            created_at: 1,
+            variables: Default::default(),
+            repositories: vec![Worktree {
+                path: ".".into(),
+                base: Base {
+                    branch: "main".into(),
+                    remote: "origin".into(),
+                    reference: "refs/heads/main".into(),
+                    commit,
+                    fetched_now: false,
+                    fetched_at: None,
+                    note: None,
+                    fetch: None,
+                },
+                resumed: false,
+                resumed_branch: None,
+                laid: Some("laid".into()),
+            }],
+            steps: Vec::new(),
+            ticket: None,
+        };
+        let daemon = crate::daemon::tests::a_daemon(dir, false);
+        workspace.id = daemon
+            .write(|store| {
+                let (id, event) =
+                    store.create_workspace(&workspace, ("workspace.created", json!({})))?;
+                Ok((id, event))
+            })
+            .unwrap();
+        (daemon, workspace)
+    }
+
+    #[tokio::test]
+    async fn a_workspace_of_code_that_came_goes_when_nothing_was_written_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, workspace) = made_of_code_that_came(dir.path()).await;
+
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {}).await;
+
+        assert_eq!(removed, Ok(()));
+        assert!(!workspace.folder.exists());
+    }
+
+    #[tokio::test]
+    async fn work_written_after_a_held_agent_stops_is_not_lost_by_the_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (daemon, workspace) = made_of_code_that_came(dir.path()).await;
+        let notes = workspace.folder.join("notes.txt");
+
+        // The file the sender's work holds is written again between the two reads of what the
+        // workspace holds: the same sentence says it lost, only its content tells.
+        let removed = remove_unless_work_came(&daemon, &workspace, async || {
+            std::fs::write(&notes, "two\n").unwrap();
+        })
+        .await;
+
+        assert!(removed.is_err(), "{removed:?}");
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "two\n");
+    }
 }

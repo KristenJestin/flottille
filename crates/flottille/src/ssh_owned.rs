@@ -77,11 +77,12 @@ fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<(PathBuf,
     walk.copies
 }
 
-/// A walk of the files `ssh` includes. What a run can write never steers it: the machine's
-/// configuration is followed only through files `ssh` reads, root's (or the walk's first), and
-/// the user's only inside `~/.ssh`, which no run writes, as the lent push reads it
-/// (`pushed::includes`). Each file is opened without following a link nor waiting on a FIFO, and
-/// judged on what was opened.
+/// A walk of the files `ssh` includes. What a confined run can write never steers it: the
+/// machine's configuration is followed only through files `ssh` reads, root's (or the walk's
+/// first), and the user's only inside `~/.ssh`, read-only to a confined run, as the lent push
+/// reads it (`pushed::includes`). A run in Full writes `~/.ssh` as the user does: what it names
+/// there is still given only when root owns it, a file the user reads already. Each file is
+/// opened without following a link nor waiting on a FIFO, and judged on what was opened.
 struct Walk<'a> {
     account: Option<&'a Path>,
     owner: u32,

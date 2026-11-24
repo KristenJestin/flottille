@@ -67,7 +67,7 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     // A session it started on another machine is reached through its daemon.
-    if let Some(outcome) = crate::across::call(daemon, &caller, tool, &args).await {
+    if let Some(outcome) = crate::across::call(daemon, &caller, &grant.place, tool, &args).await {
         return outcome;
     }
     let done = match tool {
@@ -858,9 +858,22 @@ pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
         if kind == "child" {
             return ("brief", brief);
         }
+        // Led from there, it is told where its questions go as a session led here is; the off case
+        // stays inside that paragraph, which the window cuts whole.
+        let guide = match agent.led {
+            true => format!(
+                "\n\n{WHERE_QUESTIONS_GO} this session is led by agent {caller} of {machine}: \
+                 what you need answered goes through ask, which reaches it, and its answer comes \
+                 as [flottille:session]; the user may also write to you directly. A question \
+                 left in a report or in your last message is a follow-up, not a wait: nobody is \
+                 told to answer it.\nWhile {machine} is not linked to this machine, ask reaches the \
+                 user's inbox instead."
+            ),
+            false => String::new(),
+        };
         return (
             "launched",
-            format!("agent {caller} of {machine}{LAUNCHED}\n\n{brief}"),
+            format!("agent {caller} of {machine}{LAUNCHED}\n\n{brief}{guide}"),
         );
     }
     let Some(launcher) = agent.launched_by.as_ref().or(agent.detached_from.as_ref()) else {
@@ -1168,8 +1181,6 @@ pub fn grant_leave(daemon: &Daemon, writer: &str, session: &str, request: u64) {
 
 /// What follows the sender's name on the first line of a message `session_send` delivers.
 pub const SESSION_WROTE: &str = " wrote to this session:";
-/// How the reason of a session its pilot ended starts.
-pub const ENDED_BY_ITS_PILOT: &str = "ended by the session that led it";
 
 /// `session_send`: a message to another session of the caller's project, once the gate let it
 /// through (`Relation`), delivered as `session` under a line naming the sender: an agent's words, never the user's.
@@ -1203,7 +1214,7 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     );
     if let Some((starter, followed)) = following {
         let answered = relation == Relation::StartedYou;
-        crate::subscriptions::exchanged(daemon, starter, followed, answered);
+        crate::subscriptions::exchanged(daemon, starter, &followed.id, answered);
     }
     Ok(Outcome::Done(format!(
         "Sent to {}: it reaches it on its next tool result, or as a new turn. An answer comes \
@@ -2092,9 +2103,10 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
 /// (`docs/tools.md`, "Where a question goes"). A pilot that ended its subscription, or whose
 /// following is paused, is not woken, so the session's questions go to the user.
 pub fn pilot_of(daemon: &Daemon, agent: &Agent) -> Option<String> {
-    // An agent of another machine leads it while the link to that machine is up.
+    // An agent of another machine leads it while the link to that machine is up, and it still
+    // follows it.
     if let Some(Ok(pilot)) = crate::across::starter(daemon, agent, "led") {
-        return Some(pilot);
+        return crate::across::followed(daemon, agent).then_some(pilot);
     }
     let pilot = agent.launched_by.as_ref().filter(|_| agent.led)?;
     crate::subscriptions::following(daemon, pilot, Some(&agent.id))
@@ -2152,14 +2164,30 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
         Ok(((), events))
     })?;
     daemon.mcp.detached(&session.id);
-    let moved = questions_to_user(daemon, &session, &starter, None);
+    // A pilot of another machine was asked its questions under its own id there.
+    let remote = crate::across::caller_of(daemon, &session, "led");
+    let moved = questions_to_user(
+        daemon,
+        &session,
+        remote.as_deref().unwrap_or(&starter),
+        None,
+    );
     let title = session.title.clone().unwrap_or_else(|| session.id.clone());
     let starter_alive = daemon
         .read(|store| store.agent(&starter))
         .ok()
         .flatten()
         .is_some_and(|agent| !agent.state.is_final());
-    if starter_alive {
+    // Its pilot there is told on its machine, and the launch is the user's on both: its pilot
+    // reaches it no more as the session it leads.
+    let starter_named = match crate::across::detached(daemon, &session, &title) {
+        Some(named) => named,
+        None => format!("agent {starter}"),
+    };
+    // The starter of a session started from another machine is a stand-in here, which nobody
+    // reads: a handed session's pilot is told nothing, and a led one's was told across.
+    let stood_in = crate::launches::launched_from(daemon, &session.id).is_some();
+    if starter_alive && remote.is_none() && !stood_in {
         deliveries::deliver(
             daemon,
             &starter,
@@ -2180,9 +2208,9 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
             "detached",
             Some(format!("detached-{}", session.id)),
             &format!(
-                "The user detached this session from agent {starter}: it is now the user's alone. \
-                 What you need answered goes through ask to the user, and writing to agent \
-                 {starter} now asks the user's leave.{}",
+                "The user detached this session from {starter_named}: it is now the user's alone. \
+                 What you need answered goes through ask to the user, and writing to \
+                 {starter_named} now asks the user's leave.{}",
                 moved_said(moved)
             ),
             approval::BETWEEN_TURNS,
@@ -2243,6 +2271,8 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
         return;
     };
     let Ok(Some(session)) = daemon.read(|store| store.agent(id)) else {
+        // A session it leads on another machine: that machine is told.
+        crate::across::following(daemon, &following.agent, id, "ended");
         return;
     };
     if session.state.is_final()
@@ -2276,9 +2306,16 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
 /// be resumed, and its sessions go on led by it.
 fn end_led(daemon: &Arc<Daemon>, pilot: &Agent) {
     for session in led_by_pilot(daemon, &pilot.id) {
-        stop_tree(daemon, &session.id, "its pilot ended");
+        stop_tree(daemon, &session.id, ITS_PILOT_ENDED);
     }
 }
+
+/// Why a led session ended with its pilot.
+pub const ITS_PILOT_ENDED: &str = "its pilot ended";
+/// Why a child ended with its parent.
+pub const ITS_PARENT_STOPPED: &str = "its parent stopped";
+/// Why a child ended as its parent failed.
+pub const ITS_PARENT_FAILED: &str = "its parent failed";
 
 /// The sessions that end with `pilot`'s end, its led sessions and theirs in turn, the oldest
 /// first: what the user is told before they confirm.
@@ -2331,6 +2368,26 @@ pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
             "state": state,
             "losses": losses,
         }));
+    }
+    // Those it leads on other machines end there with it: their work is read there, not here.
+    let pilots = std::iter::once(id.to_owned()).chain(
+        led_by_pilot(daemon, id)
+            .into_iter()
+            .map(|session| session.id),
+    );
+    for pilot in pilots {
+        for (launch, machine) in crate::across::led_elsewhere_by(daemon, &pilot) {
+            sessions.push(json!({
+                "id": launch.agent,
+                "title": launch.asked["title"],
+                "project": launch.asked["there"]["project"].as_str().unwrap_or(&launch.project),
+                "workspace": launch.workspace,
+                "machine": machine,
+                "state": "unknown",
+                // Not asked there: the confirmation never waits on another machine.
+                "losses": [format!("unknown (on {machine})")],
+            }));
+        }
     }
     Ok(json!({"agent": id, "sessions": sessions}))
 }
@@ -2528,7 +2585,7 @@ pub fn stop_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
     let mut tree = descendants(daemon, id);
     tree.sort_by_key(|agent| std::cmp::Reverse(agent.depth));
     for agent in &tree {
-        end(daemon, &agent.id, AgentState::Ended, "its parent stopped");
+        end(daemon, &agent.id, AgentState::Ended, ITS_PARENT_STOPPED);
     }
     end(daemon, id, AgentState::Ended, reason);
 }
@@ -2538,7 +2595,7 @@ pub fn fail_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
     let mut tree = descendants(daemon, id);
     tree.sort_by_key(|agent| std::cmp::Reverse(agent.depth));
     for agent in &tree {
-        end(daemon, &agent.id, AgentState::Ended, "its parent failed");
+        end(daemon, &agent.id, AgentState::Ended, ITS_PARENT_FAILED);
     }
     let reason = secrets::mask(reason, &std::env::vars_os().collect());
     if !end(daemon, id, AgentState::Failed, &reason) {
@@ -2635,15 +2692,18 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         _ => format!("ended: {reason}"),
     };
     crate::subscriptions::followed_ended(daemon, &agent, &why);
-    // Its pilot on another machine is told, unless it ended it.
-    if crate::across::remote_led(daemon, &agent) && !reason.starts_with(ENDED_BY_ITS_PILOT) {
+    // Its pilot on another machine is told, as one here is, unless it ended with its pilot.
+    if crate::across::remote_led(daemon, &agent) && reason != ITS_PILOT_ENDED {
         crate::across::tell(
             daemon,
             id,
             crate::subscriptions::TURN_ENDED,
-            &format!(
-                "Session {} {why}. Your following of it is over.",
-                named(&agent)
+            // As the wake of a session led here says it.
+            &crate::subscriptions::wake_body(
+                daemon,
+                &agent,
+                &format!("{why}. Your following of it is over."),
+                None,
             ),
             approval::BETWEEN_TURNS,
             false,
@@ -2653,6 +2713,8 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
     if state == AgentState::Ended {
         end_led(daemon, &agent);
     }
+    // What it started on other machines stops there as it would here.
+    crate::across::ended(daemon, id, state == AgentState::Failed);
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });
@@ -2716,11 +2778,14 @@ pub fn remind_integrated_due(daemon: &Arc<Daemon>) {
             let Ok(Some(session)) = daemon.read(|store| store.agent(&id)) else {
                 continue;
             };
+            // A pilot of another machine is told between its turns there, whatever its
+            // stand-in here says.
             let pilot_idle = session.launched_by.as_deref().is_some_and(|pilot| {
-                matches!(
-                    daemon.read(|store| store.agent(pilot)),
-                    Ok(Some(pilot)) if pilot.state == AgentState::Idle
-                )
+                crate::across::is_stand_in(pilot)
+                    || matches!(
+                        daemon.read(|store| store.agent(pilot)),
+                        Ok(Some(pilot)) if pilot.state == AgentState::Idle
+                    )
             });
             if pilot_idle {
                 remind_once(&daemon, &session).await;
@@ -2778,6 +2843,30 @@ async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
             named(session)
         ),
     };
+    // A pilot of another machine is told there; its stand-in keeps the reminder, never rung, so
+    // that it is told once as ever.
+    if crate::across::is_stand_in(pilot) {
+        let marked = deliveries::deliver(
+            daemon,
+            pilot,
+            LED_INTEGRATED,
+            Some(id),
+            &text,
+            approval::BETWEEN_TURNS,
+        );
+        if marked.is_some() {
+            crate::across::tell(
+                daemon,
+                &session.id,
+                LED_INTEGRATED,
+                &text,
+                approval::BETWEEN_TURNS,
+                false,
+                false,
+            );
+        }
+        return;
+    }
     deliveries::deliver(
         daemon,
         pilot,
