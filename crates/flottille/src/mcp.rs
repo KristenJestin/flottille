@@ -511,7 +511,8 @@ const SERVED: [Definition; 33] = [
         name: "setup",
         title: "The project's setup",
         description: "The steps that prepare each new workspace, in order, by number: \
-            list reads them; add, edit, remove and move change them, judged as for tasks. \
+            list reads them; add, edit, remove and move change them, judged as for tasks. A step \
+            is an object with one of copy, link, root_entries, run, task. \
             {\"action\": \"add\", \"step\": {\"copy\": [\".env\"], \
             \"for_each_repository\": true}}.",
         read_only: false,
@@ -532,7 +533,10 @@ const SERVED: [Definition; 33] = [
         description: "This project's settings: settings reads each repository's forge and the \
             tracker, rules how agents are told to work; set_settings and set_rules change them \
             once the judge or the user allows it (the tracker and the rules: the user). \
-            {\"action\": \"set_settings\", \"repositories\": [{\"path\": \"api\", \
+            set_rules replaces the project's text whole (text, at most 8000 characters): send \
+            every rule, never one alone. A forge is {kind: github | bitbucket-cloud, repository} \
+            or {kind: bitbucket-data-center, host, repository}, a tracker {kind: github, \
+            repository} or {kind: jira, site, projects}. {\"action\": \"set_settings\", \"repositories\": [{\"path\": \"api\", \
             \"base\": [\"develop\", \"main\"], \"depends_on\": [\"lib\"]}]}.",
         read_only: false,
         idempotent: false,
@@ -616,8 +620,8 @@ const SERVED: [Definition; 33] = [
         description: "The MCP servers the user gives every agent, each as one \
             tool conn_<name>: list and show read them, never a secret; add, edit, remove, set, on \
             and off are always held for the user, whatever the mode. A connection is given to \
-            every project, so the vault entries it names are every project's; one the vault \
-            lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. {\"action\": \"add\", \
+            every project, so the vault entries it names are every project's (env and headers \
+            hold an entry's name, never a secret); one the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. {\"action\": \"add\", \
             \"name\": \"notes\", \"about\": \"The user's notes.\", \"command\": \
             \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
         read_only: false,
@@ -4497,7 +4501,9 @@ mod tests {
             context.";
         // The tool `routine` of #1129 (#1289) comes to a root's list next: counted at its whole
         // definition's size (2,915 characters, measured on that branch), before it is listed
-        // short as the other rarely used families are.
+        // short as the other rarely used families are. The roots list is measured with the
+        // tool `vault` (an entry exists) and `routine` whole: 59,870 characters of the 60,000,
+        // a margin of 130 (measured on this branch, round 2, 2026-11-24). The limits are not raised.
         const ROUTINE: usize = 2_915;
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
@@ -4505,7 +4511,7 @@ mod tests {
             ("a child", false, false),
             ("a child at the depth limit", false, true),
         ] {
-            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, false);
+            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, true);
             let names = served(&claude::PROVIDER, &list);
             let coming = if root { 1 } else { 0 };
             assert!(

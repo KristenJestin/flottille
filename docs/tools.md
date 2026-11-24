@@ -77,8 +77,9 @@ short, so that every agent does not read their whole text at every request for a
 never make (`docs/reference/mcp.md` §4, "The budget"). Nothing of them is lost: it is read when
 it is needed, as a skill is read with `skill_read`.
 
-- **What is listed**: the description's first part (what the family is, its rule the agent must
-  not miss, one example) and the sentence `Its guide, each action and each argument: {"action":
+- **What is listed**: the description's first part (what the family is, each rule the agent must
+  know before its first call, such as `project`'s `set_rules` replacing the whole text, what an
+  object argument without declared fields holds, one example) and the sentence `Its guide, each action and each argument: {"action":
   "guide"}, or with your first call.`; the schema whole but for the sentence of each argument
   (names, types, enums, `required` and bounds stay), with `guide` added to its actions.
 - **The guide** is the family's whole text: its full description, then one line per argument,
