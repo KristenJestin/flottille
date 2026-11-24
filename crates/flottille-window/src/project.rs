@@ -21,6 +21,11 @@ pub fn machine_block_id(machine: &str) -> ElementId {
     ElementId::Name(format!("machine-block-{machine}").into())
 }
 
+/// The time ago of the row of the session `id` of another machine.
+pub fn machine_session_ago_id(id: &str) -> ElementId {
+    ElementId::Name(format!("machine-session-ago-{id}").into())
+}
+
 /// The machine's icon on the row of the session `id` of another machine.
 pub fn machine_session_mark_id(id: &str) -> ElementId {
     ElementId::Name(format!("machine-session-mark-{id}").into())
@@ -555,6 +560,17 @@ impl ProjectPage {
     /// The times move on: a block is drawn again only when one of its texts changes.
     pub fn tick(page: &Entity<Self>, now: u64, cx: &mut gpui_kit::App) {
         for block in page.read(cx).blocks.clone() {
+            if block.read(cx).times_changed(now) {
+                block.update(cx, |_, cx| cx.notify());
+            }
+        }
+        for block in page
+            .read(cx)
+            .machine_blocks
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if block.read(cx).times_changed(now) {
                 block.update(cx, |_, cx| cx.notify());
             }
