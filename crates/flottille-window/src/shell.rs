@@ -4657,9 +4657,17 @@ impl Shell {
         let mut projects = HashMap::new();
         let mut sessions = HashMap::new();
         let mut project_nodes = Vec::new();
-        // A workspace that is gone takes its pull request with it.
+        // A workspace that is gone takes its pull request with it, each checked against its own
+        // machine's list: another machine's that was never read keeps its own (#1271).
+        let copies = &self.copies;
         self.pulls
-            .retain(|(_, project, name), _| snapshot.workspace(project, name).is_some());
+            .retain(|(machine, project, name), _| match machine {
+                None => snapshot.workspace(project, name).is_some(),
+                Some(machine) => copies
+                    .get(machine)
+                    .and_then(|copy| copy.read.as_ref())
+                    .is_none_or(|read| read.workspace(project, name).is_some()),
+            });
         let grouped = self.by_machine && snapshot.homes.len() > 1;
         let mut section_nodes = Vec::new();
         let mut sections = HashMap::new();
