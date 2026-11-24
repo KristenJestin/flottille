@@ -239,9 +239,10 @@ pub struct Shell {
     /// What the composers hold went to the daemon already (the window closes once).
     closed: bool,
     sessions: HashMap<String, Entity<SessionRow>>,
-    /// The pull request of each workspace (its project and name) as a project page last read it:
-    /// a session's row says it on its second line. The sidebar asks the forge for none of them.
-    pulls: HashMap<(String, String), PullRequest>,
+    /// The pull request of each workspace (its machine, `None` for this one, its project and
+    /// name) as a project page last read it: a session's row says it on its second line. The
+    /// sidebar asks the forge for none of them.
+    pulls: HashMap<(Option<String>, String, String), PullRequest>,
     /// The notifications the window has asked the daemon to mark read: it asks once for each,
     /// whatever the answer takes.
     marked: HashSet<u64>,
@@ -2958,7 +2959,9 @@ impl Shell {
     fn done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
         match outcome {
             Outcome::Details(details) => {
-                self.read_pulls(&details, cx);
+                // Read by the project page in front (taken aside, they were dropped): its
+                // machine's pull requests are not this machine's of the same name (#1271).
+                self.read_pulls(self.front.clone(), &details, cx);
                 if let Some(page) = self.main.read(cx).project_page().cloned() {
                     page.update(cx, |page, cx| page.set_details(&details, cx));
                 }
@@ -4517,9 +4520,9 @@ impl Shell {
 
     /// What a project page read of its workspaces' pull requests: their sessions' rows say the
     /// first of each on their second line. A workspace the page could not read keeps what it had.
-    fn read_pulls(&mut self, details: &Details, cx: &mut Context<Self>) {
+    fn read_pulls(&mut self, machine: Option<String>, details: &Details, cx: &mut Context<Self>) {
         for (name, pulls) in &details.pulls {
-            let key = (details.project.clone(), name.clone());
+            let key = (machine.clone(), details.project.clone(), name.clone());
             match pulls.first() {
                 Some(pull) => self.pulls.insert(key, pull.clone()),
                 None => self.pulls.remove(&key),
@@ -4529,7 +4532,7 @@ impl Shell {
             let Some(row) = self.sessions.get(&session.id) else {
                 continue;
             };
-            let pull = self.pull_of(&session.project, &session.place);
+            let pull = self.pull_of(session, &session.place);
             if row.read(cx).pull() != pull {
                 row.update(cx, |row, cx| row.set_pull(pull, cx));
             }
@@ -4537,9 +4540,16 @@ impl Shell {
     }
 
     /// The pull request of the place a session works in, when the window has read it.
-    fn pull_of(&self, project: &str, place: &Place) -> Option<&PullRequest> {
+    /// A session of another machine's list says its own machine's.
+    fn pull_of(&self, session: &crate::model::Session, place: &Place) -> Option<&PullRequest> {
         let workspace = place.as_ref()?;
-        self.pulls.get(&(project.to_owned(), workspace.clone()))
+        let machine = session
+            .elsewhere
+            .as_ref()
+            .filter(|there| !there.here)
+            .map(|there| there.machine.clone());
+        self.pulls
+            .get(&(machine, session.project.clone(), workspace.clone()))
     }
 
     /// The rows of `listed`, each the one the tree had or a new one, brought up to date; their
@@ -4594,7 +4604,7 @@ impl Shell {
             }
             // Ended, it sits among other projects' sessions: its row says whose it is.
             let scope = session.ended.then_some(session.project.as_str());
-            let pull = self.pull_of(&session.project, &session.place).cloned();
+            let pull = self.pull_of(session, &session.place).cloned();
             row.update(cx, |row, cx| {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
@@ -4632,7 +4642,7 @@ impl Shell {
         let mut project_nodes = Vec::new();
         // A workspace that is gone takes its pull request with it.
         self.pulls
-            .retain(|(project, name), _| snapshot.workspace(project, name).is_some());
+            .retain(|(_, project, name), _| snapshot.workspace(project, name).is_some());
         let grouped = self.by_machine && snapshot.homes.len() > 1;
         let mut section_nodes = Vec::new();
         let mut sections = HashMap::new();
