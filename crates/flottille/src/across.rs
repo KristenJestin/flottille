@@ -917,6 +917,16 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
     else {
         return message;
     };
+    let lines = came_lines(name, came);
+    if !lines.is_empty() {
+        deliver.body = format!("{}\n{}", deliver.body, lines.join("\n"));
+    }
+    serde_json::to_value(MachineMessage::Deliver(deliver)).unwrap_or(message)
+}
+
+/// Where the commits that went back from `name` came, `came` as `travel::send_back` answered, a
+/// line each.
+fn came_lines(name: &str, came: Result<Value, String>) -> Vec<String> {
     let mut lines = Vec::new();
     match came {
         Ok(came) => {
@@ -934,10 +944,7 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
             "Its commits could not come back from {name}: {why}."
         )),
     }
-    if !lines.is_empty() {
-        deliver.body = format!("{}\n{}", deliver.body, lines.join("\n"));
-    }
-    serde_json::to_value(MachineMessage::Deliver(deliver)).unwrap_or(message)
+    lines
 }
 
 /// What the inbox says of a message dropped: for whom, what, since when, and why: refused by the
@@ -1124,12 +1131,20 @@ fn delivered(
             .into()),
         };
     }
+    // An agent removed since is no one to deliver to: dropped, not kept in the queue.
+    let agent = agent_here(daemon, &deliver.agent)?.ok_or_else(|| {
+        format!(
+            "there is no agent {} on this machine",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+    })?;
+    let body = delivered_body(daemon, &agent, &deliver.body);
     deliveries::deliver(
         daemon,
         &deliver.agent,
         &deliver.kind,
         Some(id),
-        &deliver.body,
+        &body,
         &deliver.urgency,
     )
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
@@ -1207,12 +1222,20 @@ pub(crate) async fn serve_call(
         Err(refused) => Err(refused),
         // A session its agent did not start: served as a call of this machine's agents is.
         Ok(daemon) if call.launch.is_empty() && call.tool != "approval_answer" => {
-            session_call(&daemon, &remote, &from, *call, None, false).await
+            session_call(&daemon, &remote, &from, *call, None, false, None).await
+        }
+        // The removal of the workspace of a session or child its agent started here: judged by
+        // the same gate and done by the same tool as one of this machine's agents' removals.
+        Ok(daemon) if call.tool == "workspace" => {
+            match own_launch(&daemon, &remote, &from, &call) {
+                Ok(launch) => removal(&daemon, &remote, &from, *call, &launch).await,
+                Err(refused) => Err(refused),
+            }
         }
         // The review of a session its agent leads here: served as the same call of a pilot of
         // this machine, and only that review.
         Ok(daemon) if call.tool == REVIEW => match led_review(&daemon, &remote, &from, &call) {
-            Ok(()) => session_call(&daemon, &remote, &from, *call, None, true).await,
+            Ok(()) => session_call(&daemon, &remote, &from, *call, None, true, None).await,
             Err(refused) => Err(refused),
         },
         // A read of a session or child its agent started here: served by the same tool as one it
@@ -1220,7 +1243,7 @@ pub(crate) async fn serve_call(
         Ok(daemon) if READS.contains(&call.tool.as_str()) => {
             match own_launch(&daemon, &remote, &from, &call) {
                 Ok(launch) => {
-                    session_call(&daemon, &remote, &from, *call, launch.agent, false).await
+                    session_call(&daemon, &remote, &from, *call, launch.agent, false, None).await
                 }
                 Err(refused) => Err(refused),
             }
@@ -1392,6 +1415,9 @@ fn called(
             if agent.state.is_final() {
                 return Err(format!("{} has {}", named(&agent), agent.state.as_str()).into());
             }
+            // What another machine wrote, masked of the secrets of the place of whom it is
+            // written to, as every delivery from afar is.
+            let text = &masked_for(daemon, &agent, text, false);
             match child {
                 true => deliveries::deliver(
                     daemon,
@@ -1924,16 +1950,22 @@ fn answered_request(
                 && request.state == approval::RequestState::Pending
                 && crate::tree::root_of(daemon, &request.agent) == child
         });
-    if held.is_none() {
+    let Some(held) = held else {
         return Err(format!(
             "request #{number} is not held by agent {} of {name}: it answers only the pending \
              requests that reached it as [flottille:child-asks]",
             launch.caller
         )
         .into());
-    }
+    };
     let by = format!("agent {} of {name}", launch.caller);
     if deny {
+        // The agent that asked reads it: masked of the secrets of its place too, before the
+        // denial is recorded (a store that cannot be read is sent again, a denial recorded is not).
+        let why = match agent_here(daemon, &held.agent)? {
+            Some(asker) => masked_for(daemon, &asker, &why, false),
+            None => why,
+        };
         let decided = daemon
             .write(|store| {
                 Ok(
@@ -2517,7 +2549,9 @@ fn stand_in_cap(name: &str) -> String {
 /// tree's mode (Full only with the user's signed switch). A `viewer` device's agents only read.
 /// `reads`: the session or child of this machine the caller started, which it reads as its
 /// starter (`Grant::reads`). `review`: the call is the review of the session it leads here
-/// (`led_review`), the one call for which it is given the review tool.
+/// (`led_review`), the one call for which it is given the review tool. `removes`: the launch
+/// whose workspace the call removes, its commits sent back once the call is found to be one this
+/// machine plays, before it is played.
 async fn session_call(
     daemon: &Arc<Daemon>,
     remote: &Arc<Remote>,
@@ -2525,6 +2559,7 @@ async fn session_call(
     call: Call,
     reads: Option<String>,
     review: bool,
+    removes: Option<&Launch>,
 ) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
@@ -2563,6 +2598,7 @@ async fn session_call(
     let tools: Vec<&'static str> = stand_in_tools()
         .into_iter()
         .chain(review.then_some(REVIEW))
+        .chain(removes.map(|_| REMOVES))
         .collect();
     let tool = tools
         .iter()
@@ -2602,17 +2638,251 @@ async fn session_call(
         &members,
     );
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
-    let grant = Arc::new(crate::mcp::Grant {
-        reads,
-        tools,
-        ..stand_in_grant(daemon, &agent)
-    });
-    let played = crate::mcp::played_for(daemon, &grant, tool, args, &call.id).await;
+    let (grant, key, came) = match removes {
+        Some(launch) => {
+            let grant =
+                removal_grant(daemon, &agent, &args, &launch.launch).map_err(Refused::Never)?;
+            // What went back is the caller's: the removal is judged on what never reached it.
+            let came = crate::travel::send_back(daemon, &launch.launch).await;
+            (grant, removal_key(&launch.launch, &call.id), Some(came))
+        }
+        None => (
+            crate::mcp::Grant {
+                reads,
+                tools,
+                ..stand_in_grant(daemon, &agent)
+            },
+            call.id.clone(),
+            None,
+        ),
+    };
+    let grant = Arc::new(grant);
+    let played = crate::mcp::played_for(daemon, &grant, tool, args, &key).await;
     eprintln!(
         "flottille daemon: {tool} of agent {} of {name} on {}: {}",
         call.caller, call.agent, played.word
     );
-    Ok(json!({"text": played.text, "outcome": played.word, "request": played.request}))
+    let mut text = played.text;
+    if let Some(came) = came {
+        let lines = came_lines(&own_name(daemon).unwrap_or_default(), came);
+        if !lines.is_empty() {
+            text = format!("{}\n{text}", lines.join("\n"));
+        }
+    }
+    Ok(json!({"text": text, "outcome": played.word, "request": played.request}))
+}
+
+/// The key a removal asked from another machine is played and held under: its launch's name
+/// with the call's id, so that the user's answer is done for that launch's workspace alone.
+fn removal_key(launch: &str, id: &str) -> String {
+    format!("{launch}/{id}")
+}
+
+/// The launch a removal asked from another machine was held for, from its request's key.
+pub(crate) fn removal_launch(key: Option<&str>) -> &str {
+    key.and_then(|key| key.split_once('/'))
+        .map_or("", |(launch, _)| launch)
+}
+
+/// The tool a caller of another machine removes the workspace of a session or child it started
+/// here with: `workspace`, its action `remove` only.
+const REMOVES: &str = "workspace";
+
+/// The removal, asked by its caller on the machine of `from`, of the workspace this machine made
+/// for `launch`: once the call is found to be one this machine plays (its device's role, its
+/// words, its workspace the launch's), the commits of that workspace go back first, so that what
+/// the removal is judged to lose is what never reached the caller; then it is played as one of
+/// this machine's agents' removals is, by the same gate (held for the user as theirs is) and the
+/// same tool (refused while an agent works in it, nothing lost but by the user's answer to
+/// discard).
+async fn removal(
+    daemon: &Arc<Daemon>,
+    remote: &Arc<Remote>,
+    from: &PublicKey,
+    call: Call,
+    launch: &Launch,
+) -> Result<Value, Refused> {
+    let name = remote
+        .name_of(from)
+        .ok_or_else(|| "it is no machine of the user's".to_owned())?;
+    let args: Value = serde_json::from_str(&call.arguments)
+        .ok()
+        .filter(Value::is_object)
+        .ok_or_else(|| "the call's arguments are not a JSON object".to_owned())?;
+    if args["action"] != "remove" {
+        return Err(format!(
+            "workspace {} is not called from another machine: only remove is",
+            args["action"]
+        )
+        .into());
+    }
+    let caller = call.caller.chars().take(64).collect::<String>();
+    let made = launch
+        .workspace_id
+        .and_then(|id| daemon.read(|store| store.workspace_by_id(id)).ok());
+    let workspace = match (made, args["name"].as_str()) {
+        (Some(made), Some(asked)) if made.name == asked => made,
+        (made, asked) => {
+            return Ok(json!({"outcome": "refused", "text": format!(
+                "refused: {}: agent {caller} of {name} removes here only the workspace made for \
+                 the session or child it started, {}",
+                match asked {
+                    Some(asked) => format!("the workspace {asked} is not the one of agent {}", call.agent),
+                    None => "name the workspace".to_owned(),
+                },
+                match made {
+                    Some(made) => format!("the workspace {}", made.name),
+                    None => "which is gone already".to_owned(),
+                }
+            )}));
+        }
+    };
+    let answer = session_call(daemon, remote, from, call, None, false, Some(launch)).await?;
+    eprintln!(
+        "flottille daemon: the removal of workspace {} of project {}, asked by agent {caller} of \
+         {name}: {}",
+        workspace.name, workspace.project, answer["outcome"]
+    );
+    Ok(answer)
+}
+
+/// The grant a caller of another machine stood in for here as `agent` removes, with `args`, the
+/// workspace this machine made for `launch`, a session or child it started: in the project that
+/// workspace is in, whatever the caller calls it. Refused for any other workspace, of the same
+/// name or not, another launch's included.
+pub(crate) fn removal_grant(
+    daemon: &Daemon,
+    agent: &Agent,
+    args: &Value,
+    launch: &str,
+) -> Result<crate::mcp::Grant, String> {
+    let (caller, machine) = agent
+        .id
+        .split_once('@')
+        .ok_or_else(|| format!("agent {} is of this machine", agent.id))?;
+    if args["action"] != "remove" {
+        return Err("a caller of another machine only removes a workspace here".to_owned());
+    }
+    let asked = args["name"].as_str().unwrap_or_default();
+    let launches = daemon
+        .read(|store| store.launches("in", Some(machine), LaunchFilter::Named(launch)))
+        .map_err(|error| error.to_string())?;
+    let project = launches
+        .iter()
+        .filter(|launch| {
+            launch.caller == caller
+                && launch.kind != "handed"
+                && launch.state != "refused"
+                && launch.agent.is_some()
+        })
+        .filter_map(|launch| {
+            let id = launch.workspace_id?;
+            let made = daemon.read(|store| store.workspace_by_id(id)).ok()?;
+            (made.name == asked && made.project == launch.project).then_some(made.project)
+        })
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "{} made no workspace {asked} on this machine: it removes only the workspace of a \
+                 session or child it started here",
+                stand_in_name(agent).unwrap_or_else(|| agent.id.clone())
+            )
+        })?;
+    let project = crate::projects::load_project(daemon, &project).map_err(|f| f.message)?;
+    Ok(crate::mcp::Grant {
+        agent: agent.id.clone(),
+        epoch: agent.epoch,
+        tools: stand_in_tools().into_iter().chain([REMOVES]).collect(),
+        place: crate::place::Place::main(&project, project.folder.clone()),
+        launched: false,
+        reads: None,
+    })
+}
+
+/// The launch of a session or child `caller` started on another machine whose workspace there
+/// `args` (`workspace` `remove` with `machine`) removes; the refusal when it names none. `None`
+/// for any other call: one with no `machine` is this machine's.
+pub(crate) fn removal_aimed(
+    daemon: &Daemon,
+    caller: &str,
+    tool: &str,
+    args: &Value,
+) -> Option<Result<Launch, String>> {
+    let machine = args.get("machine")?;
+    if tool != REMOVES {
+        return None;
+    }
+    if args["action"] != "remove" {
+        return Some(Err(
+            "refused: with machine, workspace only removes the workspace there of a session or \
+             child you started: {\"action\": \"remove\", \"name\": \"<workspace>\", \
+             \"machine\": \"<machine>\"}; every other action is on this machine's workspaces, \
+             without machine"
+                .to_owned(),
+        ));
+    }
+    // As on one machine, the agent the user talks to manages workspaces, a child none.
+    if !crate::actions::is_root_agent(daemon, caller) {
+        return Some(Err(crate::actions::CHILD_WORKSPACES.to_owned()));
+    }
+    let (Some(machine), Some(name)) = (machine.as_str(), args["name"].as_str()) else {
+        return Some(Err(
+            "refused: name the workspace and the machine it is on: {\"action\": \"remove\", \
+             \"name\": \"<workspace>\", \"machine\": \"<machine>\"}"
+                .to_owned(),
+        ));
+    };
+    let launches = daemon
+        .read(|store| store.launches("out", None, LaunchFilter::All))
+        .unwrap_or_default();
+    Some(
+        launches
+            .into_iter()
+            .find(|launch| {
+                launch.caller == caller
+                    && matches!(launch.kind.as_str(), "led" | "child")
+                    && launch.state != "refused"
+                    && launch.agent.is_some()
+                    && launch.workspace.as_deref() == Some(name)
+                    && machine_name(daemon, launch) == machine
+            })
+            .ok_or_else(|| {
+                format!(
+                    "refused: you started no session or child on {machine} whose workspace is \
+                     {name}: with machine, workspace remove removes only the workspace there of a \
+                     session or child you started; left out, a workspace of this machine"
+                )
+            }),
+    )
+}
+
+/// The removal, asked by the grant's agent, of the workspace on another machine of the session or
+/// child `launch` it started there: sent to that machine, which judges it and does it as one of
+/// its own agents' removals, its answer as that machine gave it.
+pub(crate) async fn remove_there(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: &Value,
+    launch: &Launch,
+) -> Outcome {
+    let mut args = args.clone();
+    if let Some(args) = args.as_object_mut() {
+        args.remove("machine");
+    }
+    let agent = launch.agent.clone().unwrap_or_default();
+    let name = machine_name(daemon, launch);
+    let aim = Aim {
+        machine: &launch.machine,
+        name: &name,
+        agent: &agent,
+        launch: &launch.launch,
+        session: format!(
+            "the workspace {} of agent {agent}",
+            launch.workspace.as_deref().unwrap_or_default()
+        ),
+        woken: false,
+    };
+    forward_to(daemon, grant, REMOVES, &args, aim).await
 }
 
 /// A tool of the tree aimed at `away`, a session of another machine: sent to that machine,
@@ -2814,7 +3084,7 @@ fn answered(sent: Result<Value, LinkError>, aim: &Aim, place: &Place) -> Outcome
 /// (`docs/remote.md`): masked of this machine's secrets, and cut at the limit of its kind, as a
 /// local one is.
 fn here(outcome: Outcome, place: &Place) -> Outcome {
-    let known = Secrets::new(&std::env::vars_os().collect(), &place.secret_values());
+    let known = known_in(place);
     let shown = |text: String, limit| masked_and_cut(&text, &known, limit);
     match outcome {
         Outcome::Done(text) => Outcome::Done(shown(text, RESULT_LIMIT)),
@@ -2825,18 +3095,68 @@ fn here(outcome: Outcome, place: &Place) -> Outcome {
     }
 }
 
+/// The secrets of this machine a text of another machine is masked of for an agent in `place`:
+/// the daemon's, the vault's and those of the place's secret files (`mcp::masked`).
+fn known_in(place: &Place) -> Secrets {
+    Secrets::new(&std::env::vars_os().collect(), &place.secret_values())
+}
+
+/// The secrets of this machine a text of another machine is masked of for `agent`: those of its
+/// place (`known_in`). A place that cannot be read any more (a workspace or a project removed
+/// meanwhile) is no reason to keep the text waiting, nor to show it whole: it is the folder the
+/// agent was given, as far as it still is, and the daemon's and the vault's secrets, that mask it.
+pub(crate) fn known_for(daemon: &Daemon, agent: &Agent) -> Secrets {
+    let place = match crate::mcp::grant_of(daemon, agent) {
+        Ok(grant) => grant.place,
+        Err(_) => Place {
+            project: agent.project.clone(),
+            workspace: agent.workspace.clone(),
+            root: agent.folder.clone(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        },
+    };
+    known_in(&place)
+}
+
+/// `text`, said by another machine to `agent` of this one, masked of the secrets of the agent's
+/// place before anything stores or shows it. With `cut_end`, its end is taken for a cut
+/// (`cuts_masked`).
+pub(crate) fn masked_for(daemon: &Daemon, agent: &Agent, text: &str, cut_end: bool) -> String {
+    cuts_masked(text, &known_for(daemon, agent), cut_end)
+}
+
+/// The agent of this machine named `id`; `None` when there is none. Refused for now only when
+/// the store cannot be read.
+fn agent_here(daemon: &Daemon, id: &str) -> Result<Option<Agent>, Refused> {
+    daemon
+        .read(|store| store.agent(id))
+        .map_err(|error| Refused::Now(error.to_string()))
+}
+
+/// `body`, a delivery of another machine for `agent` of this one, as it is stored: masked as an
+/// answer of that machine is (`here`), of the secrets of the agent's place too, before anything
+/// stores or shows it. A body of `LONGEST` characters may end where that machine cut it without
+/// saying (`answer_back`): its end is taken for a cut.
+fn delivered_body(daemon: &Daemon, agent: &Agent, body: &str) -> String {
+    masked_for(daemon, agent, body, body.chars().count() == LONGEST)
+}
+
 /// `text` masked, then cut at `limit` saying so; and wherever the other machine cut it, the
 /// halves of a secret its cut split masked too: masking by the whole value cannot find them.
 /// Masked whole before this machine cuts it, no secret is split by its own cut.
 fn masked_and_cut(text: &str, known: &Secrets, limit: usize) -> String {
-    crate::mcp::cut(&cuts_masked(text, known), limit)
+    crate::mcp::cut(&cuts_masked(text, known, false), limit)
 }
 
 /// `text` masked whole, then, around each cut the other machine made in it, the end of the piece
 /// a cut closes masked when it starts a secret, and the start of the piece a cut opens in the
 /// middle of the text masked when it ends one. Masked whole first, nothing the other machine
-/// wrote, a marker or what looks like one, is shown unmasked.
-fn cuts_masked(text: &str, known: &Secrets) -> String {
+/// wrote, a marker or what looks like one, is shown unmasked. With `cut_end`, the end of `text` is
+/// taken for a cut too.
+fn cuts_masked(text: &str, known: &Secrets, cut_end: bool) -> String {
     let masked = known.mask(text);
     let piece = |piece: &str, opened: bool, closed: bool| {
         let mut piece = piece.to_owned();
@@ -2858,14 +3178,15 @@ fn cuts_masked(text: &str, known: &Secrets) -> String {
         shown.push_str(&masked[span.clone()]);
         (from, opened) = (span.end, goes_on);
     }
-    shown.push_str(&piece(&masked[from..], opened, false));
+    shown.push_str(&piece(&masked[from..], opened, cut_end));
     shown
 }
 
 /// Every cut a daemon makes in the answer of a tool, found in `text`, in order: where it is, and
 /// whether what follows goes on from the middle of the text cut. They are the end of a text
-/// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the middle of a long
-/// result `results::shorten` left out (its marker, exactly as it writes it, on a line of its
+/// `mcp::cut` or `tree::cut` cut (`‹+N chars›`, nothing after it goes on); the end of a delivery
+/// `fitted` cut (its marker, exactly as it writes it, nothing after it goes on); the middle of a
+/// long result `results::shorten` left out (its marker, exactly as it writes it, on a line of its
 /// own); and, in a result cut so, each new line: one may split a line longer than
 /// `results::LINE_CHARS`, and masking may have shortened that line below it.
 fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
@@ -2876,6 +3197,11 @@ fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
         let close = " chars\u{203a}";
         if digits > 0 && rest[digits..].starts_with(close) {
             cuts.push((at..at + open.len() + digits + close.len(), false));
+        }
+    }
+    for (at, _) in text.match_indices(FITTED) {
+        if let Some(length) = fitted_cut(&text[at..]) {
+            cuts.push((at..at + length, false));
         }
     }
     for (at, _) in text.match_indices('[') {
@@ -2907,6 +3233,26 @@ fn cuts(text: &str) -> Vec<(std::ops::Range<usize>, bool)> {
     }
     cuts.sort_by_key(|(span, _)| span.start);
     cuts
+}
+
+/// How the marker of `fitted` starts.
+const FITTED: &str = "\n\n[cut: ";
+
+/// The length of the marker of `fitted` that `text` starts with, written exactly so, up to the
+/// end of its line: `\n\n[cut: N more characters; session_read {"session": "…"} on … reads the
+/// rest]`. Each is looked at up to the next new line, which starts the next one: linear.
+fn fitted_cut(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix(FITTED)?;
+    let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    if digits.len() == rest.len() {
+        return None;
+    }
+    let rest = digits.strip_prefix(" more characters; session_read {\"session\": \"")?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let rest = rest.strip_prefix("\"} on ")?;
+    let line = rest.split('\n').next().unwrap_or_default();
+    let machine = line.strip_suffix(" reads the rest]")?;
+    (!machine.is_empty()).then(|| text.len() - rest.len() + line.len())
 }
 
 /// The length of the marker of `results::shorten` that `text` starts with, written exactly so:
@@ -3000,6 +3346,18 @@ fn delivered_answer(
     {
         return Ok(json!({}));
     }
+    let waits_for_no_answer = || {
+        format!(
+            "agent {} of this machine waits for no answer of request #{number} of {name}",
+            deliver.agent.chars().take(64).collect::<String>()
+        )
+    };
+    // An agent that is not here waits for nothing: refused for good, as any other answer to no
+    // wait is, before anything of its place is read.
+    let Some(agent) = agent_here(daemon, &deliver.agent)? else {
+        return Err(waits_for_no_answer().into());
+    };
+    let body = delivered_body(daemon, &agent, &deliver.body);
     // Looked at before what is awaited: a call answered meanwhile has recorded its wait.
     let calling = remote.calling.any(machine, &deliver.agent);
     let awaited = daemon
@@ -3013,10 +3371,7 @@ fn delivered_answer(
     // first is sent again. Any other is refused for good, so that it holds back nothing kept
     // behind it on its machine.
     if !awaited {
-        let agent = deliver.agent.chars().take(64).collect::<String>();
-        let why = format!(
-            "agent {agent} of this machine waits for no answer of request #{number} of {name}"
-        );
+        let why = waits_for_no_answer();
         return Err(if calling {
             Refused::Now(format!("{why} yet"))
         } else {
@@ -3028,7 +3383,7 @@ fn delivered_answer(
         &deliver.agent,
         "approval",
         Some(id),
-        &deliver.body,
+        &body,
         approval::URGENT,
     )
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
@@ -3218,13 +3573,75 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_cut_in_half_by_the_cut_of_a_delivery_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = known_in(&place_with_secret(dir.path()));
+        let long = "x".repeat(LONGEST + 100);
+        let kept = fitted(&long, "ab12", "server").find(FITTED).unwrap();
+        // Of the same number of digits as `long`'s length, the body is cut at the same place.
+        let body = format!("{}{SECRET}{}", &long[..kept - 8], &long[..200]);
+        let cut = fitted(&body, "ab12", "server");
+        assert!(cut.contains(&SECRET[..8]), "the secret is not cut in half");
+
+        let shown = cuts_masked(&cut, &known, false);
+        assert!(
+            shown.contains("x[masked]\n\n[cut: "),
+            "{}",
+            &shown[kept - 20..]
+        );
+        holds_no_piece_of_the_secret(&shown);
+        // Cut at `LONGEST` characters without a marker.
+        let unmarked = format!("{}{}", &long[..LONGEST - 8], &SECRET[..8]);
+        let shown = cuts_masked(&unmarked, &known, true);
+        assert!(
+            shown.ends_with("x[masked]"),
+            "{}",
+            &shown[shown.len() - 20..]
+        );
+    }
+
+    #[test]
+    fn a_secret_inside_a_fake_or_unclosed_delivery_cut_marker_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = known_in(&place_with_secret(dir.path()));
+        for text in [
+            format!(
+                "a\n\n[cut: 9 more characters; session_read {{\"session\": \"{SECRET}\"}} on pc \
+                 reads the rest]"
+            ),
+            format!(
+                "a\n\n[cut: 9 more characters; session_read {{\"session\": \"ab\"}} on {SECRET}"
+            ),
+            format!("a\n\n[cut: 9 more characters; {SECRET} reads the rest]"),
+        ] {
+            let shown = cuts_masked(&text, &known, false);
+            holds_no_piece_of_the_secret(&shown);
+        }
+    }
+
+    #[test]
+    fn a_delivery_of_many_cut_markers_is_masked_in_linear_time() {
+        let marker = "\n\n[cut: 9 more characters; session_read {\"session\": \"ab\"} on pc";
+        let text = format!("{} reads the rest]", marker.repeat(20_000));
+        let started = std::time::Instant::now();
+        let known = Secrets::new(&Default::default(), &["a-value-of-the-caller".to_owned()]);
+        let shown = cuts_masked(&text, &known, true);
+        assert!(shown.ends_with("reads the rest]"), "{}", &shown[..80]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn an_answer_of_many_lines_after_a_cut_marker_is_masked_in_linear_time() {
         let marker = "[5 characters left out (lines 2-3 of 4): read them with run_status \
                       {\"run\": \"res_1\", \"start\": 2}]";
         let text = format!("head\n{marker}\n{}tail", "\n".repeat(100_000));
         let started = std::time::Instant::now();
         let known = Secrets::new(&Default::default(), &["a-value-of-the-caller".to_owned()]);
-        let shown = cuts_masked(&text, &known);
+        let shown = cuts_masked(&text, &known, false);
         assert!(shown.ends_with("tail"), "{}", &shown[..80]);
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),

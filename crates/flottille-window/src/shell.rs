@@ -1604,6 +1604,7 @@ impl Shell {
         };
         let this = cx.entity().downgrade();
         let machine = self.pages_machine();
+        let drafted_on = machine.clone();
         let made = !self.forms.contains_key(name);
         let forms = self.forms.entry(name.clone()).or_insert_with(|| {
             let (a, b) = (
@@ -1618,7 +1619,10 @@ impl Shell {
         if made {
             // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
             self.actions.send(Command::DraftRead {
-                key: DraftKey::Project(name.clone()),
+                key: DraftKey::Project {
+                    machine: drafted_on,
+                    name: name.clone(),
+                },
             });
         }
         let forms = forms.clone();
@@ -2317,10 +2321,11 @@ impl Shell {
             Some(reply) => reply.clone(),
             None => {
                 let (shell, project) = (this.clone(), opened.project.clone());
-                let (session, its) = (agent.clone(), asks.clone());
+                let (session, its, on) = (agent.clone(), asks.clone(), machine.clone());
                 let extensions = self.extensions.downgrade();
                 let reply = cx.new(|cx| {
-                    Reply::new(shell, its, session, project, window, cx).with_extensions(extensions)
+                    Reply::new(shell, its, on, session, project, window, cx)
+                        .with_extensions(extensions)
                 });
                 self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
                     let session = reply.read(cx).session().to_owned();
@@ -2330,7 +2335,10 @@ impl Shell {
                 // What this machine keeps of its draft comes back as an `Outcome::Draft`, said of
                 // the machine whose actions asked (the keeper always asks this one).
                 asks.send(Command::DraftRead {
-                    key: DraftKey::Session(agent.clone()),
+                    key: DraftKey::Session {
+                        machine: machine.clone(),
+                        agent: agent.clone(),
+                    },
                 });
                 reply
             }
@@ -2732,6 +2740,14 @@ impl Shell {
     fn folds_now(&self, cx: &Context<Self>) -> Folds {
         // What was last asked of the daemon, which the nodes that are not shown now keep.
         let last = self.kept_asked.as_ref().unwrap_or(&self.kept);
+        // No rows yet (a window opening reads what the daemon keeps before its rows): the nodes
+        // say nothing, and writing their empty maps would forget every fold for every window.
+        if self.read.is_none() {
+            return Folds {
+                by_machine: self.by_machine,
+                ..last.clone()
+            };
+        }
         let by_machine = self.is_by_machine();
         let exists = |name: &str| self.snapshot.projects.iter().any(|p| p.name == name);
         Folds {
@@ -3786,7 +3802,7 @@ impl Shell {
             // A read that failed is not "no draft": the composer writes nothing, and the read is
             // asked again.
             Outcome::Draft { key, found } => match key {
-                DraftKey::Session(id) => {
+                DraftKey::Session { agent: id, .. } => {
                     if let Some(reply) = self.replies.get(&self.row_answered(&id)).cloned() {
                         match found {
                             Ok(found) => {
@@ -3796,7 +3812,7 @@ impl Shell {
                         }
                     }
                 }
-                DraftKey::Project(name) => {
+                DraftKey::Project { name, .. } => {
                     let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
                     if let Some(composer) = composer {
                         match found {
@@ -3810,12 +3826,12 @@ impl Shell {
                 }
             },
             Outcome::DraftWritten { key, result } => match key {
-                DraftKey::Session(id) => {
+                DraftKey::Session { agent: id, .. } => {
                     if let Some(reply) = self.replies.get(&self.row_answered(&id)).cloned() {
                         reply.update(cx, |reply, cx| reply.draft_written(result, cx));
                     }
                 }
-                DraftKey::Project(name) => {
+                DraftKey::Project { name, .. } => {
                     let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
                     if let Some(composer) = composer {
                         composer.update(cx, |composer, cx| composer.draft_written(result, cx));

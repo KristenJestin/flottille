@@ -30,7 +30,7 @@ fn hex_of(machine: &Machine) -> String {
 
 /// A session led by `pc`'s root (in `mode`), started on `server` with `brief`: its id there, the
 /// root's id, the launch's answer and the root's MCP session.
-fn led_on_server(
+pub(crate) fn led_on_server(
     pc: &Machine,
     server: &Machine,
     brief: &str,
