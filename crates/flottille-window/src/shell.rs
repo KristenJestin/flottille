@@ -628,10 +628,26 @@ fn unread_words(said: &str) -> String {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    #[cfg(feature = "test-support")]
+    let now = now + CLOCK_AHEAD_HERE.with(std::cell::Cell::get);
+    now
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static CLOCK_AHEAD_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// For a scenario of the window: the clock the windows opened on this thread read runs `by` ahead
+/// of the wall's, so that a time ago moves on without the scenario waiting for it. A thread of its
+/// own, so that the scenarios that run beside it keep the wall's.
+#[cfg(feature = "test-support")]
+pub fn move_clock_on_this_thread(by: Duration) {
+    CLOCK_AHEAD_HERE.with(|ahead| ahead.set(ahead.get() + by.as_millis() as u64));
 }
 
 impl Shell {

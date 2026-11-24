@@ -10,7 +10,9 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, px,
 };
 
-use super::{SessionLine, machine_block_id, machine_session_mark_id, session_row_id};
+use super::{
+    SessionLine, machine_block_id, machine_session_ago_id, machine_session_mark_id, session_row_id,
+};
 use crate::model::ago;
 use crate::shell::{Selection, now_ms};
 
@@ -118,6 +120,7 @@ impl Render for MachineBlock {
             .collect();
         let rows = rows.into_iter().map(|(session, placement)| {
             let (shell, open) = (self.shell.clone(), session.id.clone());
+            let said_ago = SharedString::from(ago(now, session.active_at));
             let mark = crate::machines::mark(
                 machine_session_mark_id(&session.id),
                 &data.icon,
@@ -131,7 +134,13 @@ impl Render for MachineBlock {
                 SharedString::from(session.title.clone()),
             )
             .leading(mark)
-            .meta(div().child(SharedString::from(ago(now, session.active_at))))
+            .meta(
+                div()
+                    .id(machine_session_ago_id(&session.id))
+                    .aria_label(said_ago.clone())
+                    .child(said_ago)
+                    .test_support(),
+            )
             .on_click(move |_, window, cx| {
                 let session = open.clone();
                 shell

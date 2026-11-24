@@ -17,7 +17,9 @@ use flottille_window::device::Device;
 use flottille_window::link::Connect;
 use flottille_window::machines::News;
 use flottille_window::model::elsewhere_id;
-use flottille_window::project::{machine_block_id, machine_session_mark_id, session_row_id};
+use flottille_window::project::{
+    machine_block_id, machine_session_ago_id, machine_session_mark_id, session_row_id,
+};
 use flottille_window::shell::Selection;
 use flottille_window::tree::{
     by_machine_id, group_header_id, machine_id, machine_mark_id, project_apart_id, project_id,
@@ -1033,4 +1035,48 @@ fn a_snapshot_of_another_machine_that_changes_nothing_draws_nothing(cx: &mut Tes
     }
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     assert_eq!((drawn, asked), (0, 0), "(drawn, asked)");
+}
+
+/// What the drawn time ago of the row of `session` of `machine` says.
+fn said_ago(machine: &str, session: &str, cx: &mut VisualTestContext) -> Option<String> {
+    label(cx, machine_session_ago_id(&elsewhere_id(machine, session)))
+}
+
+/// The frames the window draws over `by` of its clock, which the clock of its page reads as well.
+fn frames_over(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> u64 {
+    cx.update(|window, _| window.reset_layout_stats());
+    step(shell, by, cx);
+    cx.update(|window, _| window.layout_stats().frames)
+}
+
+#[gpui_kit::test]
+fn another_machine_s_session_rows_say_how_long_ago_as_time_goes_by(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+    let there = session(&server, "app", "Ship the server part");
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "the server's session on the page", |cx| {
+        said_ago("server", &there, cx).is_some()
+    });
+    quiet(&shell, cx);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("now"));
+
+    // The clock of the page runs and the text is the same: nothing is drawn.
+    flottille_window::shell::move_clock_on_this_thread(Duration::from_secs(10));
+    assert_eq!(frames_over(&shell, Duration::from_secs(30), cx), 0);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("now"));
+
+    // Two minutes on, the row says so, drawn once.
+    flottille_window::shell::move_clock_on_this_thread(Duration::from_secs(120));
+    assert!(frames_over(&shell, Duration::from_secs(30), cx) > 0);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("2m"));
+
+    // And again nothing, while the text is the same.
+    quiet(&shell, cx);
+    assert_eq!(frames_over(&shell, Duration::from_secs(30), cx), 0);
+    assert_eq!(said_ago("server", &there, cx).as_deref(), Some("2m"));
 }

@@ -21,6 +21,11 @@ pub fn machine_block_id(machine: &str) -> ElementId {
     ElementId::Name(format!("machine-block-{machine}").into())
 }
 
+/// The time ago of the row of the session `id` of another machine.
+pub fn machine_session_ago_id(id: &str) -> ElementId {
+    ElementId::Name(format!("machine-session-ago-{id}").into())
+}
+
 /// The machine's icon on the row of the session `id` of another machine.
 pub fn machine_session_mark_id(id: &str) -> ElementId {
     ElementId::Name(format!("machine-session-mark-{id}").into())
