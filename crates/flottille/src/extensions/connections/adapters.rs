@@ -47,6 +47,11 @@ pub struct Adapter {
     patterns: &'static [&'static str],
     /// Actions off while it applies, which no setting turns on.
     locked: &'static [&'static str],
+    /// Its actions that take a file's path beside their other arguments, and those arguments:
+    /// a call that gives one is refused, and the action runs with the server's own folder.
+    file_arguments: &'static [(&'static str, &'static [&'static str])],
+    /// Arguments every one of its actions takes though no schema says them, refused on each.
+    hidden_arguments: &'static [&'static str],
     /// Why they are.
     pub locked_why: &'static str,
     /// Its own actions, served by Flottille.
@@ -112,13 +117,53 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         // Not served by 0.43.0: named should a 0.43 patch serve it, since off alone the user could
         // turn agent-browser's own login on beside Flottille's.
         "agent_browser_with_login",
+        // The browser's profile lasts from one browser to the next and keeps the sign-ins, made
+        // by hand or through the vault (#1326): a session cookie or a token in a page's storage is
+        // a credential. Their answers are not masked to names instead: a value of a site's own
+        // format is no secret Flottille knows, and saved state is a file.
+        "agent_browser_cookies_get",
+        "agent_browser_storage_get",
+        "agent_browser_state_save",
+        "agent_browser_state_show",
+        // They read or write a file by a path the agent gives, through the server, which reaches
+        // the profile: a run plants a link to its cookies under a name built in a script, which
+        // the gate never sees, and the server follows it. A check of the path loses to a link
+        // swapped after it, and these cannot run without a path.
+        "agent_browser_cookies_set_curl",
+        "agent_browser_upload",
+        "agent_browser_download",
+        "agent_browser_pdf",
+        "agent_browser_record_start",
+        "agent_browser_record_restart",
     ],
+    // The same, where the path is optional: without one the server writes to its own folder,
+    // which Flottille puts in the vault folder (`display`) or which only the user turns on
+    // (HAR, traces).
+    file_arguments: &[
+        ("agent_browser_screenshot", &["path", "screenshotDir"]),
+        ("agent_browser_wait_for_download", &["path"]),
+        ("agent_browser_network_har_stop", &["path"]),
+        ("agent_browser_trace_stop", &["path"]),
+        ("agent_browser_profiler_stop", &["path"]),
+        ("agent_browser_flow_save", &["output"]),
+        ("agent_browser_diff_snapshot", &["baseline"]),
+        ("agent_browser_diff_screenshot", &["baseline", "output"]),
+    ],
+    // restore and restoreSave save the cookies and storage to a file under the home, which runs
+    // read; caCert is a file the server reads and trusts; namespace moves the daemon's socket and
+    // its restore folders, as at the start (`UNSAFE`); extraArgs carries any of agent-browser's
+    // options (--restore, --screenshot-dir…), which no list of Flottille's can follow.
+    hidden_arguments: &["extraArgs", "restore", "restoreSave", "caCert", "namespace"],
     locked_why: "agent-browser's own logins keep passwords in its own store or take them as \
                  arguments, and its plugins run commands with its credential providers: \
                  Flottille's vault is the only way to sign in, with the action login; connect and \
                  state_load bring a browser or a session someone else controls, which a login \
                  would type into; get_cdp_url hands out Chrome's DevTools address, which drives \
-                 the browser with no gate",
+                 the browser with no gate; cookies_get, storage_get, state_save and state_show \
+                 give the cookies, storage and saved state of the browser's profile, which keeps \
+                 the sign-ins, and upload, download, pdf, cookies_set_curl, record_start and \
+                 record_restart read or write a file by its path through the server, which \
+                 reaches the profile however that path is made",
     actions: &[Own {
         name: LOGIN,
         description: "Signs in to a site in the browser with a vault entry of the user's: \
@@ -133,7 +178,10 @@ pub static AGENT_BROWSER: Adapter = Adapter {
            headed, true to show it on the user's screen, only when the user must act in the page \
            (sign in, a captcha) or see it, never to read a page; left out or false it runs \
            headless, and the next open without headed hides it again. The browser keeps its \
-           profile when it changes.",
+           profile when it changes. Its cookies, storage and saved state are not yours to read: \
+           cookies_get, storage_get, state_save, upload, download and pdf are off, and no action \
+           takes a file's path, extraArgs or restore; a screenshot without a path comes back as \
+           an image.",
     shows: Some((OPEN, SHOWS)),
 };
 
@@ -286,6 +334,26 @@ impl Adapter {
         ))
     }
 
+    /// Why a call of `action` with `arguments` is refused: a file's path, which the server would
+    /// follow into the browser's profile, or an argument agent-browser takes on every action that
+    /// saves the browser's state or moves its folders (`file_arguments`, `hidden_arguments`).
+    pub fn refuses_files(&self, action: &str, arguments: &Value) -> Option<String> {
+        let files = self
+            .file_arguments
+            .iter()
+            .find(|(name, _)| *name == action)
+            .map_or(&[][..], |(_, files)| *files);
+        let given = files
+            .iter()
+            .chain(self.hidden_arguments)
+            .find(|name| arguments.get(**name).is_some())?;
+        Some(format!(
+            "{action} takes no {given} while Flottille's adapter applies: the server would read \
+             or write a file Flottille does not choose, or save the browser's state, and the \
+             browser's profile keeps the user's sign-ins; call it without {given}"
+        ))
+    }
+
     /// What it changes, a sentence each, as the review says it.
     pub fn changed(&self, config: &Path) -> Vec<String> {
         let mut said = vec![format!(
@@ -303,6 +371,17 @@ impl Adapter {
              one runs in the page"
                 .to_owned(),
         );
+        said.push(format!(
+            "a call that gives a file's path ({}) or {} is refused: the server would follow it \
+             into the browser's profile, or save the browser's state; a screenshot and a \
+             download without a path go to a folder of the connection's vault folder",
+            self.file_arguments
+                .iter()
+                .map(|(action, files)| format!("{} of {action}", files.join(", ")))
+                .collect::<Vec<_>>()
+                .join("; "),
+            self.hidden_arguments.join(", ")
+        ));
         said.push(format!(
             "{} are off and stay off: {}",
             self.locked.join(", "),
@@ -722,6 +801,12 @@ pub fn display(
         sockets(vault)?.into_os_string(),
     );
     env.insert("TMPDIR".into(), private(vault, TEMPORARY)?.into_os_string());
+    // A screenshot without a path goes to `~/.agent-browser/tmp/screenshots`, under the home
+    // runs write: a link planted there, at the name of the next one, would have it written into
+    // the profile. A download would go to a folder of Chrome's choosing.
+    for (variable, name) in BROWSERS_FILES {
+        env.insert(variable.into(), private(vault, name)?.into_os_string());
+    }
     // Chrome writes outside its profile, whatever profile it is given: its crash database (page
     // memory, a password typed) under its default configuration folder, its caches; never in a
     // folder of the user's, which runs read and write (`docs/vault.md`, "The browser's network").
@@ -736,9 +821,11 @@ pub fn display(
 
 /// The variables [`display`] sets, or removes, for the browser: where agent-browser puts its
 /// socket, and where Chrome writes its profile, caches and crash dumps.
-pub const FOLDERS_OF_THE_BROWSER: [&str; 7] = [
+pub const FOLDERS_OF_THE_BROWSER: [&str; 9] = [
     "AGENT_BROWSER_SOCKET_DIR",
     "TMPDIR",
+    "AGENT_BROWSER_SCREENSHOT_DIR",
+    "AGENT_BROWSER_DOWNLOAD_PATH",
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
@@ -752,6 +839,13 @@ const CHROMES_FOLDERS: [(&str, &str); 3] = [
     ("XDG_CONFIG_HOME", "config"),
     ("XDG_CACHE_HOME", "cache"),
     ("XDG_DATA_HOME", "data"),
+];
+
+/// The variables that say where agent-browser writes a screenshot and a download given no path,
+/// and the folder of the vault folder each names.
+const BROWSERS_FILES: [(&str, &str); 2] = [
+    ("AGENT_BROWSER_SCREENSHOT_DIR", "screenshots"),
+    ("AGENT_BROWSER_DOWNLOAD_PATH", "downloads"),
 ];
 
 /// The folder `name` of the vault folder, made the user's alone: the temporary folder of
@@ -829,7 +923,7 @@ pub fn swept_at_start(paths: &flottille_core::paths::Paths) {
             .and_then(|sockets| std::fs::read_dir(sockets).ok()?.next())
             .is_none();
         if no_browser {
-            emptied(&vault.join(TEMPORARY));
+            emptied_files(&vault);
         }
     }
     for state in folders(paths.state.join("connections")) {
@@ -927,7 +1021,18 @@ fn emptied(folder: &Path) {
 fn emptied_once_ended(vault: &Path) {
     let answering = sockets_in(vault).is_some_and(|sockets| !network::daemons(&sockets).is_empty());
     if !answering {
-        emptied(&vault.join(TEMPORARY));
+        emptied_files(vault);
+    }
+}
+
+/// `emptied` the temporary folder of the vault folder `vault`, and the folders of its
+/// screenshots and downloads, which no browser's next start needs.
+fn emptied_files(vault: &Path) {
+    for name in [TEMPORARY]
+        .into_iter()
+        .chain(BROWSERS_FILES.map(|(_, name)| name))
+    {
+        emptied(&vault.join(name));
     }
 }
 

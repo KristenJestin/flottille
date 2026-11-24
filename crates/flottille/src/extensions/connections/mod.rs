@@ -1674,7 +1674,11 @@ fn decide<'a>(
             action.name, action.name
         )
     })?;
-    if let Some(why) = adapter.and_then(|adapter| adapter.refuses_url(&action.name, &arguments)) {
+    if let Some(why) = adapter.and_then(|adapter| {
+        adapter
+            .refuses_url(&action.name, &arguments)
+            .or_else(|| adapter.refuses_files(&action.name, &arguments))
+    }) {
         return Err(why);
     }
     limits(declaration, action, &arguments)?;
