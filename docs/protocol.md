@@ -2435,8 +2435,9 @@ sessions it leads and theirs in turn, in its project and in others, those that h
 workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
 `unpushed` or `unknown`), `losses` each as a sentence. A session it leads on another machine,
 which ends there with it, is listed too, with `machine` its name, `project` its project there and
-`state` `unknown` and `losses` `["unknown (on <machine>)"]`: what its workspace holds is not
-asked there, so that the answer never waits on another machine. The window reads it for its
+`state` and `losses` as that machine reads them, asked there and awaited 3 seconds at most:
+`state` `unknown` and `losses` `["unknown (on <machine>)"]` when it is off or does not answer in
+time (`docs/remote.md`, "A tree across machines"). The window reads it for its
 confirmation, each session on another machine said with its machine.
 
 #### `agent.detach`

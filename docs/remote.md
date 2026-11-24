@@ -887,7 +887,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch, and `session_losses`, the machine's own, which reads what a led session's workspace holds that is not saved for its pilot's End confirmation; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1946,8 +1946,10 @@ on a real phone, by hand, and reported.
   the user's on both machines (no longer a row under its pilot, reached with a leave as any
   session of another machine). A real end of the pilot ends it there (`its pilot ended`), the stop
   kept until that machine takes it; `agent.ending` and the window's End confirmation list it,
-  with its machine, its unsaved work `unknown (on server)`: it is not asked there, so that the
-  confirmation never waits on another machine. A `following`, a `pilot-ended`, a
+  with its machine and its unsaved work as that machine reads it (#1354): asked there with a
+  `session_losses` `call` of the launch, all such machines at once, its answer awaited 3 seconds at
+  most, masked and cut here as any answer of another machine; `unknown (on server)` when it is
+  off, does not answer in time or cannot (a machine of before). A `following`, a
   `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
   caller, never for a handed launch; a `following` only for a led one, its state `on`, `paused`
   or `ended`. The light list does not name a pilot of another machine (its
@@ -1961,6 +1963,14 @@ on a real phone, by hand, and reported.
   until that machine takes it as the pilot's is, and only for a launch this machine made, never
   for anything another machine names. A failed pilot ends no led session, here or there: it can
   be resumed.
+- **A held launch goes with its caller, and a stop is never lost** (#1354). A launch held for the
+  user there names its agent already, and is stopped as any: that machine withdraws it (its
+  request goes, nothing is laid, its workspace is removed), the agent's reason saying the caller's
+  end (`withdrawn: agent … of pc, which asked for it, ended`, or `failed`). A launch whose code is
+  still travelling when its caller ends, whose agent is not known yet, is stopped as soon as that
+  machine names it. The stop is kept under `stop-<launch>` whatever the queue for that machine
+  holds: it replaces the calls kept for that launch (a message, a following, an earlier stop),
+  which it makes useless, so that the queue grows by one at most per launch it ends.
 - Where a question goes when the parent is off (#818): a parent of another machine that forwards
   a request of its child gives it to the user of the child's machine, never to its own parent on
   its machine (the request lives where the call was held). A request goes to the user when the
@@ -2510,11 +2520,16 @@ on a real phone, by hand, and reported.
   lists a launch held for its user `idle`, as it lists nothing it holds; while the launch is
   `held` here, that `idle` is not taken over the request's mark. Any other state that machine
   lists wins, so an allowed launch shows what it does as soon as its list says so.
-- **The End confirmation does not ask another machine** (#1277): a session the pilot leads on
-  another machine is listed with its unsaved work `unknown (on server)`, never read there, rather
-  than waiting, even briefly, for an answer that may not come. Asking that machine with a bounded
-  wait is a follow-up. A launch on another machine that names no agent yet (held for the user
-  there) is not stopped with its parent: a follow-up.
+- **The End confirmation waits 3 seconds for another machine** (#1354): the machines of the
+  sessions the pilot leads elsewhere are asked at once, and one that has not answered after 3
+  seconds is said `unknown (on server)`, rather than holding the confirmation longer.
+- **A stop replaces the messages kept for its launch** (#1354): rather than going past the 100
+  messages a machine may leave waiting, a stop takes the place of the calls kept for the same
+  launch, which it makes useless; a message the agent would have read before its stop is not
+  delivered.
+- **A held launch's withdrawal is said on the agent there** (#1354): its reason, `withdrawn: agent
+  … of pc, which asked for it, ended`; the user's request goes as any request of an agent that
+  ended.
 
 ## Open questions
 
