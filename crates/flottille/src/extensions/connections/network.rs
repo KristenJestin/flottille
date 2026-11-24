@@ -326,13 +326,14 @@ pub fn hold() -> ! {
 /// The pids of the processes that answer on the sockets of agent-browser's daemons in the socket
 /// folder `sockets` and the folders in it (`<session>.sock`; a namespace puts a session's in a
 /// subfolder), as the kernel says (`SO_PEERCRED`), never as a file says: 0 for one whose process
-/// is gone or unknown, which no network holds, and for one that cannot be connected to, whatever
-/// the error (it stops accepting, its path is too long for a socket address, nobody listens on it
-/// any more), which fails closed. Never through a link.
+/// is gone or unknown, which no network holds, and for whatever cannot be told, which fails
+/// closed: a socket that cannot be connected to whatever the error (it stops accepting, its path
+/// is too long for a socket address, its mode refuses us, nobody listens on it any more), a link
+/// named as a socket (agent-browser follows it), a folder or an entry that cannot be read.
 pub fn daemons(sockets: &Path) -> Vec<u32> {
     connected(sockets)
         .into_iter()
-        .map(|result| match result {
+        .map(|(_, result)| match result {
             Ok(stream) => peer(&stream)
                 .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
                 .unwrap_or(0),
@@ -342,35 +343,70 @@ pub fn daemons(sockets: &Path) -> Vec<u32> {
 }
 
 /// Whether a daemon may still be alive on a socket of the socket folder `sockets`: one that
-/// accepts, or that does not accept at once. A socket nobody listens on is a browser that ended,
-/// which keeps nothing (`daemons` counts it as outside all the same).
+/// accepts, or that cannot be told (it does not accept at once, its path is too long, its mode
+/// refuses us). Only a socket nobody listens on is a browser that ended, which keeps nothing.
 pub fn alive(sockets: &Path) -> bool {
-    connected(sockets).iter().any(|result| match result {
-        Ok(_) => true,
-        Err(error) => error.kind() == io::ErrorKind::WouldBlock,
-    })
+    connected(sockets)
+        .iter()
+        .any(|(_, result)| result.as_ref().map_or_else(|error| !dead(error), |_| true))
 }
 
-/// Not yet.
-pub fn swept(_sockets: &Path) {}
+/// The sockets of the socket folder `sockets` (and the folders in it) that nobody listens on any
+/// more removed: a browser that crashed leaves its file, and holds nothing. One that cannot be
+/// told (any other error) stays, and counts as outside (`daemons`).
+pub fn swept(sockets: &Path) {
+    for (path, result) in connected(sockets) {
+        if result.as_ref().is_err_and(dead) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Whether `error` says nobody is behind the socket: refused, or the file went.
+fn dead(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    )
+}
 
 /// A connection, or its error, to each socket of agent-browser's in `sockets` and the folders in
-/// it, never through a link.
-fn connected(sockets: &Path) -> Vec<io::Result<std::os::unix::net::UnixStream>> {
+/// it, never through a link. What cannot be looked at is an error too, never skipped: a folder
+/// or an entry that cannot be read, and a link named as a socket.
+fn connected(sockets: &Path) -> Vec<(PathBuf, io::Result<std::os::unix::net::UnixStream>)> {
     use std::os::unix::fs::FileTypeExt;
-    let Ok(listed) = std::fs::read_dir(sockets) else {
-        return Vec::new();
+    let listed = match std::fs::read_dir(sockets) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => return vec![(sockets.to_owned(), Err(error))],
     };
     let mut found = Vec::new();
-    for entry in listed.flatten() {
-        // The type of the entry itself, never of what a link leads to.
-        let Ok(kind) = entry.file_type() else {
-            continue;
+    for entry in listed {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                found.push((sockets.to_owned(), Err(error)));
+                continue;
+            }
         };
+        let path = entry.path();
+        // The type of the entry itself, never of what a link leads to.
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) => {
+                found.push((path, Err(error)));
+                continue;
+            }
+        };
+        let named_as_socket = path.extension().is_some_and(|kind| kind == "sock");
         if kind.is_dir() {
-            found.extend(connected(&entry.path()));
-        } else if kind.is_socket() && entry.path().extension().is_some_and(|kind| kind == "sock") {
-            found.push(connect_at_once(&entry.path()));
+            found.extend(connected(&path));
+        } else if kind.is_socket() && named_as_socket {
+            let result = connect_at_once(&path);
+            found.push((path, result));
+        } else if kind.is_symlink() && named_as_socket {
+            let error = io::Error::other("a link named as a socket");
+            found.push((path, Err(error)));
         }
     }
     found

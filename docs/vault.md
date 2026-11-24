@@ -923,7 +923,11 @@ the socket folder and of the folders in it, never through a link (`SO_PEERCRED`;
 a session's socket in a subfolder, and `--namespace` is refused to the login all the same). The
 connection does not wait for a daemon to accept, and a socket it cannot connect to, whatever the
 error, counts as outside: one that stops accepting, one whose path is too long for a socket address,
-one nobody listens on any more, and one whose process is gone. The pids are never read from
+one whose mode refuses the connection, and one whose process is gone; so does what cannot be
+looked at (a folder or an entry that cannot be read, a link named as a socket, which agent-browser
+follows). One exception: a socket nobody listens on (the connection is refused) is a browser that
+crashed and left its file, in socket folders that are kept: it is removed before the count, and
+holds nothing. The pids are never read from
 agent-browser's `<session>.pid` files. The record is the holder's only while the process at its pid
 has the start time it records: a process that took the pid since is not the holder.
 

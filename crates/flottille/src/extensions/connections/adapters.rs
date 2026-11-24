@@ -923,10 +923,15 @@ async fn answering(vault: &Path) -> Vec<u32> {
     let Some(sockets) = sockets_in(vault) else {
         return Vec::new();
     };
-    tokio::task::spawn_blocking(move || network::daemons(&sockets))
-        .await
-        // Not known: as a browser outside, so nothing is filled.
-        .unwrap_or_else(|_| vec![0])
+    tokio::task::spawn_blocking(move || {
+        // A crashed browser's socket file stays in the kept socket folders: nobody listens, so it
+        // is not outside, and counting it would block every login.
+        network::swept(&sockets);
+        network::daemons(&sockets)
+    })
+    .await
+    // Not known: as a browser outside, so nothing is filled.
+    .unwrap_or_else(|_| vec![0])
 }
 
 /// `agent-browser close` (`--all` its sessions when `all`), in `network` when there is one.
