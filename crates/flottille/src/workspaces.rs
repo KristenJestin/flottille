@@ -724,17 +724,17 @@ pub fn move_base(
     // undone.
     let written = daemon.write(|store| {
         let Some(fresh) = store.workspace(&workspace.project, &workspace.name)? else {
-            return Ok((Moving::Nothing, None));
+            return Ok((BaseWrite::Nothing, None));
         };
         let mut repositories = fresh.repositories.clone();
         let Some(worktree) = repositories.iter_mut().find(|w| w.path == repository) else {
-            return Ok((Moving::Nothing, None));
+            return Ok((BaseWrite::Nothing, None));
         };
         if worktree.base.branch == to {
-            return Ok((Moving::Nothing, None));
+            return Ok((BaseWrite::Nothing, None));
         }
         if worktree.base.branch != from {
-            return Ok((Moving::Meanwhile(worktree.base.branch.clone()), None));
+            return Ok((BaseWrite::Meanwhile(worktree.base.branch.clone()), None));
         }
         let was = std::mem::replace(&mut worktree.base.branch, to.to_owned());
         // The tracking ref a review compares against follows the branch; a commit it started from
@@ -752,18 +752,18 @@ pub fn move_base(
             &repositories,
             ("workspace.base_changed", event),
         )?;
-        Ok((Moving::Moved(was), Some(event)))
+        Ok((BaseWrite::Moved(was), Some(event)))
     });
     let was = match written {
-        Ok(Moving::Moved(was)) => was,
-        Ok(Moving::Meanwhile(now)) => {
+        Ok(BaseWrite::Moved(was)) => was,
+        Ok(BaseWrite::Meanwhile(now)) => {
             return Some(format!(
                 "The base of {repository} in the workspace {} is {now}, moved meanwhile: it was \
                  not moved from {from} to {to}.",
                 workspace.name
             ));
         }
-        Ok(Moving::Nothing) => return None,
+        Ok(BaseWrite::Nothing) => return None,
         Err(error) => {
             eprintln!("flottille daemon: workspace.base_changed: {error}");
             return None;
@@ -793,7 +793,7 @@ pub fn move_base(
 }
 
 /// What `move_base` found when it wrote.
-enum Moving {
+enum BaseWrite {
     Nothing,
     Moved(String),
     /// The base was not the one the decision was made on: the one it is.
