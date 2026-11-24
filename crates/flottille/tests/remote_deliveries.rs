@@ -1012,6 +1012,39 @@ fn a_message_sent_from_another_machine_is_masked_with_the_receiver_s_place() {
 }
 
 #[test]
+fn a_brief_from_another_machine_given_again_after_a_compaction_is_masked() {
+    let user = server_user(allowing());
+    let file = user.path("export.env");
+    std::fs::write(&file, format!("EXPORT_KEY={SERVER_SECRET}\n")).unwrap();
+    let setup = format!("\n[[setup]]\nrun = \"cp {} .env\"\n", file.display());
+    let (_hub, pc, server) = pc_and_server(user, Some(&setup));
+    script(
+        &server,
+        json!([{"when": "Sign the export tests with", "times": 1,
+            "do": [{"compaction": true}]}]),
+    );
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let answer = launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": format!("Sign the export tests with {SERVER_SECRET}.")}),
+    );
+
+    done(&answer);
+    eventually("the brief again", || {
+        prompts_with(&server, "Your brief, again") == 1
+    });
+    assert_eq!(
+        stored_or_prompted(&server, SERVER_SECRET),
+        0,
+        "{:#?}",
+        server.prompts()
+    );
+}
+
+#[test]
 fn a_brief_from_another_machine_is_masked_with_the_receiver_s_place() {
     // The setup puts the secret in the workspace each child works in, as a copied `.env` is.
     let user = server_user(allowing());
