@@ -120,8 +120,11 @@ fn the_pilot_removes_the_workspace_of_its_led_session_on_another_machine() {
         .call("approval.approve", json!({"number": number}))
         .unwrap();
     eventually("the workspace removed there", || !there.exists());
-    let approved = prompt_with(&pc, &format!("Request #{number} on server"));
-    assert!(approved.contains("was approved by the user"), "{approved}");
+    let approved = prompt_with(&pc, "was approved by the user");
+    assert!(
+        approved.contains(&format!("Request #{number}")),
+        "{approved}"
+    );
     assert!(approved.contains("is removed"), "{approved}");
 }
 
