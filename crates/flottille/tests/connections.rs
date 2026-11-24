@@ -4565,8 +4565,9 @@ const OWN_LOGINS: [&str; 6] = [
 /// Actions its adapter keeps off as well: plugins run commands and read agent-browser's config,
 /// `connect` and `state_load` bring a browser or a session someone else controls, and
 /// `with_login` is named should a 0.43 patch serve it.
-const LOCKED_TOO: [&str; 7] = [
+const LOCKED_TOO: [&str; 8] = [
     "agent_browser_connect",
+    "agent_browser_get_cdp_url",
     "agent_browser_state_load",
     "agent_browser_plugin_add",
     "agent_browser_plugin_list",
@@ -4699,6 +4700,15 @@ fn signed_up(user: &User) -> (String, Mcp) {
     .unwrap();
     let (id, mcp) = session(user, "app");
     set_mode(user, &id, "full");
+    (id, mcp)
+}
+
+/// `signed_up`, its session in Auto with a judge allowing every call: a run in Full is the
+/// user's own, confined in no way (`docs/tools.md`, "In Full, a run is the user's own"), so what
+/// a confined run cannot reach is tested in Auto. The user is made `with_allowing_judge`.
+fn signed_up_confined(user: &User) -> (String, Mcp) {
+    let (id, mcp) = signed_up(user);
+    set_mode(user, &id, "auto");
     (id, mcp)
 }
 
@@ -4929,6 +4939,322 @@ fn agent_browser_logs_in_with_a_vault_entry() {
         login[0]["cwd"],
         started.last().unwrap()["cwd"],
         "not the server's folder"
+    );
+}
+
+#[test]
+fn without_isolation_the_login_refuses_to_fill() {
+    // No pasta: the browser's network would be the runs', whose DevTools any run reaches. The
+    // login refuses before it opens anything, and says what to install; the rest of the
+    // connection still answers.
+    let user = user().with_env("FLOTTILLE_TEST_PASTA", "flottille-test-no-pasta");
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(
+        said.contains("install passt (pasta) to let the agent's browser sign in"),
+        "{said}"
+    );
+    assert!(form(&user).is_none(), "the form was filled");
+    assert!(logged(&user, "browser", "open").is_empty());
+    assert!(logged(&user, "browser", "login").is_empty());
+    let opened = done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    assert!(opened.contains("opened"), "{opened}");
+    // Doctor says the gap with its remedy, once.
+    let doctor = user.run(&["doctor", "--json"]);
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(report["sandbox"]["browser_network"], false, "{report}");
+    let warnings = report["warnings"].to_string();
+    assert_eq!(warnings.matches("install passt").count(), 1, "{report}");
+}
+
+/// What Chrome leaves in the temporary folder while it runs, by the start of its name:
+/// agent-browser's profile folder (cookies, Local Storage, History…) and Chrome's own files.
+const CHROME_LEFT: [&str; 3] = [
+    "agent-browser-chrome-",
+    ".org.chromium.",
+    "com.google.Chrome.",
+];
+
+/// What a run of the agent's, in `mode`, lists of each of `folders`: `{"listed": {folder:
+/// [names]}, "errors": {folder: why}}`.
+fn listed_by_run(user: &User, mcp: &Mcp, agent: &str, mode: &str, folders: &[PathBuf]) -> Value {
+    let result = user.path(&format!("work/app/listed-{mode}.json"));
+    let folders: Vec<String> = folders
+        .iter()
+        .map(|folder| folder.display().to_string())
+        .collect();
+    std::fs::write(
+        user.path("work/app/probe.py"),
+        format!(
+            "import json, os\n\
+             out = {{'listed': {{}}, 'errors': {{}}}}\n\
+             for folder in {folders}:\n\
+             \x20   try:\n\
+             \x20       out['listed'][folder] = sorted(os.listdir(folder))\n\
+             \x20   except Exception as error:\n\
+             \x20       out['errors'][folder] = str(error)\n\
+             open({result:?}, 'w').write(json.dumps(out))\n",
+            folders = serde_json::to_string(&folders).unwrap(),
+            result = result.display().to_string(),
+        ),
+    )
+    .unwrap();
+    probe_ran(user, mcp, agent, mode, &result)
+}
+
+/// That a run's listing found nothing of Chrome's.
+fn found_no_profile(listing: &Value, mode: &str) {
+    for (folder, names) in listing["listed"].as_object().unwrap() {
+        for name in names.as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(
+                !CHROME_LEFT.iter().any(|start| name.starts_with(start)),
+                "{mode}: a run found the browser's {name} in {folder}: {listing}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_confined_run_finds_no_chrome_profile_in_the_temporary_folder() {
+    // agent-browser makes Chrome's profile, which holds its cookies, in the temporary folder: the
+    // daemon's own is the runs' too. While the browser runs, a run in Ask and in Auto lists the
+    // daemon's temporary folder and finds nothing of it.
+    let user = User::with_fake_agent().with_allowing_judge();
+    let temporary = user.path("tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    let user = user.with_env("TMPDIR", temporary.to_str().unwrap());
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    let started = logged(&user, "browser", "browser");
+    assert_eq!(started.last().unwrap()["started"], true, "{started:?}");
+    for mode in ["ask", "auto"] {
+        let listing = listed_by_run(&user, &mcp, &id, mode, std::slice::from_ref(&temporary));
+        assert!(
+            listing["listed"]
+                .as_object()
+                .unwrap()
+                .contains_key(temporary.to_str().unwrap()),
+            "{mode}: {listing}"
+        );
+        found_no_profile(&listing, mode);
+    }
+}
+
+#[test]
+fn every_command_of_agent_browser_runs_in_the_browsers_network() {
+    // The server, the login's `open` and `auth login`, and `close`: one network namespace, the
+    // browser's, which is not the one the test (as a run) is in.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    user.call("connection.remove", json!({"name": "browser"}))
+        .unwrap();
+    eventually("the browser is closed", || {
+        !logged(&user, "browser", "close").is_empty()
+    });
+    let ours = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self/ns/net").unwrap().ino()
+    };
+    let mut seen = Vec::new();
+    for event in ["start", "open", "login", "close"] {
+        // The server started before its adapter applies (to list its tools) is no browser's.
+        let lines: Vec<Value> = logged(&user, "browser", event)
+            .into_iter()
+            .filter(|line| event != "start" || !line["config"].is_null())
+            .collect();
+        assert!(!lines.is_empty(), "no {event}");
+        for line in lines {
+            let netns = line["netns"].as_u64().unwrap_or_else(|| panic!("{line}"));
+            assert_ne!(netns, ours, "{event} ran in the runs' network: {line}");
+            seen.push((event, netns));
+        }
+    }
+    assert!(
+        seen.iter().all(|(_, netns)| *netns == seen[0].1),
+        "not one network: {seen:?}"
+    );
+}
+
+#[test]
+fn every_command_of_agent_browser_keeps_chromes_folders_in_the_vault() {
+    // Chrome writes outside its profile: its crash database (page memory, a password typed), its
+    // caches, under its default configuration folder whatever profile it is given. The server,
+    // the login's `open` and `auth login`, and `close` are each given folders of the vault's, and
+    // none of the user's variables that would move them elsewhere.
+    let user = user();
+    let elsewhere = user.path("elsewhere");
+    let user = user
+        .with_env("XDG_CACHE_HOME", elsewhere.join("cache").to_str().unwrap())
+        .with_env(
+            "CHROME_CONFIG_HOME",
+            elsewhere.join("chrome").to_str().unwrap(),
+        )
+        .with_env(
+            "BREAKPAD_DUMP_LOCATION",
+            elsewhere.join("crashes").to_str().unwrap(),
+        );
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    user.call("connection.remove", json!({"name": "browser"}))
+        .unwrap();
+    eventually("the browser is closed", || {
+        !logged(&user, "browser", "close").is_empty()
+    });
+    let vault = vault_folder(&user);
+    for event in ["start", "open", "login", "close"] {
+        // The server started before its adapter applies (to list its tools) is no browser's.
+        let lines: Vec<Value> = logged(&user, "browser", event)
+            .into_iter()
+            .filter(|line| event != "start" || !line["config"].is_null())
+            .collect();
+        assert!(!lines.is_empty(), "no {event}");
+        for line in lines {
+            let folders = &line["folders"];
+            for name in [
+                "TMPDIR",
+                "XDG_CONFIG_HOME",
+                "XDG_CACHE_HOME",
+                "XDG_DATA_HOME",
+            ] {
+                let folder = folders[name]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{event}: no {name}: {line}"));
+                assert!(
+                    Path::new(folder).starts_with(&vault) && Path::new(folder) != vault,
+                    "{event}: {name} is outside the vault folder: {line}"
+                );
+            }
+            for name in ["CHROME_CONFIG_HOME", "BREAKPAD_DUMP_LOCATION"] {
+                assert!(folders[name].is_null(), "{event}: {name} given: {line}");
+            }
+        }
+    }
+}
+
+#[test]
+fn pasta_forwards_no_port_in_and_the_hosts_loopback_out() {
+    // pasta gives the browser's network its way out: no port of the host's forwarded in, where
+    // a run would reach DevTools through it, and the host's loopback ports out.
+    let user = user();
+    let log = user.path("pasta.log");
+    let pasta = user.path("pasta.sh");
+    std::fs::write(
+        &pasta,
+        format!(
+            "#!/bin/sh\nfor word in \"$@\"; do printf '%s\\n' \"$word\" >> {}; done\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&pasta, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let user = user.with_env("FLOTTILLE_TEST_PASTA", pasta.to_str().unwrap());
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let words: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    for (option, value) in [
+        ("-t", "none"),
+        ("-u", "none"),
+        ("-T", "auto"),
+        ("-U", "auto"),
+    ] {
+        assert!(
+            words
+                .windows(2)
+                .any(|pair| pair[0] == option && pair[1] == value),
+            "{option} {value}: {words:?}"
+        );
+    }
+    // Nothing else forwarded in: one -t and one -u.
+    for option in ["-t", "-u", "--tcp-ports", "--udp-ports"] {
+        assert!(
+            words.iter().filter(|word| *word == option).count() <= 1,
+            "{option}: {words:?}"
+        );
+    }
+    // Attached to the namespace's holder, by its pid, the last word.
+    let holder: u32 = words.last().unwrap().parse().unwrap();
+    assert!(holder > 1, "{words:?}");
+}
+
+#[test]
+fn a_browser_outside_its_network_is_closed_and_the_login_refuses() {
+    // A browser answers on the connection's socket folder from outside its network (started
+    // before it, or its holder killed): the login closes the folder's browsers (`close --all`),
+    // and, one still answering from outside, fills nothing.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    eventually("the socket folder is made", || {
+        socket_folder(&user).is_some()
+    });
+    let sockets = socket_folder(&user).unwrap();
+    // The test's own socket, in the test's network, and no pid file that says whose it is.
+    let _outside = std::os::unix::net::UnixListener::bind(sockets.join("default.sock")).unwrap();
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("runs outside its network"), "{said}");
+    assert!(form(&user).is_none(), "the form was filled");
+    assert!(logged(&user, "browser", "login").is_empty());
+    let closed = logged(&user, "browser", "close");
+    assert!(
+        closed
+            .iter()
+            .any(|line| line["args"].as_array().unwrap().contains(&json!("--all"))),
+        "{closed:?}"
+    );
+}
+
+#[test]
+fn a_link_in_the_connections_state_folder_is_not_followed_at_start() {
+    // The connections' state folder is within the runs' reach: a link a run plants there, to a
+    // folder of the user's, is not followed by the sweep at the daemon's start.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let elsewhere = user.path("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("agent-browser.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, user.path("state/flottille/connections/planted"))
+        .unwrap();
+    killed(&user);
+    user.status();
+    assert!(
+        elsewhere.join("agent-browser.json").exists(),
+        "the sweep followed the link"
     );
 }
 
@@ -5194,6 +5520,915 @@ fn a_plugin_request_without_its_runs_token_is_refused() {
 }
 
 #[test]
+fn a_plugin_that_fails_tells_the_agent_why() {
+    // The plugin is asked while no token of a login of Flottille's is there: it fails before it
+    // reaches the daemon, and agent-browser says only that it "exited unsuccessfully".
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({"token": "drop"}));
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(answer.contains("exited unsuccessfully"), "{answer}");
+    // Flottille's plugin's own reason, which agent-browser does not relay.
+    assert!(
+        answer.contains("Flottille's credential plugin said: refused: no login of Flottille's"),
+        "{answer}"
+    );
+    assert!(!answer.contains(PASSWORD), "{answer}");
+    assert!(form(&user).is_none(), "the form was filled");
+}
+
+/// The files of the plugin's last login beside its socket (`vault.token`, `vault.why`), found by
+/// the socket the configuration of its page's load names (a login stopped logs nothing).
+fn plugin_file(user: &User, file: &str) -> PathBuf {
+    let opened = logged(user, "browser", "open");
+    let socket = opened.last().unwrap()["config"]["plugins"][0]["args"][2]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Path::new(&socket).with_file_name(file)
+}
+
+#[test]
+fn a_run_cannot_get_the_credential() {
+    // A run of the agent's own waits for a login of Flottille's, reads the token beside the
+    // plugin's socket and speaks to that socket with the entry and its site's URL: it gets
+    // nothing, and the login still signs in.
+    let user = user().with_allowing_judge();
+    let until = user.path("probe-done");
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"hold": until.to_str().unwrap()}),
+    );
+    let (_, mcp) = signed_up_confined(&user);
+    let result = user.path("probe-result.json");
+    // The run cannot read the configuration that names the socket (it is in the vault folder):
+    // it is told the socket's path, which anyone can guess.
+    let config = vault_folder(&user).join("agent-browser.json");
+    let socket = vault_folder(&user).join("vault.sock");
+    std::fs::write(
+        user.path("work/app/probe.py"),
+        format!(
+            "import json, os, socket, time\n\
+             started, config, sock, result, until = {started:?}, {config:?}, {sock:?}, {result:?}, {until:?}\n\
+             deadline = time.time() + 30\n\
+             while not os.path.exists(started) and time.time() < deadline:\n    time.sleep(0.02)\n\
+             out = {{'started': os.path.exists(started), 'socket': sock}}\n\
+             token = ''\n\
+             try:\n\
+             \x20   out['config'] = open(config).read()\n\
+             except Exception as error:\n\
+             \x20   out['config_error'] = str(error)\n\
+             try:\n\
+             \x20   try:\n\
+             \x20       token = open(os.path.join(os.path.dirname(sock), 'vault.token')).read()\n\
+             \x20       out['token'] = token\n\
+             \x20   except Exception as error:\n\
+             \x20       out['token_error'] = str(error)\n\
+             \x20   s = socket.socket(socket.AF_UNIX)\n\
+             \x20   s.settimeout(5)\n\
+             \x20   s.connect(sock)\n\
+             \x20   s.sendall((json.dumps({{'token': token, 'item': 'shop-test', \\\n\
+             \x20       'url': 'https://shop.example.com/login'}}) + '\\n').encode())\n\
+             \x20   out['answer'] = s.makefile().readline()\n\
+             except Exception as error:\n\
+             \x20   out['error'] = str(error)\n\
+             open(result, 'w').write(json.dumps(out))\n\
+             open(until, 'w').write('')\n",
+            started = format!("{}.started", until.display()),
+            config = config.display().to_string(),
+            sock = socket.display().to_string(),
+            result = result.display().to_string(),
+            until = until.display().to_string(),
+        ),
+    )
+    .unwrap();
+    // Left running past its call: it waits for the login.
+    mcp.call("run", json!({"line": "python3 probe.py", "timeout": 1}));
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("shop-test"), "{said}");
+    let filled = form(&user).expect("the login did not sign in");
+    assert_eq!(filled["password"], PASSWORD);
+    let held = logged(&user, "browser", "held");
+    assert_eq!(held.last().unwrap()["token_seen"], true, "{held:?}");
+    let probe: Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the run never ended"))
+            .unwrap();
+    assert_eq!(probe["started"], true, "{probe}");
+    assert!(
+        probe.get("config").is_none(),
+        "the run read the configuration: {probe}"
+    );
+    assert!(
+        probe.get("token").is_none(),
+        "the run read the token: {probe}"
+    );
+    assert!(!probe.to_string().contains(PASSWORD), "{probe}");
+    assert!(!probe.to_string().contains("tester@example.com"), "{probe}");
+}
+
+/// The connection `browser`'s vault folder, where its login's token, its plugin's socket,
+/// agent-browser's configuration and its daemon's socket are: out of every run's reach.
+fn vault_folder(user: &User) -> PathBuf {
+    user.path("runtime/flottille/vault/browser")
+}
+
+/// The folders where agent-browser's configuration and its daemon's socket were or are: the
+/// connection's state folder (until #1309) and its vault folder.
+fn browser_folders(user: &User) -> Vec<PathBuf> {
+    vec![
+        user.path("state/flottille/connections/browser"),
+        vault_folder(user),
+    ]
+}
+
+/// `probe` (Python, its words `{STARTED}`, `{UNTIL}`, `{RESULT}` and `{FOLDERS}` replaced) run by
+/// the agent while a login of the entry `shop-test` holds before its plugin is asked: the
+/// login's answer and what the probe wrote.
+fn probed_login(user: &User, probe: &str) -> (Answer, Value) {
+    let until = user.path("probe-done");
+    browser(
+        user,
+        &agent_browser("0.43.0"),
+        json!({"hold": until.to_str().unwrap()}),
+    );
+    let (_, mcp) = signed_up_confined(user);
+    let result = user.path("probe-result.json");
+    let folders: Vec<String> = browser_folders(user)
+        .iter()
+        .map(|folder| folder.display().to_string())
+        .collect();
+    let script = probe
+        .replace(
+            "{STARTED}",
+            &format!("{:?}", format!("{}.started", until.display())),
+        )
+        .replace("{UNTIL}", &format!("{:?}", until.display().to_string()))
+        .replace("{RESULT}", &format!("{:?}", result.display().to_string()))
+        .replace("{FOLDERS}", &serde_json::to_string(&folders).unwrap());
+    std::fs::write(user.path("work/app/probe.py"), script).unwrap();
+    // Left running past its call: it waits for the login.
+    mcp.call("run", json!({"line": "python3 probe.py", "timeout": 1}));
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    let probe: Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the run never ended"))
+            .unwrap();
+    (answer, probe)
+}
+
+#[test]
+fn a_run_cannot_swap_the_login_plugin() {
+    // A run of the agent's own rewrites agent-browser's configuration, wherever it may be, over
+    // and over while a login loads its page and starts: its plugin, a script that would be run by
+    // agent-browser's daemon with the vault folder in reach, is never run, and the login fills
+    // with Flottille's own plugin.
+    let user = user().with_allowing_judge();
+    let marker = user.path("swapped-plugin-ran");
+    let plugin = user.path("plugin.sh");
+    std::fs::write(
+        &plugin,
+        format!("#!/bin/sh\necho ran > {}\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&plugin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let probe = r#"import json, os, time
+started, until, result, folders = {STARTED}, {UNTIL}, {RESULT}, {FOLDERS}
+swapped = json.dumps({'plugins': [{'name': 'flottille', 'command': PLUGIN, 'args': [],
+    'capabilities': ['credential.read']}]})
+out = {'written': [], 'errors': {}}
+deadline = time.time() + 30
+while not os.path.exists(started) and time.time() < deadline:
+    for folder in folders:
+        config = os.path.join(folder, 'agent-browser.json')
+        try:
+            with open(config, 'w') as f:
+                f.write(swapped)
+            if config not in out['written']:
+                out['written'].append(config)
+        except Exception as error:
+            out['errors'][config] = str(error)
+    time.sleep(0.002)
+out['started'] = os.path.exists(started)
+open(result, 'w').write(json.dumps(out))
+open(until, 'w').write('')
+"#
+    .replace("PLUGIN", &format!("{:?}", plugin.display().to_string()));
+    let (answer, probe) = probed_login(&user, &probe);
+    assert_eq!(probe["started"], true, "{probe}");
+    assert!(
+        !marker.exists(),
+        "the run's plugin was run by agent-browser: {probe}"
+    );
+    let said = done(answer);
+    assert!(said.contains("shop-test"), "{said}");
+    let filled = form(&user).expect("the login did not sign in");
+    assert_eq!(filled["password"], PASSWORD);
+    let vault_config = vault_folder(&user).join("agent-browser.json");
+    assert!(
+        !probe["written"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(vault_config.display().to_string())),
+        "{probe}"
+    );
+}
+
+#[test]
+fn a_run_cannot_drive_the_browser() {
+    // A run of the agent's own looks for agent-browser's daemon while a login runs, in the folder
+    // `AGENT_BROWSER_SOCKET_DIR` names (the fake's browser is its `browser.json` there, the real
+    // one's a socket): it finds nothing to connect to, and reads none of it.
+    let user = user().with_allowing_judge();
+    let probe = r#"import json, os, socket, time
+started, until, result, folders = {STARTED}, {UNTIL}, {RESULT}, {FOLDERS}
+deadline = time.time() + 30
+while not os.path.exists(started) and time.time() < deadline:
+    time.sleep(0.02)
+out = {'started': os.path.exists(started), 'listed': {}, 'errors': {}, 'read': {},
+    'connected': []}
+for folder in folders:
+    try:
+        names = sorted(os.listdir(folder))
+        out['listed'][folder] = names
+    except Exception as error:
+        out['errors'][folder] = str(error)
+        continue
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.endswith('.sock'):
+            try:
+                s = socket.socket(socket.AF_UNIX)
+                s.settimeout(2)
+                s.connect(path)
+                out['connected'].append(path)
+            except Exception as error:
+                out['errors'][path] = str(error)
+        elif name in ('browser.json', 'agent-browser.json'):
+            try:
+                out['read'][path] = open(path).read()
+            except Exception as error:
+                out['errors'][path] = str(error)
+open(result, 'w').write(json.dumps(out))
+open(until, 'w').write('')
+"#;
+    let (answer, probe) = probed_login(&user, probe);
+    assert_eq!(probe["started"], true, "{probe}");
+    done(answer);
+    // The login's browser did run, in the folder the run looked into.
+    let browsers = logged(&user, "browser", "browser");
+    assert!(!browsers.is_empty(), "no browser ran");
+    for names in probe["listed"].as_object().unwrap().values() {
+        for name in names.as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(
+                name != "browser.json" && name != "agent-browser.json" && !name.ends_with(".sock"),
+                "the run found the browser's {name}: {probe}"
+            );
+        }
+    }
+    assert_eq!(probe["read"], json!({}), "{probe}");
+    assert_eq!(probe["connected"], json!([]), "{probe}");
+}
+
+/// A login of the entry `shop-test` with the fake's `login` behaviour `login`: its answer, and
+/// the paths of the run's token and reason files.
+fn logged_in_with(user: &User, login: Value) -> (Answer, PathBuf, PathBuf) {
+    browser(user, &agent_browser("0.43.0"), login);
+    let (_, mcp) = signed_up(user);
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    (
+        answer,
+        plugin_file(user, "vault.token"),
+        plugin_file(user, "vault.why"),
+    )
+}
+
+#[test]
+fn the_token_and_the_reason_are_gone_once_the_login_ends() {
+    // Signed in: the token was there while the plugin was asked.
+    let signed_in = user();
+    let until = signed_in.path("go");
+    std::fs::write(&until, "").unwrap();
+    let (answer, token, why) = logged_in_with(&signed_in, json!({"hold": until.to_str().unwrap()}));
+    done(answer);
+    let held = logged(&signed_in, "browser", "held");
+    assert_eq!(held.last().unwrap()["token_seen"], true, "{held:?}");
+    assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
+    // Failed: the plugin wrote why.
+    let failed = user();
+    let (answer, token, why) = logged_in_with(&failed, json!({"token": "wrong"}));
+    let said = refused(answer);
+    // Anything that reached the socket may have sent it: not said to be the plugin's request.
+    assert!(
+        said.contains("a request without the token of this login was refused"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("Flottille refused agent-browser's request"),
+        "{said}"
+    );
+    assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
+}
+
+#[test]
+fn the_token_is_gone_once_the_login_runs_out_of_time() {
+    let user = user().with_env("FLOTTILLE_CONNECTION_LOGIN_MS", "1500");
+    let never = user.path("never");
+    let (answer, token, why) = logged_in_with(&user, json!({"hold": never.to_str().unwrap()}));
+    let said = refused(answer);
+    assert!(said.contains("did not sign in within"), "{said}");
+    let held = logged(&user, "browser", "held");
+    assert_eq!(held.last().unwrap()["token_seen"], true, "{held:?}");
+    assert!(!token.exists() && !why.exists(), "{token:?} {why:?}");
+}
+
+#[test]
+fn the_plugins_reason_is_never_read_through_a_link() {
+    // Its reason replaced with a link to a file that holds another secret: never read.
+    let linked = user();
+    let elsewhere = linked.path("elsewhere.txt");
+    std::fs::write(&elsewhere, "another-secret-of-the-user\n").unwrap();
+    let (answer, _, _) = logged_in_with(
+        &linked,
+        json!({"token": "drop", "why_link": elsewhere.to_str().unwrap()}),
+    );
+    let said = refused(answer);
+    assert!(!said.contains("another-secret-of-the-user"), "{said}");
+    // A link planted where it writes its reason: replaced, never written through.
+    let planted = user();
+    let target = planted.path("target.txt");
+    std::fs::write(&target, "kept\n").unwrap();
+    let (answer, _, _) = logged_in_with(
+        &planted,
+        json!({"token": "drop", "why_planted": target.to_str().unwrap()}),
+    );
+    let said = refused(answer);
+    assert!(
+        said.contains("Flottille's credential plugin said"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept\n");
+}
+
+#[test]
+fn the_plugins_reason_is_read_up_to_a_kibibyte() {
+    let user = user();
+    let (answer, _, _) = logged_in_with(&user, json!({"token": "drop", "why_big": true}));
+    let said = refused(answer);
+    assert!(
+        said.contains("Flottille's credential plugin said"),
+        "{said}"
+    );
+    assert!(!said.contains(&"x".repeat(1025)), "{} bytes", said.len());
+}
+
+/// The real agent-browser 0.43.x to drive, when this machine has it: `FLOTTILLE_TEST_AGENT_BROWSER`
+/// names it, else `agent-browser` on the `PATH`; a launcher beside its native binary (npm's
+/// `agent-browser.js`) is replaced by that binary, which needs no Node in the run's sandbox.
+/// `Err` says why the test cannot drive one.
+fn real_agent_browser(home: &Path) -> Result<PathBuf, String> {
+    let named = std::env::var_os("FLOTTILLE_TEST_AGENT_BROWSER")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|folder| folder.join("agent-browser"))
+                    .find(|candidate| candidate.is_file())
+            })
+        })
+        .ok_or("no agent-browser: neither FLOTTILLE_TEST_AGENT_BROWSER nor one on the PATH")?;
+    let resolved =
+        std::fs::canonicalize(&named).map_err(|e| format!("{}: {e}", named.display()))?;
+    let native = resolved.with_file_name("agent-browser-linux-x64");
+    let program = if native.is_file() { native } else { resolved };
+    let version = std::process::Command::new(&program)
+        .arg("--version")
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+    let said = String::from_utf8_lossy(&version.stdout).trim().to_owned();
+    if !said.starts_with("agent-browser 0.43.") {
+        return Err(format!(
+            "{} is not agent-browser 0.43.x under a test's HOME: {said:?}{}",
+            program.display(),
+            String::from_utf8_lossy(&version.stderr).trim()
+        ));
+    }
+    Ok(program)
+}
+
+/// A login page on this machine, with an invented account: its form sends `username` and
+/// `password` to `/signed-in`, whose query is sent on the channel. It serves until the test ends.
+fn login_page() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = first.split_whitespace().nth(1).unwrap_or("/").to_owned();
+            let body = if let Some(query) = path.strip_prefix("/signed-in?") {
+                let _ = sent.send(query.to_owned());
+                "<!doctype html><title>Signed in</title><p>Welcome.</p>".to_owned()
+            } else {
+                "<!doctype html><title>Sign in</title><form action=\"/signed-in\" method=\"get\">\
+                 <label>Email <input type=\"email\" name=\"username\" id=\"username\" \
+                 autocomplete=\"username\"></label><label>Password <input type=\"password\" \
+                 name=\"password\" id=\"password\" autocomplete=\"current-password\"></label>\
+                 <button type=\"submit\">Sign in</button></form>"
+                    .to_owned()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (format!("http://127.0.0.1:{port}/login"), received)
+}
+
+/// Closes the browser agent-browser's daemon runs for the connection `browser` once the test
+/// ends, however it ends: no Chrome of the test outlives it.
+struct Closed {
+    program: PathBuf,
+    home: PathBuf,
+    vault: PathBuf,
+}
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        let Some(folder) = socket_folder_in(&self.vault) else {
+            return;
+        };
+        let _ = std::process::Command::new(&self.program)
+            .arg("close")
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("AGENT_BROWSER_SOCKET_DIR", folder)
+            .output();
+    }
+}
+
+/// A user for a test of the real agent-browser, with passt's real `pasta` (the network of its
+/// browser), and the program to run: none, said, when this machine lacks either. Its Auto judge
+/// allows everything.
+fn real_user() -> Option<(User, PathBuf)> {
+    let user = User::with_fake_agent().with_allowing_judge();
+    // The test's runtime folder is under `/tmp`, so the sandbox rules each entry of `/tmp` and
+    // not `/tmp` itself (`landlock.rs`): Chrome makes its profile in a temporary folder of the
+    // test's own, as it does in `/tmp` on a machine whose runtime folder is `/run/user/<uid>`.
+    let temporary = user.path("tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    let user = user
+        .with_env("TMPDIR", temporary.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_PASTA", "pasta");
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let program = match real_agent_browser(&user.path("home")) {
+        Ok(program) => program,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return None;
+        }
+    };
+    let pasta = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .any(|folder| folder.join("pasta").is_file());
+    if !pasta {
+        eprintln!("skipped: no pasta (passt) on the PATH");
+        return None;
+    }
+    Some((user, program))
+}
+
+/// The connection `browser` running the real `agent-browser mcp`, headless, its actions as the
+/// adapter sets them.
+fn real_connection(user: &User, program: &Path) {
+    turn_on(user);
+    let added = user
+        .call(
+            "connection.add",
+            json!({"name": "browser", "about": "A browser for the tests.",
+                "command": [program, "mcp"]}),
+        )
+        .unwrap();
+    if added["given"] != true {
+        user.call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        user.call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {}}),
+        )
+        .unwrap();
+    }
+}
+
+/// A page on this machine's loopback, as a developer's server is: each path asked is sent on the
+/// channel. It serves until the test ends.
+fn local_page() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                    break;
+                }
+            }
+            let _ = sent.send(first.split_whitespace().nth(1).unwrap_or("/").to_owned());
+            let body = "<!doctype html><title>The local page</title><p>Served here.</p>";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (format!("http://127.0.0.1:{port}/local"), received)
+}
+
+/// Has the browser of the connection open `url` (`agent_browser_open`), the agent in Full: what
+/// agent-browser answered.
+fn opened(mcp: &Mcp, url: &str) -> String {
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": url}}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    answer.text
+}
+
+/// What a run of the agent's, in `mode`, finds of Chrome's DevTools while the connection's
+/// browser runs: it reads every listening TCP port it can see (its own `/proc/net/tcp`, and every
+/// process's), asks each on the loopback for `/json/version`, and tries agent-browser's own port
+/// (its daemon's `stream`, which the test reads in the socket folder). `{"ports": <how many it
+/// tried>, "devtools": [what answered as a browser's DevTools], "stream": <connected or the
+/// error>}`.
+fn devtools_probed(user: &User, mcp: &Mcp, agent: &str, mode: &str) -> Value {
+    let sockets = socket_folder_in(&vault_folder(user)).expect("no browser runs");
+    let stream: u16 = std::fs::read_to_string(sockets.join("default.stream"))
+        .expect("agent-browser's daemon says no port")
+        .trim()
+        .parse()
+        .unwrap();
+    let result = user.path(&format!("work/app/probe-{mode}.json"));
+    std::fs::write(
+        user.path("work/app/probe.py"),
+        format!(
+            "import glob, json, socket\n\
+             result, stream = {result:?}, {stream}\n\
+             ports = set()\n\
+             tables = ['/proc/net/tcp', '/proc/net/tcp6'] + glob.glob('/proc/[0-9]*/net/tcp') \\\n\
+             \x20   + glob.glob('/proc/[0-9]*/net/tcp6')\n\
+             for table in tables:\n\
+             \x20   try:\n\
+             \x20       lines = open(table).read().splitlines()[1:]\n\
+             \x20   except Exception:\n\
+             \x20       continue\n\
+             \x20   for line in lines:\n\
+             \x20       fields = line.split()\n\
+             \x20       if len(fields) > 3 and fields[3] == '0A':\n\
+             \x20           ports.add(int(fields[1].rsplit(':', 1)[1], 16))\n\
+             out = {{'ports': len(ports), 'devtools': []}}\n\
+             for port in sorted(ports):\n\
+             \x20   for host in ('127.0.0.1', '::1'):\n\
+             \x20       try:\n\
+             \x20           s = socket.create_connection((host, port), timeout=1)\n\
+             \x20           s.settimeout(2)\n\
+             \x20           s.sendall(b'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n')\n\
+             \x20           data = b''\n\
+             \x20           try:\n\
+             \x20               while len(data) < 65536:\n\
+             \x20                   chunk = s.recv(4096)\n\
+             \x20                   if not chunk:\n\
+             \x20                       break\n\
+             \x20                   data += chunk\n\
+             \x20           except Exception:\n\
+             \x20               pass\n\
+             \x20           s.close()\n\
+             \x20           if b'webSocketDebuggerUrl' in data:\n\
+             \x20               out['devtools'].append(data.decode('utf-8', 'replace')[-400:])\n\
+             \x20       except Exception:\n\
+             \x20           pass\n\
+             try:\n\
+             \x20   socket.create_connection(('127.0.0.1', stream), timeout=1).close()\n\
+             \x20   out['stream'] = 'connected'\n\
+             except Exception as error:\n\
+             \x20   out['stream'] = type(error).__name__\n\
+             open(result, 'w').write(json.dumps(out))\n",
+            result = result.display().to_string(),
+        ),
+    )
+    .unwrap();
+    probe_ran(user, mcp, agent, mode, &result)
+}
+
+/// The run of `work/app/probe.py` by the agent `agent` in `mode`, approved when it is held: what
+/// it wrote to `result`, as JSON.
+fn probe_ran(user: &User, mcp: &Mcp, agent: &str, mode: &str, result: &Path) -> Value {
+    set_mode(user, agent, mode);
+    let asked = mcp.call("run", json!({"line": "python3 probe.py"}));
+    if held(&asked) {
+        let number: u64 = asked
+            .text
+            .strip_prefix("Waiting for the user's approval, request #")
+            .and_then(|rest| rest.split_once('.'))
+            .map(|(number, _)| number.parse().unwrap())
+            .unwrap();
+        user.call("approval.approve", json!({"number": number}))
+            .unwrap();
+    } else {
+        assert!(!asked.error, "{}", asked.text);
+    }
+    // Each port it tries may take seconds: longer than `eventually` waits.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let probe: Option<Value> = std::fs::read_to_string(result)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        if let Some(probe) = probe {
+            return probe;
+        }
+        assert!(Instant::now() < deadline, "the run in {mode} never ended");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// That a run's probe found the loopback's ports and none of the browser's.
+fn found_nothing(probe: &Value, mode: &str) {
+    assert!(probe["ports"].as_u64().unwrap_or(0) > 0, "{mode}: {probe}");
+    let headless: Vec<&Value> = probe["devtools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|said| said.as_str().unwrap_or("").contains("HeadlessChrome"))
+        .collect();
+    assert!(
+        headless.is_empty(),
+        "{mode}: a run reached the browser's DevTools: {probe}"
+    );
+    assert_ne!(
+        probe["stream"], "connected",
+        "{mode}: a run reached agent-browser's own port: {probe}"
+    );
+}
+
+#[test]
+fn a_run_cannot_reach_the_browsers_devtools() {
+    // The real agent-browser, headless: its daemon and Chrome run in a network of their own, so a
+    // confined run of the agent's, in Ask as in Auto, finds no DevTools port on its loopback,
+    // whatever it reads of /proc, and not agent-browser's own port either.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, _asked) = local_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    opened(&mcp, &url);
+    for mode in ["ask", "auto"] {
+        let probe = devtools_probed(&user, &mcp, &id, mode);
+        found_nothing(&probe, mode);
+    }
+}
+
+#[test]
+fn the_browser_reaches_a_local_server_of_the_host() {
+    // A developer's server on the host's loopback, as a run of the agent's may start one: the
+    // browser, in its own network, still opens its page.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, asked) = local_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let said = opened(&mcp, &url);
+    let path = asked
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|_| panic!("the local server was never asked: {said}"));
+    assert_eq!(path, "/local", "{said}");
+    assert!(said.contains("The local page"), "{said}");
+}
+
+#[test]
+fn the_login_fills_and_no_run_reads_it() {
+    // The login fills the form of a local page with the entry's password; a run of the agent's
+    // then looks for the browser's DevTools, which would read the page and its cookies: it finds
+    // none, and nothing of the secret.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, signed_in) = login_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": PASSWORD, "username": "tester@example.com",
+            "url": url, "for": "connection:browser",
+            "description": "The test account of the shop."}),
+    )
+    .unwrap();
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let query = signed_in
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the form was never sent");
+    // Never printed: compared only.
+    assert!(
+        query
+            .split('&')
+            .any(|pair| pair == format!("password={PASSWORD}")),
+        "the password sent is not the entry's"
+    );
+    let probe = devtools_probed(&user, &mcp, &id, "auto");
+    found_nothing(&probe, "auto");
+    assert!(
+        !probe.to_string().contains(PASSWORD),
+        "a run read the secret"
+    );
+}
+
+#[test]
+fn a_run_finds_none_of_the_real_browsers_profile() {
+    // The real agent-browser, headless, a page open: its Chrome's profile (cookies, Local
+    // Storage, History) is not in the daemon's temporary folder, which a run in Ask or in Auto
+    // lists. (`/tmp` itself is refused to a run here: the test's runtime folder is under it.)
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, _asked) = local_page();
+    real_connection(&user, &program);
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    opened(&mcp, &url);
+    let folders = [user.path("tmp")];
+    for mode in ["ask", "auto"] {
+        let listing = listed_by_run(&user, &mcp, &id, mode, &folders);
+        assert!(
+            listing["listed"]
+                .as_object()
+                .unwrap()
+                .contains_key(folders[0].to_str().unwrap()),
+            "{mode}: {listing}"
+        );
+        found_no_profile(&listing, mode);
+    }
+}
+
+#[test]
+fn the_real_agent_browser_signs_in_with_a_vault_entry() {
+    // The whole path with the real tool: the connection runs the real `agent-browser mcp`, its
+    // adapter applies, login runs agent-browser's command line in the run's sandbox, agent-browser's
+    // daemon starts Flottille's plugin, which asks the daemon for the entry; the page is a local
+    // one, headless, and the account an invented one in the in-memory keyring.
+    let Some((user, program)) = real_user() else {
+        return;
+    };
+    let _closed = Closed {
+        program: program.clone(),
+        home: user.path("home"),
+        vault: vault_folder(&user),
+    };
+    let (url, signed_in) = login_page();
+    let before = written_by_others(&user);
+    real_connection(&user, &program);
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": PASSWORD, "username": "tester@example.com",
+            "url": url, "for": "connection:browser",
+            "description": "The test account of the shop."}),
+    )
+    .unwrap();
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    assert!(
+        !answer.text.contains(PASSWORD),
+        "the secret reached the agent"
+    );
+    assert!(!answer.error, "{}", answer.text);
+    // The page's form was filled and sent with the entry's account.
+    let query = signed_in
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the form was never sent");
+    let sent: Vec<(&str, &str)> = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .collect();
+    assert!(
+        sent.contains(&("username", "tester%40example.com")),
+        "the username was not sent"
+    );
+    // Never printed: compared only.
+    assert!(
+        sent.contains(&("password", PASSWORD)),
+        "the password sent is not the entry's"
+    );
+    // Chrome's crash database and caches are in the vault folder, not in the user's
+    // configuration and cache folders, which runs read and write.
+    let after = written_by_others(&user);
+    let new: Vec<&String> = after.iter().filter(|path| !before.contains(path)).collect();
+    assert!(new.is_empty(), "written outside the vault folder: {new:?}");
+}
+
+/// What is in the test user's configuration, cache and data folders (`$XDG_CONFIG_HOME`,
+/// `$XDG_DATA_HOME`, and `~/.config`, `~/.cache`, `~/.local/share`), two levels deep, but
+/// Flottille's own: where Chrome writes its crash database and its caches unless it is told
+/// otherwise.
+fn written_by_others(user: &User) -> Vec<String> {
+    let home = user.path("home");
+    let roots = [
+        user.path("config"),
+        user.path("data"),
+        home.join(".config"),
+        home.join(".cache"),
+        home.join(".local/share"),
+    ];
+    let mut found = Vec::new();
+    for root in roots {
+        let Ok(first) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in first.flatten() {
+            if entry.file_name() == "flottille" {
+                continue;
+            }
+            found.push(entry.path().display().to_string());
+            if let Ok(second) = std::fs::read_dir(entry.path()) {
+                found.extend(second.flatten().map(|e| e.path().display().to_string()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
 fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
@@ -5238,6 +6473,33 @@ fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     let answer = refused(mcp.call(
         "conn_browser",
         json!({"action": "agent_browser_auth_save", "arguments": {"name": "x"}}),
+    ));
+    assert!(answer.contains("off"), "{answer}");
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn the_devtools_address_is_never_handed_to_the_agent() {
+    // Chrome's DevTools listens on this machine with no token: its address in the agent's hands
+    // is the browser driven with no gate, the filled password and the cookies read.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let refused_accept = user
+        .call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {"agent_browser_get_cdp_url": "passes"}}),
+        )
+        .unwrap_err();
+    assert!(
+        refused_accept.1.contains("agent_browser_get_cdp_url"),
+        "{refused_accept:?}"
+    );
+    assert!(refused_accept.1.contains("DevTools"), "{refused_accept:?}");
+    assert_eq!(setting(&user, "agent_browser_get_cdp_url"), "off");
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_get_cdp_url", "arguments": {}}),
     ));
     assert!(answer.contains("off"), "{answer}");
     assert!(logged(&user, "browser", "call").is_empty());
@@ -5933,17 +7195,11 @@ fn a_secret_is_given_only_to_its_entrys_site() {
 }
 
 #[test]
-fn login_runs_beside_the_options_a_domain_list_refused() {
+fn login_runs_beside_a_domain_list_and_a_config_it_never_reads() {
+    // The options agent-browser calls unsafe beside a domain list refuse the login
+    // (`login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set`); the list itself,
+    // and a configuration agent-browser never reads, do not.
     let mut cases: Vec<(Vec<&str>, Option<&str>)> = [
-        vec!["--cdp", "9222"],
-        vec!["--auto-connect"],
-        vec!["--profile", "Default"],
-        vec!["--state=auth.json"],
-        vec!["--restore"],
-        vec!["--session-name", "work"],
-        vec!["-p", "ios"],
-        vec!["--provider=browserbase"],
-        vec!["--args", "--no-sandbox"],
         vec!["--allowed-domains", "example.com"],
         // Not read by agent-browser, which reads `--config <file>` alone.
         vec!["--config=my-agent-browser.json"],
@@ -5951,12 +7207,7 @@ fn login_runs_beside_the_options_a_domain_list_refused() {
     .into_iter()
     .map(|options| (options, None))
     .collect();
-    for variable in [
-        "AGENT_BROWSER_ALLOWED_DOMAINS",
-        "AGENT_BROWSER_PROFILE",
-        "AGENT_BROWSER_CDP",
-        "AGENT_BROWSER_CONFIG",
-    ] {
+    for variable in ["AGENT_BROWSER_ALLOWED_DOMAINS", "AGENT_BROWSER_CONFIG"] {
         cases.push((Vec::new(), Some(variable)));
     }
     for (options, variable) in cases {
@@ -6084,6 +7335,224 @@ fn login_is_refused_while_an_option_could_send_the_session_elsewhere() {
             json!({"action": "login", "arguments": {"entry": "shop-test"}}),
         ));
         // The option or the variable by its name, and never its value.
+        assert!(said.contains(named), "{named}: {said}");
+        assert!(said.contains("password"), "{named}: {said}");
+        assert!(!said.contains(SETTING), "{named}: {said}");
+        assert!(logged(&user, "browser", "login").is_empty(), "{named}");
+        assert!(form(&user).is_none(), "{named}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(named), "{named}: {review}");
+        assert!(!review.to_string().contains(SETTING), "{named}: {review}");
+    }
+}
+
+#[test]
+fn login_is_refused_while_an_option_agent_browser_calls_unsafe_is_set() {
+    // The options agent-browser's own `--allowed-domains` rejects as unsafe: another profile, a
+    // saved or restored session, a browser reached over CDP or found running, launch arguments of
+    // the command's (a `--proxy-server` among them). From the server's command, the connection's
+    // environment, or the environment the daemon itself started with.
+    let command =
+        |options: &[&str]| -> Vec<String> { options.iter().map(|o| o.to_string()).collect() };
+    let mut cases: Vec<(Vec<String>, Option<&str>, bool, &str)> = vec![
+        (command(&["--profile", "Default"]), None, false, "--profile"),
+        (
+            command(&["--profile=/tmp/a-profile"]),
+            None,
+            false,
+            "--profile",
+        ),
+        (
+            command(&["--args", "--proxy-server=http://127.0.0.1:9"]),
+            None,
+            false,
+            "--args",
+        ),
+        (command(&["--cdp", "9222"]), None, false, "--cdp"),
+        (command(&["--auto-connect"]), None, false, "--auto-connect"),
+        (
+            command(&["--state", "/tmp/a-state.json"]),
+            None,
+            false,
+            "--state",
+        ),
+        (command(&["--restore"]), None, false, "--restore"),
+        (
+            command(&["--session-name", "saved"]),
+            None,
+            false,
+            "--session-name",
+        ),
+        (
+            command(&["--provider", "a-cloud"]),
+            None,
+            false,
+            "--provider",
+        ),
+        (command(&["-p", "a-cloud"]), None, false, "-p"),
+        // Its plugin registry replaces Flottille's plugin, which runs with the vault's access;
+        // its namespace may put the browser's socket in a folder the network check never lists.
+        (
+            command(&["--plugins", "/tmp/a-registry.json"]),
+            None,
+            false,
+            "--plugins",
+        ),
+        (
+            command(&["--namespace", "other"]),
+            None,
+            false,
+            "--namespace",
+        ),
+        (command(&["--namespace=other"]), None, false, "--namespace"),
+    ];
+    for variable in [
+        "AGENT_BROWSER_PLUGINS",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_PROFILE",
+        "AGENT_BROWSER_ARGS",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_RESTORE",
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_PROVIDER",
+    ] {
+        cases.push((Vec::new(), Some(variable), false, variable));
+        cases.push((Vec::new(), Some(variable), true, variable));
+    }
+    for (options, variable, of_the_daemon, named) in cases {
+        let mut user = user();
+        let mut more = json!({});
+        match variable {
+            Some(variable) if of_the_daemon => user = user.with_env(variable, SETTING),
+            Some(variable) => {
+                user.call(
+                    "vault.set",
+                    json!({"name": "browser-setting", "secret": SETTING}),
+                )
+                .unwrap();
+                more = json!({"env": {variable: {"vault": "browser-setting"}}});
+            }
+            None => {}
+        }
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        browser_declared(&user, &agent_browser("0.43.0"), json!({}), &options, more);
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        // The option or the variable by its name, and never its value.
+        assert!(said.contains(named), "{named}: {said}");
+        assert!(said.contains("unsafe"), "{named}: {said}");
+        if of_the_daemon {
+            assert!(said.contains("daemon"), "{named}: {said}");
+        }
+        assert!(!said.contains(SETTING), "{named}: {said}");
+        assert!(logged(&user, "browser", "login").is_empty(), "{named}");
+        assert!(form(&user).is_none(), "{named}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(named), "{named}: {review}");
+        assert!(!review.to_string().contains(SETTING), "{named}: {review}");
+    }
+}
+
+#[test]
+fn a_connections_env_cannot_move_the_browsers_socket_profile_or_crash_dumps() {
+    // The connection's env is applied to the server's start, and an agent can propose that edit:
+    // the variables that say where agent-browser puts its socket and Chrome its profile and crash
+    // dumps are Flottille's, set last, so none reaches a folder runs reach.
+    let user = user();
+    let moved = user.path("elsewhere");
+    user.call(
+        "vault.set",
+        json!({"name": "browser-setting", "secret": moved.to_str().unwrap()}),
+    )
+    .unwrap();
+    let env: serde_json::Map<String, Value> = MOVING
+        .iter()
+        .map(|name| (name.to_string(), json!({"vault": "browser-setting"})))
+        .collect();
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"env": env}),
+    );
+    let (_, _mcp) = signed_up(&user);
+    let vault = vault_folder(&user);
+    let starts = || -> Vec<Value> {
+        logged(&user, "browser", "start")
+            .into_iter()
+            .filter(|line| !line["config"].is_null())
+            .collect()
+    };
+    eventually("the server started", || !starts().is_empty());
+    for line in starts() {
+        for name in [
+            "AGENT_BROWSER_SOCKET_DIR",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+        ] {
+            let folder = line["folders"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("no {name}: {line}"));
+            assert!(
+                Path::new(folder).starts_with(&vault) && Path::new(folder) != vault,
+                "{name} is outside the vault folder: {line}"
+            );
+        }
+        for name in ["CHROME_CONFIG_HOME", "BREAKPAD_DUMP_LOCATION"] {
+            assert!(line["folders"][name].is_null(), "{name} given: {line}");
+        }
+    }
+}
+
+/// The variables that move where agent-browser puts its socket and Chrome its profile, caches and
+/// crash dumps.
+const MOVING: [&str; 7] = [
+    "AGENT_BROWSER_SOCKET_DIR",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "CHROME_CONFIG_HOME",
+    "BREAKPAD_DUMP_LOCATION",
+];
+
+#[test]
+fn login_is_refused_while_the_connections_env_moves_the_browsers_folders() {
+    for named in MOVING {
+        let user = user();
+        user.call(
+            "vault.set",
+            json!({"name": "browser-setting", "secret": SETTING}),
+        )
+        .unwrap();
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"env": {named: {"vault": "browser-setting"}}}),
+        );
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        // The variable by its name, and never its value.
         assert!(said.contains(named), "{named}: {said}");
         assert!(said.contains("password"), "{named}: {said}");
         assert!(!said.contains(SETTING), "{named}: {said}");
@@ -6284,8 +7753,7 @@ fn a_shown_browser_gets_the_display_variables() {
         json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": null,
             "XDG_RUNTIME_DIR": folder.to_str().unwrap(),
             "DBUS_SESSION_BUS_ADDRESS": null,
-            "AGENT_BROWSER_SOCKET_DIR": user.path("state/flottille/connections/browser")
-                .to_str().unwrap(),
+            "AGENT_BROWSER_SOCKET_DIR": socket_folder(&user).unwrap().to_str().unwrap(),
             "runtime_files": ["wayland-test"]})
     );
     let started = logged(&user, "browser", "start");
@@ -6319,7 +7787,7 @@ fn the_shown_browser_is_launched_with_its_own_class() {
     let started = logged(&user, "browser", "start");
     assert_eq!(
         started.last().unwrap()["config"]["args"],
-        json!("--class=flottille-browser")
+        json!("--class=flottille-browser,--disk-cache-size=33554432")
     );
 }
 
@@ -6335,8 +7803,11 @@ fn a_hidden_browser_gets_none() {
     }
     let started = logged(&user, "browser", "start");
     assert_eq!(started.last().unwrap()["config"].get("headed"), None);
-    // A browser nobody sees has no window to name.
-    assert_eq!(started.last().unwrap()["config"].get("args"), None);
+    // A browser nobody sees has no window to name: its disk cache is capped alone.
+    assert_eq!(
+        started.last().unwrap()["config"]["args"],
+        json!("--disk-cache-size=33554432")
+    );
     assert_eq!(connection(&user, "browser")["headed"], Value::Null);
 }
 
@@ -6506,7 +7977,8 @@ fn the_server_and_its_login_share_one_browser_socket_folder() {
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    let shared = user.path("state/flottille/connections/browser");
+    let shared = socket_folder(&user).unwrap();
+    assert_eq!(shared.parent(), Some(vault_folder(&user).as_path()));
     let server = display_of(&user, "browser");
     let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
     assert_eq!(
@@ -6558,13 +8030,19 @@ fn a_connection_variable_cannot_choose_the_landlock_exception() {
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
     assert!(said.contains("failed"), "{said}");
-    // The loads of the page ran with the variable, and could read nothing of the folder it names.
+    // The display's variables are set after the connection's own: the loads of the page ran with
+    // the folder the daemon made, never with the one the variable names, and read nothing of it.
     let opened = logged(&user, "browser", "open");
     assert_eq!(opened.len(), 2, "{opened:?}");
     for line in &opened {
         let seen = &line["display"];
-        assert_eq!(seen["XDG_RUNTIME_DIR"], runtime.to_str().unwrap(), "{seen}");
-        assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
+        let folder = seen["XDG_RUNTIME_DIR"].as_str().unwrap();
+        assert_ne!(folder, runtime.to_str().unwrap(), "{seen}");
+        assert!(
+            folder.starts_with(user.path("runtime/flottille/display").to_str().unwrap()),
+            "{seen}"
+        );
+        assert_eq!(seen["runtime_files"], json!(["wayland-test"]), "{seen}");
     }
 }
 
@@ -6609,9 +8087,39 @@ fn a_shown_server_cannot_link_the_socket_out_of_its_folder() {
 
 /// The browser on the connection's socket folder, as the fake keeps it: none once it is closed.
 fn browser_running(user: &User) -> Option<Value> {
-    std::fs::read_to_string(user.path("state/flottille/connections/browser/browser.json"))
+    std::fs::read_to_string(socket_folder(user)?.join("browser.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// The folder `AGENT_BROWSER_SOCKET_DIR` names for the connection `browser`: the one folder of its
+/// vault folder, of a name no one can guess.
+fn socket_folder(user: &User) -> Option<PathBuf> {
+    socket_folder_in(&vault_folder(user))
+}
+
+/// The socket folder of the vault folder `vault`: its one folder named `browser-…`.
+fn socket_folder_in(vault: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(vault)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry.file_name().to_string_lossy().starts_with("browser-")
+        })
+        .map(|entry| entry.path())
+}
+
+/// Kills the user's daemon as a crash would, and waits until it is gone: what it made stays.
+fn killed(user: &User) {
+    let daemon = user.status()["pid"].as_u64().unwrap() as i32;
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon, libc::SIGKILL) };
+    eventually("the daemon is gone", || {
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = unsafe { libc::kill(daemon, 0) } == 0;
+        !alive
+    });
 }
 
 #[test]
@@ -6829,6 +8337,277 @@ fn a_browser_left_by_a_daemon_that_stopped_is_closed_before_its_display_is_made_
         display_of(&user, "browser")["runtime_files"],
         json!(["wayland-test"])
     );
+}
+
+#[test]
+fn a_headless_browser_left_by_a_daemon_that_stopped_is_closed_at_start() {
+    // Hidden as well as shown: a browser a dead daemon left keeps running with the vault folder
+    // in reach, whatever its mode, until the next daemon closes it.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    assert_eq!(
+        browser_running(&user),
+        Some(json!({"headed": null, "XDG_RUNTIME_DIR": null}))
+    );
+    killed(&user);
+    assert!(browser_running(&user).is_some(), "the browser outlives it");
+    user.status();
+    assert_eq!(browser_running(&user), None);
+    assert_eq!(logged(&user, "browser", "close").len(), 1);
+}
+
+#[test]
+fn a_profile_a_crashed_browser_left_is_removed_when_its_browser_is_closed() {
+    // A Chrome that crashed leaves its profile (cookies, Local Storage…) in the vault's temporary
+    // folder, which agent-browser's own close never removes: closing the connection's browser
+    // empties the folder.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let temporary = vault_folder(&user).join("tmp");
+    let crashed = temporary.join("agent-browser-chrome-crashed");
+    std::fs::create_dir_all(crashed.join("Default")).unwrap();
+    std::fs::write(crashed.join("Default/Cookies"), "left").unwrap();
+    std::fs::write(temporary.join(".org.chromium.Chromium.crashed"), "left").unwrap();
+    // The daemon that died left the browser; the next closes it.
+    killed(&user);
+    user.status();
+    assert_eq!(browser_running(&user), None);
+    eventually("the profile is removed", || !crashed.exists());
+    assert_eq!(common::names_in(&temporary), Vec::<String>::new());
+}
+
+#[test]
+fn a_profile_left_with_no_browser_is_removed_at_start() {
+    // No browser left to close (it crashed with the daemon): the start empties the vault's
+    // temporary folder all the same, and keeps the folder.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let temporary = vault_folder(&user).join("tmp");
+    killed(&user);
+    let sockets = socket_folder(&user).expect("no socket folder");
+    for entry in std::fs::read_dir(&sockets).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let crashed = temporary.join("agent-browser-chrome-crashed");
+    std::fs::create_dir_all(crashed.join("Default")).unwrap();
+    std::fs::write(crashed.join("Default/Cookies"), "left").unwrap();
+    user.status();
+    eventually("the profile is removed", || !crashed.exists());
+    assert!(temporary.is_dir(), "the temporary folder is gone");
+    assert_eq!(common::names_in(&temporary), Vec::<String>::new());
+    assert!(logged(&user, "browser", "close").is_empty());
+}
+
+#[test]
+fn a_daemon_that_died_leaves_no_token_nor_socket_in_the_vault() {
+    // A daemon killed during a login leaves its token, its plugin's socket and the plugin's
+    // reason: the next one removes them before anything runs, and keeps the browser's socket
+    // folder, which a browser it left may still answer on.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let vault = vault_folder(&user);
+    let sockets = socket_folder(&user).expect("no socket folder");
+    std::fs::write(vault.join("vault.token"), "left").unwrap();
+    std::fs::write(vault.join("vault.why"), "left").unwrap();
+    drop(std::os::unix::net::UnixListener::bind(vault.join("vault.sock")).unwrap());
+    killed(&user);
+    user.status();
+    for name in ["vault.token", "vault.why", "vault.sock"] {
+        assert!(!vault.join(name).exists(), "{name} is left");
+    }
+    assert!(sockets.is_dir(), "the socket folder is gone");
+}
+
+#[test]
+fn the_old_files_of_the_state_folder_are_removed_at_start() {
+    // Before the vault folder, agent-browser's configuration and the plugin's socket were in the
+    // connection's state folder, which runs reach: the next daemon removes them, and nothing else.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let state = user.path("state/flottille/connections/browser");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("agent-browser.json"), "{}").unwrap();
+    drop(std::os::unix::net::UnixListener::bind(state.join("vault.sock")).unwrap());
+    std::fs::write(state.join("kept.txt"), "kept").unwrap();
+    killed(&user);
+    user.status();
+    assert!(!state.join("agent-browser.json").exists());
+    assert!(!state.join("vault.sock").exists());
+    assert!(state.join("kept.txt").exists());
+}
+
+#[test]
+fn removing_a_connection_removes_its_vault_folder() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(vault_folder(&user).is_dir());
+    user.call("connection.remove", json!({"name": "browser"}))
+        .unwrap();
+    assert!(!vault_folder(&user).exists(), "the vault folder is left");
+    // Declared again under the same name, it gets a vault folder afresh and signs in.
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    std::fs::remove_file(form_file(&user)).unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(form(&user).expect("not signed in")["password"], PASSWORD);
+}
+
+#[test]
+fn the_browsers_socket_folder_cannot_be_guessed() {
+    // agent-browser's socket is named after its session (`default`): in a folder named after the
+    // connection alone, a run that may connect by path (no namespace, an older Landlock) would
+    // guess it. Its folder has a random name, found again by the next daemon.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    let named = PathBuf::from(login["AGENT_BROWSER_SOCKET_DIR"].as_str().unwrap());
+    assert_eq!(named.parent(), Some(vault_folder(&user).as_path()));
+    let name = named.file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(name.len() >= 20, "{name}");
+    let other = user_named_socket_folder();
+    assert_ne!(other, name);
+    // The next daemon finds the same folder, for its server (the tests' keyring is the dead
+    // daemon's, gone with it: no login).
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    killed(&user);
+    done(mcp_after_restart(&user).call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    assert_eq!(
+        display_of(&user, "browser")["AGENT_BROWSER_SOCKET_DIR"],
+        named.to_str().unwrap()
+    );
+}
+
+/// The name of the socket folder another user's connection `browser` gets.
+fn user_named_socket_folder() -> String {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let folder = socket_folder(&user).expect("no socket folder");
+    folder.file_name().unwrap().to_str().unwrap().to_owned()
+}
+
+/// A new session of the project `app` in Full mode, once the daemon answers again.
+fn mcp_after_restart(user: &User) -> Mcp {
+    let (id, mcp) = session(user, "app");
+    set_mode(user, &id, "full");
+    mcp
+}
+
+#[test]
+fn a_spent_token_does_not_hide_why_the_login_failed() {
+    // The plugin is given the credential, then asked again (by anything that reached the socket)
+    // and refused, the token being spent; the page then refuses the account. The login says the
+    // page's refusal, never that Flottille refused the request.
+    let user = user();
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"replay": true, "fail": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let replayed = logged(&user, "browser", "login").last().unwrap()["replayed"].clone();
+    assert_eq!(replayed["success"], false, "{replayed}");
+    assert!(
+        !said.contains("Flottille refused agent-browser's request"),
+        "{said}"
+    );
+    assert!(said.contains("the page refused"), "{said}");
+    assert!(!said.contains(PASSWORD), "{said}");
+}
+
+#[test]
+fn a_silent_connection_does_not_block_the_plugins_request() {
+    // Three connections to the plugin's socket that say nothing, made before the plugin asks:
+    // each waits for its own words, and the plugin is answered at once.
+    let user = user();
+    let until = user.path("go");
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"hold": until.to_str().unwrap()}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let socket = vault_folder(&user).join("vault.sock");
+    let started = PathBuf::from(format!("{}.started", until.display()));
+    let opener = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !started.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let silent: Vec<_> = (0..3)
+            .map(|_| std::os::unix::net::UnixStream::connect(&socket).unwrap())
+            .collect();
+        // Accepted before the plugin connects.
+        std::thread::sleep(Duration::from_millis(300));
+        let released = Instant::now();
+        std::fs::write(&until, "").unwrap();
+        (silent, released)
+    });
+    let answer = mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    let answered = Instant::now();
+    let (_silent, released) = opener.join().unwrap();
+    done(answer);
+    assert!(
+        answered - released < Duration::from_secs(4),
+        "the plugin waited {:?}",
+        answered - released
+    );
+    assert_eq!(form(&user).expect("not signed in")["password"], PASSWORD);
 }
 
 #[test]

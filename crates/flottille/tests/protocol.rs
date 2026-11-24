@@ -85,8 +85,11 @@ fn every_method_the_sources_name_is_catalogued() {
         "remote.pushdefault",
     ];
     // `remote.git` is a bare repository's folder, beside the `remote.` methods; `update.rs` a
-    // source file, beside the `update.` ones.
-    let files = ["md", "toml", "log", "pdf", "sock", "git", "rs"];
+    // source file, beside the `update.` ones; `vault.token` and `vault.why` a login's files
+    // beside its `vault.sock`, beside the `vault.` methods.
+    let files = [
+        "md", "toml", "log", "pdf", "sock", "git", "rs", "token", "why",
+    ];
 
     let mut sources = Vec::new();
     for folder in [

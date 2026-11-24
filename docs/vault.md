@@ -343,7 +343,11 @@ push the gate let through, and its checks' dry run, are the exception (below):
   login (and its reload of the page), are also granted their display folder,
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
-  The folder is the one the daemon made, never one a variable of the connection names;
+  An agent-browser connection's server, its login and its reload are granted its vault folder,
+  `$XDG_RUNTIME_DIR/flottille/vault/<connection>`, the same way (and `agent-browser close` too):
+  agent-browser's configuration and its daemon's socket, the login's one-time token and the
+  credential plugin's socket, which no run reaches. The folders are the ones the daemon made,
+  never one a variable of the connection names;
 - Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
   process also starts in a **private mount namespace** of its own, where the kernel lets a user
   make one (an unprivileged user namespace): the user's runtime folders are empty folders there
@@ -608,7 +612,22 @@ private mount namespace of every command Flottille confines (above), `~/.ssh` is
 with what is below it, and so are the files of the user's own git settings found at the daemon's
 start (`GIT_CONFIG_GLOBAL` when set, else `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`) and
 those they include (`include.path`, `includeIf.*.path`, whatever their condition): those git
-reads at every push, and the daemon reads its user's `core.sshCommand` from. Each folder on the
+reads at every push, and the daemon reads its user's `core.sshCommand` from. Where one of those
+files is reached through a link (a dotfiles manager's), the folder that holds each link on the way
+is read-only too when it is a folder of its own below the home (`~/.config/git`), and so is the
+folder that holds the versions: the one above the folder of the file the link leads to
+(`~/dots/versions` for `~/dots/versions/a/git-config`), the nearest that holds the versions a
+dotfiles manager makes later beside it, never one higher: no run re-points the link, or writes a
+version made after the start. A kept folder is read-only with everything below it, the folders
+kept in place below it included. Not kept, a link there being refused when its settings are
+relinked (below), and nothing kept at all when it is the folder of the versions (a relink is then
+refused saying so): a folder a project of Flottille's or its workspaces are in or that holds them
+(their folders as the projects' files and the store say at the daemon's start, whatever their
+name, and the default folder of the workspaces), the home itself, the base folders (`$XDG_CONFIG_HOME`, or `~/.config` when it is unset,
+`~/.local`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the same way), the folders
+a user keeps projects in by their usual names (`projects`, `workspaces`, `src`, `code`, `dev`,
+`repos`, `git`, `work`, `Documents`, `Downloads`, `Desktop` of the home), and Flottille's own: they hold every other
+program's files, which a run would lose. Each folder on the
 way to them that a command could rename or remove (its own folder is the user's, or one they may
 write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
 the way is renamed to put another file at the path. `~/.ssh` is the account's (the home of the
@@ -713,7 +732,44 @@ The gaps, where the platform does not allow more:
 - where the kernel refuses user namespaces, a confined process has no private mount namespace:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
   by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
-  (`sandbox.private_mounts` false in `--json`);
+  (`sandbox.private_mounts` false in `--json`). That includes a connection's vault folder: it
+  cannot list it nor read the login's token or agent-browser's configuration, and agent-browser's
+  daemon's socket is in a folder of a random name it cannot guess, but it can connect to the
+  login's socket, whose name it can guess and which refuses a request without the token;
+- **a browser of a connection is in the runs' network where it cannot have its own** ("The
+  browser's network", below): agent-browser 0.43 starts Chrome with `--remote-debugging-port=0`,
+  so Chrome's DevTools listens on the loopback, on a port of its choice, with no token, and
+  agent-browser's daemon listens on another. In its own network namespace neither is on the runs'
+  loopback. Where pasta is missing or the kernel refuses user namespaces (a distribution that
+  restricts them to programs its AppArmor profiles allow, Ubuntu from 23.10, included), the
+  browser still runs, in the runs' network: a run that finds the port (`/proc/net/tcp`, a scan)
+  drives it with no gate, reads its pages, the cookies and storage of every site signed in to.
+  The login refuses to fill a password then, and says to install passt; the daemon's log and
+  `flottille doctor` say the gap (`sandbox.browser_network` false in `--json`). Flottille never
+  hands the address to an agent (the adapter keeps `get_cdp_url` off). Where the user's runs
+  have no private mount namespace (above), a run is in the same user namespace as the daemon and
+  can enter the browser's (`setns`): the browser's network keeps it out only where runs have
+  theirs;
+- **below Landlock's second ABI the browser has no private network, even for ordinary browsing**
+  (since the check that a run stays out of the browser's reach is made each time a network is
+  used): the server's browser runs in the runs' network, as where pasta is missing, and the login
+  refuses;
+- **a shown browser reads neither the user's fontconfig and GTK settings nor
+  `~/.local/share/fonts`**, since Chrome's `XDG_*` folders are the vault folder's: it may look
+  plainer than the user's other windows, and a certificate authority the user added to their own
+  certificate database (`~/.pki/nssdb`, `$XDG_DATA_HOME/pki/nssdb`) may not be trusted by it;
+- **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
+  can write what is the user's under the home: agent-browser itself where the user installed it
+  there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
+  `~/.agent-browser/browsers/`. A run that replaced that Chrome, or agent-browser, has its own
+  program run as the browser the login fills. Chrome's certificate database is in the vault folder
+  (`data/pki/nssdb`, above); a Chrome that still reads the older `~/.pki/nssdb`, where one is, would
+  trust a certificate authority a run wrote there. Flottille does not
+  check them: the owner is the user either way, and a hash recorded at first use could be taken
+  of a program a run had already replaced, and would refuse every update the user or agent-browser
+  makes (agent-browser downloads a new Chrome on its own). Installing agent-browser and its Chrome
+  where root alone writes closes the programs' part; the rest needs a sandbox that keeps the
+  home's programs read-only, a change of its own;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then
@@ -759,8 +815,31 @@ The gaps, where the platform does not allow more:
 - a file protected at the daemon's start is protected at the path it had then: a command started
   before the user replaced it (an editor that writes a new file, `git config --global`) still sees
   the new one writable, so the push is lent nothing until the daemon restarts, which ends every
-  run. A process a run of an older Flottille left behind, outside its session and without its
-  marker, is not ended at the start, and has `~/.ssh` as that version left it;
+  run (`flottille daemon stop`: the next command starts another, which finds the settings again).
+  **A settings file that leads elsewhere** is judged again at each push (`pushed::settle`). The
+  start and the push share the judgement of **the links** (which folder may hold one: the same
+  functions); the file itself is kept read-only at the start, whatever it is, and judged at the
+  push by a rule of its own. A dotfiles update that moves the link to a new version is accepted
+  only when **both** hold: each link on the way is in a folder kept read-only since the start
+  (above) or that only root may change, **and the new file lies under a folder kept since the
+  start** (above: the one that holds the old version's folder) or that only root may change, **with no other
+  hard link**. So no command could have written it between the link moving and the push, as a
+  command may write any file of the home outside those folders; the push then reads it, every
+  command started from then on has it read-only, its identity the one recorded then, and a hard
+  link made later is refused at the next push. Refused, saying which rule failed, when a link is
+  in a folder a run can write (the home itself: put the link in a folder of its own below it,
+  `~/.config/git/config`), when the new file is not under a folder kept since the start (a
+  manager that makes its versions elsewhere than beside the one found at the start), when it has
+  another hard link, or when no link leads there at all (a file replaced in its place); until the
+  daemon restarts. What remains: a settings file that includes a file not found at the start (a
+  relative include, which is a file of the new version folder) is refused as before, until a
+  restart; the folders kept are those of the settings the daemon found, so a link that did not
+  exist at the start is not kept; and a version made directly in one of the folders listed above
+  as not kept (`~/projects/<version>`, say) is refused, never trusted. A manager that puts the
+  file deeper in its versions (`versions/<n>/git/config`) has `versions/<n>` kept, so a relink to
+  another version is refused, not trusted; and a project added after the daemon's start in a kept
+  folder, or holding one, finds it read-only to its runs until the daemon restarts. A process a run of an
+  older Flottille left behind, outside its session and without its marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
   lent agent, as a push does, under the same judgement; and the remote's URL is read just before
   the call, so a run that rewrites it in between sends that call to another host of the same
@@ -813,6 +892,99 @@ hold for what is made there (above). And the missing `XAUTHORITY` does not keep 
   for the runtime folder under it too, since Landlock grants by hierarchy and denies nothing. The
   user cannot write in these folders anyway; a runtime folder set in one the user writes to (an
   `XDG_RUNTIME_DIR` in `/tmp`) takes that folder's new entries from what the daemon runs.
+
+## The browser's network
+
+agent-browser's daemon and its Chrome, for a connection the agent-browser adapter applies to
+(`docs/extensions.md`, "agent-browser"), run in a **network namespace of their own**, so that
+their loopback is not the runs': Chrome's DevTools, which has no token and drives the browser
+(the pages open, a password filled before it is sent, every cookie), and agent-browser's own
+port listen there, where no run connects. passt's `pasta` gives the namespace its way out:
+
+- the browser reaches the internet as the user does, through pasta, unprivileged;
+- the host's loopback ports are forwarded into the namespace (`-T auto -U auto`): a developer's
+  server on `localhost:<port>`, or one a run started, opens in the browser, and so does the
+  host's resolver on its loopback address;
+- nothing is forwarded in (`-t none -u none`): no port of the namespace is on the host's
+  loopback, DevTools' included.
+
+The namespace is held by a process of its own, `flottille browser-network`, started by the daemon
+in a user and a network namespace it makes (the user mapped to themself), and pasta set up on it
+by its pid. It outlives a server, as the browser does: the connection's vault folder records it
+(`network`, the holder's pid and its namespaces), and the next server, a login and `close` find it
+there and start each command of agent-browser's in it, before the rest of its sandbox (its private
+mount namespace is made inside). The vault folder's socket keeps working by its path: a socket by
+its path is no network's. It ends when the browser is closed (`close`, the daemon's stop, the
+connection's removal); pasta ends with it. A browser that answers on the socket folder from
+outside the namespace (started by a server that ran without one) is closed before a login or a
+server uses the namespace, and a login checks, once its page is loaded, that every browser that
+answers runs in it. Which process answers is asked of the kernel, by connecting to each socket of
+the socket folder and of the folders in it, never through a link (`SO_PEERCRED`; a namespace puts
+a session's socket in a subfolder, and `--namespace` is refused to the login all the same). The
+connection does not wait for a daemon to accept: one that stops accepting counts as outside, never read from agent-browser's `<session>.pid` files: a socket
+whose process is gone counts as outside. The record is the holder's only while the process at its
+pid has the start time it records: a process that took the pid since is not the holder.
+
+**Chrome's profile is in the vault folder.** agent-browser makes the browser's profile (its
+cookies, Local Storage, History, and Chrome's `Default/Preferences`, which names a proxy) in the
+temporary folder, `/tmp/agent-browser-chrome-…`, and Chrome keeps its passwords there in the clear
+(`--password-store=basic`): in `/tmp`, which runs reach, a run would read them or plant a
+`Preferences` before Chrome reads it. Every command of agent-browser's (the server, `open`, `auth
+login`, `close`) is given `TMPDIR`, the folder `tmp` of the connection's vault folder (`0700`,
+denied to every run), so the profile and Chrome's own temporary files are there.
+
+Chrome also writes outside its profile, whatever profile it is given: its crash database
+(`Crash Reports`, whose dumps hold the page's memory, a password typed included) under its default
+configuration folder (`$XDG_CONFIG_HOME/google-chrome`, or the folder of the Chrome agent-browser
+runs, else `~/.config/…`), its certificate database (`$XDG_DATA_HOME/pki/nssdb`) and
+`mimeapps.list` under `$XDG_DATA_HOME`, and fontconfig's cache under `$XDG_CACHE_HOME`: a real
+login wrote all four there before this. The same commands
+are given `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`, the folders `config`, `cache`
+and `data` of the vault folder, and never `CHROME_CONFIG_HOME` nor `BREAKPAD_DUMP_LOCATION`,
+which would move the configuration folder or the dumps elsewhere. These are set after the
+connection's own `env` on every start, and a login is refused while the `env` names one of them
+(the socket's, `TMPDIR` and the `XDG_*` folders included), so an edit of the connection's `env` an
+agent proposes cannot move them back within a run's reach. `HOME` stays the user's:
+agent-browser finds the Chrome it downloaded under `~/.agent-browser` ("The gaps" says what a run
+can do there).
+
+The vault folder is in the runtime folder, in memory on most systems: Chrome's HTTP disk cache is
+capped at 32 MiB (`--disk-cache-size`, in the `args` of the configuration Flottille writes). The
+cap is the HTTP cache's alone: what pages keep themselves (IndexedDB, Cache Storage, Local
+Storage) is not capped, so a site that stores much takes memory until the browser is closed. A
+folder on disk denied to runs would have needed a rule of its own in every run's sandbox; the
+vault folder already is one. A Chrome that crashed leaves its profile behind, which agent-browser
+never removes: closing the connection's browser (`close`, the daemon's stop, the connection's
+removal) empties the folder `tmp` when no browser answers on the socket folder any more (a close
+that did not end it, or the other sessions' browsers, keep their profiles), and so does the
+daemon's start where no browser was left running. A `tmp` that is a link is never emptied.
+
+**Nothing reads the browser's memory.** A run with the user's identity may attach to Chrome
+(`ptrace`) and read the page and the password filled, or open `/proc/<pid>/root` of a process of
+the user's outside its namespace, which leads to the vault folder, the browser's socket and its
+profile. Landlock from its second ABI (Linux 5.19) keeps a confined process from both: it attaches
+to none outside its domain and cannot open their `/proc/<pid>/root`. Yama's `ptrace_scope` keeps
+the attach alone, not `/proc/<pid>/root`, which needs only the right to read: it is no substitute.
+Where Landlock is missing or below its second ABI, the browser's isolation is unavailable and the
+login refuses, saying so and what lets it sign in.
+
+**Full mode.** The namespace keeps the browser from the runs Flottille confines, Ask's and
+Auto's. A run that reaches the vault folder or the user's other processes as the user does, as a
+run in Full mode may, can enter the namespace (`setns` into its holder) and reach DevTools: the
+browser's isolation is no defence against it.
+
+**After Flottille's program is updated in place**, the daemon that still runs cannot start the
+namespace's holder, which is its own program by its path, and the login refuses until the daemon
+is restarted.
+
+Without pasta on the `PATH`, where the kernel refuses user namespaces, or where Landlock is below
+its second ABI, the server still runs, its browser in the runs' network, and the **login refuses
+to fill**, saying why and its remedy: "install passt (pasta) to let the agent's browser sign in",
+the user namespaces to allow, or the kernel to update. Every other action of the connection works.
+`flottille doctor` says whether the browser's isolation is available (`sandbox.browser_network`),
+with the gap and its remedy, once, as a warning. passt is packaged by the main distributions, as `passt` (Arch, Debian, Fedora, Ubuntu); Ubuntu from 23.10 restricts unprivileged user namespaces through AppArmor, which
+refuses Flottille's own namespaces, the browser's included, until the user lifts the restriction
+or allows Flottille.
 
 ## The tests' keyring
 
