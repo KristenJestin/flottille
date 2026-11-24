@@ -709,3 +709,172 @@ fn a_pilot_ended_while_the_machine_is_off_ends_them_when_it_is_back() {
         server.agent(&child)
     );
 }
+
+// A lead reviews the session it leads on another machine as one it leads here (#1279): the review
+// is started there, judged there, its findings go to that session and its pilot is told here.
+
+/// pc's root leading a session on server, Review on on both machines; the server's review agents
+/// hang in their turn, so that the test acts as its pilot. The session's id there and the root's
+/// MCP session.
+fn led_with_review(pc: &Machine, server: &Machine) -> (String, Mcp) {
+    for machine in [pc, server] {
+        machine
+            .user
+            .call("extension.set", json!({"name": "review", "enabled": true}))
+            .unwrap();
+    }
+    script(
+        server,
+        json!([{"when": "of the change of workspace", "do": [{"hang": true}]}]),
+    );
+    let (session, _root, _, mcp) = led_on_server(pc, server, "Finish the export.", "auto");
+    eventually("the session's first turn", || {
+        server.agent(&session)["state"] == "idle"
+    });
+    (session, mcp)
+}
+
+/// The reviews of `session` on `machine`.
+fn reviews_of(machine: &Machine, session: &str) -> Vec<Value> {
+    machine
+        .user
+        .call("review.list", json!({"session": session}))
+        .unwrap()["reviews"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The MCP session of the pilot of a review on `machine`, as its fake agent was given it.
+fn pilot_there(machine: &Machine) -> Mcp {
+    let mut found = None;
+    eventually("the pilot's session", || {
+        found = machine
+            .user
+            .received_requests("session/new")
+            .into_iter()
+            .find(|opened| {
+                opened["params"]["_meta"]["claudeCode"]["options"]["systemPrompt"]["prompt"][2]
+                    .as_str()
+                    .is_some_and(|prompt| prompt.contains("You are the pilot of a review"))
+            });
+        found.is_some()
+    });
+    let server = found.unwrap()["params"]["mcpServers"][0].clone();
+    Mcp::initialize(
+        server["url"].as_str().unwrap(),
+        server["headers"][0]["value"].as_str().unwrap(),
+    )
+}
+
+#[test]
+fn a_lead_reviews_its_led_session_on_another_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, mcp) = led_with_review(&pc, &server);
+
+    let started = mcp.call("review", json!({"action": "start", "agent": session}));
+
+    let text = done(&started);
+    assert!(text.contains("round 1"), "{text}");
+    assert!(text.contains(&session), "names the session: {text}");
+    let all = reviews_of(&server, &session);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["state"], "running");
+    // Its pilot is the reviewed session's child there, as on one machine.
+    let pilot = server.agent(all[0]["pilot"].as_str().unwrap());
+    assert_eq!(pilot["parent"], session.as_str(), "{pilot:#}");
+    // Started for the session the root leads, which needs no leave of the user there.
+    assert!(server.requests().is_empty(), "{:#?}", server.requests());
+}
+
+#[test]
+fn the_findings_of_a_review_there_are_told_to_the_pilot_here() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, mcp) = led_with_review(&pc, &server);
+    done(&mcp.call("review", json!({"action": "start", "agent": session})));
+    let pilot = pilot_there(&server);
+
+    let reported = pilot.call(
+        "review",
+        json!({"action": "report", "summary": "Read the export.", "findings": [
+            {"severity": "high", "confidence": "confirmed", "file": "b.txt", "lines": "1",
+                "concerns": "code", "text": "The export drops the last line.",
+                "case": "export a file of two lines"}
+        ]}),
+    );
+
+    assert!(!reported.error, "{}", reported.text);
+    // The findings go to the session reviewed, there.
+    prompted(&server, "The review of your change");
+    // Its pilot is told here, as of a session it leads on this machine.
+    let told = prompt_with(&pc, "the session you lead");
+    assert!(told.contains("[flottille:review]"), "{told}");
+    assert!(told.contains(&session), "names it: {told}");
+    assert!(told.contains("The export drops the last line."), "{told}");
+}
+
+/// `review` with `args`, as pc's daemon sends it for `root`'s launch `launch` of `session`.
+fn review_call(id: &str, launch: &str, root: &str, session: &str, args: Value) -> MachineMessage {
+    MachineMessage::Call(Box::new(Call {
+        id: id.into(),
+        launch: launch.into(),
+        caller: root.into(),
+        agent: session.into(),
+        tool: "review".into(),
+        arguments: args.to_string(),
+        project: "app".into(),
+        mode: "auto".into(),
+        ..Call::default()
+    }))
+}
+
+#[test]
+fn the_pilot_of_another_machine_starts_no_other_review_there() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, mcp) = led_with_review(&pc, &server);
+    let (root, text) = {
+        let launch = &launches(&pc)[0];
+        (
+            launch["caller"].as_str().unwrap().to_owned(),
+            launch["launch"].as_str().unwrap().to_owned(),
+        )
+    };
+    drop(mcp);
+    let key = pc.stand_in();
+
+    // Its own change, a pull request, a pass, a report: none is the review of the session it
+    // leads there, and none is served; that review alone is.
+    let mut calls: Vec<MachineMessage> = [
+        json!({"action": "start"}),
+        json!({"action": "start", "pull_request": 7}),
+        json!({"action": "start", "agent": session, "pull_request": 7}),
+        json!({"action": "start", "agent": "0123456789ab"}),
+        json!({"action": "run_pass", "pass": "bugs"}),
+        json!({"action": "report", "summary": "Nothing.", "findings": []}),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(n, args)| review_call(&format!("call-r{n}"), &text, &root, &session, args))
+    .collect();
+    calls.push(review_call(
+        "call-ok",
+        &text,
+        &root,
+        &session,
+        json!({"action": "start", "agent": session}),
+    ));
+
+    let answers = sent_with(&key, &server, calls);
+
+    let (refused, started) = answers.split_at(answers.len() - 1);
+    for answer in refused {
+        let served = answer
+            .as_ref()
+            .is_ok_and(|answer| answer["outcome"] == "ok");
+        assert!(!served, "{answer:?}");
+    }
+    let started = started[0].as_ref().unwrap();
+    assert_eq!(started["outcome"], "ok", "{started}");
+    let all = reviews_of(&server, &session);
+    assert_eq!(all.len(), 1, "{all:?}");
+}
