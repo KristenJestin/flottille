@@ -615,7 +615,9 @@ const SERVED: [Definition; 33] = [
         title: "The user's connections",
         description: "The MCP servers the user gives every agent, each as one \
             tool conn_<name>: list and show read them, never a secret; add, edit, remove, set, on \
-            and off are always held for the user, whatever the mode. {\"action\": \"add\", \
+            and off are always held for the user, whatever the mode. A connection is given to \
+            every project, so the vault entries it names are every project's; one the vault \
+            lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. {\"action\": \"add\", \
             \"name\": \"notes\", \"about\": \"The user's notes.\", \"command\": \
             \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
         read_only: false,
