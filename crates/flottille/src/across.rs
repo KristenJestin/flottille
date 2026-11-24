@@ -636,12 +636,20 @@ fn kept_for_caller(
             flottille_core::agent::new_id().unwrap_or_default()
         )
     });
+    // The user's answer is never dropped, one per launch: an end that came without it would tell
+    // the caller its session never ran (#1385). Cut rather than refused, it waits beyond the most.
+    let answer = kind == "approval";
+    let body = match answer {
+        true => crate::mcp::cut(body, LONGEST),
+        false => body.to_owned(),
+    };
+    let length = body.chars().count();
     let message = MachineMessage::Deliver(Box::new(Deliver {
         id: id.clone(),
         launch: launch.launch.clone(),
         agent: launch.caller.clone(),
         kind: kind.to_owned(),
-        body: body.to_owned(),
+        body,
         urgency: urgency.to_owned(),
         ended,
     }));
@@ -649,7 +657,6 @@ fn kept_for_caller(
         .as_str()
         .unwrap_or("another machine")
         .to_owned();
-    let length = body.chars().count();
     let kept = match length > LONGEST {
         true => Err(format!(
             "a delivery to another machine is {LONGEST} characters at most, this one {length}"
@@ -662,6 +669,7 @@ fn kept_for_caller(
             id,
             &message,
             back,
+            answer,
         ),
     };
     if let Err(why) = kept {
@@ -702,7 +710,8 @@ fn outgoing(
 }
 
 /// Keeps `message` of `launch` (or of the request it answers) for the machine of key `machine`,
-/// and sends it when it can; refused when as many wait for that machine as may.
+/// and sends it when it can; refused when as many wait for that machine as may, but `beyond`.
+#[allow(clippy::too_many_arguments)]
 fn keep(
     daemon: &Arc<Daemon>,
     machine: &str,
@@ -711,13 +720,14 @@ fn keep(
     id: String,
     message: &MachineMessage,
     back: bool,
+    beyond: bool,
 ) -> Result<(), String> {
     let outgoing = outgoing(machine, launch, name, id, message, back);
     let waiting = daemon
         .read(|store| store.outgoing(Some(machine)))
         .map_err(|error| format!("it cannot be kept: {error}"))?
         .len();
-    if playing_kept_full() || waiting >= MOST_KEPT {
+    if (playing_kept_full() || waiting >= MOST_KEPT) && !beyond {
         return Err(format!("{MOST_KEPT} messages wait for {name} already"));
     }
     daemon
@@ -1605,6 +1615,7 @@ fn keep_call(
         id,
         &message,
         false,
+        false,
     )
 }
 
@@ -2166,6 +2177,7 @@ pub(crate) async fn call(
                 &name,
                 format!("call-{id}"),
                 &message(format!("call-{id}")),
+                false,
                 false,
             );
             if let Err(why) = kept {
@@ -2960,7 +2972,7 @@ pub(crate) fn answer_back(daemon: &Arc<Daemon>, request: &Request, body: &str) -
         urgency: approval::URGENT.to_owned(),
         ended: false,
     }));
-    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false) {
+    if let Err(why) = keep(daemon, machine, &launch, &name, id, &message, false, false) {
         eprintln!(
             "flottille daemon: the answer of request #{} for {name} is dropped: {why}",
             request.number
