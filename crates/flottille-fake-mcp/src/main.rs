@@ -485,7 +485,10 @@ fn write_log(log: &Option<String>, mut line: Value) {
         .append(true)
         .open(path)
         .unwrap();
-    writeln!(file, "{line}").unwrap();
+    // One write of the whole line: `writeln!` writes it piece by piece, and over HTTP another
+    // request's thread logs at the same time, so their pieces would mix. An append of one write
+    // is never interleaved with another's.
+    file.write_all(format!("{line}\n").as_bytes()).unwrap();
 }
 
 /// What `echo_env` appends: a space and the value of the variable, nothing without it.
