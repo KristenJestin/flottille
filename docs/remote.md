@@ -2054,6 +2054,11 @@ on a real phone, by hand, and reported.
   line is not in it). A failure stays on the card, never as a toast.
 - **After a failure the primary button says Try again** (#1262): the click resumes at the failed
   step instead of doing it all again, and its word says so.
+- **A failure brings the card's error and buttons into view** (#1419): the section of "Waiting for
+  you" is limited in height, so a card grown by its error has its Try again and Deny below the
+  fold. The section scrolls to them once, over `PANEL`, the way a "leads" link moves a page; the
+  steps that succeed scroll nothing, and the user's own scroll afterwards is left alone. The error
+  and a refused Allow or Deny on any card do the same.
 - **Deny after a partial share leaves the entries shared** (#1262): each is bound to its one file
   (`file:<project>/<path>`) and laid only by a launch the user allows; the card's Details says so
   once a file is shared, and only then.
