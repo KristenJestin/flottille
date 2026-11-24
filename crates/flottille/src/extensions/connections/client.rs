@@ -197,8 +197,11 @@ struct Running {
     cut: Cut,
     /// The runtime folder of its shown browser, removed when it stops, and its variables.
     display: Option<crate::display::Shown>,
-    /// Why its browser runs headless though the user shows it, when it cannot be shown.
+    /// Why its browser runs headless though a call asked to show it, when it cannot be shown.
     headless: Option<String>,
+    /// Whether a call asked to show its browser: the mode it was started for, which a call that
+    /// asks the other restarts it for.
+    headed: bool,
 }
 
 impl Running {
@@ -555,7 +558,11 @@ fn cut_during_start(
 /// cut. The adapter is known only once the server said what it is: it is taken from the pin, and
 /// a server that turns out to be another (its first review, a version that moved) is started
 /// once more with the options of its own.
-async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
+async fn start(
+    daemon: &Arc<Daemon>,
+    declaration: &Declaration,
+    headed: bool,
+) -> Result<Running, String> {
     // Declared before the check of its URL existed, or by hand: it fails alone until it is
     // edited.
     if let Some(why) = declaration.url_fault() {
@@ -565,7 +572,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         .pin
         .as_ref()
         .and_then(super::adapters::applying);
-    let running = start_with(daemon, declaration, pinned).await?;
+    let running = start_with(daemon, declaration, pinned, headed).await?;
     let found = super::adapters::applying(&running.listing);
     let same = match (pinned, found) {
         (Some(a), Some(b)) => std::ptr::eq(a, b),
@@ -576,7 +583,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         return Ok(running);
     }
     stop_running(running).await;
-    start_with(daemon, declaration, found).await
+    start_with(daemon, declaration, found, headed).await
 }
 
 /// `start`, with the options of `adapter`.
@@ -584,6 +591,7 @@ async fn start_with(
     daemon: &Arc<Daemon>,
     declaration: &Declaration,
     adapter: Option<&'static super::adapters::Adapter>,
+    headed: bool,
 ) -> Result<Running, String> {
     let start = daemon
         .extensions
@@ -605,12 +613,16 @@ async fn start_with(
             let folder = super::adapters::folder(daemon, &declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
+            // The folder of the connection's browser, its profile in it: given back to its server
+            // alone (`browsers.rs`).
+            let mut profile = None;
             // The adapter's server gets its vault's folder, which its browser's plugin reaches.
             let mut vault = None;
             // And its browser's network, where it can be made.
             let mut network = None;
             let options = match adapter {
                 Some(_) => {
+                    let given = crate::browsers::folder(&daemon.paths, &declaration.name)?;
                     let own = vault.insert(vault_of(daemon, &declaration.name)?);
                     if let Some(program) = super::adapters::command_line(declaration) {
                         // Without one it runs as before, its browser in the runs' network, and
@@ -625,13 +637,20 @@ async fn start_with(
                         }
                     }
                     (display, headless) =
-                        super::adapters::shown(daemon, declaration, &declaration.name);
+                        super::adapters::shown(daemon, declaration, &declaration.name, headed);
                     if let Some(browser) =
                         super::adapters::browser(daemon, declaration, display.as_ref())
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(own, display.is_some())?
+                    let options = super::adapters::start_options(
+                        declaration,
+                        own,
+                        &given,
+                        display.is_some(),
+                    )?;
+                    profile = Some(given);
+                    options
                 }
                 None => Vec::new(),
             };
@@ -670,11 +689,13 @@ async fn start_with(
             if let Some(network) = &network {
                 network.entered(&mut command);
             }
-            let mut child = crate::children::spawn(crate::landlock::confined_given(
-                crate::children::in_own_session(&mut command),
-                &reached,
-            ))
-            .map_err(|error| format!("{}: {error}", words[0]))?;
+            crate::children::in_own_session(&mut command);
+            match &profile {
+                Some(profile) => crate::landlock::confined_browser(&mut command, &reached, profile),
+                None => crate::landlock::confined_given(&mut command, &reached),
+            };
+            let mut child = crate::children::spawn(&mut command)
+                .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())
@@ -803,6 +824,7 @@ async fn start_with(
                 cut: cut.clone(),
                 display,
                 headless,
+                headed,
             })
             .await;
             return Err(why);
@@ -833,6 +855,7 @@ async fn start_with(
         cut,
         display,
         headless,
+        headed,
     })
 }
 
@@ -1115,7 +1138,14 @@ pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<L
         *server.leader.lock().unwrap() = None;
         stop_running(running).await;
     }
-    let running = match start(daemon, declaration).await {
+    // Its browser goes on in the mode that runs: no call asked for another.
+    let running = match start(
+        daemon,
+        declaration,
+        browser_display(daemon, &declaration.name).is_some(),
+    )
+    .await
+    {
         Ok(running) => running,
         Err(why) => {
             let why = not_started(&why, |why| {
@@ -1140,7 +1170,7 @@ pub async fn call(
     grant: &Grant,
     name: &str,
     action: &str,
-    arguments: Map<String, Value>,
+    mut arguments: Map<String, Value>,
 ) -> Outcome {
     let server = server_of(daemon, name);
     let mut turn = server.turn.lock().await;
@@ -1161,8 +1191,27 @@ pub async fn call(
     {
         stop_running(running).await;
     }
+    // The call that opens the browser says whether to show it; any other goes on in the mode that
+    // runs. The other mode restarts the server and closes the browser, so that the next one starts
+    // in the mode asked, on the same profile (`adapters::start_options`).
+    let current = turn.as_ref().map_or_else(
+        || browser_display(daemon, name).is_some(),
+        |running| running.headed,
+    );
+    let wanted =
+        super::adapters::applying(&pin).and_then(|adapter| adapter.headed(action, &arguments));
+    if let Some(wanted) = wanted
+        && wanted != current
+    {
+        if let Some(running) = turn.take() {
+            *server.leader.lock().unwrap() = None;
+            stop_running(running).await;
+        }
+        closed(daemon, &server).await;
+    }
+    let headed = wanted.unwrap_or(current);
     if turn.is_none() {
-        let running = match start(daemon, &declaration).await {
+        let running = match start(daemon, &declaration, headed).await {
             Ok(running) => running,
             Err(why) if super::row(daemon, name).signed_out.is_some() => {
                 drop(turn);
@@ -1198,13 +1247,20 @@ pub async fn call(
         super::changed_event(daemon, name, None);
     }
     let running = turn.as_ref().expect("started");
+    // Asked to show the browser that could not be: the agent is told, not left to wait for a window.
+    let not_shown = running.headless.clone().filter(|_| wanted == Some(true));
+    // agent-browser's own `headed` is above its configuration: the server is told the mode that
+    // runs, so a browser that could not be shown opens the page headless instead of failing.
+    if wanted.is_some() && arguments.contains_key("headed") {
+        arguments.insert("headed".into(), json!(running.display.is_some()));
+    }
     let params = CallToolRequestParams::new(action.to_owned()).with_arguments(arguments);
     // A cut that ended no call (an event stream that went on after it) is not this call's.
     running.cut.take();
     let answered = tokio::time::timeout(CALL_LIMIT, running.service.call_tool(params)).await;
     let now = super::now_of(daemon, name).map(|(_, _, state)| state);
     let stopping = !matches!(now, Some(State::Ready));
-    let outcome = match answered {
+    let mut outcome = match answered {
         Err(_) => {
             if let Some(running) = turn.take() {
                 *server.leader.lock().unwrap() = None;
@@ -1257,6 +1313,12 @@ pub async fn call(
             grant,
         ),
     };
+    if let (Outcome::Done(text), Some(why)) = (&mut outcome, not_shown) {
+        text.push_str(&format!(
+            "\nFlottille: the browser is not shown, it runs headless: {}",
+            crate::mcp::masked(&why, &grant.place)
+        ));
+    }
     if stopping && let Some(running) = turn.take() {
         *server.leader.lock().unwrap() = None;
         stop_running(running).await;

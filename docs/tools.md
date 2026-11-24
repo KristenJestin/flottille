@@ -608,7 +608,8 @@ pending requests.
   protocols, and so type into other windows. When the folder cannot be made (the socket cannot be
   linked), the run has no display, never the real folder, and the daemon's log says why. The gate
   judges the run as before: the setting only adds the display. It is the same folder a connection's
-  *Show the browser* uses (`docs/extensions.md`), one per owner.
+  browser uses when a call shows it (`docs/extensions.md`, "The browser can be
+  shown"), one per owner.
 - **A commit's message is checked as the project declares**: with `message_checks` in the
   project's file (`docs/projects.md`, "Message checks"), each `git commit` the line runs, at any of
   its layers, has its message (its `-m`, or its `-F` file) given to each check before the run
@@ -1142,7 +1143,11 @@ agent never talks to the server.
   action's description (cut at 4,000 characters, a line saying so) and its argument schema; with
   `for: "@instructions"` the server's own instructions, cut the same. Answered from what the user
   accepted, never by a call to the server, and harmless. Each text is framed as the server's, in
-  a `<connection_text>` block with every `<` and `&` escaped.
+  a `<connection_text>` block with every `<` and `&` escaped. For a server Flottille has an
+  adapter for, `help` also says Flottille's own words beside the server's: agent-browser's
+  browser is headless, and `agent_browser_open` takes `headed` to show it on the user's screen,
+  only when the user must act in the page (sign in, a captcha) or see it, never to read a page
+  (`extensions.md`, "Adapters", "The browser can be shown").
 - **`arguments`** is the action's own object, checked against the accepted schema (types,
   properties, the required ones, the values taken, items, bounds) and the user's limits before the
   server sees anything: an unknown action, one turned off, arguments that do not fit or a value
@@ -2437,7 +2442,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`,
      `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.local/share/keyrings`,
      `Library/Keychains`, `.local/share/opencode` wherever they sit along the path, `/etc/shadow`,
-     `/etc/sudoers`, `/etc/sudoers.d`. Inside the place only what sits below it counts; a path
+     `/etc/sudoers`, `/etc/sudoers.d`, and the folders `remote/` (Flottille's keys) and
+     `browsers/` (its browsers' profiles: their cookies and sign-ins) of Flottille's own folders,
+     in any case: `refused: X is in a login's place (the profiles of Flottille's browsers, its
+     browsers/ folder)`. Inside the place only what sits below it counts; a path
      outside is checked as written and where it leads, and without a leading `/proc/<process>/root`
      or `cwd`. The agents' own folders of the home (`~/.claude`, `~/.claude.json`, `~/.codex`)
      are a login's place whole (`refused: X is in a login's place (~/.claude)`), and so is a copy
