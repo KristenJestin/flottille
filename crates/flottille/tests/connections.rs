@@ -4552,6 +4552,11 @@ fn a_revoked_token_refused_as_the_server_starts_signs_out() {
 /// The password of the vault entry `shop-test`, which reaches the page's form alone.
 const PASSWORD: &str = "pa55-of-the-test-acc0unt";
 
+/// The actions that record a session as a flow and keep it in a file agent-browser writes itself
+/// (what a login types included, which no masking reaches): off at the first pin, as the HAR and
+/// the trace are.
+const FLOWS: [&str; 2] = ["agent_browser_flow_save", "agent_browser_flow_steps"];
+
 /// The credential actions of agent-browser's own, which its adapter keeps off.
 const OWN_LOGINS: [&str; 6] = [
     "agent_browser_auth_delete",
@@ -4632,6 +4637,7 @@ fn agent_browser(version: &str) -> Value {
         .chain(&LOCKED_TOO)
         .chain(&SCRIPTS)
         .chain(&FILES)
+        .chain(&FLOWS)
         .chain(&OTHERS)
     {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
@@ -6758,6 +6764,30 @@ fn har_and_trace_are_off_at_the_first_pin() {
     )
     .unwrap();
     assert_eq!(setting(&user, "agent_browser_trace_start"), "judged");
+}
+
+#[test]
+fn the_flow_and_capture_tools_are_off() {
+    // `flow save` keeps a recorded session in a file of agent-browser's own, and `flow steps`
+    // lists what it recorded: the values a login types may be in them, where Flottille's masking
+    // does not look. Off at the first pin, beside the HAR and the trace, and the user's to turn on.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in FLOWS {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(changed.contains("agent_browser_flow_save"), "{changed}");
+    assert!(changed.contains("not masked"), "{changed}");
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_flow_save": "judged"}}),
+    )
+    .unwrap();
+    assert_eq!(setting(&user, "agent_browser_flow_save"), "judged");
 }
 
 /// A secret holding both quotes, which HTML and JSON escape.
