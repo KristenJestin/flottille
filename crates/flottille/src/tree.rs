@@ -2978,6 +2978,8 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
         return;
     }
     if let Some(brief) = &agent.brief {
+        // Given again as at its start: a brief from another machine is masked with this place.
+        let brief = crate::across::masked_for(daemon, &agent, brief, false);
         deliveries::deliver(
             daemon,
             id,
