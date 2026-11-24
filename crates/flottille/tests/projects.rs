@@ -1994,6 +1994,92 @@ mod removal {
     }
 
     #[test]
+    fn a_file_restored_during_a_removal_is_kept() {
+        let (user, held, release) = holding_removals();
+        project(&user, "app");
+        workspace(&user, "app", "w");
+        let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+        lose_the_file(&user, "app");
+        let mut removed = None;
+        std::thread::scope(|scope| {
+            let removing = scope.spawn(|| user.call("project.remove", json!({"name": "app"})));
+            eventually("the removal holds", || held.exists());
+            // Put back by hand, or by `project add`, while the removal waits.
+            std::fs::write(user.project_file("app"), &text).unwrap();
+            std::fs::write(&release, "").unwrap();
+            removed = Some(removing.join().unwrap());
+        });
+
+        let removed = removed.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(user.project_file("app")).unwrap(),
+            text,
+            "the file that came back is not deleted: {removed}"
+        );
+        assert_eq!(removed["removed"], Value::Null, "{removed}");
+        assert!(removed["project_kept"].is_string(), "{removed}");
+        let shown = user.call("project.show", json!({"name": "app"}));
+        assert!(shown.is_ok(), "the project is still known: {shown:?}");
+        let listed = user.call("project.list", json!({})).unwrap();
+        assert_eq!(listed["unconfigured"], json!([]), "{listed}");
+    }
+
+    #[test]
+    fn a_project_whose_live_sessions_are_children_only_can_still_be_removed() {
+        let user = user();
+        project(&user, "app");
+        let root = user
+            .call(
+                "agent.run",
+                json!({"project": "app", "message": "HANG here"}),
+            )
+            .unwrap()["agent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        eventually("the root works", || state(&user, &root) == "working");
+        let lead = session(&user, "You are the root");
+        let launched = lead.call(
+            "agent_launch",
+            json!({"kind": "child", "title": "worker", "brief": "HANG on"}),
+        );
+        assert!(!launched.error, "{}", launched.text);
+        let child = user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["parent"] == root.as_str())
+            .map(|agent| agent["id"].as_str().unwrap().to_owned())
+            .expect("the child");
+        // The root's end alone, as a store left by an older version holds it.
+        let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+        db.execute(
+            "UPDATE agents SET state = 'ended', ended_at = updated_at WHERE id = ?1",
+            [&root],
+        )
+        .unwrap();
+        drop(db);
+        lose_the_file(&user, "app");
+        assert_eq!(state(&user, &child), "working");
+
+        let listed = user.call("project.list", json!({})).unwrap();
+        assert_eq!(
+            listed["unconfigured"],
+            json!([{"name": "app", "sessions": 1, "workspaces": 0}]),
+            "{listed}"
+        );
+        let removed = remove(&user, false);
+
+        assert_eq!(removed["removed"], "app", "{removed}");
+        assert_eq!(
+            ids(&removed["stopped"]["agents"]),
+            std::slice::from_ref(&child),
+            "{removed}"
+        );
+        assert_eq!(state(&user, &child), "ended");
+    }
+
+    #[test]
     fn the_command_line_lists_a_project_without_a_file_and_removes_it() {
         let user = user();
         project(&user, "app");
@@ -2003,7 +2089,7 @@ mod removal {
 
         let listed = user.run(&["project", "list"]);
         let text = String::from_utf8_lossy(&listed.stdout).into_owned();
-        assert!(text.contains("app  1 sessions  1 workspaces"), "{text}");
+        assert!(text.contains("app  1 session  1 workspace"), "{text}");
         assert!(text.contains("flottille project remove"), "{text}");
 
         let removed = user.run(&["project", "remove", "app"]);
