@@ -7670,7 +7670,7 @@ fn login_and_review_refused(user: &User, mcp: &Mcp, named: &str) {
 
 #[test]
 fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
-    for named in MOVING.iter().copied().chain(["HOME"]) {
+    for named in MOVING.iter().copied().chain(["HOME", "LANG"]) {
         let user = user();
         let assignment = format!("{named}=/tmp/elsewhere");
         browser_declared(
@@ -7681,11 +7681,12 @@ fn a_connection_whose_command_sets_a_folder_variable_through_env_is_refused() {
             json!({"command": browser_command_after(&user, &["env", &assignment])}),
         );
         let (_, mcp) = signed_up(&user);
-        // A folder variable is said by its name; any other assignment, by the launcher.
-        let said = if MOVING.contains(&named) {
-            named.to_owned()
-        } else {
+        // A folder variable is said by its name (never `HOME` for `XDG_CONFIG_HOME`); any other
+        // assignment, by the launcher.
+        let said = if named == "LANG" {
             "starts with env".to_owned()
+        } else {
+            named.to_owned()
         };
         login_and_review_refused(&user, &mcp, &said);
     }
