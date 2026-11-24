@@ -867,9 +867,16 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
   chosen where a page is a machine's: Settings' header and Add project's `On` (#1182, #1244), and
-  in a project's composer (the machine picker); the
+  in a project's composer (the machine picker) and its settings' header (#1266); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
+- **A shared project's page** (#1266) lists, after its places, the sessions of each other machine
+  that has it, a block a machine with its icon, its name and its state, each session with the
+  machine's icon (`docs/design.md` §10). A session starts on this machine when it has the project
+  and can run an agent, else on the one machine online that has it; when several do and this one
+  cannot, the composer asks which before it starts anything, and the answer is kept for the
+  project by the window. Its settings switch between the machines that
+  have it, this one first.
 - **The same project.** Two projects are the same when the remotes of their repositories are the
   same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
   `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
@@ -1895,6 +1902,21 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **Another machine can run a shared project's session when it is an online runner that offers the
+  project** (#1266): what agents it has signed in is not looked at, so that a machine is not left
+  out while its providers are not read; a start it cannot run is refused there, and said. This
+  machine "can run" when its role is a runner: its providers are not looked at either, so that the
+  page that opens does not change as they are read (its composer says when none is ready).
+- **A shared project's start and settings switches match the project by its name on each machine**
+  (#1266), as the composer's picker did: a project another machine has under another name (the same
+  repositories) has its sessions on the page, but that machine is not offered to start on nor in
+  the settings' switch. Matching by the remotes there too could come later.
+- **The machine chosen for a shared project is kept with the sidebar's folds** (#1266, `starts`
+  under `sidebar`), not under a key of its own as the arrangement is: two windows choosing at the
+  same moment may keep one choice, which is harmless (the next choice writes it again).
+- **A machine with no session of a shared project has no block on its page** (#1266): the row's
+  marks already say which machines have it.
 
 - **An allowed launch whose setup a restart cut is refused, not resumed** (#1317): the daemon that
   starts again finds the request allowed and its answer never stored; it refuses the launch, removes
