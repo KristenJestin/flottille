@@ -903,6 +903,106 @@ fn its_settings_switch_between_the_machines_that_have_it(cx: &mut TestAppContext
     });
 }
 
+// A shared project is matched by its repositories' remotes, whatever its name on each machine
+// (#1410): the page, the start choice and the settings switch use the sidebar's match.
+
+#[gpui_kit::test]
+fn a_project_cloned_under_another_name_is_the_same_shared_project(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "web-app", APP);
+    told(&pc, &["web-app"]);
+    let here = session(&pc, "app", "Fix the pc part");
+    let there = session(&server, "web-app", "Ship the server part");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    assert_eq!(homes(&shell, "app", cx), ["pc", "server"], "one row");
+    // The page lists the server's session in the server's block.
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "both sessions on app's page", |cx| {
+        present(cx, session_row_id(&here))
+            && present(cx, session_row_id(&row))
+            && present(cx, machine_block_id("server"))
+    });
+    assert_eq!(shown(&shell, cx), None, "this machine's page of it");
+
+    // The start choice offers the server, and takes it to the server's page of its `web-app`.
+    until(&shell, cx, "app's composer offers the server", |cx| {
+        present(cx, "machine-picker")
+    });
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-server", cx);
+    until(&shell, cx, "the server's page of web-app", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::Project("web-app".into()))
+            })
+            && present(cx, machine_block_id("pc"))
+            && present(cx, session_row_id(&here))
+    });
+    // And back from there to this machine's `app`.
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-here", cx);
+    until(&shell, cx, "this machine's page of app", |cx| {
+        shown(&shell, cx).is_none()
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::Project("app".into()))
+            })
+    });
+
+    // The settings switch offers the server too, and shows its settings of `web-app`.
+    show(&shell, Selection::ProjectSettings("app".into()), cx);
+    until(&shell, cx, "app's switch of machines", |cx| {
+        present(cx, "project-settings-machine")
+    });
+    click(&shell, "project-settings-machine", cx);
+    until(&shell, cx, "the server offered", |cx| {
+        present(cx, "project-settings-machine-server")
+    });
+    click(&shell, "project-settings-machine-server", cx);
+    until(&shell, cx, "the server's settings of web-app", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::ProjectSettings("web-app".into()))
+            })
+    });
+}
+
+#[gpui_kit::test]
+fn two_projects_of_the_same_name_with_other_remotes_are_not_one(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = ready_machines();
+    add(&pc, "app", APP);
+    add(&server, "app", "https://git.example/other/app.git");
+    told(&pc, &["app"]);
+    let there = session(&server, "app", "Ship the other app");
+    let row = elsewhere_id("server", &there);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    until(&shell, cx, "the server's namesake row", |cx| {
+        present(cx, project_id("app@server"))
+    });
+    assert_eq!(homes(&shell, "app", cx), ["pc"]);
+    // This machine's page of `app` holds nothing of the server's namesake, and its start choice
+    // does not offer the server.
+    show(&shell, Selection::Project("app".into()), cx);
+    until(&shell, cx, "app's composer", |cx| {
+        present(cx, "place-picker")
+    });
+    settle(&shell, cx);
+    assert_eq!(shown(&shell, cx), None);
+    assert!(!present(cx, machine_block_id("server")));
+    assert!(!present(cx, session_row_id(&row)));
+    assert!(!present(cx, "machine-picker"), "the server is not offered");
+    // Nor does its settings switch.
+    show(&shell, Selection::ProjectSettings("app".into()), cx);
+    until(&shell, cx, "app's settings", |cx| {
+        present(cx, "project-settings-header")
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, "project-settings-machine"));
+}
+
 // The shared project's page at rest (#1411): nothing is drawn once it settled, whatever the other
 // machines hold, and a read of them that changes nothing on it draws nothing.
 
