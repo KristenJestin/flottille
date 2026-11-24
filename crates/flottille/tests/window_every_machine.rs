@@ -1395,6 +1395,10 @@ fn a_read_of_this_machine_queued_before_the_server_s_page_does_not_fill_it(
 fn a_read_of_the_server_that_comes_after_its_page_was_left_is_not_shown(cx: &mut TestAppContext) {
     let (_hub, pc, _server, _here, _there) = two_machines();
     let relay = Relay::default();
+    // This machine's own list is the slow one to come, as on a loaded runner: the window is
+    // shown before it holds `app`.
+    relay.slow.lock().unwrap().push("project.list");
+    relay.slow_by.store(3000, Ordering::SeqCst);
     let (shell, cx) = window(&pc, &relay, cx);
     settle(&shell, cx);
 
