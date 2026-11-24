@@ -4496,6 +4496,16 @@ mod tests {
             setup.contains("one of copy, link, root_entries, run, task"),
             "setup lost what a step is: {setup}"
         );
+        // A launch on another machine takes the uncommitted changes there, one in another project
+        // is held for the user, and a new workspace's branch follows the repository's convention.
+        let launch = listed("agent_launch");
+        for said in [
+            "uncommitted changes go with it",
+            "another registered project, always held for the user",
+            "the repository's convention",
+        ] {
+            assert!(launch.contains(said), "agent_launch lost: {said}\n{launch}");
+        }
         // A secret never goes in a connection's variables or headers.
         let connections = listed("connections");
         assert!(

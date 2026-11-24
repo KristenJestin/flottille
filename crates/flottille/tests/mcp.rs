@@ -477,6 +477,57 @@ fn a_rarely_used_family_reads_its_guidance_on_demand() {
 }
 
 #[test]
+fn a_launch_lists_its_rules_and_reads_its_arguments_on_demand() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+
+    // Listed short: the kinds, the example and the rules a first call needs; no argument's
+    // sentence, its guide coming with the first call.
+    let tools = mcp.tools();
+    let launch = tools.iter().find(|t| t["name"] == "agent_launch").unwrap();
+    let description = launch["description"].as_str().unwrap();
+    for said in [
+        "{\"kind\": \"child\"",
+        "uncommitted changes go with it",
+        "always held for the user",
+        "the repository's convention",
+    ] {
+        assert!(description.contains(said), "{said}: {description}");
+    }
+    let properties = &launch["inputSchema"]["properties"];
+    assert!(
+        properties["branch"]["description"].is_null(),
+        "{properties}"
+    );
+    assert_eq!(properties["branch"]["type"], "string");
+    assert_eq!(
+        launch["inputSchema"]["required"],
+        json!(["kind", "title", "brief"])
+    );
+
+    // The first call works and brings the guide whole: each argument's sentence.
+    let (first, guide) = mcp.call_with_guide(
+        "agent_launch",
+        json!({"kind": "child", "title": "worker", "brief": "Read the log."}),
+    );
+    assert!(!first.error, "{}", first.text);
+    let guide = guide.expect("the first call brings the guide");
+    for said in [
+        "machine: Another of the user's machines, by name",
+        "branch: With new_workspace: its branch, as workspace create takes it",
+        "role: worker by default.",
+    ] {
+        assert!(guide.contains(said), "{said}: {guide}");
+    }
+    let (again, guide) = mcp.call_with_guide(
+        "agent_launch",
+        json!({"kind": "child", "title": "second", "brief": "Read it again."}),
+    );
+    assert!(!again.error, "{}", again.text);
+    assert_eq!(guide, None, "given once");
+}
+
+#[test]
 fn writing_a_file_never_read_is_refused() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
