@@ -2830,6 +2830,60 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_inside_a_fake_or_unclosed_cut_marker_from_another_machine_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place_with_secret(dir.path());
+        let texts = [
+            // Opened as `results::shorten`'s marker, closed by a later `}]` far away.
+            format!(
+                "[1 characters left out (lines API_TOKEN={SECRET}\nsome output\n{{\"a\": [{{}}]}} done"
+            ),
+            // A marker `mcp::cut` cut before its `}]`, closed by a JSON `}]` further on.
+            format!(
+                "quoted: [12 characters left out (lines 3-4 of 9): read th\nkey {SECRET}\n[{{\"b\": 1}}]"
+            ),
+            // A marker of the right shape around the secret.
+            format!(
+                "[1 characters left out (lines 1-2 of 3): read them with run_status \
+                 {{\"run\": \"res_1\", \"start\": 1, \"key\": \"{SECRET}\"}}]"
+            ),
+        ];
+        for text in texts {
+            for outcome in ["ok", "held", "failed", "refused"] {
+                let answer = json!({"outcome": outcome, "text": text});
+                let shown = text_of(answered(Ok(answer.clone()), &aim(), &place));
+                assert!(shown.contains("[masked]"), "{outcome}: {shown}");
+                holds_no_piece_of_the_secret(&shown);
+                let shown = text_of(call_answered(Ok(answer), "server", "ab12", &place));
+                holds_no_piece_of_the_secret(&shown);
+            }
+        }
+    }
+
+    #[test]
+    fn a_secret_of_digits_that_a_marker_of_another_machine_counts_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let digits = "4815162342";
+        std::fs::write(dir.path().join(".env"), format!("PIN_TOKEN={digits}\n")).unwrap();
+        let place = Place {
+            root: dir.path().into(),
+            ..place_with_secret(tempfile::tempdir().unwrap().path())
+        };
+        let text = format!(
+            "head\n[{digits} characters left out (lines 2-9 of 10): read them with run_status \
+             {{\"run\": \"res_1\", \"start\": 2}}]\ntail"
+        );
+        let answer = || json!({"outcome": "ok", "text": text});
+        for shown in [
+            text_of(answered(Ok(answer()), &aim(), &place)),
+            text_of(call_answered(Ok(answer()), "server", "ab12", &place)),
+        ] {
+            assert!(!shown.contains(digits), "{shown}");
+            assert!(shown.contains("[[masked] characters left out"), "{shown}");
+        }
+    }
+
+    #[test]
     fn a_refusal_or_a_cannot_answer_now_of_another_machine_is_masked() {
         let dir = tempfile::tempdir().unwrap();
         let place = place_with_secret(dir.path());
