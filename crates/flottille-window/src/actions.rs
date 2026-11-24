@@ -2119,47 +2119,8 @@ fn allow_sharing(
             bounds.quick,
         )
     };
-    let made: HashSet<String> = match on_from("vault.list", json!({})) {
-        Ok(listed) => listed["entries"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
-            .collect(),
-        Err(why) => {
-            let path = needs.files.get(from_step).map_or("", |file| &file.path);
-            told(
-                Some(from_step),
-                Step::NotMade,
-                Some(format!("{path} was not made: {why}")),
-            );
-            return;
-        }
-    };
-    for (at, file) in needs.files.iter().enumerate().skip(from_step) {
-        if !made.contains(&file.entry) {
-            if !told(Some(at), Step::Making, None) {
-                return;
-            }
-            let params = json!({"project": needs.project, "path": file.path, "name": file.entry});
-            if let Err(why) = on_from("vault.from_file", params) {
-                let why = format!("{} was not made: {why}", file.path);
-                told(Some(at), Step::NotMade, Some(why));
-                return;
-            }
-        }
-        if !told(Some(at), Step::Sharing, None) {
-            return;
-        }
-        let params = json!({"name": file.entry, "machine": needs.to});
-        if let Err(why) = on_from("vault.share", params) {
-            let why = format!("{} was not shared with {}: {why}", file.path, needs.to);
-            told(Some(at), Step::NotShared, Some(why));
-            return;
-        }
-        if !told(Some(at), Step::Shared, None) {
-            return;
-        }
+    if !share_files(&needs, from_step, &needs.to, on_from, &told) {
+        return;
     }
     if !told(None, Step::Allowing, None) {
         return;
@@ -2184,6 +2145,62 @@ fn allow_sharing(
         },
     };
     let _ = updates.unbounded_send(Update::Done(outcome));
+}
+
+/// The files of an Allow ([`Command::AllowSharing`]) from `from_step` on, each made an entry on
+/// `from` unless it is one already, and shared, `on_from` asking `from`, each step `told` as it
+/// goes: whether every one is shared. `here` is the machine the launch is held on.
+fn share_files(
+    needs: &crate::waiting::Needs,
+    from_step: usize,
+    _here: &str,
+    on_from: impl Fn(&str, Value) -> Result<Value, String>,
+    told: impl Fn(Option<usize>, crate::waiting::Step, Option<String>) -> bool,
+) -> bool {
+    use crate::waiting::Step;
+    let made: HashSet<String> = match on_from("vault.list", json!({})) {
+        Ok(listed) => listed["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+            .collect(),
+        Err(why) => {
+            let path = needs.files.get(from_step).map_or("", |file| &file.path);
+            told(
+                Some(from_step),
+                Step::NotMade,
+                Some(format!("{path} was not made: {why}")),
+            );
+            return false;
+        }
+    };
+    for (at, file) in needs.files.iter().enumerate().skip(from_step) {
+        if !made.contains(&file.entry) {
+            if !told(Some(at), Step::Making, None) {
+                return false;
+            }
+            let params = json!({"project": needs.project, "path": file.path, "name": file.entry});
+            if let Err(why) = on_from("vault.from_file", params) {
+                let why = format!("{} was not made: {why}", file.path);
+                told(Some(at), Step::NotMade, Some(why));
+                return false;
+            }
+        }
+        if !told(Some(at), Step::Sharing, None) {
+            return false;
+        }
+        let params = json!({"name": file.entry, "machine": needs.to});
+        if let Err(why) = on_from("vault.share", params) {
+            let why = format!("{} was not shared with {}: {why}", file.path, needs.to);
+            told(Some(at), Step::NotShared, Some(why));
+            return false;
+        }
+        if !told(Some(at), Step::Shared, None) {
+            return false;
+        }
+    }
+    true
 }
 
 /// How long the window waits for a sign-in on another machine: the daemon's own wait, and a
