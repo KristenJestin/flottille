@@ -2029,6 +2029,14 @@ impl Shell {
     fn folds_now(&self, cx: &Context<Self>) -> Folds {
         // What was last asked of the daemon, which the nodes that are not shown now keep.
         let last = self.kept_asked.as_ref().unwrap_or(&self.kept);
+        // No rows yet (a window opening reads what the daemon keeps before its rows): the nodes
+        // say nothing, and writing their empty maps would forget every fold for every window.
+        if self.read.is_none() {
+            return Folds {
+                by_machine: self.by_machine,
+                ..last.clone()
+            };
+        }
         let by_machine = self.is_by_machine();
         let exists = |name: &str| self.snapshot.projects.iter().any(|p| p.name == name);
         Folds {
