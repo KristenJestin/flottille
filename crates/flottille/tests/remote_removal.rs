@@ -465,7 +465,7 @@ fn in_full_a_removal_from_another_machine_is_not_done_when_work_came_after_its_c
 
     assert!(card_made, "the card was never made, or the commit failed");
     // What the card did not say would be lost is not discarded unseen: refused, or held.
-    let text = done(&answer);
+    let text = &answer.text;
     assert!(
         text.contains("refused") || text.contains("request #"),
         "{text}"
