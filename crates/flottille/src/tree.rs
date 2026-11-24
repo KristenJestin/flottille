@@ -2346,20 +2346,7 @@ fn led_by_pilot(daemon: &Daemon, pilot: &str) -> Vec<Agent> {
 pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
     let mut sessions = Vec::new();
     for session in led_by_pilot(daemon, id) {
-        let workspace = match &session.workspace {
-            Some(name) => daemon
-                .read(|store| store.workspace(&session.project, name))
-                .ok()
-                .flatten(),
-            None => None,
-        };
-        let (state, losses) = match workspace {
-            Some(workspace) => match workspaces::loss_state(daemon, &workspace).await {
-                Ok(found) => found,
-                Err(failure) => ("unknown", vec![failure.message]),
-            },
-            None => ("clean", Vec::new()),
-        };
+        let (state, losses) = losses_of(daemon, &session).await;
         sessions.push(json!({
             "id": session.id,
             "title": session.title,
@@ -2369,27 +2356,60 @@ pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
             "losses": losses,
         }));
     }
-    // Those it leads on other machines end there with it: their work is read there, not here.
+    // Those it leads on other machines end there with it: their work is read there, each machine
+    // asked at once, the answer awaited no longer than a bounded wait.
     let pilots = std::iter::once(id.to_owned()).chain(
         led_by_pilot(daemon, id)
             .into_iter()
             .map(|session| session.id),
     );
-    for pilot in pilots {
-        for (launch, machine) in crate::across::led_elsewhere_by(daemon, &pilot) {
-            sessions.push(json!({
-                "id": launch.agent,
-                "title": launch.asked["title"],
-                "project": launch.asked["there"]["project"].as_str().unwrap_or(&launch.project),
-                "workspace": launch.workspace,
-                "machine": machine,
-                "state": "unknown",
-                // Not asked there: the confirmation never waits on another machine.
-                "losses": [format!("unknown (on {machine})")],
-            }));
-        }
+    let elsewhere: Vec<_> = pilots
+        .flat_map(|pilot| crate::across::led_elsewhere_by(daemon, &pilot))
+        .collect();
+    let until = tokio::time::Instant::now() + crate::across::LOSSES_WAIT;
+    let answers = futures::future::join_all(
+        elsewhere
+            .iter()
+            .map(|(launch, _)| crate::across::losses_there(daemon, launch, until)),
+    )
+    .await;
+    for ((launch, machine), answer) in elsewhere.iter().zip(answers) {
+        let (state, losses) = answer.unwrap_or_else(|| {
+            (
+                "unknown".to_owned(),
+                vec![format!("unknown (on {machine})")],
+            )
+        });
+        sessions.push(json!({
+            "id": launch.agent,
+            "title": launch.asked["title"],
+            "project": launch.asked["there"]["project"].as_str().unwrap_or(&launch.project),
+            "workspace": launch.workspace,
+            "machine": machine,
+            "state": state,
+            "losses": losses,
+        }));
     }
     Ok(json!({"agent": id, "sessions": sessions}))
+}
+
+/// What the workspace of the session `session` holds that is not saved, as `project.removal` says
+/// it (`clean`, `uncommitted`, `unpushed` or `unknown`), each loss as a sentence.
+pub(crate) async fn losses_of(daemon: &Daemon, session: &Agent) -> (&'static str, Vec<String>) {
+    let workspace = match &session.workspace {
+        Some(name) => daemon
+            .read(|store| store.workspace(&session.project, name))
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    match workspace {
+        Some(workspace) => match workspaces::loss_state(daemon, &workspace).await {
+            Ok(found) => found,
+            Err(failure) => ("unknown", vec![failure.message]),
+        },
+        None => ("clean", Vec::new()),
+    }
 }
 
 // Requests.

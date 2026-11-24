@@ -322,9 +322,11 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         None => "started".into(),
     };
     write(daemon, &record).map_err(refused)?;
+    // Its caller may have ended while its code travelled: what it started goes with it.
+    let gone = crate::across::recorded(daemon, &record);
     // Its pilot follows it from here, as a session it leads here: held, from now on too, since its
     // first wake may come before anything else is heard of it.
-    if let (LaunchKind::Led, Some(session)) = (asked.kind, &record.agent) {
+    if let (LaunchKind::Led, Some(session), false) = (asked.kind, &record.agent, gone) {
         crate::subscriptions::lead_elsewhere(daemon, &caller.id, session, &asked.title, machine)
             .map_err(refused)?;
     }
