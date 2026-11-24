@@ -2875,13 +2875,30 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_of_many_lines_after_a_cut_marker_is_masked_in_linear_time() {
+        let marker = "[5 characters left out (lines 2-3 of 4): read them with run_status \
+                      {\"run\": \"res_1\", \"start\": 2}]";
+        let text = format!("head\n{marker}\n{}tail", "\n".repeat(100_000));
+        let started = std::time::Instant::now();
+        let known = Secrets::new(&Default::default(), &["a-value-of-the-caller".to_owned()]);
+        let shown = cuts_masked(&text, &known);
+        assert!(shown.ends_with("tail"), "{}", &shown[..80]);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn a_secret_of_digits_that_a_marker_of_another_machine_counts_is_masked() {
         let dir = tempfile::tempdir().unwrap();
         let digits = "4815162342";
         std::fs::write(dir.path().join(".env"), format!("PIN_TOKEN={digits}\n")).unwrap();
+        let other = tempfile::tempdir().unwrap();
         let place = Place {
             root: dir.path().into(),
-            ..place_with_secret(tempfile::tempdir().unwrap().path())
+            ..place_with_secret(other.path())
         };
         let text = format!(
             "head\n[{digits} characters left out (lines 2-9 of 10): read them with run_status \
