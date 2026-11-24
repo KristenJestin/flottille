@@ -3507,6 +3507,71 @@ pub(crate) mod tests {
         assert_eq!(daemon.read(Store::agents).unwrap().len(), 1);
     }
 
+    /// The agent `c1` of `a_daemon_with` says `pieces` (text, message id), an event of the
+    /// daemon's own recorded after each of the first `between` of them: the numbers of its
+    /// pieces then skip, as they do when anything else of the daemon is recorded meanwhile.
+    fn said_with_the_daemon_recording(
+        daemon: &Daemon,
+        pieces: &[(&str, Option<&str>)],
+        between: usize,
+    ) {
+        for (at, (text, id)) in pieces.iter().enumerate() {
+            let mut data = json!({"text": text});
+            if let Some(id) = id {
+                data["message_id"] = (*id).into();
+            }
+            daemon
+                .write(|store| {
+                    let event = store.append_agent_event("c1", "agent.message", data, true)?;
+                    Ok(((), Some(event)))
+                })
+                .unwrap();
+            if at < between {
+                daemon
+                    .write(|store| {
+                        let event = store.append_event("remote.machine_changed", json!({}))?;
+                        Ok(((), Some(event)))
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_message_whose_pieces_the_daemon_s_own_events_part_is_one_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon_with(dir.path(), &crate::daemon::tests::an_agent("c1"));
+        // What `agents::Speech` records of one reply when the daemon holds the end of it back: the
+        // settled part, then the held part at the turn's end, and the daemon recorded something
+        // else of its own between them.
+        said_with_the_daemon_recording(
+            &daemon,
+            &[("The export is ", None), ("finished, CSV and JSON.", None)],
+            1,
+        );
+
+        assert_eq!(
+            last_messages_after(&daemon, "c1", 0),
+            ["The export is finished, CSV and JSON."]
+        );
+    }
+
+    #[test]
+    fn two_messages_of_the_agent_with_an_event_of_its_own_between_stay_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon_with(dir.path(), &crate::daemon::tests::an_agent("c1"));
+        said_with_the_daemon_recording(&daemon, &[("First.", None)], 0);
+        daemon
+            .write(|store| {
+                let event = store.append_agent_event("c1", "agent.tool_call", json!({}), true)?;
+                Ok(((), Some(event)))
+            })
+            .unwrap();
+        said_with_the_daemon_recording(&daemon, &[("Second.", None)], 0);
+
+        assert_eq!(last_messages_after(&daemon, "c1", 0), ["First.", "Second."]);
+    }
+
     #[test]
     fn a_duration_is_said_in_its_unit() {
         assert_eq!(ago(40_000), "40 s");
