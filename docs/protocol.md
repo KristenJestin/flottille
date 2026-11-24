@@ -1508,8 +1508,17 @@ was removed on 2026-11-21).
   projects are the same one when their `remotes` are equal and not empty. A machine whose list
   came before projects were listed says `null` for them. A session is `{"id", "title", "project", "state",
   "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
-  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  `pilot` the session of the agent that leads it on that machine, or `null`;
+  `pilot_elsewhere` `{"machine", "agent"}` the agent of another machine that leads it, that
+  machine's name and the agent's id there, as the session's machine said it (`pilots`), or
+  `null`: said only of a session of that machine's own list and only naming a member machine
+  other than it, and the window puts the row under that agent's only when that machine lists it,
+  never under a session of this machine (`docs/remote.md`, "One list of every machine"); never its
   conversation. The event `remote.sessions {name}` says that a machine's list changed.
+  Between machines of two builds: `sessions` keeps its closed shape (a field a machine of before
+  does not know makes it refuse the whole list), what is new beside it travels as a message of its
+  own (`projects`, `pilots`) that a machine of before refuses alone, and a machine that receives
+  none of them draws the list as before.
 - `remote.close {request}` keeps the user's close of a session of another machine: `request` is
   `agent.stop {agent}` for that machine, signed by the client with the device key as any request
   for another machine. This machine stores it before it sends it, sends it once that machine is
