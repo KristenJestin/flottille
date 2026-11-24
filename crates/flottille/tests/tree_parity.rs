@@ -453,15 +453,21 @@ fn allowed(key: &str, text: &str) -> String {
             kept.push(line.to_owned());
         // The last line of a prompt closes its JSON: that stays, on the line before, when the
         // line is left out.
-        } else if let (Some(at), Some(last)) = (line.find(JSON_END), kept.last_mut()) {
+        } else if let (Some(at), Some(last)) = (json_end(line), kept.last_mut()) {
             last.push_str(&line[at..]);
         }
     }
     kept.join("\n")
 }
 
-/// What closes a prompt the fake agent kept, a JSON list of one text block.
-const JSON_END: &str = "\",\"type\":\"text\"}]";
+/// Where a prompt the fake agent kept, a JSON list of one text block, closes on `line`: after the
+/// text when its keys are sorted, after `type` when they keep the order they were written in.
+fn json_end(line: &str) -> Option<usize> {
+    ["\",\"type\":\"text\"}]", "\"}]"]
+        .iter()
+        .filter_map(|end| line.find(end))
+        .min()
+}
 
 /// What a tool answered, said with whether it was an error.
 fn said(answer: &Answer) -> String {
@@ -524,6 +530,33 @@ fn held_then(method: &'static str) -> impl Fn(Topology) -> Seen {
             seen("held: root's deliveries", list(play.root_deliveries())),
         ]
     }
+}
+
+/// The prompt as the fake agent kept it, its JSON keys in either order: the order follows the
+/// features the build unifies (`preserve_order` when the whole workspace is built, not when one
+/// crate is), and the parity must not depend on it.
+#[test]
+fn a_line_left_out_closes_the_prompt_whatever_the_order_of_its_keys() {
+    let guide = "Where a question goes: it is led.\\nWhile pc is not linked to this machine, ask \
+                 reaches the user's inbox instead.";
+    let here = "[{\"text\":\"Brief.\\n\\nWhere a question goes: it is led.\",\"type\":\"text\"}]";
+    let across = format!("[{{\"text\":\"Brief.\\n\\n{guide}\",\"type\":\"text\"}}]");
+    assert_eq!(
+        allowed("led: first message", here),
+        allowed("led: first message", &across)
+    );
+    let here = "[{\"type\":\"text\",\"text\":\"Brief.\\n\\nWhere a question goes: it is led.\"}]";
+    let across = format!("[{{\"type\":\"text\",\"text\":\"Brief.\\n\\n{guide}\"}}]");
+    assert_eq!(
+        allowed("led: first message", here),
+        allowed("led: first message", &across)
+    );
+    // What the user sees still counts: a different line before it is a difference.
+    let other = across.replace("it is led", "it is not");
+    assert_ne!(
+        allowed("led: first message", here),
+        allowed("led: first message", &other)
+    );
 }
 
 #[test]
