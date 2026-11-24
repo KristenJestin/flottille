@@ -1441,7 +1441,7 @@ was removed on 2026-11-21).
   hub and the keys; turned on again, the same hub.
 - `client.presence {focused, input?}` (local) is what a client says of the user: whether it is in
   front of them (the window focused), and `input: true` when they just gave it an input (a key, a
-  click). The daemon stamps the input with its clock, keeps it, and tells the hub
+  click, the wheel). The daemon stamps the input with its clock, keeps it, and tells the hub
   (`{active, last_input}`, seconds since 1970), which tells the runners; it answers `{}`. The
   window says it when its focus changes and at an input, every 20 seconds at most. With remote off
   it is answered and kept nowhere. A runner tells the phone only when no client of the user had an
