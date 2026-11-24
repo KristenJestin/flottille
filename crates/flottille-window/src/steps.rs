@@ -188,8 +188,7 @@ impl RenderOnce for StepRow {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .mono(12.)
-                                .child(object.clone())
-                                .test_support(),
+                                .child(object.clone()),
                             object,
                             window,
                             cx,
