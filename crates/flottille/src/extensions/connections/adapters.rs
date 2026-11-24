@@ -417,10 +417,21 @@ impl Adapter {
         Some(format!("{} is not started while {why}", self.server))
     }
 
-    /// Whether the server's command runs the adapter's program, through any wrapper the gate
-    /// unwraps: its server is checked before its first start, as the adapter's.
+    /// Whether the server's command names the adapter's program: run through a wrapper the gate
+    /// unwraps, or any word of it (`setsid …/agent-browser mcp`, which the gate does not unwrap).
+    /// Its server is checked before its first start, as the adapter's.
     pub fn named_by(&self, words: &[String]) -> bool {
-        self.reached(words).named
+        self.reached(words).named || words.iter().any(|word| self.is_program(word))
+    }
+
+    /// Whether `word` is the adapter's program: its name, its path, or a package runner's spec of
+    /// it (`agent-browser@0.43.0`).
+    fn is_program(&self, word: &str) -> bool {
+        let program = crate::gate::base(word);
+        program == self.server
+            || program
+                .strip_prefix(self.server)
+                .is_some_and(|rest| rest.starts_with('@'))
     }
 
     /// The folder variable an assignment sets before the program, in any layer of the command.
@@ -477,11 +488,7 @@ impl Adapter {
                 break;
             };
             let program = crate::gate::base(first);
-            if program == self.server
-                || program
-                    .strip_prefix(self.server)
-                    .is_some_and(|rest| rest.starts_with('@'))
-            {
+            if self.is_program(first) {
                 reached.named = true;
                 return reached;
             }
