@@ -8626,12 +8626,28 @@ impl Render for SessionRail {
                     .text_color(p.faint)
                     .child("unreadable")
                     .into_any_element(),
-                RepositoryFacts::Branch(branch) => div()
-                    .text_color(p.faint)
-                    .child(SharedString::from(
-                        branch.unwrap_or_else(|| "no branch".to_owned()),
-                    ))
-                    .into_any_element(),
+                // A long branch is cut with an ellipsis, its whole name in a tooltip: the
+                // repository's name beside it keeps its room.
+                RepositoryFacts::Branch(branch) => {
+                    let branch =
+                        SharedString::from(branch.unwrap_or_else(|| "no branch".to_owned()));
+                    tipped_when_cut(
+                        div()
+                            .id(ElementId::Name(
+                                format!("rail-repository-{name}-branch").into(),
+                            ))
+                            .min_w_0()
+                            .text_color(p.faint)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(branch.clone()),
+                        branch,
+                        window,
+                        cx,
+                    )
+                    .into_any_element()
+                }
             };
             lines.push(
                 div()
@@ -8670,17 +8686,21 @@ impl Render for SessionRail {
                                     .id(ElementId::Name(
                                         format!("rail-repository-{name}-label").into(),
                                     ))
-                                    .flex_1()
-                                    .min_w_0()
+                                    .flex_none()
+                                    .whitespace_nowrap()
                                     .child(SharedString::from(name.clone()))
                                     .test_support(),
                             )
+                            // The facts keep the rest of the line, at its right edge.
+                            .child(div().flex_1())
                             .child(
                                 div()
                                     .id(ElementId::Name(
                                         format!("rail-repository-{name}-value").into(),
                                     ))
-                                    .flex_none()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
                                     .mono(11.5)
                                     .child(changes)
                                     .test_support(),
