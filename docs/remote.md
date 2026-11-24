@@ -1139,7 +1139,11 @@ local child's work; nothing moves your branch.*
   request and its machine (a name may hold spaces and dots), each machine counting its own, and says
   a session started when the call itself answers that the user allowed it before it returned. A restart
   there never stops a session that ran: an allowed launch whose workspace is ready and whose session
-  was briefed only has its answer settled again. A refused launch leaves no row under its
+  was briefed only has its answer settled again. One a restart cut after its caller may have heard
+  it approved (its answer settled `started`) tells that caller its stop as the end of the session it
+  started (`child-failed`, or `session-turn-ended` for a led one), which its machine takes whether the
+  approval reached it or not, and records `ended`, or `refused` when the approval had not reached it
+  (#1374). A refused launch leaves no row under its
   pilot and counts in no cap. A handed session's caller is told too: it waited
   for that answer, and hears nothing of the session after it.
 - **No chain without the user, across machines too** (`tools.md`, "No chain without the user"):
@@ -1299,6 +1303,17 @@ its question cards say `· on server` after their time.
   answer (`{"later": why}`): the sender keeps it, in its place, and sends it again on the next
   link, the next message kept, or 30 seconds later. Only a refusal is final: the message is then
   dropped.
+- **A delivery from another machine is masked as its answers are** (a report, a question, a led
+  session's turn, the answer to an approval): on the machine that takes it, before it is stored or
+  shown, of that machine's secrets and of those of the secret files of the place of the agent it
+  is for, the whole first, then both halves of a secret a cut of the other machine split (its
+  `[cut: N more characters; …]` marker, and the end of a body of 64,000 characters, where the
+  answer to a request is cut without a marker). So is every other text of another machine an
+  agent here is shown: a message of its parent or pilot (`agent_send`, `session_send`), the reason
+  of a denial, the brief of a session started for it. A place that cannot be read any more (its
+  workspace or project was removed) holds nothing back: the text is masked of the daemon's, the
+  vault's and what is left of the place's secrets, and delivered; a delivery for an agent that is
+  not here is refused for good. Only a store that cannot be read is refused for now and sent again.
 
 ### Where a question goes when the parent is off
 
@@ -1835,6 +1850,13 @@ on a real phone, by hand, and reported.
   user's answer to a held launch, the caller is told nothing was done, while the launch there stays
   held until its session ends; the refusal that end sends is a second answer, which the caller's
   machine refuses.
+- **A launch a restart cut after it was told approved is stopped, its caller told it ended** (#1374):
+  when the store could not keep the user's answer, the caller may have heard "approved" while the
+  daemon there, started again, finds the launch's setup cut and stops it. Its stop goes as the end of
+  the session (`child-failed`, `session-turn-ended`), which the caller's machine takes, rather than
+  as a second answer, which it refuses. Keeping the launch and resuming its setup instead could come
+  later; stopping it is the simpler, and the rule that a launch is answered once stays whole. A
+  handed launch's caller still hears only the user's answer.
 - **A restart leaves a launch that ran alone** (#1317): of an allowed launch whose answer was never
   stored, only one whose workspace is still preparing or whose session was never briefed is refused;
   one that ran is left running and its answer is stored again, since its caller was told approved.
