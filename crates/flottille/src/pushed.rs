@@ -165,8 +165,9 @@ const RESTART: &str = "restart the daemon, or work in Full (`flottille daemon st
 
 /// Finds what a push reads, before anything runs, and makes a missing `~/.ssh` where `make` (the
 /// daemon's start; `0700`, as `ssh` would): a folder that is not there could not be kept
-/// read-only, and a run would make it.
-pub fn find(make: bool) {
+/// read-only, and a run would make it. `work` are the folders runs work in, which no folder kept
+/// read-only holds or is in: each project's folder, the folders of its workspaces.
+pub fn find(make: bool, work: &[PathBuf]) {
     FOUND.get_or_init(|| {
         let account = account_home()?;
         let account = account.canonicalize().unwrap_or(account);
@@ -196,12 +197,16 @@ pub fn find(make: bool) {
             &account,
             home.as_deref(),
             &|name| std::env::var_os(name),
-            &[],
+            work,
         );
-        let mut kept: Vec<PathBuf> = settings
-            .iter()
-            .flat_map(|setting| keep_for(setting, &shared).unwrap_or_default())
-            .collect();
+        let mut settings = settings;
+        let mut kept: Vec<PathBuf> = Vec::new();
+        for setting in &mut settings {
+            match keep_for(setting, &shared) {
+                Ok(folders) => kept.extend(folders),
+                Err(why) => setting.unkept = Some(why),
+            }
+        }
         kept.sort();
         kept.dedup();
         let mut paths: Vec<PathBuf> = kept.clone();
@@ -650,8 +655,9 @@ fn links_on_the_way(path: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
 
 /// Whether `folder`, which holds a link on the way to the user's git settings, or the versions of
 /// what they lead to, can be kept read-only to every confined command: one below the account's
-/// home that is the user's own to write and that is not [`Shared`]: keeping a folder of everyone's
-/// would take the files of everything else in it away from the runs.
+/// home that is the user's own to write, that is not [`Shared`] and that neither holds nor is in a
+/// folder runs work in: keeping a folder of everyone's would take the files of everything else in
+/// it away from the runs.
 fn keepable(folder: &Path, shared: &Shared) -> bool {
     let Ok(folder) = folder.canonicalize() else {
         return false;
@@ -662,7 +668,17 @@ fn keepable(folder: &Path, shared: &Shared) -> bool {
             .iter()
             .any(|shared| shared.starts_with(&folder))
         && !shared.inside.iter().any(|own| folder.starts_with(own))
+        && !worked_in(&folder, shared)
         && changeable(&folder)
+}
+
+/// Whether runs work in `folder` (a real path), or in one it holds: a project's folder or a
+/// workspace's, as the daemon knows them.
+fn worked_in(folder: &Path, shared: &Shared) -> bool {
+    shared
+        .work
+        .iter()
+        .any(|work| work.starts_with(folder) || folder.starts_with(work))
 }
 
 /// The folders no link is kept in: **the one place that lists them.** Listed as real paths.
@@ -675,6 +691,9 @@ struct Shared {
     /// Flottille's own folders (configuration, data, state): nothing in them is kept either, the
     /// data folder holding the workspaces and the projects the daemon makes.
     inside: Vec<PathBuf>,
+    /// The folders runs work in, from the daemon's configuration and store: no folder that holds
+    /// one or is in one is kept, whatever its name.
+    work: Vec<PathBuf>,
 }
 
 /// The folders under which a user keeps their projects, by their usual names.
@@ -696,7 +715,7 @@ fn shared_folders(
     account: &Path,
     home: Option<&Path>,
     var: &dyn Fn(&str) -> Option<OsString>,
-    _work: &[PathBuf],
+    work: &[PathBuf],
 ) -> Shared {
     let real = |path: PathBuf| path.canonicalize().unwrap_or(path);
     let base = |name: &str, fallback: &str| {
@@ -731,16 +750,20 @@ fn shared_folders(
         account: real(account.to_owned()),
         folders,
         inside,
+        work: work.iter().cloned().map(real).collect(),
     }
 }
 
 /// The folders kept read-only at the daemon's start for `setting`, which a settings file that
 /// leads elsewhere later is judged by: **the folders that hold a link on the way to it**, so no
-/// run re-points one, and **the folder above the file it leads to**: the highest folder over the
-/// file that is [`keepable`], so the versions a dotfiles manager makes later, beside the one in use,
-/// are under a folder no run could write since the daemon's start. Where none is [`keepable`]
-/// (the file is in a shared folder), a file it is relinked to is refused. Nothing is kept for
-/// settings with a link no folder can hold.
+/// run re-points one, and **the folder that holds the versions**: the one above the folder of the
+/// file it leads to (`versions/` of `versions/<n>/git-config`), the nearest that holds the versions
+/// a dotfiles manager makes beside the one in use, so a new one is under a folder no run could
+/// write since the daemon's start. Not one above it: the less is read-only to the runs, the less
+/// is taken from them. Nothing is kept for settings with a link no folder can hold. Where the
+/// folder of the versions cannot be kept ([`keepable`]: the home, a shared folder, a project's or
+/// its workspaces', or one holding them), nothing is kept and the error says why, which a relink
+/// is refused with; a file root's alone needs no folder kept.
 fn keep_for(setting: &Setting, shared: &Shared) -> Result<Vec<PathBuf>, String> {
     let links = links_on_the_way(&setting.named)?;
     // A link in a folder that cannot be kept (the home, a shared folder) is one a run can replace:
@@ -757,13 +780,19 @@ fn keep_for(setting: &Setting, shared: &Shared) -> Result<Vec<PathBuf>, String> 
         .map(|(_, folder)| folder)
         .filter(|folder| keepable(folder, shared))
         .collect();
-    let above = setting
-        .file
-        .ancestors()
-        .skip(1)
-        .take_while(|folder| keepable(folder, shared))
-        .last();
-    kept.extend(above.map(Path::to_owned));
+    match setting.file.parent().and_then(Path::parent) {
+        Some(versions) if root_only(versions) => {}
+        Some(versions) if keepable(versions, shared) => kept.push(versions.to_owned()),
+        versions => {
+            return Err(format!(
+                "{} holds the versions of {}, and it cannot be kept read-only: it is the home, a \
+                 folder every program shares, or one a project or its workspaces are in or hold, \
+                 which runs must write",
+                versions.unwrap_or(Path::new("/")).display(),
+                setting.file.display()
+            ));
+        }
+    }
     kept.sort();
     kept.dedup();
     Ok(kept)
@@ -778,10 +807,10 @@ fn root_only(path: &Path) -> bool {
 /// Whether `folder` is in one kept read-only to every confined command since the daemon's start
 /// (`find`), and that one is still the folder it was then.
 fn under_kept(found: &Found, folder: &Path) -> bool {
-    found
-        .kept
-        .iter()
-        .any(|kept| folder.starts_with(kept) && changed(found, kept).is_none())
+    found.kept.iter().any(|kept| {
+        folder.starts_with(kept)
+            && recorded(found, kept).is_some_and(|start| identity(kept) == Some(start))
+    })
 }
 
 /// Whether no confined command can change what `folder` holds: it is root's alone, or it is in a
@@ -839,6 +868,14 @@ fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
             return Err(why);
         }
         return Ok(current);
+    }
+    if let Some(why) = &setting.unkept {
+        return Err(format!(
+            "{} now leads to {}, and nothing was kept read-only for it at the daemon's start: \
+             {why}: {RESTART}",
+            named.display(),
+            now.display()
+        ));
     }
     let links = links_on_the_way(named)?;
     if links.is_empty() {

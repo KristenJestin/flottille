@@ -158,8 +158,6 @@ pub fn run(paths: &Paths) -> Result<()> {
     crate::git::find_git();
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
-    // Before anything runs: what a push reads, which every run has read-only.
-    crate::pushed::find(true);
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
@@ -170,6 +168,9 @@ pub fn run(paths: &Paths) -> Result<()> {
     agents::kill_orphans(&store);
     crate::claude::forget_bridges(paths);
     let projects = Projects::open(paths)?;
+    // Before anything runs: what a push reads, which every run has read-only, never a folder runs
+    // work in.
+    crate::pushed::find(true, &work_folders(&projects, Some(&store)));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -182,6 +183,34 @@ pub fn run(paths: &Paths) -> Result<()> {
         return Err(start_again(&crate::update::binary()?));
     }
     served
+}
+
+/// The folders runs work in, as the configuration and the store have them: each project's folder
+/// and the folder its workspaces are made in, the default one for the projects to come, and each
+/// workspace's own (one made before the folder of its project's workspaces moved).
+pub fn work_folders(projects: &Projects, store: Option<&Store>) -> Vec<std::path::PathBuf> {
+    let registry = projects.registry();
+    let mut work = Vec::new();
+    match registry.load_all() {
+        Ok(loaded) => {
+            for project in loaded.projects {
+                work.push(project.folder);
+                work.push(project.workspaces_root);
+            }
+        }
+        Err(error) => eprintln!("flottille daemon: the projects: {error}"),
+    }
+    if let Ok(flottille_core::place::Place::Own(text)) = registry.place_read() {
+        let home = flottille_core::place::home();
+        work.extend(flottille_core::place::typed(&text, "", home.as_deref(), "path").ok());
+    }
+    if let Some(store) = store {
+        match store.workspaces(None) {
+            Ok(workspaces) => work.extend(workspaces.into_iter().map(|w| w.folder)),
+            Err(error) => eprintln!("flottille daemon: the workspaces: {error}"),
+        }
+    }
+    work
 }
 
 /// Becomes `<binary> daemon`, in this process: it never returns but with why it could not.
