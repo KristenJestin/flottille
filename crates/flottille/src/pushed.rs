@@ -118,6 +118,9 @@ struct Found {
     kept: Vec<PathBuf>,
     /// Every path made read-only, with its device and inode then.
     read_only: Vec<(PathBuf, (u64, u64))>,
+    /// The files the settings were relinked to since, as [`settle`] judged them (the newest of a
+    /// setting last). A restart of the daemon starts none.
+    later: Mutex<Vec<Relinked>>,
     /// The folders kept where they are, outermost first.
     pinned: Vec<PathBuf>,
     /// Whether the daemon found it, and made `~/.ssh` (not `flottille doctor`, which probes
@@ -145,13 +148,12 @@ struct Relinked {
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
 
-/// What [`settle`] accepted, the newest of each setting last. A restart of the daemon starts none.
-static LATER: Mutex<Vec<Relinked>> = Mutex::new(Vec::new());
-
-fn later() -> std::sync::MutexGuard<'static, Vec<Relinked>> {
-    LATER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+impl Found {
+    fn later(&self) -> std::sync::MutexGuard<'_, Vec<Relinked>> {
+        self.later
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 /// The restart a refusal names: `flottille daemon stop` stops the daemon and the next command
@@ -221,6 +223,7 @@ pub fn find(make: bool) {
             settings,
             kept,
             read_only,
+            later: Mutex::new(Vec::new()),
             pinned,
             made: make,
             started: std::time::SystemTime::now(),
@@ -238,7 +241,7 @@ pub fn read_only() -> Vec<PathBuf> {
                 .iter()
                 .map(|(path, _)| path.clone())
                 .collect();
-            for relinked in later().iter() {
+            for relinked in found.later().iter() {
                 if !paths.contains(&relinked.file) {
                     paths.push(relinked.file.clone());
                 }
@@ -253,7 +256,7 @@ pub fn pinned() -> Vec<PathBuf> {
     found()
         .map(|found| {
             let mut pinned = found.pinned.clone();
-            for relinked in later().iter() {
+            for relinked in found.later().iter() {
                 for folder in on_the_way(&relinked.file) {
                     if !pinned.contains(&folder) {
                         pinned.push(folder);
@@ -310,15 +313,31 @@ fn git_settings(home: Option<&Path>) -> Vec<PathBuf> {
     if let Some(global) = std::env::var_os("GIT_CONFIG_GLOBAL").filter(|g| !g.is_empty()) {
         return vec![PathBuf::from(global)];
     }
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|config| config.is_absolute())
-        .or_else(|| home.map(|home| home.join(".config")));
+    let config = xdg_base(
+        &|name| std::env::var_os(name),
+        "XDG_CONFIG_HOME",
+        home,
+        ".config",
+    );
     config
         .map(|config| config.join("git/config"))
         .into_iter()
         .chain(home.map(|home| home.join(".gitconfig")))
         .collect()
+}
+
+/// An XDG base folder as the specification has it: the variable when it is an absolute path,
+/// else `fallback` in the home.
+fn xdg_base(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    name: &str,
+    home: Option<&Path>,
+    fallback: &str,
+) -> Option<PathBuf> {
+    var(name)
+        .map(PathBuf::from)
+        .filter(|base| base.is_absolute())
+        .or_else(|| home.map(|home| home.join(fallback)))
 }
 
 /// A path's device and inode, its links not followed.
@@ -536,7 +555,8 @@ fn inside(path: &Path, ssh_folder: &Path) -> bool {
 /// The device and inode `path` had when the daemon made it read-only (at its start, or once a
 /// setting was relinked to it).
 fn recorded(found: &Found, path: &Path) -> Option<(u64, u64)> {
-    let relinked = later()
+    let relinked = found
+        .later()
         .iter()
         .rev()
         .find(|relinked| relinked.file == path)
@@ -585,7 +605,9 @@ fn links_on_the_way(path: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
         .map(|part| part.as_os_str().to_owned())
         .collect();
     for _ in 0..256 {
-        let Some(name) = todo.pop() else { break };
+        let Some(name) = todo.pop() else {
+            return Ok(links);
+        };
         match name.to_str() {
             Some("/") => real = PathBuf::from("/"),
             Some(".") => {}
@@ -609,57 +631,164 @@ fn links_on_the_way(path: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
             }
         }
     }
-    Ok(links)
+    Err(format!(
+        "{} has too many links on the way to it to be followed",
+        path.display()
+    ))
 }
 
-/// Whether `folder`, which holds a link on the way to the user's git settings, can be kept
-/// read-only to every confined command: one below the account's home that is the user's own to
-/// write. Not the home, nor the folder of every program's settings (`$XDG_CONFIG_HOME`), which
-/// would take the files of everything else with it.
+/// Whether `folder`, which holds a link on the way to the user's git settings, or the versions of
+/// what they lead to, can be kept read-only to every confined command: one below the account's
+/// home that is the user's own to write and that is not [`Shared`]: keeping a folder of everyone's
+/// would take the files of everything else in it away from the runs.
 fn keepable(folder: &Path, shared: &Shared) -> bool {
-    let config = shared.config.as_deref();
+    let Ok(folder) = folder.canonicalize() else {
+        return false;
+    };
     folder.starts_with(&shared.account)
-        && folder != shared.account
-        && shared.home.as_deref() != Some(folder)
-        && config != Some(folder)
-        && changeable(folder)
+        && !shared
+            .folders
+            .iter()
+            .any(|shared| shared.starts_with(&folder))
+        && !shared.inside.iter().any(|own| folder.starts_with(own))
+        && changeable(&folder)
 }
 
-/// The folders a link may not be kept in (see [`keepable`]).
+/// The folders no link is kept in: **the one place that lists them.** Listed as real paths.
 struct Shared {
     account: PathBuf,
-    home: Option<PathBuf>,
-    config: Option<PathBuf>,
+    /// Each one, and so each folder above it, is never kept: the home, the XDG base folders
+    /// (`~/.config`, `~/.local/share`, `~/.local/state`, `~/.cache`, resolved the way `git_settings`
+    /// resolves the first), `~/.local`, and the folders a user keeps their projects in.
+    folders: Vec<PathBuf>,
+    /// Flottille's own folders (configuration, data, state): nothing in them is kept either, the
+    /// data folder holding the workspaces and the projects the daemon makes.
+    inside: Vec<PathBuf>,
 }
+
+/// The folders under which a user keeps their projects, by their usual names.
+const WORK_FOLDERS: [&str; 11] = [
+    "projects",
+    "workspaces",
+    "src",
+    "code",
+    "dev",
+    "repos",
+    "git",
+    "work",
+    "Documents",
+    "Downloads",
+    "Desktop",
+];
 
 fn shared_folders(
     account: &Path,
     home: Option<&Path>,
     var: &dyn Fn(&str) -> Option<OsString>,
 ) -> Shared {
+    let real = |path: PathBuf| path.canonicalize().unwrap_or(path);
+    let base = |name: &str, fallback: &str| {
+        xdg_base(var, name, home.or(Some(account)), fallback).map(real)
+    };
+    let mut folders: Vec<PathBuf> = Vec::new();
+    folders.push(real(account.to_owned()));
+    folders.extend(home.map(|home| real(home.to_owned())));
+    for (name, fallback) in [
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_STATE_HOME", ".local/state"),
+        ("XDG_CACHE_HOME", ".cache"),
+    ] {
+        folders.extend(base(name, fallback));
+        // And the default one, which is still every program's when the variable moved the others.
+        folders.push(real(account.join(fallback)));
+    }
+    folders.push(real(account.join(".local")));
+    for name in WORK_FOLDERS {
+        folders.push(real(account.join(name)));
+    }
+    let inside = ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"]
+        .into_iter()
+        .zip([".config", ".local/share", ".local/state"])
+        .filter_map(|(name, fallback)| base(name, fallback))
+        .map(|folder| folder.join("flottille"))
+        .collect();
+    folders.sort();
+    folders.dedup();
     Shared {
-        account: account.to_owned(),
-        home: home.map(Path::to_owned),
-        config: var("XDG_CONFIG_HOME").map(PathBuf::from),
+        account: real(account.to_owned()),
+        folders,
+        inside,
     }
 }
 
-/// The folders kept read-only at the daemon's start for `setting`: those that hold a link on the
-/// way to it, where [`keepable`].
+/// The folders kept read-only at the daemon's start for `setting`, which a settings file that
+/// leads elsewhere later is judged by: **the folders that hold a link on the way to it**, so no
+/// run re-points one, and **the folder above the file it leads to**: the highest folder over the
+/// file that is [`keepable`], so the versions a dotfiles manager makes later, beside the one in use,
+/// are under a folder no run could write since the daemon's start. Where none is [`keepable`]
+/// (the file is in a shared folder), a file it is relinked to is refused. Nothing is kept for
+/// settings with a link no folder can hold.
 fn keep_for(setting: &Setting, shared: &Shared) -> Result<Vec<PathBuf>, String> {
-    Ok(links_on_the_way(&setting.named)?
+    let links = links_on_the_way(&setting.named)?;
+    // A link in a folder that cannot be kept (the home, a shared folder) is one a run can replace:
+    // the settings are refused when relinked, and nothing else is kept for them.
+    if links.is_empty()
+        || links
+            .iter()
+            .any(|(_, folder)| !keepable(folder, shared) && !root_only(folder))
+    {
+        return Ok(Vec::new());
+    }
+    let mut kept: Vec<PathBuf> = links
         .into_iter()
         .map(|(_, folder)| folder)
         .filter(|folder| keepable(folder, shared))
-        .collect())
+        .collect();
+    let above = setting
+        .file
+        .ancestors()
+        .skip(1)
+        .take_while(|folder| keepable(folder, shared))
+        .last();
+    kept.extend(above.map(Path::to_owned));
+    kept.sort();
+    kept.dedup();
+    Ok(kept)
 }
 
-/// Whether no confined command can change what `folder` holds: it is another's (root's, with
-/// nothing the user may write), or it is one kept read-only since the daemon's start and still the
-/// folder that was.
+/// Whether no confined command can change what is at `path`, not one started since the daemon's
+/// start: every folder over it (and it) is another's, root's, with nothing the user may write.
+fn root_only(path: &Path) -> bool {
+    path.ancestors().all(|folder| !changeable(folder))
+}
+
+/// Whether `folder` is in one kept read-only to every confined command since the daemon's start
+/// (`find`), and that one is still the folder it was then.
+fn under_kept(found: &Found, folder: &Path) -> bool {
+    found
+        .kept
+        .iter()
+        .any(|kept| folder.starts_with(kept) && changed(found, kept).is_none())
+}
+
+/// Whether no confined command can change what `folder` holds: it is root's alone, or it is in a
+/// folder kept read-only since the daemon's start.
 fn held(found: &Found, folder: &Path) -> bool {
-    !changeable(folder)
-        || (found.kept.iter().any(|kept| kept == folder) && changed(found, folder).is_none())
+    root_only(folder) || under_kept(found, folder)
+}
+
+/// Why `file` is not a single name for its contents: another hard link to it is a way to write it
+/// that stays open to a run when the file is kept read-only.
+fn linked_elsewhere(file: &Path) -> Option<String> {
+    let links = std::fs::metadata(file).ok()?.nlink();
+    (links > 1).then(|| {
+        format!(
+            "{} has another hard link ({links} names), a way to write it that a run keeps: \
+             {RESTART}",
+            file.display()
+        )
+    })
 }
 
 /// The file the user's settings at `setting.named` are read from now, judged: the one they lead
@@ -668,27 +797,35 @@ fn held(found: &Found, folder: &Path) -> bool {
 /// read-only to every confined command it starts (`find`), and no link on the way to it is one a
 /// run controls, because the folders that hold the links are kept the same. A settings file that
 /// leads somewhere else than where it did (a dotfiles update moved its link to a new version
-/// folder) is accepted only if every link on the way to it is in such a folder, and the file is
-/// then kept read-only for the commands started from now on, its identity the one recorded. Not
-/// so (no link at all: a file replaced in its own folder, which a run can write; a link in a folder
-/// a run can replace it in): refused, saying which rule, until the daemon restarts.
+/// folder) is accepted only if **both** hold: every link on the way to it is in a folder kept
+/// read-only since the start (or root's), and **the file itself lies under a folder kept since the
+/// start** (`keep_for`: the one above the version in use) or root's, with no other hard link, so no
+/// command has been able to write it since it was made. It is then kept read-only for the commands
+/// started from now on, its identity the one recorded. Not so (no link at all: a file replaced in
+/// its own folder, which a run can write; a link or a file where a run can write): refused, saying
+/// which rule, until the daemon restarts.
 ///
-/// What remains: a command started before this judgement has not the new file read-only, and may
-/// write it before a push reads it (`docs/vault.md`, "The gaps"), as it may a file replaced in its
-/// place; the files are read again by the push, the judgement being made just before.
+/// What remains: the folders are kept for a file a link led to at the daemon's start; a manager
+/// that makes its versions elsewhere is refused, not trusted.
 fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
     let named = &setting.named;
-    let current = later()
+    let current = found
+        .later()
         .iter()
         .rev()
         .find(|relinked| relinked.named == *named)
-        .map(|relinked| relinked.file.clone())
-        .unwrap_or_else(|| setting.file.clone());
+        .map(|relinked| (relinked.file.clone(), true));
+    let (current, relinked) = current.unwrap_or_else(|| (setting.file.clone(), false));
     let Some(now) = leads(named) else {
         // No file there now: the settings the daemon found are gone from their place.
         return Ok(current);
     };
     if now == current {
+        // A file the settings were relinked to stays one name: another hard link made since is a
+        // way to write it that is not kept.
+        if relinked && let Some(why) = linked_elsewhere(&current) {
+            return Err(why);
+        }
         return Ok(current);
     }
     let links = links_on_the_way(named)?;
@@ -712,10 +849,27 @@ fn settle(found: &Found, setting: &Setting) -> Result<PathBuf, String> {
             ));
         }
     }
+    // The new file: made since the start, so no kept folder holds it unless one above it was kept
+    // then; a run could otherwise have written it between the link moving and this push.
+    let kept = now
+        .parent()
+        .is_some_and(|folder| root_only(&now) || under_kept(found, folder));
+    if !kept {
+        return Err(format!(
+            "{} now leads to {}, a file a run can write: it is not in a folder kept read-only \
+             since the daemon's start, and a command may have written it before this push: \
+             {RESTART}",
+            named.display(),
+            now.display()
+        ));
+    }
+    if let Some(why) = linked_elsewhere(&now) {
+        return Err(why);
+    }
     let Some(id) = identity(&now) else {
         return Ok(current);
     };
-    let mut accepted = later();
+    let mut accepted = found.later();
     accepted.retain(|relinked| relinked.named != *named);
     accepted.push(Relinked {
         named: named.clone(),
@@ -1530,6 +1684,7 @@ mod tests {
             settings: Vec::new(),
             kept: Vec::new(),
             read_only: Vec::new(),
+            later: Mutex::new(Vec::new()),
             pinned: Vec::new(),
             made: false,
             started: std::time::SystemTime::now(),
