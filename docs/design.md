@@ -1271,12 +1271,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   title and how long since it was active; a click opens it there. A machine with no session of it
   has no block; a block unfolds as its first session comes and folds away with its last, its rows
   unfolding and folding away as theirs do, and its ink fades while its machine is off. A session
-  starts, and so the page that opens is the one of, the machine the user chose for the project
-  (window state, `sidebar`'s `starts`, `docs/protocol.md`), while it has the project and is
-  online; else this machine when it has the project and can run an agent (its role is a
-  runner); else the one machine online that has it; when several do and this one
-  cannot, the composer asks first, one line (`Choose where it runs: server or laptop.`) and Start
-  waiting until the machine picker chose one. Choosing in that picker is the choice kept. The
+  starts, and so the page that opens is the one of, this machine when it has the project and can
+  run an agent (its role is a runner); else the one machine online that has it; when several do and this one
+  cannot, the one the user chose for the project (window state, `sidebar`'s `starts`,
+  `docs/protocol.md`) while it still can, else the composer asks first, one line (`Choose where
+  it runs: server or laptop.`) and Start waiting until the machine picker chose one; choosing in
+  that picker is the choice kept. The
   project's settings have the same picker on their title's line, `Settings of` to a reader: the
   machines that have it, this one first, each with its state; choosing one shows that machine's
   settings of the project. With the project on one machine only, it narrows away.

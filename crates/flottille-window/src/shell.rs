@@ -1242,10 +1242,9 @@ impl Shell {
         self.reach(name, Selection::Project(project.to_owned()), window, cx);
     }
 
-    /// Where a session of `project` starts (#1266): on the machine the user chose for it while
-    /// that machine has it and is online; else on this machine when it has the project and can run
-    /// an agent; else on the one machine online that can; when several can and this one cannot,
-    /// the start asks which.
+    /// Where a session of `project` starts (#1266): on this machine when it has the project and
+    /// can run an agent; else on the one machine online that can; when several can and this one
+    /// cannot, on the one the user chose for it, while it still can, else the start asks which.
     fn start_on(&self, project: &str, cx: &App) -> Start {
         let here = self
             .read
@@ -1263,13 +1262,6 @@ impl Shell {
                 .is_some_and(|machine| machine.runs() && machine.online())
                 && machines.has_project(Some(name), project)
         };
-        match self.starts.get(project) {
-            Some(chosen) if Some(chosen) == machines.this.as_ref() && here => {
-                return Start::On(None);
-            }
-            Some(chosen) if can(chosen) => return Start::On(Some(chosen.clone())),
-            _ => {}
-        }
         if here && self.this_can_run(machines) {
             return Start::On(None);
         }
@@ -1282,9 +1274,14 @@ impl Shell {
             [] if here => Start::On(None),
             [] => Start::On(self.machine_of_project(project, cx)),
             [one] => Start::On(Some(one.clone())),
-            several => Start::Ask {
-                page: (!here).then(|| several[0].clone()),
-                machines: several.to_vec(),
+            // What the user answered when it was asked, while that machine still can.
+            several => match self.starts.get(project) {
+                Some(chosen) if several.contains(chosen) => Start::On(Some(chosen.clone())),
+                Some(chosen) if here && Some(chosen) == machines.this.as_ref() => Start::On(None),
+                _ => Start::Ask {
+                    page: (!here).then(|| several[0].clone()),
+                    machines: several.to_vec(),
+                },
             },
         }
     }

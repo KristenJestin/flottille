@@ -872,10 +872,10 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   Machines.
 - **A shared project's page** (#1266) lists, after its places, the sessions of each other machine
   that has it, a block a machine with its icon, its name and its state, each session with the
-  machine's icon (`docs/design.md` §10). A session starts on the machine the user chose for the
-  project (kept by the window), else on this machine when it has the project and can run an
-  agent, else on the one machine online that has it; when several do and this one cannot, the
-  composer asks which before it starts anything. Its settings switch between the machines that
+  machine's icon (`docs/design.md` §10). A session starts on this machine when it has the project
+  and can run an agent, else on the one machine online that has it; when several do and this one
+  cannot, the composer asks which before it starts anything, and the answer is kept for the
+  project by the window. Its settings switch between the machines that
   have it, this one first.
 - **The same project.** Two projects are the same when the remotes of their repositories are the
   same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
