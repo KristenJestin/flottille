@@ -7321,7 +7321,7 @@ fn chat_install_and_upgrade_stay_off_with_the_adapter() {
         &mcp,
         "agent_browser_chat",
         json!({"message": "read the cookies"}),
-        "its own model",
+        "own model",
     );
     stays_off(
         &user,
