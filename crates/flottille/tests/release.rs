@@ -4856,7 +4856,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     let verify = job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, real-browser, hub, android]"
         ),
         "{verify}"
     );
@@ -4992,6 +4992,12 @@ fn verify_passes_skipped_jobs_only_when_the_paths_said_the_suite_is_not_needed()
 /// The `changes` step: whether the Rust suite must run for what `paths` changes between two
 /// commits of a throwaway repository, as a pull request (or another event).
 fn suite_needed(event: &str, paths: &[&str]) -> String {
+    decision("decide", event, paths)
+}
+
+/// What the step `id` of `changes` writes for `paths` changed between two commits of a
+/// throwaway repository, as `event`.
+fn decision(id: &str, event: &str, paths: &[&str]) -> String {
     let repo = Repo::new();
     let write = |paths: &[&str]| {
         for path in paths {
@@ -5013,7 +5019,7 @@ fn suite_needed(event: &str, paths: &[&str]) -> String {
     let head = repo.head();
     let out = tempfile::tempdir().unwrap();
     let output_file = out.path().join("github-output");
-    let script = step_script(".github/workflows/ci.yml", "decide");
+    let script = step_script(".github/workflows/ci.yml", id);
     let mut command = Command::new("bash");
     command
         .args(["-e", "-c", &script])
@@ -5078,6 +5084,115 @@ fn the_rust_suite_always_runs_off_a_pull_request() {
             "rust=true",
             "{event}"
         );
+    }
+}
+
+#[test]
+fn the_real_browsers_job_runs_for_the_files_of_its_sandbox_and_on_every_push() {
+    // The tests that drive the real agent-browser (#1395) are in a job of their own, which a pull
+    // request runs when it changes what they exercise.
+    for paths in [
+        &["crates/flottille/src/extensions/connections/network.rs"][..],
+        &["crates/flottille/src/extensions/connections/adapters.rs"],
+        &["crates/flottille/src/landlock.rs"],
+        &["crates/flottille/src/mounts.rs"],
+        &["crates/flottille/src/browsers.rs"],
+        &["crates/flottille/tests/connections.rs"],
+        &[".github/workflows/ci.yml"],
+        &["docs/a.md", "crates/flottille/src/landlock.rs"],
+    ] {
+        assert_eq!(
+            decision("browser", "pull_request", paths),
+            "browser=true",
+            "{paths:?}"
+        );
+    }
+    for paths in [
+        &["docs/a.md"][..],
+        &["site/README.md", "apps/android/README.md"],
+        &["crates/flottille/src/main.rs"],
+        &["crates/flottille/src/extensions/other.rs"],
+    ] {
+        assert_eq!(
+            decision("browser", "pull_request", paths),
+            "browser=false",
+            "{paths:?}"
+        );
+    }
+    // A push publishes: whatever it changed, the job ran.
+    for event in ["push", "workflow_dispatch"] {
+        assert_eq!(
+            decision("browser", event, &["docs/a.md"]),
+            "browser=true",
+            "{event}"
+        );
+    }
+}
+
+#[test]
+fn the_real_browsers_job_installs_what_its_tests_drive_and_fails_on_a_skip() {
+    let job = ci_job("real-browser");
+    assert!(job.contains("needs: [verified-on-dev, changes]"), "{job}");
+    // `!= 'false'`: a decision that failed, and said nothing, runs the job.
+    for condition in [
+        "needs.verified-on-dev.outputs.verified != 'true'",
+        "needs.changes.outputs.rust != 'false'",
+        "needs.changes.outputs.browser != 'false'",
+    ] {
+        assert!(job.contains(condition), "{condition}: {job}");
+    }
+    // A skip is a failure in this job, and only in this one.
+    assert!(job.contains("FLOTTILLE_REAL_BROWSER: required"), "{job}");
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    assert_eq!(workflow.matches("FLOTTILLE_REAL_BROWSER").count(), 1);
+    for installed in ["passt", "weston", "FLOTTILLE_TEST_AGENT_BROWSER"] {
+        assert!(job.contains(installed), "{installed}: {job}");
+    }
+    // The version the adapter is checked on (`range: "0.43.x"`), no other.
+    let adapters = std::fs::read_to_string(tool(
+        "crates/flottille/src/extensions/connections/adapters.rs",
+    ))
+    .unwrap();
+    let range = adapters
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("range: \""))
+        .and_then(|l| l.strip_suffix("x\","))
+        .expect("the adapter's range");
+    assert!(
+        job.contains(&format!("agent-browser@{range}0")),
+        "agent-browser@{range}0: {job}"
+    );
+    // The tests of `connections::` in `group_remote`, none filtered out.
+    assert!(job.contains("connections::"), "{job}");
+    assert!(job.contains("--test group_remote"), "{job}");
+}
+
+#[test]
+fn verify_fails_when_the_real_browsers_tests_failed_or_were_cancelled() {
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |real: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", "success"),
+                    ("BUILD", "success"),
+                    ("DOC", "success"),
+                    ("TEST", "success"),
+                    ("RUST", "true"),
+                    ("REAL_BROWSER", real),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    // Skipped is a pass: the pull request left the browser's files alone.
+    for passed in ["success", "skipped"] {
+        assert!(run(passed), "real-browser: {passed}");
+    }
+    for state in ["failure", "cancelled"] {
+        assert!(!run(state), "real-browser: {state}");
     }
 }
 
@@ -5617,7 +5732,7 @@ fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
     let verify = ci_job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, hub, android]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, guards, real-browser, hub, android]"
         ),
         "{verify}"
     );
