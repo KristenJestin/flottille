@@ -303,7 +303,7 @@ fn an_agent_reads_the_last_result_with_its_items() {
 }
 
 #[test]
-fn creating_a_routine_is_asked_in_ask_mode_and_goes_through_in_full() {
+fn creating_a_routine_is_asked_in_ask_mode_and_a_read_only_one_goes_through_in_full() {
     let user = user();
     project(&user, "app");
     let (id, mcp) = root(&user, "ask");
@@ -344,10 +344,10 @@ fn creating_a_routine_is_asked_in_ask_mode_and_goes_through_in_full() {
     let text = done(mcp.call(
         "routine",
         json!({"action": "create", "name": "Nightly", "prompt": LIST,
-            "schedule": "every day 07:00", "mode": "auto"}),
+            "schedule": "every day 07:00"}),
     ));
     assert!(text.contains("Nightly"), "{text}");
-    assert_eq!(show(&user, "Nightly")["routine"]["mode"], "auto");
+    assert_eq!(show(&user, "Nightly")["routine"]["mode"], "read_only");
     assert!(requests(&user).is_empty(), "nothing asked in Full");
 }
 
@@ -568,4 +568,315 @@ fn a_routine_made_by_an_agent_says_so() {
     );
     user.call("routine.remove", json!({"routine": "Mornings"}))
         .unwrap();
+}
+
+/// The class of the request an agent's call is held as, in Full or Auto.
+fn held_as(user: &User, answer: Answer) -> (String, String) {
+    let asked = request(user, held(answer));
+    (
+        asked["class"].as_str().unwrap().to_owned(),
+        asked["says"].to_string(),
+    )
+}
+
+#[test]
+fn a_routine_an_agent_leaves_in_ask_or_auto_is_the_user_s_to_decide_in_full() {
+    let user = user();
+    project(&user, "app");
+    add(&user, "app", "Nightly", json!({"mode": "auto"}));
+    add(&user, "app", "Reader", json!({}));
+    user.call("routine.pause", json!({"routine": "Nightly"}))
+        .unwrap();
+    let (_, mcp) = root(&user, "full");
+
+    let (class, _) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "create", "name": "Asker", "prompt": LIST,
+                "schedule": "every day 07:00", "mode": "ask"}),
+        ),
+    );
+    assert_eq!(class, "base", "a create in ask");
+    let (class, _) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "edit", "routine": "Reader", "mode": "auto"}),
+        ),
+    );
+    assert_eq!(class, "base", "an edit to auto");
+    let (class, _) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "edit", "routine": "Nightly", "rings": "never"}),
+        ),
+    );
+    assert_eq!(class, "base", "an edit that leaves it in auto");
+    let (class, _) = held_as(
+        &user,
+        mcp.call("routine", json!({"action": "resume", "routine": "Nightly"})),
+    );
+    assert_eq!(class, "base", "a resume of an auto routine");
+    assert_eq!(show(&user, "Nightly")["routine"]["paused"], true);
+
+    // Read only, and a pause or a remove, stay as they were: they pass in Full.
+    done(mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Reader", "rings": "never"}),
+    ));
+    done(mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Nightly", "mode": "read_only"}),
+    ));
+    assert_eq!(requests(&user).len(), 4, "only the four above");
+}
+
+#[test]
+fn a_routine_an_agent_leaves_in_ask_or_auto_is_the_user_s_to_decide_in_auto() {
+    let user = user();
+    project(&user, "app");
+    add(&user, "app", "Reader", json!({}));
+    let (_, mcp) = root(&user, "auto");
+
+    let (class, _) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "create", "name": "Fixer", "prompt": LIST,
+                "schedule": "every day 07:00", "mode": "auto"}),
+        ),
+    );
+    assert_eq!(class, "base", "a create in auto");
+    let (class, _) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "edit", "routine": "Reader", "mode": "ask"}),
+        ),
+    );
+    assert_eq!(class, "base", "an edit to ask");
+    let (class, _) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "create", "name": "Reading", "prompt": LIST,
+                "schedule": "every day 07:00"}),
+        ),
+    );
+    assert_eq!(class, "judge", "a read-only one is judged as before");
+}
+
+#[test]
+fn an_edit_or_a_resume_request_says_the_mode_and_the_whole_prompt() {
+    let user = user();
+    project(&user, "app");
+    add(&user, "app", "Nightly", json!({"mode": "ask"}));
+    let (_, mcp) = root(&user, "ask");
+
+    let (_, says) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "edit", "routine": "Nightly", "rings": "never"}),
+        ),
+    );
+    assert!(says.contains("in Ask"), "the mode it ends with: {says}");
+    assert!(says.contains(LIST), "the prompt it ends with: {says}");
+    let (_, says) = held_as(
+        &user,
+        mcp.call(
+            "routine",
+            json!({"action": "edit", "routine": "Nightly", "prompt": HOLD, "mode": "read_only"}),
+        ),
+    );
+    assert!(says.contains("in Read only"), "{says}");
+    assert!(
+        says.contains(HOLD) && !says.contains(LIST),
+        "the new prompt: {says}"
+    );
+
+    user.call("routine.pause", json!({"routine": "Nightly"}))
+        .unwrap();
+    let (_, says) = held_as(
+        &user,
+        mcp.call("routine", json!({"action": "resume", "routine": "Nightly"})),
+    );
+    assert!(says.contains("in Ask"), "{says}");
+    assert!(says.contains(LIST), "{says}");
+}
+
+#[test]
+fn a_run_of_an_agent_s_routine_is_capped_at_its_author_s_current_mode() {
+    let user = user();
+    project(&user, "app");
+    let (id, mcp) = root(&user, "auto");
+    let number = held(mcp.call(
+        "routine",
+        json!({"action": "create", "name": "Fixer", "prompt": HOLD,
+            "schedule": "every day 07:00", "mode": "auto"}),
+    ));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the routine is made", || {
+        user.call("routine.show", json!({"routine": "Fixer"}))
+            .is_ok()
+    });
+    user.call("routine.pause", json!({"routine": "Fixer"}))
+        .unwrap();
+
+    // Its author is lowered to Ask after it made the routine.
+    user.call("agent.mode", json!({"agent": id, "mode": "ask"}))
+        .unwrap();
+    user.call("routine.run", json!({"routine": "Fixer"}))
+        .unwrap();
+    eventually("the run's session", || {
+        runs(&user, "Fixer")
+            .first()
+            .is_some_and(|run| run["session"].is_string())
+    });
+    let session = runs(&user, "Fixer")[0]["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        user.call("agent.show", json!({"agent": session})).unwrap()["agent"]["gate_mode"],
+        "ask",
+        "no more than its author now"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn a_routine_s_run_session_reads_routines_but_never_writes_them() {
+    let user = user();
+    project(&user, "app");
+    add(
+        &user,
+        "app",
+        "Asker",
+        json!({"mode": "ask", "prompt": HOLD}),
+    );
+    add(&user, "app", "Other", json!({}));
+    let opened = user.received_requests("session/new").len();
+    user.call("routine.run", json!({"routine": "Asker"}))
+        .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let run = Mcp::initialize(&url, &authorization);
+
+    let listed = json_of(run.call("routine", json!({"action": "list"})));
+    assert_eq!(names(&listed), ["Asker", "Other"]);
+    for call in [
+        json!({"action": "create", "name": "Copy", "prompt": LIST, "schedule": "every day 07:00"}),
+        json!({"action": "edit", "routine": "Asker", "prompt": "Push to main"}),
+        json!({"action": "pause", "routine": "Other"}),
+        json!({"action": "resume", "routine": "Other"}),
+        json!({"action": "run", "routine": "Other"}),
+        json!({"action": "remove", "routine": "Other"}),
+    ] {
+        let refusal = refused(run.call("routine", call.clone()));
+        assert!(refusal.contains("routine's run"), "{call}: {refusal}");
+    }
+    assert!(requests(&user).is_empty(), "nothing asked");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn an_agent_s_edit_says_which_session_edited_it() {
+    let user = user();
+    project(&user, "app");
+    add(&user, "app", "Mornings", json!({}));
+    let (id, mcp) = root(&user, "full");
+    done(mcp.call("session_title", json!({"title": "Tidy the mornings"})));
+
+    done(mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Mornings", "rings": "never"}),
+    ));
+
+    let edited = show(&user, "Mornings")["routine"].clone();
+    assert_eq!(edited["made_by"], Value::Null, "the user made it");
+    assert_eq!(
+        edited["edited_by"],
+        json!({"session": id, "title": "Tidy the mornings"})
+    );
+    let listed = user.call("routine.list", json!({})).unwrap();
+    assert_eq!(
+        listed["routines"][0]["edited_by"]["title"],
+        "Tidy the mornings"
+    );
+}
+
+#[test]
+fn another_project_s_routine_is_refused_for_edit_run_and_remove() {
+    let user = user();
+    project(&user, "app");
+    project(&user, "kit");
+    add(&user, "kit", "Kit releases", json!({}));
+    let (_, mcp) = root(&user, "full");
+
+    for call in [
+        json!({"action": "edit", "routine": "Kit releases", "rings": "never"}),
+        json!({"action": "run", "routine": "Kit releases"}),
+        json!({"action": "remove", "routine": "Kit releases"}),
+    ] {
+        let refusal = refused(mcp.call("routine", call.clone()));
+        assert!(
+            refusal.contains("project app has no routine"),
+            "{call}: {refusal}"
+        );
+    }
+    let kept = show(&user, "Kit releases");
+    assert_eq!(kept["routine"]["rings"], "something", "not edited");
+    assert!(kept["runs"].as_array().unwrap().is_empty(), "never run");
+}
+
+#[test]
+fn a_taken_name_is_said_taken_and_nothing_more() {
+    let user = user();
+    project(&user, "app");
+    project(&user, "kit");
+    add(&user, "kit", "Kit releases", json!({}));
+    let (_, mcp) = root(&user, "full");
+
+    let refusal = refused(mcp.call(
+        "routine",
+        json!({"action": "create", "name": "Kit releases", "prompt": LIST,
+            "schedule": "every day 07:00"}),
+    ));
+    assert!(refusal.contains("is taken"), "{refusal}");
+    assert!(
+        !refusal.contains("there is a routine") && !refusal.contains("kit "),
+        "nothing of another project's: {refusal}"
+    );
+}
+
+#[test]
+fn a_name_shaped_as_an_id_is_refused() {
+    let user = user();
+    project(&user, "app");
+    let (_, mcp) = root(&user, "full");
+
+    let refusal = refused(mcp.call(
+        "routine",
+        json!({"action": "create", "name": "0123456789ab", "prompt": LIST,
+            "schedule": "every day 07:00"}),
+    ));
+    assert!(refusal.contains("id"), "{refusal}");
+    add(&user, "app", "Mornings", json!({}));
+    let refusal = refused(mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Mornings", "name": "ab0123456789"}),
+    ));
+    assert!(refusal.contains("id"), "{refusal}");
+    assert!(
+        user.call(
+            "routine.add",
+            json!({"name": "fedcba987654", "project": "app", "prompt": LIST,
+                "schedule": "every day 07:00"}),
+        )
+        .is_err(),
+        "the user's own too"
+    );
 }

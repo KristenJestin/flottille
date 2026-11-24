@@ -1153,3 +1153,44 @@ fn a_routine_made_by_an_agent_says_so(cx: &mut TestAppContext) {
         "the user's own says nothing"
     );
 }
+
+#[gpui_kit::test]
+fn a_routine_an_agent_edited_says_which_session(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Mornings", LIST_REVIEWS, json!({}));
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let titled = mcp.call("session_title", json!({"title": "Tidy the mornings"}));
+    assert!(!titled.error, "{}", titled.text);
+
+    let (shell, cx) = open_routine(&user, "Mornings", cx);
+    settle(cx);
+    assert!(
+        !present(cx, "routine-edited-by"),
+        "the user's own, never edited by an agent"
+    );
+    let edited = mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Mornings", "rings": "never"}),
+    );
+    assert!(!edited.error, "{}", edited.text);
+    until(&shell, cx, "its editor shows", |cx| {
+        present(cx, "routine-edited-by")
+    });
+    assert_eq!(
+        label(cx, "routine-edited-by").as_deref(),
+        Some("Edited by Tidy the mornings"),
+        "the session's title"
+    );
+    assert!(!present(cx, "routine-made-by"), "the user made it");
+}

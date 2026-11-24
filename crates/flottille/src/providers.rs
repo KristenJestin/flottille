@@ -2041,7 +2041,7 @@ mod tests {
         for child in [&leaf, &lead_child] {
             assert!(child.contains(&"tasks".to_owned()));
             assert!(child.contains(&"workspace".to_owned()));
-            for family in ["skills", "commands", "setup", "project"] {
+            for family in ["skills", "commands", "setup", "project", "routine"] {
                 assert!(!child.contains(&family.to_owned()), "{family}");
             }
         }
