@@ -2568,6 +2568,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_text_of_any_length_is_cut_to_what_another_machine_takes() {
+        // The note names how many characters were cut: its digits grow with the text.
+        for length in [LONGEST + 1, 999_999, 1_000_000, 1_234_567, 12_345_678] {
+            let long = "x".repeat(length);
+
+            let fitted = fitted(&long, "ab12", "server");
+
+            assert!(
+                fitted.chars().count() <= LONGEST,
+                "{length}: {}",
+                fitted.len()
+            );
+            assert!(fitted.contains("[cut: "), "{length}");
+        }
+    }
+
+    #[test]
     fn a_text_too_long_for_another_machine_is_cut_saying_where_to_read_it() {
         let long = format!("Round 1 found {}", "x".repeat(LONGEST));
 
