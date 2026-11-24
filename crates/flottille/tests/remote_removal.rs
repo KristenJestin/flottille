@@ -245,7 +245,11 @@ fn a_device_that_may_only_view_removes_nothing_and_takes_no_commit() {
 #[test]
 fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_name() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
-    pc.wait_for_offer("server", 12);
+    eventually("server's agents", || {
+        pc.seen("server")["offers"]["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|agent| agent == "claude"))
+    });
     let (_root, mcp) = pc.root("auto");
     let first = launched(
         &mcp,
@@ -497,6 +501,10 @@ fn an_end_told_once_its_workspace_is_gone_says_nothing_of_commits_that_came_back
     // Every commit came back with its report.
     prompted(&pc, "it reported");
     off(&pc);
+    // Its end's delivery is kept until pc is back, and composed then.
+    eventually("server sees pc offline", || {
+        server.seen("pc")["state"] != "online"
+    });
     ended_there(&server, &session);
     // The user of the server removes it: nothing is lost, all of it came back.
     server
