@@ -326,8 +326,9 @@ pub fn hold() -> ! {
 /// The pids of the processes that answer on the sockets of agent-browser's daemons in the socket
 /// folder `sockets` and the folders in it (`<session>.sock`; a namespace puts a session's in a
 /// subfolder), as the kernel says (`SO_PEERCRED`), never as a file says: 0 for one whose process
-/// is gone or unknown, which no network holds, and for one that stops accepting, which fails
-/// closed. A socket nobody answers on is no browser's. Never through a link.
+/// is gone or unknown, which no network holds, and for one that cannot be connected to, whatever
+/// the error (it stops accepting, its path is too long for a socket address, nobody listens on it
+/// any more), which fails closed. Never through a link.
 pub fn daemons(sockets: &Path) -> Vec<u32> {
     use std::os::unix::fs::FileTypeExt;
     let Ok(listed) = std::fs::read_dir(sockets) else {
@@ -348,9 +349,10 @@ pub fn daemons(sockets: &Path) -> Vec<u32> {
                         .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
                         .unwrap_or(0),
                 ),
-                // Alive, and not accepting: no browser that serves is, so none a network holds.
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => pids.push(0),
-                Err(_) => {}
+                // A socket the check cannot tell (it does not accept, its path is too long for an
+                // address, nobody listens on it any more, a permission is refused) is outside:
+                // fail closed on every error, so a browser that hides behind one is never skipped.
+                Err(_) => pids.push(0),
             }
         }
     }
