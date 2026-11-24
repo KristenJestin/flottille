@@ -1031,23 +1031,27 @@ fn removing_a_group_from_its_menu_keeps_its_projects_and_folds_it_away(cx: &mut 
     drag(project_id("bravo"), group_header_id(&id), 0., &shell, cx);
     assert_eq!(held(&shell, "Work", cx), names(&["bravo", "alpha"]));
     settle(&shell, cx);
-    // The heading's frame, which folds away; the heading itself keeps its height inside it.
-    let head = gpui_kit::ElementId::Name(format!("projects-list-group-{id}-head").into());
-    let before = bounds(cx, head.clone()).size.height;
+    // The row below the group rides up as the heading folds away with its gap.
+    let top = |cx: &mut VisualTestContext| bounds(cx, project_slot_id("charlie")).origin.y;
+    let before = top(cx);
 
     from_menu(&id, group_remove_id(&id), &shell, cx);
     // Half-way: the heading is still there, folding away with its gap.
     step(&shell, FRAME, cx);
     step(&shell, PANEL / 2, cx);
     assert!(present(cx, group_header_id(&id)), "the heading folds away");
-    let half = bounds(cx, head).size.height;
-    assert!(half > px(0.) && half < before, "{half:?} of {before:?}");
+    let half = top(cx);
     assert!(
         held(&shell, "Work", cx).is_empty(),
         "the arrangement has forgotten the group at once"
     );
 
     settle(&shell, cx);
+    let end = top(cx);
+    assert!(
+        end < half && half <= before,
+        "the gap folds away over time: {before:?}, {half:?}, {end:?}"
+    );
     assert!(!present(cx, group_header_id(&id)), "the heading is gone");
     assert_eq!(loose(&shell, cx), names(&["charlie", "bravo", "alpha"]));
     assert!(present(cx, project_id("alpha")) && present(cx, project_id("bravo")));
