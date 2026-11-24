@@ -877,7 +877,7 @@ fn emptied(folder: &Path) {
 /// one of the other sessions, which `agent-browser close` leaves), whose profile it uses and
 /// which of the folder's profiles is whose is not known.
 fn emptied_once_ended(vault: &Path) {
-    let answering = sockets_in(vault).is_some_and(|sockets| !network::daemons(&sockets).is_empty());
+    let answering = sockets_in(vault).is_some_and(|sockets| network::alive(&sockets));
     if !answering {
         emptied(&vault.join(TEMPORARY));
     }

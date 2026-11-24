@@ -330,33 +330,47 @@ pub fn hold() -> ! {
 /// the error (it stops accepting, its path is too long for a socket address, nobody listens on it
 /// any more), which fails closed. Never through a link.
 pub fn daemons(sockets: &Path) -> Vec<u32> {
+    connected(sockets)
+        .into_iter()
+        .map(|result| match result {
+            Ok(stream) => peer(&stream)
+                .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
+                .unwrap_or(0),
+            Err(_) => 0,
+        })
+        .collect()
+}
+
+/// Whether a daemon may still be alive on a socket of the socket folder `sockets`: one that
+/// accepts, or that does not accept at once. A socket nobody listens on is a browser that ended,
+/// which keeps nothing (`daemons` counts it as outside all the same).
+pub fn alive(sockets: &Path) -> bool {
+    connected(sockets).iter().any(|result| match result {
+        Ok(_) => true,
+        Err(error) => error.kind() == io::ErrorKind::WouldBlock,
+    })
+}
+
+/// A connection, or its error, to each socket of agent-browser's in `sockets` and the folders in
+/// it, never through a link.
+fn connected(sockets: &Path) -> Vec<io::Result<std::os::unix::net::UnixStream>> {
     use std::os::unix::fs::FileTypeExt;
     let Ok(listed) = std::fs::read_dir(sockets) else {
         return Vec::new();
     };
-    let mut pids = Vec::new();
+    let mut found = Vec::new();
     for entry in listed.flatten() {
         // The type of the entry itself, never of what a link leads to.
         let Ok(kind) = entry.file_type() else {
             continue;
         };
         if kind.is_dir() {
-            pids.extend(daemons(&entry.path()));
+            found.extend(connected(&entry.path()));
         } else if kind.is_socket() && entry.path().extension().is_some_and(|kind| kind == "sock") {
-            match connect_at_once(&entry.path()) {
-                Ok(stream) => pids.push(
-                    peer(&stream)
-                        .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
-                        .unwrap_or(0),
-                ),
-                // A socket the check cannot tell (it does not accept, its path is too long for an
-                // address, nobody listens on it any more, a permission is refused) is outside:
-                // fail closed on every error, so a browser that hides behind one is never skipped.
-                Err(_) => pids.push(0),
-            }
+            found.push(connect_at_once(&entry.path()));
         }
     }
-    pids
+    found
 }
 
 /// A connection to the socket at `path` that never waits for the daemon to accept it: a daemon
