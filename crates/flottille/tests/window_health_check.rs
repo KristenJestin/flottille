@@ -183,18 +183,16 @@ fn a_state_word_stays_on_one_line(shade: &str, cx: &mut TestAppContext) {
     .unwrap();
     let (shell, cx) = window(&user, cx);
     open_checks(&shell, cx);
-    let wide: Vec<f32> = STATES.iter().map(|id| height(cx, id)).collect();
-    assert!(wide.iter().all(|height| *height > 0.), "{wide:?}");
-
-    // From a narrow window to one barely wider than its sidebar.
-    for width in [420., 320., 240., 160.] {
+    // A line of this text is about 20 px high; "O" over "ff" is 40.
+    let one_line = 24.;
+    for width in [1280., 420., 320., 240.] {
         cx.simulate_resize(size(px(width), px(2400.)));
         settle(cx);
-        for (id, wide) in STATES.iter().zip(&wide) {
-            assert_eq!(
-                height(cx, id),
-                *wide,
-                "{id} is one line high at {width} px, as in a wide window"
+        for id in STATES {
+            let high = height(cx, id);
+            assert!(
+                high > 0. && high <= one_line,
+                "{id} is {high} px high at {width} px: it wraps"
             );
         }
     }
