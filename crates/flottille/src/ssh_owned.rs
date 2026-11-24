@@ -29,7 +29,6 @@ const INCLUDES_MAX: usize = 16;
 /// The files looked at, at most.
 const FILES_MAX: usize = 256;
 /// The paths the globs of one walk examine, at most.
-#[allow(dead_code)]
 const GLOB_MAX: usize = 1024;
 /// The files copied, at most.
 const COPIES_MAX: usize = 64;
@@ -163,10 +162,17 @@ impl Walk<'_> {
             return;
         }
         if self.seen >= FILES_MAX {
-            self.gap(format!(
-                "the ssh settings include more than {FILES_MAX} files: a run's ssh refuses those \
-                 past them that root owns (Bad owner or permissions)"
-            ));
+            // Said when something past the limit is the owner's, as a copy past its limit is.
+            let owned = file
+                .canonicalize()
+                .and_then(|path| std::fs::symlink_metadata(path))
+                .is_ok_and(|meta| meta.is_file() && self.owns(&meta));
+            if owned {
+                self.gap(format!(
+                    "the ssh settings include more than {FILES_MAX} files: a run's ssh refuses \
+                     those past them that root owns (Bad owner or permissions)"
+                ));
+            }
             return;
         }
         self.seen += 1;
@@ -230,24 +236,24 @@ impl Walk<'_> {
     }
 
     /// The files the `Include` pattern names, as `ssh` reads it: in the user's configuration,
-    /// `~` the account's home and a relative path in `~/.ssh`, inside `~/.ssh` alone (one outside
-    /// is said, not followed); in the machine's, a relative path in `folder`, and no `~`, which
-    /// `ssh` refuses there with the whole configuration. A pattern with a token, a variable or a
-    /// class of characters names none here.
+    /// `~` the account's home and a relative path in `~/.ssh`, inside `~/.ssh` alone; in the
+    /// machine's, a relative path in `folder`, and no `~`, which `ssh` refuses there with the
+    /// whole configuration. A pattern with a token, a variable or a class of characters names
+    /// none here. One of the user's outside `~/.ssh` is not followed: `flottille doctor` looks
+    /// at it (`scan_outside`), never a start, and through no link, a run having written it.
     fn expanded(&mut self, pattern: &str, folder: &Path) -> Vec<PathBuf> {
         if let (Some((ssh, _)), Some(account)) = (self.ssh.clone(), self.account) {
             return match crate::pushed::includes(pattern, &ssh, account) {
                 Ok(found) => found,
                 Err(_) => {
-                    let path = match pattern.strip_prefix("~/") {
-                        Some(rest) => account.join(rest),
-                        None => ssh.join(pattern),
-                    };
-                    if !pattern.starts_with('~') || pattern.starts_with("~/") {
-                        for found in globbed(&path, &mut self.examined) {
-                            if let Ok(real) = found.canonicalize() {
-                                self.outside(&real);
-                            }
+                    if self.scan_outside && (!pattern.starts_with('~') || pattern.starts_with("~/"))
+                    {
+                        let path = match pattern.strip_prefix("~/") {
+                            Some(rest) => account.join(rest),
+                            None => ssh.join(pattern),
+                        };
+                        for found in self.glob(&path, false) {
+                            self.outside(&found);
                         }
                     }
                     Vec::new()
@@ -257,7 +263,19 @@ impl Walk<'_> {
         if pattern.contains(['$', '%', '[', '\\', '{']) || pattern.starts_with('~') {
             return Vec::new();
         }
-        globbed(&folder.join(pattern), &mut self.examined)
+        self.glob(&folder.join(pattern), true)
+    }
+
+    /// `globbed` within what is left of the walk's budget, said when it runs out.
+    fn glob(&mut self, pattern: &Path, links: bool) -> Vec<PathBuf> {
+        let (found, cut) = globbed(pattern, links, &mut self.examined);
+        if cut {
+            self.gap(format!(
+                "the ssh settings include patterns that name more than {GLOB_MAX} paths: a run's \
+                 ssh refuses the root-owned files past them (Bad owner or permissions)"
+            ));
+        }
+        found
     }
 
     /// Whether the walk's owner owns what `meta` says.
@@ -266,9 +284,10 @@ impl Walk<'_> {
     }
 
     /// Says a file of the owner's the user's configuration includes from outside `~/.ssh`: not
-    /// followed, so that no run steers the walk, and so refused by `ssh`.
+    /// followed, so that no run steers the walk, and so refused by `ssh`. A link is no file here:
+    /// a run can plant one, and it would name any file root owns.
     fn outside(&mut self, real: &Path) {
-        if std::fs::metadata(real).is_ok_and(|meta| meta.is_file() && self.owns(&meta)) {
+        if std::fs::symlink_metadata(real).is_ok_and(|meta| meta.is_file() && self.owns(&meta)) {
             self.gap(format!(
                 "{}, which ~/.ssh/config includes from outside ~/.ssh, is root's: a run's ssh \
                  refuses it (Bad owner or permissions). Copy it into ~/.ssh and include the copy",
@@ -286,21 +305,36 @@ impl Walk<'_> {
 
 /// The paths `pattern`, an absolute path with `*` and `?`, matches, as `glob(3)` finds them for
 /// `ssh`: through a link to a folder too, a hidden name matched only by a part that starts with a
-/// dot, sorted.
-fn globbed(pattern: &Path, examined: &mut usize) -> Vec<PathBuf> {
+/// dot, sorted. Without `links`, none is followed past the first wildcard, and none is a match:
+/// a folder a run can write names what it plants. `examined` counts the paths looked at over
+/// all the globs of a walk, which stop at `GLOB_MAX`: then the second is whether it was cut.
+fn globbed(pattern: &Path, links: bool, examined: &mut usize) -> (Vec<PathBuf>, bool) {
+    let parts: Vec<_> = pattern
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(part) => Some(part),
+            Component::ParentDir => Some("..".as_ref()),
+            _ => None,
+        })
+        .collect();
     let mut found = vec![PathBuf::from("/")];
-    for part in pattern.components() {
-        let part = match part {
-            Component::Normal(part) => part,
-            Component::ParentDir => "..".as_ref(),
-            _ => continue,
-        };
+    let mut wild_seen = false;
+    for (n, part) in parts.iter().enumerate() {
+        let last = n + 1 == parts.len();
+        let wild = part.as_bytes().iter().any(|b| matches!(b, b'*' | b'?'));
+        wild_seen |= wild;
+        let unlinked = !links && (wild_seen || last);
         let mut next = Vec::new();
         for path in found {
-            let wild = part.as_bytes().iter().any(|b| matches!(b, b'*' | b'?'));
+            if *examined >= GLOB_MAX {
+                return (Vec::new(), true);
+            }
             if !wild {
+                *examined += 1;
                 let named = path.join(part);
-                if std::fs::symlink_metadata(&named).is_ok() {
+                if std::fs::symlink_metadata(&named)
+                    .is_ok_and(|meta| !(unlinked && meta.file_type().is_symlink()))
+                {
                     next.push(named);
                 }
                 continue;
@@ -309,10 +343,14 @@ fn globbed(pattern: &Path, examined: &mut usize) -> Vec<PathBuf> {
                 continue;
             };
             for entry in entries.flatten() {
+                if *examined >= GLOB_MAX {
+                    return (Vec::new(), true);
+                }
                 *examined += 1;
                 let name = entry.file_name();
                 if let (Some(name), Some(part)) = (name.to_str(), part.to_str())
                     && flottille_core::glob::matches(part, name)
+                    && !(unlinked && entry.file_type().is_ok_and(|kind| kind.is_symlink()))
                 {
                     next.push(path.join(name));
                 }
@@ -321,7 +359,7 @@ fn globbed(pattern: &Path, examined: &mut usize) -> Vec<PathBuf> {
         found = next;
     }
     found.sort();
-    found
+    (found, false)
 }
 
 /// What the regular file at `path`, a real path, holds, with what it was when opened: none for a
