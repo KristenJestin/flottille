@@ -1228,6 +1228,19 @@ fn pc_and_server_on_one_repository() -> (TestHub, Machine, Machine) {
         .user
         .git(&repo, &["commit", "--quiet", "-m", "first"]);
     server.user.git(&repo, &["remote", "add", "origin", APP]);
+    // A launch finds the project it runs in by a root commit in common (`travelled::recognise`):
+    // two repositories committed on their own share one only when both commits fall in the same
+    // second, else the server makes `app-2` and the session is in no row of `app`.
+    let root = |machine: &Machine, folder: &std::path::Path| {
+        machine
+            .user
+            .git_output(folder, &["rev-list", "--max-parents=0", "main"])
+    };
+    assert_eq!(
+        root(&pc, &pc.user.path("work/app")),
+        root(&server, &repo),
+        "the two repositories of app share no root commit"
+    );
     register(&pc);
     register(&server);
     let told = |machine: &Machine| {
