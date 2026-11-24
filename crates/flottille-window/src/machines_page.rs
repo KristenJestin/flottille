@@ -1310,8 +1310,12 @@ impl RemovalDialog {
     pub fn new(section: Entity<MachinesSection>, cx: &mut Context<Self>) -> Self {
         Self {
             _watching: cx.observe(&section, |this, section, cx| {
-                this.open = section.read(cx).removal().is_some();
-                cx.notify();
+                let open = section.read(cx).removal().is_some();
+                // Closed and still closed, the dialog draws nothing: no frame for it.
+                if open || this.open {
+                    cx.notify();
+                }
+                this.open = open;
             }),
             section,
             open: false,

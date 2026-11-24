@@ -12,6 +12,7 @@
 //! Opening is `Modals::open`, called by whatever fills the form: a page's button and a request's
 //! Edit go through the same call, whichever page is shown.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_design_system::Modal;
@@ -19,6 +20,12 @@ use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, EntityId, FocusHandle, IntoElement,
     ParentElement as _, Render, Styled as _, Subscription, Window, div,
 };
+
+/// Whether a dialog whose state is `now` is drawn again for a change of its section: it is open,
+/// or it was when `before` was last set (it is folding away).
+fn moved(before: &Cell<bool>, now: bool) -> bool {
+    before.replace(now) || now
+}
 
 /// What gives a dialog's focus handle, when it has a field to take the focus.
 type Focus = Rc<dyn Fn(&App) -> Option<FocusHandle>>;
@@ -80,15 +87,24 @@ impl Modals {
         focus: fn(&S, &App) -> Option<FocusHandle>,
         cx: &mut Context<Self>,
     ) {
+        // A section that changes while its dialog is closed and stayed closed draws nothing: the
+        // window is drawn again for a dialog that is open, or that was a moment ago (it folds
+        // away), not for each change of a section whose page is elsewhere.
+        let was_open = Rc::new(Cell::new(false));
         let view = {
-            let section = section.clone();
+            let (section, was_open) = (section.clone(), was_open.clone());
             cx.new(|cx| Part {
-                _watching: cx.observe(&section, |_, _, cx| cx.notify()),
+                _watching: cx.observe(&section, move |_, section, cx| {
+                    if moved(&was_open, open(section.read(cx))) {
+                        cx.notify();
+                    }
+                }),
                 section,
                 draw,
             })
         };
         let (opened, focused) = (section.clone(), section.clone());
+        let shown = Rc::new(Cell::new(false));
         self.slots.push(Slot {
             id,
             owner: section.entity_id(),
@@ -98,7 +114,11 @@ impl Modals {
             was_open: false,
         });
         self._watching
-            .push(cx.observe(section, |_, _, cx| cx.notify()));
+            .push(cx.observe(section, move |_, section, cx| {
+                if moved(&shown, open(section.read(cx))) {
+                    cx.notify();
+                }
+            }));
     }
 
     /// A view that draws its own modal (`view`): `open` says whether it is.
