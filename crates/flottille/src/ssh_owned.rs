@@ -28,6 +28,9 @@ const FAILING: &str = "FLOTTILLE_TEST_SSH_COPY_FAILS";
 const INCLUDES_MAX: usize = 16;
 /// The files looked at, at most.
 const FILES_MAX: usize = 256;
+/// The paths the globs of one walk examine, at most.
+#[allow(dead_code)]
+const GLOB_MAX: usize = 1024;
 /// The files copied, at most.
 const COPIES_MAX: usize = 64;
 /// The bytes of a file read, at most.
@@ -60,7 +63,7 @@ pub fn copies() -> Vec<Copied> {
     if unsafe { libc::getuid() } == 0 {
         return Vec::new();
     }
-    let mut copies = walk(&system(), crate::pushed::account(), 0).copies;
+    let mut copies = walk(&system(), crate::pushed::account(), 0, false).copies;
     if let Some(failing) = std::env::var_os(FAILING).filter(|_| cfg!(debug_assertions))
         && Path::new(&failing).is_file()
     {
@@ -98,20 +101,22 @@ fn system() -> PathBuf {
 /// text: root's at every start, the test's own in a test.
 #[cfg(test)]
 fn copies_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<Copied> {
-    walk(system, account, owner).copies
+    walk(system, account, owner, false).copies
 }
 
 /// What the walk of the files `owner` owns leaves to `ssh`'s refusal, in the user's words.
 fn gaps_of(system: &Path, account: Option<&Path>, owner: u32) -> Vec<String> {
-    walk(system, account, owner).gaps
+    walk(system, account, owner, true).gaps
 }
 
-fn walk<'a>(system: &Path, account: Option<&'a Path>, owner: u32) -> Walk<'a> {
+fn walk<'a>(system: &Path, account: Option<&'a Path>, owner: u32, scan_outside: bool) -> Walk<'a> {
     let mut walk = Walk {
         account,
         owner,
+        scan_outside,
         ssh: None,
         seen: 0,
+        examined: 0,
         copies: Vec::new(),
         gaps: Vec::new(),
     };
@@ -140,9 +145,13 @@ fn walk<'a>(system: &Path, account: Option<&'a Path>, owner: u32) -> Walk<'a> {
 struct Walk<'a> {
     account: Option<&'a Path>,
     owner: u32,
+    /// Whether the user's includes from outside `~/.ssh` are looked at, to be said.
+    scan_outside: bool,
     /// `~/.ssh` and its real path, once the user's configuration is walked.
     ssh: Option<(PathBuf, PathBuf)>,
     seen: usize,
+    /// The paths the globs of the walk examined so far.
+    examined: usize,
     copies: Vec<Copied>,
     gaps: Vec<String>,
 }
@@ -235,7 +244,7 @@ impl Walk<'_> {
                         None => ssh.join(pattern),
                     };
                     if !pattern.starts_with('~') || pattern.starts_with("~/") {
-                        for found in globbed(&path) {
+                        for found in globbed(&path, &mut self.examined) {
                             if let Ok(real) = found.canonicalize() {
                                 self.outside(&real);
                             }
@@ -248,7 +257,7 @@ impl Walk<'_> {
         if pattern.contains(['$', '%', '[', '\\', '{']) || pattern.starts_with('~') {
             return Vec::new();
         }
-        globbed(&folder.join(pattern))
+        globbed(&folder.join(pattern), &mut self.examined)
     }
 
     /// Whether the walk's owner owns what `meta` says.
@@ -278,7 +287,7 @@ impl Walk<'_> {
 /// The paths `pattern`, an absolute path with `*` and `?`, matches, as `glob(3)` finds them for
 /// `ssh`: through a link to a folder too, a hidden name matched only by a part that starts with a
 /// dot, sorted.
-fn globbed(pattern: &Path) -> Vec<PathBuf> {
+fn globbed(pattern: &Path, examined: &mut usize) -> Vec<PathBuf> {
     let mut found = vec![PathBuf::from("/")];
     for part in pattern.components() {
         let part = match part {
@@ -300,6 +309,7 @@ fn globbed(pattern: &Path) -> Vec<PathBuf> {
                 continue;
             };
             for entry in entries.flatten() {
+                *examined += 1;
                 let name = entry.file_name();
                 if let (Some(name), Some(part)) = (name.to_str(), part.to_str())
                     && flottille_core::glob::matches(part, name)
@@ -540,5 +550,107 @@ mod tests {
             .expect("the walk blocked on a FIFO");
 
         assert!(copies.is_empty());
+    }
+
+    #[test]
+    fn a_run_s_planted_links_never_slow_a_confined_start() {
+        // A folder a run can write, with many links back to itself under an outside include:
+        // the paths a glob names grow with each wildcard. The start's walk looks at none of
+        // them; doctor's looks at a bounded number.
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        file(
+            &account.join(".ssh/config"),
+            "Include ~/work/*/*/*/ssh/*.conf\n",
+            0o600,
+        );
+        file(&account.join("work/ssh/x.conf"), "", 0o644);
+        for n in 0..40 {
+            std::os::unix::fs::symlink(
+                account.join("work"),
+                account.join("work").join(format!("p{n}")),
+            )
+            .unwrap();
+        }
+        let started = std::time::Instant::now();
+
+        let confined = walk(&account.join("no-system"), Some(&account), me(), false);
+        let doctor = walk(&account.join("no-system"), Some(&account), me(), true);
+
+        assert_eq!(
+            confined.examined, 0,
+            "a confined start looked outside ~/.ssh"
+        );
+        assert!(doctor.examined <= GLOB_MAX, "{}", doctor.examined);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn doctor_names_no_file_a_run_linked_into_an_outside_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = dir.path().canonicalize().unwrap();
+        file(
+            &account.join(".ssh/config"),
+            "Include ~/work/*.conf ~/work/*/in.conf ~/work/extra\n",
+            0o600,
+        );
+        file(&account.join("work/real.conf"), "", 0o644);
+        let target = account.join("elsewhere/target.txt");
+        file(&target, "", 0o644);
+        file(&account.join("elsewhere/in.conf"), "", 0o644);
+        let work = account.join("work");
+        std::os::unix::fs::symlink(&target, work.join("evil.conf")).unwrap();
+        std::os::unix::fs::symlink(&target, work.join("extra")).unwrap();
+        std::os::unix::fs::symlink(account.join("elsewhere"), work.join("folder")).unwrap();
+
+        let gaps = gaps_of(&account.join("no-system"), Some(&account), me());
+
+        let said = gaps.join("\n");
+        assert!(said.contains("work/real.conf"), "{gaps:?}");
+        for planted in ["target.txt", "evil.conf", "extra", "folder", "in.conf"] {
+            assert!(!said.contains(planted), "{planted} named: {gaps:?}");
+        }
+    }
+
+    #[test]
+    fn a_glob_past_its_budget_is_cut_and_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().canonicalize().unwrap();
+        file(&etc.join("ssh_config"), "Include d/*\n", 0o644);
+        std::fs::create_dir_all(etc.join("d")).unwrap();
+        for n in 0..GLOB_MAX + 10 {
+            std::fs::write(etc.join(format!("d/{n:05}")), "").unwrap();
+        }
+
+        let walked = walk(&etc.join("ssh_config"), None, me(), false);
+
+        assert!(walked.examined <= GLOB_MAX, "{}", walked.examined);
+        assert!(
+            walked.gaps.iter().any(|gap| gap.contains("1024 paths")),
+            "{:?}",
+            walked.gaps
+        );
+    }
+
+    #[test]
+    fn files_past_the_limit_are_said_only_when_the_owner_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().canonicalize().unwrap();
+        let include: String = (0..FILES_MAX + 20)
+            .map(|n| format!("Include f{n:03}\n"))
+            .collect();
+        file(&etc.join("ssh_config"), &include, 0o644);
+        for n in 0..FILES_MAX + 20 {
+            file(&etc.join(format!("f{n:03}")), "", 0o644);
+        }
+
+        let mine = gaps_of(&etc.join("ssh_config"), None, me());
+        let nobody_s = walk(&etc.join("ssh_config"), None, u32::MAX, true).gaps;
+
+        assert!(mine.iter().any(|gap| gap.contains("256 files")), "{mine:?}");
+        assert!(
+            !nobody_s.iter().any(|gap| gap.contains("256 files")),
+            "{nobody_s:?}"
+        );
     }
 }
