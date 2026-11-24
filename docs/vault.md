@@ -794,10 +794,12 @@ The gaps, where the platform does not allow more:
 - **what the browser's server reads and writes is kept from the profile by its actions, not by
   its paths.** The server reaches the profile, so an action that reads or writes a file by a path
   the agent gives would follow a link a run planted to it; the adapter keeps those actions off or
-  refuses their path (`docs/extensions.md`, "Adapters"), and the cookies, storage and saved state
-  are no action's answer. A HAR or a trace the user turned on is written to agent-browser's own
-  folder under the home, which runs read and write: it holds the page's traffic, its cookies
-  among it;
+  refuses their path, any `url` argument is a web address, never a `file:` one, and an action
+  that runs other commands (`batch`, `flow_run`) is off (`docs/extensions.md`, "Adapters"): the
+  cookies, storage, saved state and a request's headers are no action's answer. What the user
+  turns on still reaches them: `eval` reads the page's storage and the part of `document.cookie`
+  that is not `HttpOnly`, and a HAR or a trace is written to agent-browser's own folder under the
+  home, which runs read and write: it holds the page's traffic, its cookies among it;
 - **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
   can write what is the user's under the home: agent-browser itself where the user installed it
   there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
