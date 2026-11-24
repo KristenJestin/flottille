@@ -1016,7 +1016,7 @@ fn on_demand(name: &str) -> Option<&'static str> {
 
 /// The guide of a family read on demand: its whole description, then a line for each argument
 /// that has a sentence, nested ones by their path.
-pub fn guide_of(definition: &Definition) -> Option<String> {
+fn guide_of(definition: &Definition) -> Option<String> {
     let (_, whole) = ON_DEMAND
         .iter()
         .find(|(family, _)| *family == definition.name)?;
