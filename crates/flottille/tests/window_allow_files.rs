@@ -21,7 +21,7 @@ use flottille_window::model::elsewhere_id;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -214,6 +214,17 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     }
 }
 
+/// The window's clock moved on by `by`, frame after frame, nothing asked of the daemons.
+fn advance(cx: &mut VisualTestContext, by: Duration) {
+    let mut gone = Duration::ZERO;
+    while gone < by {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        gone += Duration::from_millis(16);
+    }
+}
+
 fn id(name: String) -> ElementId {
     ElementId::Name(name.into())
 }
@@ -397,6 +408,13 @@ fn a_failed_share_keeps_the_launch_held_and_says_which_file(cx: &mut TestAppCont
     assert_eq!(
         label(cx, format!("allow-{number}")).as_deref(),
         Some("Try again")
+    );
+    // Held and failed, the card draws nothing more once its marks and its dot rested.
+    advance(cx, Duration::from_secs(7));
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "a frame asked at rest"
     );
 
     // Once the server's own entry is gone, Try again resumes at that file and allows.
