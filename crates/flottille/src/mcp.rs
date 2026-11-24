@@ -4432,6 +4432,56 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_needed_before_the_first_call_stays_in_the_short_listing() {
+        // The guide comes with the first call, after it is done: what an agent must know to make
+        // that call well is listed, never moved to the guide.
+        let listed = |family: &str| {
+            let tool = serde_json::to_value(tool_of(definition(family).unwrap(), true)).unwrap();
+            tool["description"].as_str().unwrap().to_owned()
+        };
+        // set_rules replaces the text whole: one rule sent alone would replace all the user's.
+        let project = listed("project");
+        for said in [
+            "set_rules replaces the project's text whole",
+            "at most 8000 characters",
+            "every rule, never one alone",
+            // Objects with no declared field in the schema.
+            "{kind: github | bitbucket-cloud, repository}",
+            "{kind: jira, site, projects}",
+        ] {
+            assert!(project.contains(said), "project lost: {said}\n{project}");
+        }
+        // A step is an object with no declared field.
+        let setup = listed("setup");
+        assert!(
+            setup.contains("one of copy, link, root_entries, run, task"),
+            "setup lost what a step is: {setup}"
+        );
+        // A secret never goes in a connection's variables or headers.
+        let connections = listed("connections");
+        assert!(
+            connections.contains("never a secret"),
+            "connections lost: {connections}"
+        );
+    }
+
+    #[test]
+    fn a_new_process_is_given_the_guide_again_at_its_first_call() {
+        // Once is per process (`docs/tools.md`, "Guides read on demand").
+        let (server, _) = minted(true);
+        assert!(server.first_guide("a1", "services"));
+        assert!(!server.first_guide("a1", "services"));
+        assert!(server.first_guide("a1", "setup"), "each family has its own");
+        // The agent's process starts again (a reload, a resume): its token is minted anew.
+        server.mint(grant(), true, STARTED.to_vec(), false).unwrap();
+        assert!(server.first_guide("a1", "services"));
+        assert!(server.first_guide("a1", "setup"));
+        // A daemon started again has read no guide to give.
+        let (restarted, _) = minted(true);
+        assert!(restarted.first_guide("a1", "services"));
+    }
+
+    #[test]
     fn the_biggest_list_stays_under_the_guards_on_tools_and_tokens() {
         // Anthropic suggests tool search past 10 tools or 10k tokens of definitions
         // (`docs/reference/mcp.md` §3). Flottille loads every tool upfront, so these two guards
