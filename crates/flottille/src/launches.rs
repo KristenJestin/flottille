@@ -1223,13 +1223,14 @@ async fn with_agent(
         let mut shown = json!({"kind": asked.kind, "machine": launch.asked["from"],
             "title": asked.title, "brief": asked.brief});
         // What the user is asked to share from the caller's machine, by the entries' names:
-        // what a device shares before it allows the launch.
+        // what a device makes there from the caller's project (`vault.from_file`) and shares
+        // with this machine before it allows the launch.
         if launch.asked["missing"]
             .as_array()
             .is_some_and(|missing| !missing.is_empty())
         {
-            shown["needs"] =
-                json!({"from": launch.asked["from"], "files": launch.asked["missing"]});
+            shown["needs"] = json!({"from": launch.asked["from"], "to": this_machine(daemon),
+                "project": asked.project, "files": launch.asked["missing"]});
         }
         let request = Request {
             number: 0,
