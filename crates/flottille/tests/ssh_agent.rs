@@ -2971,3 +2971,53 @@ fn a_run_cannot_re_point_the_link_of_the_git_settings() {
     assert!(!said.contains("outcome=replaced"), "{said}");
     assert_eq!(std::fs::read_link(&link).unwrap(), a);
 }
+
+#[test]
+fn a_confined_run_cannot_write_below_the_kept_dotfiles_folder() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let link = user.path("home/gitlink/config");
+    let (user, _a, _own) = dotfiles(user, &link);
+    // The next version, already made by the manager before the daemon's start: a folder below the
+    // kept one, beside the version in use, whose own folders are kept in place.
+    let b = version(&user, "b", "[user]\n\tname = Test\n");
+    let mcp = session(&user, SSH_REMOTE);
+
+    // A run appends to the next version, makes another beside it, and writes in the one in use.
+    let versions = user.path("home/dots/versions");
+    let said = python(
+        &user,
+        &mcp,
+        &format!(
+            "import errno\nversions = {versions:?}\n\
+             for name, act in [\n\
+             \x20   ('b', lambda: open({b:?}, 'a').write('[core]\\n\\tsshCommand = ./x\\n')),\n\
+             \x20   ('new-in-b', lambda: open(versions + '/b/planted', 'w').write('x')),\n\
+             \x20   ('c', lambda: os.mkdir(versions + '/c')),\n\
+             \x20   ('in-a', lambda: open(versions + '/a/planted', 'w').write('x')),\n\
+             ]:\n\
+             \x20   try:\n\
+             \x20       act()\n\
+             \x20       print(name + '=written')\n\
+             \x20   except OSError as e:\n\
+             \x20       print(name + '=' + errno.errorcode[e.errno])\n",
+            versions = versions.to_str().unwrap(),
+            b = b.to_str().unwrap(),
+        ),
+    );
+
+    for name in ["b", "new-in-b", "c", "in-a"] {
+        assert!(
+            said.contains(&format!("{name}=EROFS")) || said.contains(&format!("{name}=EACCES")),
+            "{name}: {said}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&b).unwrap(),
+        "[user]\n\tname = Test\n"
+    );
+    assert!(!versions.join("c").exists(), "{said}");
+}
