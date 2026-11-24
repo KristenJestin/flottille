@@ -213,8 +213,17 @@ fn confine<'a>(
                 .get_current_dir()
                 .map(Path::to_owned)
                 .or_else(|| std::env::current_dir().ok());
+            // The folders on the way to the browsers' kept where they are too: renamed, the
+            // browsers' would be at a path no namespace empties.
+            let mut pinned = crate::pushed::pinned();
+            if browsers.is_some() {
+                pinned.extend(crate::browsers::pinned().iter().cloned());
+            }
+            pinned.sort();
+            pinned.dedup();
+            pinned.sort_by_key(|folder| folder.components().count());
             crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())?
-                .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())?
+                .protecting(&pinned, &crate::pushed::read_only())?
                 .giving(crate::ssh_owned::copies())
         })
         .flatten();

@@ -270,7 +270,7 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
 /// The folders on the way to `path` that a command could rename or remove: those whose own
 /// folder is the user's or one they may write. Their parents are not: their own folder is
 /// another's.
-fn on_the_way(path: &Path) -> Vec<PathBuf> {
+pub(crate) fn on_the_way(path: &Path) -> Vec<PathBuf> {
     path.ancestors()
         .skip(1)
         .filter(|folder| folder.parent().is_some_and(changeable))

@@ -15,17 +15,33 @@ pub const FOLDER: &str = "browsers";
 /// Where it is, found at the daemon's start: the place every confined command is kept out of.
 static BASE: OnceLock<Option<PathBuf>> = OnceLock::new();
 
+/// The folders on the way to it a command could rename, found with it: a run that renamed one
+/// would have the next run, whose namespace empties the folder at the path found here, reach the
+/// profiles under the new name.
+static WAYS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
 /// Makes the folder at the daemon's start, before anything runs, and keeps where it is.
 pub fn find(paths: &Paths) -> flottille_core::Result<()> {
     let base = paths.state.join(FOLDER);
     ensure_private_dir(&base)?;
-    BASE.get_or_init(|| base.canonicalize().ok());
+    let base = BASE.get_or_init(|| base.canonicalize().ok());
+    WAYS.get_or_init(|| {
+        base.as_deref()
+            .map(crate::pushed::on_the_way)
+            .unwrap_or_default()
+    });
     Ok(())
 }
 
 /// The folder found at the daemon's start, if it was.
 pub fn base() -> Option<&'static Path> {
     BASE.get()?.as_deref()
+}
+
+/// The folders on the way to [`base`] that every confined command has kept where they are, as the
+/// ones on the way to `~/.ssh` (`pushed::pinned`).
+pub fn pinned() -> &'static [PathBuf] {
+    WAYS.get().map(Vec::as_slice).unwrap_or_default()
 }
 
 /// The folder of one connection's browser. Only this module makes one, so that a folder named by
