@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A stub UnifiedPush distributor, for the emulator only: what ntfy is on a real phone. Its
+     instrumentation tests run in its process, which relays the pushes the spike's server holds. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="Spike distributor"
+        android:usesCleartextTraffic="true">
+        <receiver
+            android:name=".RegisterReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.distributor.REGISTER" />
+                <action android:name="org.unifiedpush.android.distributor.UNREGISTER" />
+                <action android:name="org.unifiedpush.android.distributor.MESSAGE_ACK" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
