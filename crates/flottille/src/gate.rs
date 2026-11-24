@@ -3655,12 +3655,12 @@ fn acli_reads(args: &[String]) -> bool {
     )
 }
 
-fn base(word: &str) -> &str {
+pub(crate) fn base(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
 /// `NAME=value`, as `env` reads it.
-fn assignment(word: &str) -> bool {
+pub(crate) fn assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
             && !name.starts_with(|c: char| c.is_ascii_digit())
@@ -3669,7 +3669,7 @@ fn assignment(word: &str) -> bool {
 }
 
 /// The line, then each program a wrapper runs, unwrapped in turn.
-fn layers(words: &[String]) -> Result<Vec<Vec<String>>, String> {
+pub(crate) fn layers(words: &[String]) -> Result<Vec<Vec<String>>, String> {
     let mut layers = vec![words.to_vec()];
     while let Some(inner) = inner(layers.last().expect("one layer at least"))? {
         if layers.len() == LAYERS_MAX {

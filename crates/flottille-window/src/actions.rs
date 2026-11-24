@@ -731,6 +731,17 @@ pub enum Command {
         number: u64,
         answer: Answer,
     },
+    /// Allow on a held launch that needs files (`needs`): on the machine `from`, each file from
+    /// `from_step` on made a vault entry (unless it is one already) and shared with the machine
+    /// `to`, signed with this device's key, one file after the other; then the launch allowed on
+    /// the machine shown. Each step is told as it goes ([`Outcome::Allowing`]), the approval's
+    /// answer as [`Outcome::Answered`].
+    AllowSharing {
+        session: String,
+        number: u64,
+        needs: crate::waiting::Needs,
+        from_step: usize,
+    },
 }
 
 /// What is imported from a project's `.claude` folder.
@@ -1512,6 +1523,15 @@ pub enum Outcome {
         decision: Option<String>,
         refused: Option<String>,
     },
+    /// A step of an Allow that shares files ([`Command::AllowSharing`]): the file `at` (`None`:
+    /// the approval) is now `step`; `why`, the sentence a failed one says, names the file.
+    Allowing {
+        session: String,
+        number: u64,
+        at: Option<usize>,
+        step: crate::waiting::Step,
+        why: Option<String>,
+    },
 }
 
 /// How long an answer is waited for.
@@ -1678,6 +1698,32 @@ impl Actions {
                     let _ = updates.unbounded_send(Update::Done(Outcome::Tunnel(news)));
                 })
                 .expect("a thread for closing a tunnel");
+            return;
+        }
+        // The files are the caller's machine's, reached on this machine's daemon, which carries
+        // each request signed for that machine (this one too); the approval is the machine
+        // shown's.
+        if let Command::AllowSharing {
+            session,
+            number,
+            needs,
+            from_step,
+        } = command
+        {
+            let (local, shown, updates, bounds) = (
+                self.local.clone(),
+                self.connect.clone(),
+                self.updates.clone(),
+                self.bounds,
+            );
+            let here = self.aim.as_ref().and_then(crate::machines::Aim::machine);
+            std::thread::Builder::new()
+                .name("flottille-allow".into())
+                .spawn(move || {
+                    let ask = (session, number, needs, from_step);
+                    allow_sharing(&local, (&shown, here), sign, ask, bounds, &updates);
+                })
+                .expect("a thread for an Allow that shares files");
             return;
         }
         if let Command::SignInOn { name, machine } = command {
@@ -2051,6 +2097,176 @@ fn signed_by_device(
     connected(connect)?
         .signing(sign, machine)
         .ask_within(method, params, bound)?
+}
+
+/// [`Command::AllowSharing`]: the files made and shared as [`share_files`] does, for the machine
+/// shown alone; the first step refused ends it, the launch still held; then the launch allowed.
+fn allow_sharing(
+    local: &Connect,
+    (shown, here): (&Connect, Option<String>),
+    sign: Option<Sign>,
+    (session, number, needs, from_step): (String, u64, crate::waiting::Needs, usize),
+    bounds: Bounds,
+    updates: &Updates,
+) {
+    use crate::waiting::Step;
+    let told = |at: Option<usize>, step: Step, why: Option<String>| {
+        let outcome = Outcome::Allowing {
+            session: session.clone(),
+            number,
+            at,
+            step,
+            why,
+        };
+        updates.unbounded_send(Update::Done(outcome)).is_ok()
+    };
+    let on_from = |method: &str, params: Value| {
+        signed_by_device(
+            local,
+            sign.clone(),
+            Some(needs.from.clone()),
+            method,
+            params,
+            bounds.quick,
+        )
+    };
+    // The machine shown, which the approval is sent to: this one when no other is in front.
+    let here = match here {
+        Some(here) => Ok(here),
+        None => ask_alone(local, "remote.machines", json!({}), bounds.quick)
+            .and_then(|asked| asked)
+            .and_then(|machines| {
+                machines["this"]["name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "this machine is no member of the user's yet".to_owned())
+            }),
+    };
+    let here = match here {
+        Ok(here) => here,
+        Err(why) => {
+            told(
+                None,
+                Step::Waiting,
+                Some(format!("Nothing is shared: {why}")),
+            );
+            return;
+        }
+    };
+    if !share_files(&needs, from_step, &here, on_from, told) {
+        return;
+    }
+    if !told(None, Step::Allowing, None) {
+        return;
+    }
+    let outcome = match ask_alone(
+        shown,
+        "approval.approve",
+        json!({"number": number}),
+        bounds.quick,
+    ) {
+        Ok(Ok(answered)) => Outcome::Answered {
+            session,
+            number,
+            decision: answered["request"]["decision"].as_str().map(str::to_owned),
+            refused: None,
+        },
+        Ok(Err(why)) | Err(why) => Outcome::Answered {
+            session,
+            number,
+            decision: None,
+            refused: Some(why),
+        },
+    };
+    let _ = updates.unbounded_send(Update::Done(outcome));
+}
+
+/// The files of an Allow ([`Command::AllowSharing`]) from `from_step` on, each made an entry on
+/// `from` unless it is the file's own already, and shared, `on_from` asking `from`, each step
+/// `told` as it goes: whether every one is shared. `here` is the machine the launch is held on.
+///
+/// What the card lists is what the user consents to, and the daemon shown may lie: the files go
+/// to `here` alone, each into the entry its project and path name, and an entry of that name is
+/// shared only when it is bound to that file; any other is left to `vault.from_file`, which
+/// refuses it.
+fn share_files(
+    needs: &crate::waiting::Needs,
+    from_step: usize,
+    here: &str,
+    on_from: impl Fn(&str, Value) -> Result<Value, String>,
+    told: impl Fn(Option<usize>, crate::waiting::Step, Option<String>) -> bool,
+) -> bool {
+    use crate::waiting::Step;
+    use flottille_core::vault::{entry_for, file_use};
+    if needs.to != here {
+        let why = format!(
+            "Its files would go to {}, not to {here} where the launch is held: nothing is shared",
+            needs.to
+        );
+        told(None, Step::Waiting, Some(why));
+        return false;
+    }
+    for (at, file) in needs.files.iter().enumerate() {
+        let own = entry_for(&needs.project, &file.path);
+        if file.entry != own {
+            let why = format!(
+                "{} is not shared: its entry would be {}, not {own}",
+                file.path, file.entry
+            );
+            told(Some(at), Step::NotMade, Some(why));
+            return false;
+        }
+    }
+    // The entries that are their file's already, made before (by hand from the file, or by an
+    // Allow that failed further on).
+    let made: HashSet<String> = match on_from("vault.list", json!({})) {
+        Ok(listed) => listed["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry["name"].as_str()?;
+                let file = needs.files.iter().find(|file| file.entry == name)?;
+                // A copy received from another machine is not this file of `from`'s: it is made
+                // again, and the name being taken, refused.
+                (entry["for"].as_str() == Some(&file_use(&needs.project, &file.path))
+                    && entry["shared_from"].as_str().is_none_or(str::is_empty))
+                .then(|| name.to_owned())
+            })
+            .collect(),
+        Err(why) => {
+            // No file is to blame: the card says it, its rows as they were.
+            let why = format!("The vault of {} cannot be read: {why}", needs.from);
+            told(None, Step::Waiting, Some(why));
+            return false;
+        }
+    };
+    for (at, file) in needs.files.iter().enumerate().skip(from_step) {
+        if !made.contains(&file.entry) {
+            if !told(Some(at), Step::Making, None) {
+                return false;
+            }
+            let params = json!({"project": needs.project, "path": file.path, "name": file.entry});
+            if let Err(why) = on_from("vault.from_file", params) {
+                let why = format!("{} was not made: {why}", file.path);
+                told(Some(at), Step::NotMade, Some(why));
+                return false;
+            }
+        }
+        if !told(Some(at), Step::Sharing, None) {
+            return false;
+        }
+        let params = json!({"name": file.entry, "machine": needs.to});
+        if let Err(why) = on_from("vault.share", params) {
+            let why = format!("{} was not shared with {}: {why}", file.path, needs.to);
+            told(Some(at), Step::NotShared, Some(why));
+            return false;
+        }
+        if !told(Some(at), Step::Shared, None) {
+            return false;
+        }
+    }
+    true
 }
 
 /// How long the window waits for a sign-in on another machine: the daemon's own wait, and a
@@ -2567,6 +2783,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             Outcome::Asked { then, answer }
         }
         Command::SignInOn { .. } => unreachable!("a sign-in on another machine has its thread"),
+        Command::AllowSharing { .. } => unreachable!("an Allow that shares files has its thread"),
         Command::TunnelOpen(_) | Command::TunnelClose { .. } => {
             unreachable!("a tunnel has its thread")
         }
@@ -4450,5 +4667,168 @@ mod tests {
         assert_eq!(answer.restarted.as_deref(), Some("r2"));
         assert_eq!(answer.notice.as_deref(), Some("agent a has ended"));
         assert_eq!(answer.refused, None);
+    }
+
+    /// What an Allow that shares files asked of `from`, each method with its parameters, and
+    /// what it told the card, when `from` holds `listed` and answers `from_file` with `made`.
+    #[allow(clippy::type_complexity)]
+    fn shared_with(
+        needs: &crate::waiting::Needs,
+        here: &str,
+        listed: Result<Value, String>,
+        made: Result<Value, String>,
+    ) -> (
+        bool,
+        Vec<(String, Value)>,
+        Vec<(Option<usize>, crate::waiting::Step, Option<String>)>,
+    ) {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let told = std::cell::RefCell::new(Vec::new());
+        let done = share_files(
+            needs,
+            0,
+            here,
+            |method, params| {
+                asked.borrow_mut().push((method.to_owned(), params));
+                match method {
+                    "vault.list" => listed.clone(),
+                    "vault.from_file" => made.clone(),
+                    _ => Ok(json!({})),
+                }
+            },
+            |at, step, why| {
+                told.borrow_mut().push((at, step, why));
+                true
+            },
+        );
+        (done, asked.into_inner(), told.into_inner())
+    }
+
+    fn needs_of(entry: &str) -> crate::waiting::Needs {
+        crate::waiting::Needs {
+            from: "pc".to_owned(),
+            to: "server".to_owned(),
+            project: "app".to_owned(),
+            files: vec![crate::waiting::NeededFile {
+                path: ".env".to_owned(),
+                entry: entry.to_owned(),
+            }],
+        }
+    }
+
+    fn methods(asked: &[(String, Value)]) -> Vec<&str> {
+        asked.iter().map(|(method, _)| method.as_str()).collect()
+    }
+
+    #[test]
+    fn allow_never_shares_an_entry_of_the_same_name_that_holds_another_secret() {
+        // `app-.env` on pc is a hand-made entry, bound to nothing: it is no file's.
+        let listed = Ok(json!({"entries": [{"name": "app-.env", "for": null}]}));
+        let refused = Err("the vault entry app-.env holds another secret".to_owned());
+        let (done, asked, told) = shared_with(&needs_of("app-.env"), "server", listed, refused);
+
+        assert!(!done);
+        assert_eq!(methods(&asked), ["vault.list", "vault.from_file"]);
+        assert_eq!(
+            told.last().unwrap(),
+            &(
+                Some(0),
+                crate::waiting::Step::NotMade,
+                Some(".env was not made: the vault entry app-.env holds another secret".to_owned())
+            )
+        );
+
+        // Bound to another use, the same.
+        let listed = Ok(json!({"entries": [{"name": "app-.env", "for": "connection:wiki"}]}));
+        let refused = Err("the vault entry app-.env is for the connection wiki".to_owned());
+        let (_, asked, _) = shared_with(&needs_of("app-.env"), "server", listed, refused);
+        assert_eq!(methods(&asked), ["vault.list", "vault.from_file"]);
+    }
+
+    #[test]
+    fn allow_shares_the_file_s_own_entry_without_making_it_again() {
+        let listed = Ok(json!({"entries": [{"name": "app-.env", "for": "file:app/.env"}]}));
+        let (done, asked, _) = shared_with(&needs_of("app-.env"), "server", listed, Ok(json!({})));
+
+        assert!(done);
+        assert_eq!(methods(&asked), ["vault.list", "vault.share"]);
+    }
+
+    #[test]
+    fn allow_never_shares_a_copy_that_came_from_a_third_machine_in_place_of_the_file() {
+        // `app-.env` is bound to the file, but it was received from another machine: it is not
+        // the file of `pc`, which is made again (and refused, the name being taken).
+        let listed = Ok(json!({"entries": [
+            {"name": "app-.env", "for": "file:app/.env", "shared_from": "laptop"}]}));
+        let refused = Err("the vault already has an entry app-.env".to_owned());
+        let (done, asked, told) = shared_with(&needs_of("app-.env"), "server", listed, refused);
+
+        assert!(!done);
+        assert_eq!(methods(&asked), ["vault.list", "vault.from_file"]);
+        assert_eq!(told.last().unwrap().1, crate::waiting::Step::NotMade);
+    }
+
+    #[test]
+    fn allow_refuses_a_need_whose_entry_is_not_the_file_s_own() {
+        // A daemon that names the user's token as the entry `.env` is made into.
+        let listed = Ok(json!({"entries": [{"name": "github-token", "for": null}]}));
+        let (done, asked, told) =
+            shared_with(&needs_of("github-token"), "server", listed, Ok(json!({})));
+
+        assert!(!done);
+        assert!(
+            !methods(&asked).contains(&"vault.share"),
+            "nothing is shared: {asked:?}"
+        );
+        assert!(
+            !methods(&asked).contains(&"vault.from_file"),
+            "nothing is made: {asked:?}"
+        );
+        let (at, step, why) = told.last().unwrap();
+        assert_eq!((*at, *step), (Some(0), crate::waiting::Step::NotMade));
+        assert_eq!(
+            why.as_deref(),
+            Some(".env is not shared: its entry would be github-token, not app-.env")
+        );
+    }
+
+    #[test]
+    fn allow_refuses_files_for_another_machine_than_the_one_the_launch_is_held_on() {
+        let listed = Ok(json!({"entries": []}));
+        let (done, asked, told) =
+            shared_with(&needs_of("app-.env"), "laptop", listed, Ok(json!({})));
+
+        assert!(!done);
+        assert!(asked.is_empty(), "nothing is asked of pc: {asked:?}");
+        assert_eq!(
+            told,
+            [(
+                None,
+                crate::waiting::Step::Waiting,
+                Some(
+                    "Its files would go to server, not to laptop where the launch is held: \
+                     nothing is shared"
+                        .to_owned()
+                )
+            )]
+        );
+    }
+
+    #[test]
+    fn a_vault_that_cannot_be_read_blames_no_file() {
+        let listed = Err("cannot reach pc".to_owned());
+        let (done, asked, told) =
+            shared_with(&needs_of("app-.env"), "server", listed, Ok(json!({})));
+
+        assert!(!done);
+        assert_eq!(methods(&asked), ["vault.list"]);
+        assert_eq!(
+            told,
+            [(
+                None,
+                crate::waiting::Step::Waiting,
+                Some("The vault of pc cannot be read: cannot reach pc".to_owned())
+            )]
+        );
     }
 }
