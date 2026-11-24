@@ -5,7 +5,7 @@
 //! A hub served in the test on 127.0.0.1 and two daemons, each with its own temporary HOME and
 //! XDG folders and fake agents.
 
-use crate::remote_deliveries::{answered, launch_in, release, script};
+use crate::remote_deliveries::{answered, launch_in, off, on, release, script};
 use crate::remote_launch::{
     Machine, TestHub, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server,
     prompted, refused, sent_with, server_user,
@@ -668,4 +668,44 @@ fn ending_a_pilot_lists_its_led_sessions_on_other_machines() {
     assert_eq!(sessions[0]["title"], "Finish the export", "{ending:#}");
     assert_eq!(sessions[0]["machine"], "server", "{ending:#}");
     assert_eq!(sessions[0]["project"], "app", "{ending:#}");
+    assert_eq!(sessions[0]["state"], "unknown", "{ending:#}");
+    assert_eq!(
+        sessions[0]["losses"],
+        json!(["unknown (on server)"]),
+        "{ending:#}"
+    );
+}
+
+#[test]
+fn a_pilot_ended_while_the_machine_is_off_ends_them_when_it_is_back() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (session, root, _, mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    let child = id_in(done(&launched(
+        &mcp,
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    )));
+    prompted(&server, "Write the tests of the export.");
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+
+    pc.user.call("agent.stop", json!({"agent": root})).unwrap();
+    on(&server);
+    server.wait_for("pc");
+
+    eventually("both ended on server", || {
+        server.agent(&session)["state"] == "ended" && server.agent(&child)["state"] == "ended"
+    });
+    assert_eq!(
+        server.agent(&session)["state_reason"],
+        "its pilot ended",
+        "{:#}",
+        server.agent(&session)
+    );
+    assert_eq!(
+        server.agent(&child)["state_reason"],
+        "its parent stopped",
+        "{:#}",
+        server.agent(&child)
+    );
 }

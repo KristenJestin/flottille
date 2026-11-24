@@ -2308,11 +2308,14 @@ fn end_led(daemon: &Arc<Daemon>, pilot: &Agent) {
     for session in led_by_pilot(daemon, &pilot.id) {
         stop_tree(daemon, &session.id, ITS_PILOT_ENDED);
     }
-    crate::across::end_led(daemon, &pilot.id);
 }
 
 /// Why a led session ended with its pilot.
 pub const ITS_PILOT_ENDED: &str = "its pilot ended";
+/// Why a child ended with its parent.
+pub const ITS_PARENT_STOPPED: &str = "its parent stopped";
+/// Why a child ended as its parent failed.
+pub const ITS_PARENT_FAILED: &str = "its parent failed";
 
 /// The sessions that end with `pilot`'s end, its led sessions and theirs in turn, the oldest
 /// first: what the user is told before they confirm.
@@ -2381,7 +2384,8 @@ pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
                 "workspace": launch.workspace,
                 "machine": machine,
                 "state": "unknown",
-                "losses": [format!("its workspace is on {machine}: what it holds is not read from here")],
+                // Not asked there: the confirmation never waits on another machine.
+                "losses": [format!("unknown (on {machine})")],
             }));
         }
     }
@@ -2581,7 +2585,7 @@ pub fn stop_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
     let mut tree = descendants(daemon, id);
     tree.sort_by_key(|agent| std::cmp::Reverse(agent.depth));
     for agent in &tree {
-        end(daemon, &agent.id, AgentState::Ended, "its parent stopped");
+        end(daemon, &agent.id, AgentState::Ended, ITS_PARENT_STOPPED);
     }
     end(daemon, id, AgentState::Ended, reason);
 }
@@ -2591,7 +2595,7 @@ pub fn fail_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
     let mut tree = descendants(daemon, id);
     tree.sort_by_key(|agent| std::cmp::Reverse(agent.depth));
     for agent in &tree {
-        end(daemon, &agent.id, AgentState::Ended, "its parent failed");
+        end(daemon, &agent.id, AgentState::Ended, ITS_PARENT_FAILED);
     }
     let reason = secrets::mask(reason, &std::env::vars_os().collect());
     if !end(daemon, id, AgentState::Failed, &reason) {
@@ -2709,6 +2713,8 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
     if state == AgentState::Ended {
         end_led(daemon, &agent);
     }
+    // What it started on other machines stops there as it would here.
+    crate::across::ended(daemon, id, state == AgentState::Failed);
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });

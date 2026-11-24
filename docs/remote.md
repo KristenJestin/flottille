@@ -1950,7 +1950,7 @@ on a real phone, by hand, and reported.
   id: a launch whose workspace was removed names none, and a launch refused or forgotten removes
   only the workspace made of its code, never one of the user's of the same name.
 - A child on another machine counts in its parent's cap on the parent's machine while its parent
-  lives, until its report or its failure comes back, or its parent stops it; a launch whose code never came holds a slot of the
+  lives, until its report or its failure comes back, or its parent stops it or ends; a launch whose code never came holds a slot of the
   receiving machine's cap until it is forgotten, an hour after it was asked.
 - A machine may leave 4 launches waiting for their code on another.
 - The returned commits go to `refs/flottille/machines/<machine>/<launch>/<branch>`, never onto
@@ -1983,11 +1983,21 @@ on a real phone, by hand, and reported.
   the user's on both machines (no longer a row under its pilot, reached with a leave as any
   session of another machine). A real end of the pilot ends it there (`its pilot ended`), the stop
   kept until that machine takes it; `agent.ending` and the window's End confirmation list it,
-  with its machine. A `following` or a `pilot-ended` stop is taken only from the machine of the
-  launch's caller, never for a handed launch; a `following` only for a led one, its state `on`,
-  `paused` or `ended`. The light list does not name a pilot of another machine (its
+  with its machine, its unsaved work `unknown (on server)`: it is not asked there, so that the
+  confirmation never waits on another machine. A `following`, a `pilot-ended`, a
+  `parent-stopped` or a `parent-failed` stop is taken only from the machine of the launch's
+  caller, never for a handed launch; a `following` only for a led one, its state `on`, `paused`
+  or `ended`. The light list does not name a pilot of another machine (its
   `pilot` is a session of the same list): drawing it under its pilot on every window is the
   window's part.
+- **A parent's end stops its tree on other machines** (#1277). An agent that ends for good (it is
+  stopped, reports, or ends with its own parent or pilot) stops each child it started on another
+  machine there (`its parent stopped`), and one that fails stops them too (`its parent failed`),
+  as its children here end; each of them, and each session it leads, ends in turn what it
+  started, there or on a third machine. The stop is an `agent_stop` `call` of the launch, kept
+  until that machine takes it as the pilot's is, and only for a launch this machine made, never
+  for anything another machine names. A failed pilot ends no led session, here or there: it can
+  be resumed.
 - Where a question goes when the parent is off (#818): a parent of another machine that forwards
   a request of its child gives it to the user of the child's machine, never to its own parent on
   its machine (the request lives where the call was held). A request goes to the user when the
@@ -2533,6 +2543,11 @@ on a real phone, by hand, and reported.
   lists a launch held for its user `idle`, as it lists nothing it holds; while the launch is
   `held` here, that `idle` is not taken over the request's mark. Any other state that machine
   lists wins, so an allowed launch shows what it does as soon as its list says so.
+- **The End confirmation does not ask another machine** (#1277): a session the pilot leads on
+  another machine is listed with its unsaved work `unknown (on server)`, never read there, rather
+  than waiting, even briefly, for an answer that may not come. Asking that machine with a bounded
+  wait is a follow-up. A launch on another machine that names no agent yet (held for the user
+  there) is not stopped with its parent: a follow-up.
 
 ## Open questions
 
