@@ -127,6 +127,11 @@ pub enum MachineMessage {
     /// does not know it, refuses it alone and goes on taking the sessions. Answered `{}`, or
     /// refused.
     Projects(crate::ProjectList),
+    /// The pilots of another machine of the sender's led sessions, each by its machine's name and
+    /// its id there (`docs/remote.md`, "One list of every machine"): sent by a runner after its
+    /// sessions and again when they change, kept by the receiver beside them. A message of its own
+    /// for the reason of `projects`. Answered `{}`, or refused.
+    Pilots(crate::PilotList),
     /// The user's close of a session of the receiver, signed by their device (`agent.stop`) and
     /// kept by the sender while the receiver was off: sent once it links again, kept until it is
     /// answered, and idempotent (a session ended already is answered as closed). Answered `{}`,

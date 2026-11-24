@@ -1210,3 +1210,151 @@ fn a_child_launched_from_another_machine_is_not_a_root_in_the_window(cx: &mut Te
     assert!(!present(cx, "composer-field".into()), "no composer");
     assert!(!present(cx, "back-to-root".into()));
 }
+
+/// The address of the one repository of `app`, on both machines: one project row on either window.
+const APP: &str = "https://git.example/acme/app.git";
+
+/// [`pc_and_server`], `app` over the same repository on both machines, each machine told the
+/// other's: the sidebar of either window holds one row of `app`, with both machines' sessions.
+fn pc_and_server_on_one_repository() -> (TestHub, Machine, Machine) {
+    let (hub, pc, server) = pc_and_server();
+    pc.user
+        .git(&pc.user.path("work/app"), &["remote", "add", "origin", APP]);
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
+    server.user.git(&repo, &["remote", "add", "origin", APP]);
+    register(&pc);
+    register(&server);
+    let told = |machine: &Machine| {
+        machine.user.call("remote.sessions", json!({})).unwrap()["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|m| m["projects"].as_array().cloned().unwrap_or_default())
+            .any(|p| p["name"] == "app" && p["remotes"] == json!(["git.example/acme/app"]))
+    };
+    eventually("each machine is told the other's app", || {
+        told(&pc) && told(&server)
+    });
+    (hub, pc, server)
+}
+
+/// Another window, on `machine`'s daemon, in the application of the first one.
+fn open<'a>(
+    machine: &Machine,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let connect: Connect = Arc::new(machine.user.connector());
+    let device = Some(Device::in_folder(
+        machine.user.path("state/flottille/remote"),
+    ));
+    let (shell, cx) =
+        cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    (shell, cx)
+}
+
+/// The ids of the rows of the project `app`, in the order the tree draws them.
+fn rows_of_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.project("app")
+            .map(|node| {
+                node.read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Whether `row` is drawn right under `pilot` in `app`, tied to it.
+fn right_under(shell: &Entity<Shell>, pilot: &str, row: &str, cx: &mut VisualTestContext) -> bool {
+    let rows = rows_of_app(shell, cx);
+    rows.iter()
+        .position(|id| id == pilot)
+        .is_some_and(|at| rows.get(at + 1).map(String::as_str) == Some(row))
+        && label(cx, tie_id(session_id(row))).is_some()
+}
+
+#[gpui_kit::test]
+fn a_led_session_of_another_machine_is_under_its_pilot(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server_on_one_repository();
+    // In Full, its end is let through as a session's it leads on this machine would be.
+    let (pilot, mcp) = root(&pc, "full");
+
+    // On the machine it runs on: under the row of its pilot, which that machine's list holds.
+    let agent = {
+        let (shell, cx) = window(&server, cx);
+        let pilot_row = elsewhere_id("pc", &pilot);
+        until(&shell, cx, "the pilot's row on server", |cx| {
+            present(cx, session_id(&pilot_row))
+        });
+        settle(&shell, cx);
+
+        let agent = led_on_server(&mcp);
+        until(&shell, cx, "its row comes", |cx| {
+            frame_of(&shell, &agent, cx).is_some_and(|frame| !heights(cx, &frame).is_empty())
+        });
+        let frame = frame_of(&shell, &agent, cx).unwrap();
+        let coming = heights(cx, &frame).into_iter().fold(f32::MAX, f32::min);
+        until(&shell, cx, "the session under its pilot on server", |cx| {
+            right_under(&shell, &pilot_row, &agent, cx)
+        });
+        settle(&shell, cx);
+        let full = heights(cx, &frame).into_iter().fold(0., f32::max);
+        assert!(
+            coming < full,
+            "the row unfolds from nothing: {coming} of {full}"
+        );
+        assert!(
+            right_under(&shell, &pilot_row, &agent, cx),
+            "{:?}",
+            rows_of_app(&shell, cx)
+        );
+        // Its machine's mark, as it sits among another machine's rows.
+        let said = label(cx, session_machine_id(&agent)).unwrap_or_default();
+        assert!(said.starts_with("server"), "{said}");
+        assert!(present(
+            cx,
+            gpui_kit::ElementId::Name(format!("session-machine-icon-{agent}").into())
+        ));
+
+        // It ends: its row folds away from under its pilot.
+        let stopped = mcp.call("agent_stop", json!({"agent_id": agent}));
+        assert!(!stopped.error, "{}", stopped.text);
+        until(&shell, cx, "the row starts folding away", |cx| {
+            heights(cx, &frame).into_iter().all(|height| height < full)
+        });
+        let going = heights(cx, &frame);
+        assert!(
+            going.iter().any(|height| *height > 0.),
+            "the row folds away, it does not vanish: {going:?}"
+        );
+        settle(&shell, cx);
+        assert!(!rows_of_app(&shell, cx).contains(&agent));
+        agent
+    };
+
+    // On the pilot's machine, a led session of server that lives: under its pilot, with server's
+    // mark.
+    let other = led_on_server(&mcp);
+    assert_ne!(other, agent);
+    let (shell, cx) = open(&pc, cx);
+    let row = elsewhere_id("server", &other);
+    until(&shell, cx, "the session under its pilot on pc", |cx| {
+        right_under(&shell, &pilot, &row, cx)
+    });
+    let said = label(cx, session_machine_id(&row)).unwrap_or_default();
+    assert!(said.starts_with("server · "), "{said}");
+    assert!(present(
+        cx,
+        gpui_kit::ElementId::Name(format!("session-machine-icon-{row}").into())
+    ));
+}
