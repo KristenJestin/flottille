@@ -1627,14 +1627,14 @@ mod tests {
         let link = kept.join("config");
         std::os::unix::fs::symlink(&a, &link).unwrap();
         let found = found_settings(&home, &[&link], &[&kept]);
-        assert_eq!(git_now(&found).unwrap(), [a.clone()]);
+        assert_eq!(git_now(&found).unwrap(), std::slice::from_ref(&a));
 
         // A dotfiles update: a new version, the link moved to it, the old one removed.
         let b = version(&home, "b");
         relink(&link, &b);
         std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
 
-        assert_eq!(git_now(&found).unwrap(), [b.clone()]);
+        assert_eq!(git_now(&found).unwrap(), std::slice::from_ref(&b));
         // The new file is kept from now on, its identity the one judged.
         assert_eq!(recorded(&found, &b), identity(&b));
         assert!(changed(&found, &b).is_none());
