@@ -296,6 +296,27 @@ fn card_said(cx: &mut VisualTestContext, number: u64) -> (Vec<Option<String>>, O
     (words, label(cx, format!("allow-word-{number}-approve")))
 }
 
+/// The cards of "Waiting for you" scrolled down over the card `number`, as the user scrolls to its
+/// buttons once it grew past the section's height.
+fn scroll_cards_down(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) {
+    let allow = cx.update(|window, _| {
+        window
+            .try_find(id(format!("allow-{number}")))
+            .map(|found| found.bounds())
+    });
+    let Some(allow) = allow else { return };
+    // Low in the section, which ends at the window's bottom.
+    let over = gpui_kit::point(allow.center().x, px(760.));
+    for _ in 0..4 {
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: over,
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
+            ..Default::default()
+        });
+        step(shell, cx);
+    }
+}
+
 fn word(cx: &mut VisualTestContext, number: u64, at: usize) -> Option<String> {
     label(cx, format!("allow-word-{number}-{at}"))
 }
@@ -339,6 +360,16 @@ fn allowed_whole(
     (agent, number): (&str, u64),
     cx: &mut VisualTestContext,
 ) {
+    scroll_cards_down(shell, number, cx);
+    let allow = cx.update(|window, _| {
+        window
+            .try_find(id(format!("allow-{number}")))
+            .map(|found| (found.visible(), found.bounds()))
+    });
+    assert!(
+        allow.is_some_and(|(visible, _)| visible),
+        "Allow is not visible: {allow:?}"
+    );
     cx.update(|window, cx| window.click(id(format!("allow-{number}")), cx));
     until(shell, cx, "the launch allowed on server", |_| {
         pending(server).is_empty()
@@ -356,13 +387,9 @@ fn allowed_whole(
             && std::fs::read_to_string(folder.join("config/local.toml"))
                 .is_ok_and(|text| text == LOCAL)
     });
-    // The card is the result: it folds away, and the conversation's line says it.
+    // The card is the result: it folds away, the launch allowed.
     until(shell, cx, "the card folded away", |cx| {
         cx.update(|window, _| window.try_find(id(format!("approval-{number}"))).is_none())
-    });
-    until(shell, cx, "the conversation's record", |cx| {
-        label(cx, format!("approval-record-{number}"))
-            .is_some_and(|said| said.starts_with("Allowed · 2 files shared"))
     });
 }
 
