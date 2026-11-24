@@ -1167,7 +1167,7 @@ pub(crate) async fn serve_call(
         Err(refused) => Err(refused),
         // A session its agent did not start: served as a call of this machine's agents is.
         Ok(daemon) if call.launch.is_empty() && call.tool != "approval_answer" => {
-            session_call(&daemon, &remote, &from, *call, None, false).await
+            session_call(&daemon, &remote, &from, *call, None, None).await
         }
         // The removal of the workspace of a session or child its agent started here: judged by
         // the same gate and done by the same tool as one of this machine's agents' removals.
@@ -1182,7 +1182,7 @@ pub(crate) async fn serve_call(
         Ok(daemon) if READS.contains(&call.tool.as_str()) => {
             match own_launch(&daemon, &remote, &from, &call) {
                 Ok(launch) => {
-                    session_call(&daemon, &remote, &from, *call, launch.agent, false).await
+                    session_call(&daemon, &remote, &from, *call, launch.agent, None).await
                 }
                 Err(refused) => Err(refused),
             }
@@ -2227,14 +2227,15 @@ fn stand_in_cap(name: &str) -> String {
 /// judge and the same tool, the caller stood in for by an agent of its own (`stand_in`), in its
 /// tree's mode (Full only with the user's signed switch). A `viewer` device's agents only read.
 /// `reads`: the session or child of this machine the caller started, which it reads as its
-/// starter (`Grant::reads`).
+/// starter (`Grant::reads`). `removes`: the launch whose workspace the call removes, its commits
+/// sent back once the call is found to be one this machine plays, before it is played.
 async fn session_call(
     daemon: &Arc<Daemon>,
     remote: &Arc<Remote>,
     from: &PublicKey,
     call: Call,
     reads: Option<String>,
-    removes: bool,
+    removes: Option<&Launch>,
 ) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
@@ -2272,7 +2273,7 @@ async fn session_call(
     }
     let tool = stand_in_tools()
         .into_iter()
-        .chain(removes.then_some(REMOVES))
+        .chain(removes.map(|_| REMOVES))
         .find(|tool| *tool == call.tool)
         .ok_or_else(|| format!("{:?} is not a tool another machine calls", call.tool))?;
     let args: Value = serde_json::from_str(&call.arguments)
@@ -2308,20 +2309,49 @@ async fn session_call(
         &members,
     );
     let agent = stand_in(daemon, &call, &machine, &name, mode)?;
-    let grant = match removes {
-        true => removal_grant(daemon, &agent, &args).map_err(Refused::Never)?,
-        false => crate::mcp::Grant {
-            reads,
-            ..stand_in_grant(daemon, &agent)
-        },
+    let (grant, key, came) = match removes {
+        Some(launch) => {
+            let grant =
+                removal_grant(daemon, &agent, &args, &launch.launch).map_err(Refused::Never)?;
+            // What went back is the caller's: the removal is judged on what never reached it.
+            let came = crate::travel::send_back(daemon, &launch.launch).await;
+            (grant, removal_key(&launch.launch, &call.id), Some(came))
+        }
+        None => (
+            crate::mcp::Grant {
+                reads,
+                ..stand_in_grant(daemon, &agent)
+            },
+            call.id.clone(),
+            None,
+        ),
     };
     let grant = Arc::new(grant);
-    let played = crate::mcp::played_for(daemon, &grant, tool, args, &call.id).await;
+    let played = crate::mcp::played_for(daemon, &grant, tool, args, &key).await;
     eprintln!(
         "flottille daemon: {tool} of agent {} of {name} on {}: {}",
         call.caller, call.agent, played.word
     );
-    Ok(json!({"text": played.text, "outcome": played.word, "request": played.request}))
+    let mut text = played.text;
+    if let Some(came) = came {
+        let lines = came_lines(&own_name(daemon).unwrap_or_default(), came);
+        if !lines.is_empty() {
+            text = format!("{}\n{text}", lines.join("\n"));
+        }
+    }
+    Ok(json!({"text": text, "outcome": played.word, "request": played.request}))
+}
+
+/// The key a removal asked from another machine is played and held under: its launch's name
+/// with the call's id, so that the user's answer is done for that launch's workspace alone.
+fn removal_key(launch: &str, id: &str) -> String {
+    format!("{launch}/{id}")
+}
+
+/// The launch a removal asked from another machine was held for, from its request's key.
+pub(crate) fn removal_launch(key: Option<&str>) -> &str {
+    key.and_then(|key| key.split_once('/'))
+        .map_or("", |(launch, _)| launch)
 }
 
 /// The tool a caller of another machine removes the workspace of a session or child it started
@@ -2329,10 +2359,12 @@ async fn session_call(
 const REMOVES: &str = "workspace";
 
 /// The removal, asked by its caller on the machine of `from`, of the workspace this machine made
-/// for `launch`: the commits of that workspace go back first, so that what the removal is judged
-/// to lose is what never reached the caller; then it is played as one of this machine's agents'
-/// removals is, by the same gate (held for the user as theirs is) and the same tool
-/// (refused while an agent works in it, nothing lost but by the user's answer to discard).
+/// for `launch`: once the call is found to be one this machine plays (its device's role, its
+/// words, its workspace the launch's), the commits of that workspace go back first, so that what
+/// the removal is judged to lose is what never reached the caller; then it is played as one of
+/// this machine's agents' removals is, by the same gate (held for the user as theirs is) and the
+/// same tool (refused while an agent works in it, nothing lost but by the user's answer to
+/// discard).
 async fn removal(
     daemon: &Arc<Daemon>,
     remote: &Arc<Remote>,
@@ -2375,13 +2407,7 @@ async fn removal(
             )}));
         }
     };
-    let came = crate::travel::send_back(daemon, &launch.launch).await;
-    let mut answer = session_call(daemon, remote, from, call, None, true).await?;
-    let lines = came_lines(&own_name(daemon).unwrap_or_default(), came);
-    if !lines.is_empty() {
-        let text = answer["text"].as_str().unwrap_or_default();
-        answer["text"] = format!("{}\n{text}", lines.join("\n")).into();
-    }
+    let answer = session_call(daemon, remote, from, call, None, Some(launch)).await?;
     eprintln!(
         "flottille daemon: the removal of workspace {} of project {}, asked by agent {caller} of \
          {name}: {}",
@@ -2391,12 +2417,14 @@ async fn removal(
 }
 
 /// The grant a caller of another machine stood in for here as `agent` removes, with `args`, the
-/// workspace this machine made for a session or child it started: in the project that workspace
-/// is in, whatever the caller calls it. Refused for any other workspace, of the same name or not.
+/// workspace this machine made for `launch`, a session or child it started: in the project that
+/// workspace is in, whatever the caller calls it. Refused for any other workspace, of the same
+/// name or not, another launch's included.
 pub(crate) fn removal_grant(
     daemon: &Daemon,
     agent: &Agent,
     args: &Value,
+    launch: &str,
 ) -> Result<crate::mcp::Grant, String> {
     let (caller, machine) = agent
         .id
@@ -2407,7 +2435,7 @@ pub(crate) fn removal_grant(
     }
     let asked = args["name"].as_str().unwrap_or_default();
     let launches = daemon
-        .read(|store| store.launches("in", Some(machine), LaunchFilter::All))
+        .read(|store| store.launches("in", Some(machine), LaunchFilter::Named(launch)))
         .map_err(|error| error.to_string())?;
     let project = launches
         .iter()
