@@ -887,7 +887,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `launch` | Starts a session or a child for an agent of the sender (`agent_launch` with `machine`), judged by the receiving machine's gate ("A tree across machines"). |
 | `git` | Sends a bundle of a place's commits and its uncommitted work, or of a session's new commits on its way back ("What travels"). |
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
-| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
+| `call` | One of the tree's tools aimed at a session of the receiver: one the caller started (`agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`, and `review` `{start, agent}` of a led session, checked against the launch; a read carries the caller's fields as any other does), or any other, by any tool of the tree that addresses a session (`launch` left empty, `agent` the session, with the caller's `project`, `title`, `tree`, `mode` and signed `switch`): judged there as the same call of one of its own agents ("Sessions of another machine"). |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
@@ -1129,7 +1129,8 @@ know, nor say, on which machine a session runs. The machine is where it runs, no
   taken only by the agent that waits for that very request of that machine). Nothing gives a
   caller of another machine more than an agent of that machine: no other tool than
   `session_read`, `session_send`, `agent_status`, `agent_send` and `agent_stop` (a tool added to
-  the tree later is not given until it is written there), no secret, no file: when its project is
+  the tree later is not given until it is written there), and `review` for one call alone, the
+  start of the review of a session it leads there ("What travels"), no secret, no file: when its project is
   not on that machine, its place is a folder that does not exist. Its answer, whatever its
   outcome (a refusal too), is masked again of the caller's machine's secrets; an answer without
   an outcome, or a call without a project, comes from an older daemon and is refused saying that
@@ -2409,8 +2410,14 @@ on a real phone, by hand, and reported.
   of an `out` launch of that name to the sending machine; a `call` only from the `caller` of an
   `in` launch of that name from the sending machine, for the agent it started, never for a
   handed one, and only for `agent_send` (a child), `session_send` (a led session),
-  `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
-  not start agent …`). A call is judged on the caller's machine as one to a session it started
+  `agent_status`, `session_read`, `agent_stop` and `review` (a led session); anything else is
+  refused (`agent … of pc did not start agent …`). A `review` is only `{"action": "start",
+  "agent": <the session>}` (#1279): the lead's `review {start, agent}` of a session it leads
+  there, sent at once as a read is (refused while that machine cannot be reached), served there
+  for the caller stood in for, which is given the review tool for that call alone, by the gate and
+  the tool of a pilot of that machine; the review runs there, its findings go to the session, and
+  its pilot is told on its own machine (a `deliver` of the kind `review`). Its own change, a pull
+  request, a pass or a report is refused: a caller of another machine starts no other review. A call is judged on the caller's machine as one to a session it started
   there (ending a led session as `end_led`), but for the reads (`agent_status`, `session_read`):
   those are served as a call whose `launch` is empty, and judged there, the launch only saying
   which session or child the caller reads as its own. A `call` whose `launch` is empty (and not an
@@ -2505,6 +2512,12 @@ on a real phone, by hand, and reported.
   than waiting, even briefly, for an answer that may not come. Asking that machine with a bounded
   wait is a follow-up. A launch on another machine that names no agent yet (held for the user
   there) is not stopped with its parent: a follow-up.
+- **The review of a led session on another machine is not kept while that machine is off**
+  (#1279): the lead's `review {start, agent}` is sent at once and refused while the machine
+  cannot be reached, as a read or a stop is, rather than kept as a message is: a review started
+  hours later, on a change that moved meanwhile, is not what the lead asked for. The lead calls it
+  again once that machine is back. The lead's daemon sends `{"action": "start", "agent": <the
+  session>}` alone; that machine refuses any other argument rather than drop it.
 
 ## Open questions
 
