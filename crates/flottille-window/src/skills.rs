@@ -20,7 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Window, div, px,
 };
 
 use crate::actions::{ClaudeKind, Command, SkillWrite};
@@ -28,7 +28,6 @@ use crate::claude::{Found, found_block};
 use crate::commands::{
     boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
 };
-use crate::shell::Shell;
 
 /// How many entries of a folder the picker lists.
 const LISTED: usize = 200;
@@ -132,7 +131,7 @@ enum Writing {
 }
 
 pub struct SkillsSection {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     /// The project's folder, as the page knows it.
     folder: String,
@@ -166,7 +165,7 @@ pub struct SkillsSection {
 }
 
 impl SkillsSection {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,
