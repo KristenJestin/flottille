@@ -1596,8 +1596,9 @@ too ("make me a routine that lists my reviews every morning", "what did last nig
   it `read_only`, a `pause`, a `run` and a `remove` are judged as above.
 - **A routine's run writes no routine.** A session a run started (and its tree) reads them
   (`list`, `show`, `result`) and is refused every write (`refused: this session is a routine's
-  run: …`), in every mode: a run that could change routines could change what runs next. A
-  read-only routine's run writes nothing at all (below).
+  run: …`), in every mode: a run that could change routines could change what runs next. The
+  session carries that as a flag from its start, so removing the routine does not lift it, and a
+  store that cannot be read refuses. A read-only routine's run writes nothing at all (below).
 - **A routine never gets more than its author.** A `create`, or an `edit` that leaves the routine
   (its `mode` given, or the one it has) above the caller's session's mode, is refused, in every
   mode: an Ask session makes and edits only `read_only` and `ask` routines, an Auto or a Full one

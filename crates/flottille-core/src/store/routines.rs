@@ -506,4 +506,27 @@ impl Store {
             .optional()?
             .unwrap_or(false))
     }
+
+    /// The session is a routine's run, or one of its tree, from now on. Never cleared.
+    pub fn set_routine_run_session_flag(&self, agent: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET routine_run = 1 WHERE id = ?1",
+            params![agent],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the session is a routine's run or one of its tree; false for one Flottille has no
+    /// row of.
+    pub fn routine_run_session(&self, agent: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT routine_run FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
 }

@@ -766,6 +766,10 @@ fn session(
         .read(|store| store.set_routine_run_session(run.id, &agent.id))
         .map_err(|error| error.to_string())?;
     agents::write_new(daemon, &agent).map_err(|f| f.message)?;
+    // The tool `routine` refuses its writes on this flag, whatever becomes of the routine.
+    daemon
+        .read(|store| store.set_routine_run_session_flag(&agent.id))
+        .map_err(|error| error.to_string())?;
     if routine.mode == routine::READ_ONLY {
         daemon
             .read(|store| store.set_read_only(&agent.id))
@@ -850,12 +854,13 @@ fn due_now(daemon: &Arc<Daemon>, routine: &Routine, at: u64, now: u64) {
         .filter(|last| *last > at)
         .unwrap_or(at);
     let skip = |why: String| {
+        let mode = run_mode(daemon, routine);
         let skipped = daemon.read(|store| {
             store.add_routine_run(&NewRun {
                 routine: &routine.id,
                 due_at: at,
                 started_at: now,
-                mode: &routine.mode,
+                mode: &mode,
                 outcome: routine::SKIPPED,
                 why: Some(&why),
                 trigger: None,

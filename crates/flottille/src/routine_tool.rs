@@ -122,25 +122,33 @@ pub fn leaves_running(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
 }
 
 /// The refusal of a write of a routine made by a session a routine's run started, or by its
-/// tree: a run that could change routines could change what runs next, its own included.
+/// tree: a run that could change routines could change what runs next, its own included. The flag
+/// on the session's own row holds whatever becomes of the routine (a removal forgets its runs);
+/// the run's own row covers the moment before the flag, and a store that cannot be read refuses.
 pub fn refuses_a_run(daemon: &Daemon, agent: &str, tool: &str, args: &Value) -> Option<String> {
     if tool != TOOL || !writes(args) {
         return None;
     }
     let root = crate::tree::root_of(daemon, agent);
-    daemon
-        .read(|store| store.routine_run_of(&root))
-        .ok()
-        .flatten()
-        .map(|_| {
-            "refused: this session is a routine's run: it reads routines (list, show, result) \
-             and never creates, edits, pauses, resumes, runs or removes one"
-                .to_owned()
-        })
+    let flagged = |id: &str| daemon.read(|store| store.routine_run_session(id));
+    is_a_run([
+        flagged(agent),
+        flagged(&root),
+        daemon
+            .read(|store| store.routine_run_of(&root))
+            .map(|run| run.is_some()),
+    ])
+    .then(|| {
+        "refused: this session is a routine's run: it reads routines (list, show, result) \
+         and never creates, edits, pauses, resumes, runs or removes one"
+            .to_owned()
+    })
 }
 
-fn is_a_run<E>(flags: impl IntoIterator<Item = Result<bool, E>>) -> bool {
-    flags.into_iter().any(|flag| flag.unwrap_or(false))
+/// Whether any of the checks says the session is a run; one that could not be made says so too,
+/// so that a failing store never lets a write through.
+fn is_a_run<E>(checks: impl IntoIterator<Item = Result<bool, E>>) -> bool {
+    checks.into_iter().any(|check| check.unwrap_or(true))
 }
 
 /// The routine of the caller's project named `key`; another project's is none.
