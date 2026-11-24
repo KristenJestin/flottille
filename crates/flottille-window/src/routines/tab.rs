@@ -850,8 +850,11 @@ impl RoutinesTab {
         let next = routine.next(now);
         // An agent's routine says whose it is, and which agent changed it last: the user reads it
         // as theirs to keep or remove. Either line unfolds when an agent's write brings it in.
+        let routine_id = routine.id.clone();
         let by = |id: &'static str, label: &'static str, title: Option<String>| {
-            let block = ElementId::Name(format!("{id}-block").into());
+            // The routine's own: another routine's page never carries this line's last text
+            // while it folds.
+            let block = ElementId::Name(format!("{id}-{routine_id}-block").into());
             presence_of(block, title.map(SharedString::from), move |title| {
                 LabelledLine::new(id, Icon::Edit, label, title.clone())
                     .child(title)
