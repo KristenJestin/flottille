@@ -1617,12 +1617,18 @@ way in:
   found running (`--cdp`, `--auto-connect`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`), a
   browser of a provider's (`-p`/`--provider`, `AGENT_BROWSER_PROVIDER`), and launch arguments of
   the command's (`--args`, `AGENT_BROWSER_ARGS`, which could carry a `--proxy-server` or another
-  profile folder): `login` would type into a browser, a profile or a network that is not the one
-  Flottille made. These are looked for in the server's command, the connection's `env`, and the
+  profile folder), a plugin registry (`--plugins`, `AGENT_BROWSER_PLUGINS`, which could replace
+  Flottille's credential plugin, run with the vault's access) and a namespace (`--namespace`,
+  `AGENT_BROWSER_NAMESPACE`, which puts the daemon's socket in a subfolder): `login` would type
+  into a browser, a profile or a network that is not the one Flottille made. These are looked for in the server's command, the connection's `env`, and the
   environment the daemon itself started with, which agent-browser inherits; no configuration file
   of the user's is read (agent-browser reads the one `--config` Flottille names, and only it).
-  **Its other options and variables are not judged** (`AGENT_BROWSER_SESSION`,
-  `AGENT_BROWSER_NAMESPACE`, `--headers`, `--engine`…): they are the user's, passed as written.
+  **The connection's `env` never moves the browser's folders**: Flottille sets
+  `AGENT_BROWSER_SOCKET_DIR`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`
+  last, on every start of the server and of a command of agent-browser's, and removes
+  `CHROME_CONFIG_HOME` and `BREAKPAD_DUMP_LOCATION`; and `login` is refused, naming the variable,
+  while the connection's `env` names one of them. **Its other options and variables are not
+  judged** (`AGENT_BROWSER_SESSION`, `--headers`, `--engine`…): they are the user's, passed as written.
   What is not covered: the variables of the daemon's own environment that send the session
   elsewhere (a `HTTP_PROXY` of the user's session), which a run inherits too.
 - **The shown browser takes neither the focus nor the pointer, when the desktop is told not to

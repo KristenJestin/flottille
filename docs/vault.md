@@ -697,6 +697,14 @@ The gaps, where the platform does not allow more:
   have no private mount namespace (above), a run is in the same user namespace as the daemon and
   can enter the browser's (`setns`): the browser's network keeps it out only where runs have
   theirs;
+- **below Landlock's second ABI the browser has no private network, even for ordinary browsing**
+  (since the check that a run stays out of the browser's reach is made each time a network is
+  used): the server's browser runs in the runs' network, as where pasta is missing, and the login
+  refuses;
+- **a shown browser reads neither the user's fontconfig and GTK settings nor
+  `~/.local/share/fonts`**, since Chrome's `XDG_*` folders are the vault folder's: it may look
+  plainer than the user's other windows, and a certificate authority the user added to their own
+  certificate database (`~/.pki/nssdb`, `$XDG_DATA_HOME/pki/nssdb`) may not be trusted by it;
 - **the programs a connection's browser runs are within a run's reach.** A run in Ask or in Auto
   can write what is the user's under the home: agent-browser itself where the user installed it
   there (npm's global folder under the home, `~/.local`), and the Chrome it downloaded under
@@ -835,7 +843,9 @@ connection's removal); pasta ends with it. A browser that answers on the socket 
 outside the namespace (started by a server that ran without one) is closed before a login or a
 server uses the namespace, and a login checks, once its page is loaded, that every browser that
 answers runs in it. Which process answers is asked of the kernel, by connecting to each socket of
-the socket folder (`SO_PEERCRED`), never read from agent-browser's `<session>.pid` files: a socket
+the socket folder and of the folders in it, never through a link (`SO_PEERCRED`; a namespace puts
+a session's socket in a subfolder, and `--namespace` is refused to the login all the same). The
+connection does not wait for a daemon to accept: one that stops accepting counts as outside, never read from agent-browser's `<session>.pid` files: a socket
 whose process is gone counts as outside. The record is the holder's only while the process at its
 pid has the start time it records: a process that took the pid since is not the holder.
 
@@ -855,7 +865,10 @@ runs, else `~/.config/…`), its certificate database (`$XDG_DATA_HOME/pki/nssdb
 login wrote all four there before this. The same commands
 are given `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME`, the folders `config`, `cache`
 and `data` of the vault folder, and never `CHROME_CONFIG_HOME` nor `BREAKPAD_DUMP_LOCATION`,
-which would move the configuration folder or the dumps elsewhere. `HOME` stays the user's:
+which would move the configuration folder or the dumps elsewhere. These are set after the
+connection's own `env` on every start, and a login is refused while the `env` names one of them
+(the socket's, `TMPDIR` and the `XDG_*` folders included), so an edit of the connection's `env` an
+agent proposes cannot move them back within a run's reach. `HOME` stays the user's:
 agent-browser finds the Chrome it downloaded under `~/.agent-browser` ("The gaps" says what a run
 can do there).
 
@@ -866,8 +879,9 @@ Storage) is not capped, so a site that stores much takes memory until the browse
 folder on disk denied to runs would have needed a rule of its own in every run's sandbox; the
 vault folder already is one. A Chrome that crashed leaves its profile behind, which agent-browser
 never removes: closing the connection's browser (`close`, the daemon's stop, the connection's
-removal) empties the folder `tmp`, and so does the daemon's start where no browser was left
-running.
+removal) empties the folder `tmp` when no browser answers on the socket folder any more (a close
+that did not end it, or the other sessions' browsers, keep their profiles), and so does the
+daemon's start where no browser was left running. A `tmp` that is a link is never emptied.
 
 **Nothing reads the browser's memory.** A run with the user's identity may attach to Chrome
 (`ptrace`) and read the page and the password filled, or open `/proc/<pid>/root` of a process of
