@@ -555,3 +555,88 @@ fn a_pull_request_into_another_base_is_still_refused() {
     assert!(gh_starting(&user, "pr merge").is_empty());
     assert_eq!(base_of(&user), STACKED);
 }
+
+#[test]
+fn a_retarget_outside_the_base_rule_leaves_the_base_and_the_merge_is_refused() {
+    // The rule is `main`: a pull request moved onto `release` is moved on the forge, which the
+    // gate may not have judged, but the workspace's base stays and its merge is refused.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github(STACKED, &["main", "release", STACKED], json!({})));
+    let (_, mcp) = agent(&user);
+
+    let moved = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "repository": ".", "number": 12, "base": "release"}),
+    );
+    assert!(!moved.error, "{}", moved.text);
+    assert!(
+        moved.text.contains("release") && moved.text.contains("refused"),
+        "{}",
+        moved.text
+    );
+    assert_eq!(base_of(&user), STACKED);
+
+    user.gh_script(github("release", &["main", "release", STACKED], json!({})));
+    let merged = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+    assert!(merged.error, "{}", merged.text);
+    assert!(
+        merged
+            .text
+            .contains(&format!("into release, not {STACKED}, the workspace's base")),
+        "{}",
+        merged.text
+    );
+    assert!(gh_starting(&user, "pr merge").is_empty());
+    assert_eq!(base_of(&user), STACKED);
+}
+
+#[test]
+fn a_forge_that_answers_not_found_for_everything_leaves_the_base() {
+    // GitHub also says 404 for a repository the token cannot see: no branch is confirmed, so
+    // nothing is gone, and nothing is guessed.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github("main", &[], json!({})));
+    let (_, mcp) = agent(&user);
+    let merged = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+    assert!(merged.error, "{}", merged.text);
+    assert!(gh_starting(&user, "pr merge").is_empty());
+    assert_eq!(base_of(&user), STACKED);
+}
+
+#[test]
+fn a_merged_pull_request_into_a_base_the_forge_has_not_got_is_not_followed() {
+    // A branch name used again: an old pull request of it went into a branch that is gone too.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github("main", &["main"], merged_parent("long-gone")));
+    let (_, mcp) = agent(&user);
+    let merged = write(
+        &user,
+        &mcp,
+        json!({"action": "merge", "repository": ".", "method": "squash"}),
+    );
+    assert!(!merged.error, "{}", merged.text);
+    assert_eq!(base_of(&user), "main");
+    assert!(!merged.text.contains("long-gone"), "{}", merged.text);
+}
+
+#[test]
+fn a_stacked_branch_gone_with_no_merged_pull_request_is_said_to_be_a_guess() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github("main", &["main"], json!({})));
+    let (id, mcp) = agent(&user);
+    let merged = write(
+        &user,
+        &mcp,
+        json!({"action": "merge", "repository": ".", "method": "squash"}),
+    );
+    assert!(!merged.error, "{}", merged.text);
+    assert_eq!(base_of(&user), "main");
+    let said = told(&user, &id);
+    assert!(said.contains("not found on"), "{said}");
+    assert!(!said.contains("merged and deleted"), "{said}");
+}
