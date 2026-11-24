@@ -196,13 +196,18 @@ fn a_project_whose_configuration_is_gone_is_in_the_sidebar(cx: &mut TestAppConte
         !present(cx, project_unconfigured_id("other")),
         "a project with its file is not marked"
     );
-    assert!(
-        present(cx, project_menu_id("app")),
-        "its menu is there for Remove"
-    );
+    // A row's menu shows under the pointer.
+    cx.update(|window, cx| window.hover(project_id("other"), cx));
+    settle(&shell, cx);
     assert!(
         !present(cx, project_menu_id("other")),
         "only a project with no file has the menu"
+    );
+    cx.update(|window, cx| window.hover(project_id("app"), cx));
+    settle(&shell, cx);
+    assert!(
+        present(cx, project_menu_id("app")),
+        "its menu is there for Remove"
     );
 }
 
@@ -211,6 +216,8 @@ fn ask_to_remove_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the row of the project", |cx| {
         present(cx, project_id("app"))
     });
+    settle(shell, cx);
+    cx.update(|window, cx| window.hover(project_id("app"), cx));
     settle(shell, cx);
     cx.update(|window, cx| window.click(project_menu_id("app"), cx));
     settle(shell, cx);
