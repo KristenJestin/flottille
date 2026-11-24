@@ -373,10 +373,13 @@ fn confirm(question: &str, refused: &str, instead: &str) -> Result<()> {
 
 /// What `project.remove` did: what it stopped, removed and kept, and why.
 fn removed_text(removed: &Value) -> String {
-    let mut out = format!(
-        "Removed project {}. Its folder was not touched.\n",
-        text(removed, "removed")
-    );
+    let mut out = match removed["project_kept"].as_str() {
+        Some(kept) => format!("The project is not removed: {kept}.\n"),
+        None => format!(
+            "Removed project {}. Its folder was not touched.\n",
+            text(removed, "removed")
+        ),
+    };
     let entries = |value: &Value| value.as_array().cloned().unwrap_or_default();
     for agent in entries(&removed["stopped"]["agents"]) {
         let title = match agent["title"].as_str() {
@@ -471,7 +474,11 @@ fn detected_text(found: &Value, file: &std::path::Path) -> String {
 
 fn list_text(list: &Value) -> String {
     let projects = list["projects"].as_array().map_or(&[][..], Vec::as_slice);
-    if projects.is_empty() && list["errors"].as_array().is_none_or(Vec::is_empty) {
+    let left = list["unconfigured"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if projects.is_empty() && list["errors"].as_array().is_none_or(Vec::is_empty) && left.is_empty()
+    {
         return "No project is registered. Add one with `flottille project add <folder>`.\n".into();
     }
     let width = |key: &str, title: &str| {
@@ -491,6 +498,24 @@ fn list_text(list: &Value) -> String {
             text(project, "name"),
             text(project, "folder"),
         ));
+    }
+    if !left.is_empty() {
+        table.push_str(
+            "\nNo settings file, with sessions or workspaces left \
+             (`flottille project remove <name>` removes them):\n",
+        );
+        for project in left {
+            let counted = |key: &str, noun: &str| match project[key].as_u64() {
+                Some(1) => format!("1 {noun}"),
+                other => format!("{} {noun}s", other.unwrap_or_default()),
+            };
+            table.push_str(&format!(
+                "{}  {}  {}\n",
+                text(project, "name"),
+                counted("sessions", "session"),
+                counted("workspaces", "workspace"),
+            ));
+        }
     }
     table
 }

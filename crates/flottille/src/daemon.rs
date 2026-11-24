@@ -1262,6 +1262,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        "project.list" => (
+            match projects::list(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("project.") => (
             match projects::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
