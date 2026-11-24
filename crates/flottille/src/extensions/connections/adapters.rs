@@ -908,19 +908,25 @@ pub async fn network(
     Ok(network)
 }
 
-/// The browsers that answer on the socket folder of `vault` and do not run in `network`. Each
-/// socket is connected to, which blocks: on a thread of its own.
+/// The browsers that answer on the socket folder of `vault` and do not run in `network`.
 async fn outside(network: &Network, vault: &crate::display::Folder) -> Vec<u32> {
-    let Some(sockets) = sockets_in(vault.path()) else {
+    answering(vault.path())
+        .await
+        .into_iter()
+        .filter(|pid| !network.holds(*pid))
+        .collect()
+}
+
+/// The pids behind the sockets of the socket folder of the vault folder `vault` (0 for one that
+/// cannot be told). Each socket is connected to, which blocks: on a thread of its own.
+async fn answering(vault: &Path) -> Vec<u32> {
+    let Some(sockets) = sockets_in(vault) else {
         return Vec::new();
     };
     tokio::task::spawn_blocking(move || network::daemons(&sockets))
         .await
         // Not known: as a browser outside, so nothing is filled.
         .unwrap_or_else(|_| vec![0])
-        .into_iter()
-        .filter(|pid| !network.holds(*pid))
-        .collect()
 }
 
 /// `agent-browser close` (`--all` its sessions when `all`), in `network` when there is one.
@@ -1830,5 +1836,25 @@ mod tests {
         emptied_once_ended(vault.path());
         assert!(!profile.exists(), "a crashed browser's profile was kept");
         assert!(vault.path().join(TEMPORARY).is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_socket_left_by_a_crashed_browser_does_not_block_the_login() {
+        // A browser that crashed leaves its socket file, and the socket folders are kept: nobody
+        // listens on it, so it holds nothing and is not outside. A live one still is.
+        let vault = tempfile::tempdir().unwrap();
+        let sockets = vault.path().join(format!("{SOCKETS}abc"));
+        std::fs::create_dir_all(sockets.join("other")).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(sockets.join("crashed.sock")).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(sockets.join("other/crashed.sock")).unwrap());
+        assert!(
+            answering(vault.path()).await.is_empty(),
+            "a crashed browser's socket"
+        );
+        assert!(!sockets.join("crashed.sock").exists());
+        assert!(!sockets.join("other/crashed.sock").exists());
+        let _live = std::os::unix::net::UnixListener::bind(sockets.join("live.sock")).unwrap();
+        assert_eq!(answering(vault.path()).await.len(), 1, "a live browser");
+        assert!(sockets.join("live.sock").exists());
     }
 }

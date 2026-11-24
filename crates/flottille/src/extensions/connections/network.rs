@@ -351,6 +351,9 @@ pub fn alive(sockets: &Path) -> bool {
     })
 }
 
+/// Not yet.
+pub fn swept(_sockets: &Path) {}
+
 /// A connection, or its error, to each socket of agent-browser's in `sockets` and the folders in
 /// it, never through a link.
 fn connected(sockets: &Path) -> Vec<io::Result<std::os::unix::net::UnixStream>> {
@@ -435,6 +438,7 @@ fn peer(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn a_record_of_a_process_that_took_the_pid_since_is_not_found() {
@@ -537,26 +541,118 @@ mod tests {
         assert_eq!(found, vec![0]);
     }
 
-    #[test]
-    fn a_socket_that_cannot_be_reached_counts_as_outside() {
-        // Fails closed on every error, not on "would block" alone: a socket whose path is too
-        // long for a socket address, and one nobody listens on any more, are sockets the check
-        // cannot tell, so none is skipped.
-        let sockets = tempfile::tempdir().unwrap();
-        // A socket in a folder whose path is longer than a socket address holds: it is bound by
-        // a short path through the folder's descriptor, and listed by its long one.
-        let mut deep = sockets.path().to_owned();
+    /// A socket in a folder whose path is longer than a socket address holds: bound by a short
+    /// path through the folder's descriptor, and listed by its long one.
+    fn bound_too_long(sockets: &Path) -> (std::fs::File, std::os::unix::net::UnixListener) {
+        let mut deep = sockets.to_owned();
         while deep.as_os_str().len() < 140 {
             deep.push("a-folder-of-a-long-name");
         }
         std::fs::create_dir_all(&deep).unwrap();
         let folder = std::fs::File::open(&deep).unwrap();
         let by_descriptor = format!("/proc/self/fd/{}/default.sock", folder.as_raw_fd());
-        let _listener = std::os::unix::net::UnixListener::bind(&by_descriptor).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&by_descriptor).unwrap();
+        (folder, listener)
+    }
+
+    #[test]
+    fn a_socket_that_cannot_be_reached_counts_as_outside() {
+        // Fails closed on every error, not on "would block" alone: a socket whose path is too
+        // long for a socket address, and one nobody listens on any more, are sockets the check
+        // cannot tell, so none is skipped.
+        let sockets = tempfile::tempdir().unwrap();
+        let (_folder, _listener) = bound_too_long(sockets.path());
         assert_eq!(daemons(sockets.path()), vec![0], "a path too long");
         // Its listener gone: the file stays, and a connect is refused.
         let gone = tempfile::tempdir().unwrap();
         drop(listening(&gone.path().join("default.sock")));
         assert_eq!(daemons(gone.path()), vec![0], "a socket nobody listens on");
+    }
+
+    #[test]
+    fn a_subfolder_that_cannot_be_read_counts_as_outside() {
+        // Nobody can tell what a folder holds that cannot be listed: a browser may answer in it.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads every folder: nothing to refuse
+        }
+        let sockets = tempfile::tempdir().unwrap();
+        let hidden = sockets.path().join("other");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let found = daemons(sockets.path());
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(found, vec![0]);
+    }
+
+    #[test]
+    fn a_link_named_as_a_socket_counts_as_outside() {
+        // agent-browser follows it to the daemon it leads to: never skipped.
+        let sockets = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _there = listening(&elsewhere.path().join("x.sock"));
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("x.sock"),
+            sockets.path().join("default.sock"),
+        )
+        .unwrap();
+        assert_eq!(daemons(sockets.path()), vec![0]);
+    }
+
+    #[test]
+    fn a_socket_that_refuses_to_be_connected_to_counts_as_outside() {
+        // EACCES: the file's permissions keep the connection from being made, and what answers
+        // behind it cannot be told.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root connects through any mode
+        }
+        let sockets = tempfile::tempdir().unwrap();
+        let path = sockets.path().join("default.sock");
+        let _listener = listening(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(daemons(sockets.path()), vec![0]);
+        assert!(alive(sockets.path()), "a socket that cannot be told");
+    }
+
+    #[test]
+    fn a_daemon_that_stops_accepting_is_alive() {
+        let sockets = tempfile::tempdir().unwrap();
+        let path = sockets.path().join("default.sock");
+        let _listener = listening(&path);
+        let mut kept = Vec::new();
+        while let Ok(stream) = connect_at_once(&path) {
+            kept.push(stream);
+            assert!(kept.len() < 10_000, "the backlog never fills");
+        }
+        assert!(alive(sockets.path()));
+    }
+
+    #[test]
+    fn a_socket_nobody_listens_on_is_not_alive() {
+        let sockets = tempfile::tempdir().unwrap();
+        drop(listening(&sockets.path().join("default.sock")));
+        assert!(!alive(sockets.path()));
+    }
+
+    #[test]
+    fn a_socket_whose_path_is_too_long_is_alive() {
+        // It cannot be connected to, so what answers behind it cannot be told: its profile stays.
+        let sockets = tempfile::tempdir().unwrap();
+        let (_folder, _listener) = bound_too_long(sockets.path());
+        assert!(alive(sockets.path()));
+    }
+
+    #[test]
+    fn a_socket_nobody_listens_on_is_swept_and_a_live_one_is_not() {
+        let sockets = tempfile::tempdir().unwrap();
+        let live = sockets.path().join("live.sock");
+        let _listener = listening(&live);
+        let stale = sockets.path().join("other/stale.sock");
+        drop(listening(&stale));
+        let link = sockets.path().join("link.sock");
+        std::os::unix::fs::symlink(&stale, &link).unwrap();
+        swept(sockets.path());
+        assert!(live.exists(), "a live socket was removed");
+        assert!(!stale.exists(), "a stale socket was kept");
+        assert!(link.is_symlink(), "a link was removed");
     }
 }
