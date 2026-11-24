@@ -250,6 +250,11 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
             .as_array()
             .is_some_and(|agents| agents.iter().any(|agent| agent == "claude"))
     });
+    // No setting that would make each launch wait for the user there.
+    let file = pc.user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("branch_prefix = \"\"\n", "")).unwrap();
+    pc.user.call("project.list", json!({})).unwrap();
     let (caller, mcp) = pc.root("auto");
     let first = launched(
         &mcp,
@@ -268,7 +273,10 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
         json!({"kind": "led", "machine": "server", "title": "Second export", "brief": "Two."}),
     );
     let second = (id_in(done(&second)), launch_in(done(&second)));
+    prompted(&server, "One.");
+    prompted(&server, "Two.");
     let (one, two) = (server.agent(&first.0), server.agent(&second.0));
+    assert!(one["workspace"].is_string(), "{one:#}");
     assert_eq!(one["workspace"], two["workspace"], "{one:#}\n{two:#}");
     assert_ne!(one["project"], two["project"], "{one:#}\n{two:#}");
     let workspace = one["workspace"].as_str().unwrap().to_owned();
@@ -296,7 +304,13 @@ fn a_removal_takes_the_workspace_of_its_own_launch_when_two_projects_hold_its_na
                 json!({"action": "remove", "name": workspace}),
             )],
         );
-        let answer = answers[0].clone().unwrap();
+        let answer = answers[0].clone().unwrap_or_else(|error| {
+            let launches = Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+                .unwrap()
+                .launches("in", None, LaunchFilter::All)
+                .unwrap();
+            panic!("{error}\ncalled {launch} of {session} as {caller}\n{launches:#?}")
+        });
         let text = answer["text"].as_str().unwrap_or_default();
         let at = text
             .find("request #")
