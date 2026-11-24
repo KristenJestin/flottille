@@ -238,6 +238,18 @@ The jobs of the whole suite's run:
   its own checkout of the repository (`--workspace-remap .`, for the files the tests read). A
   partition compiles nothing.
 - **`doc-tests`** runs the doc tests once (nextest does not), beside the partitions.
+- **`real-browser`** runs the tests that drive the real agent-browser (`connections::` of
+  `group_remote`: the vault's browser login, the browser's network, its kept profile), which no
+  other job can run: they need agent-browser at the version its adapter is checked on
+  (`npm install --global agent-browser@0.43.0`), passt's `pasta` and a Chrome (the runner's own: a
+  test's `HOME` has none), and print `skipped:` and pass without them. The job installs them
+  (and Weston, for the headed tests of #1066, which start one of their own) and sets
+  `FLOTTILLE_REAL_BROWSER=required`, which turns each of those skips into a failure, so that a
+  change of the browser's sandbox never passes with them skipped; on a machine without the
+  variable they stay a skip. A push runs it; a pull request runs it when it changes the
+  connections extension, `landlock.rs`, `mounts.rs`, `browsers.rs`, `tests/connections.rs` or
+  `ci.yml` (`changes`, its output `browser`). It builds on the cache dev writes, like
+  `test-selected`, and its pull request says how long it took.
 - **`android`** (`apps/android/ci.sh`, when the app or its core changes) builds the mobile core and
   runs the app's unit tests and its instrumentation tests. **The unit tests never fetch**:
   Robolectric would download the `android-all` jar of each SDK it runs on from Maven while the
@@ -252,7 +264,7 @@ The jobs of the whole suite's run:
   `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check`,
   `guards` and `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
   pass). Skipped is also a pass when `changes` said the Rust suite is not needed, and when `hub`
-  ran, it must have passed.
+  or `real-browser` ran, it must have passed.
 
 **A failed test is retried**, twice (`.config/nextest.toml`, the profile `ci`): one that passes
 on a retry does not fail the run, and **is not hidden**. Each partition's summary, and `verify`'s
