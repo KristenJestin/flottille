@@ -332,6 +332,12 @@ async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: 
             .unwrap_or(request);
         return Err(already(&request));
     };
+    // Another machine's launch: its answer is for no agent of this machine.
+    if let Some(launch) = crate::launches::held_by_request(daemon, number) {
+        crate::launches::decided(daemon, launch, &request, decision != Decision::Deny);
+        return Ok(json!({"request": request.to_json()}));
+    }
+    // After a launch: its caller there is told by the launch's answer, never as a lead.
     crate::subscriptions::request_answered(
         daemon,
         &request.agent,
@@ -343,11 +349,6 @@ async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: 
             _ => "allowed it",
         },
     );
-    // Another machine's launch: its answer is for no agent of this machine.
-    if let Some(launch) = crate::launches::held_by_request(daemon, number) {
-        crate::launches::decided(daemon, launch, &request, decision != Decision::Deny);
-        return Ok(json!({"request": request.to_json()}));
-    }
     if decision == Decision::Deny {
         let body = format!(
             "Request #{number} ({}) was refused by the user. Nothing was done.",
