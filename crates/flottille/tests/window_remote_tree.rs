@@ -755,7 +755,7 @@ fn a_row_of_another_machine_draws_no_frame_at_rest(cx: &mut TestAppContext) {
     let mut gone = Duration::ZERO;
     while gone < Duration::from_secs(10) {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
-        common::unfold_pilots(shell, cx);
+        common::unfold_pilots(&shell, cx);
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.run_until_parked();
         asked += cx.update(|window, cx| window.simulate_next_frame(cx));

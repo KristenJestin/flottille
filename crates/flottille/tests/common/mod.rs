@@ -1390,7 +1390,7 @@ pub fn unfold_pilots(
     cx: &mut gpui_kit::VisualTestContext,
 ) {
     let folded: Vec<_> = shell.read_with(cx, |s, cx| {
-        s.session_rows()
+        s.session_row_list()
             .into_iter()
             .filter(|row| row.read(cx).folded_by_default())
             .collect()

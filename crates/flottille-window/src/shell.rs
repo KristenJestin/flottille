@@ -5436,7 +5436,7 @@ impl Shell {
     }
 
     /// The rows of the sidebar's sessions, every one it holds.
-    pub fn session_rows(&self) -> Vec<Entity<SessionRow>> {
+    pub fn session_row_list(&self) -> Vec<Entity<SessionRow>> {
         self.sessions.values().cloned().collect()
     }
 

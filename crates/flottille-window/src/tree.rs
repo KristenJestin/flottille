@@ -1523,7 +1523,6 @@ impl ProjectNode {
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
-        self.chosen = true;
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         self.show_mark(cx);
@@ -2452,6 +2451,7 @@ impl SessionRow {
     /// Folds or unfolds the led sessions under its row: the tree draws its level again.
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
+        self.chosen = true;
         cx.notify();
         // The level reads this row: it is drawn again once this update is over.
         let (shell, id) = (self.shell.clone(), self.id.clone());
