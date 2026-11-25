@@ -230,7 +230,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   `models-manager/src/manager.rs`) and needs no thread: the daemon starts `codex app-server` bare,
   as for a thread's deletion, sends `initialize`, `account/read` (a Codex not signed in is a
   failure saying what a session's refused login says, "Codex's login expired: sign in again") and
-  `model/list`, and ends it; no thread is started. Claude and
+  `model/list`, and ends it; no thread is started. A listing refused for no login is said to the
+  user: its sign-in line is one of the provider's `warnings` in `provider.list` (the Providers
+  page says it under the row, the composer under its pickers) while its program, its keys and its
+  sign-in file are those it was refused in, and goes once a listing is read. Claude and
   OpenCode go through their ACP agent started as a session's is, the judge's way
   (`docs/design.md` §7): bare, in Flottille's own empty folder `<state>/models`, no tool and no MCP
   server, `initialize` and one `session/new`, its options kept as a session's are, and no user
