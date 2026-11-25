@@ -731,8 +731,10 @@ them, one line) and `notes` (anything every agent should know). Each is optional
   `about.set` checks them; one given empty is cleared for all machines. Only as a request signed
   by the user's device (`docs/remote.md`, "Requests from another machine's clients"), by a member
   that is no viewer, on a machine that has a hub; else `refused`. The daemon keeps it, seals it for
-  every machine and gives it to the hub, at once or at its next session to it. Answers as
-  `about.show`.
+  every machine and gives it to the hub, at once or at its next session to it; `refused` when a
+  value, sealed, would be larger than the hub keeps. Answers as `about.show`, with `hub`: `given`
+  (to the hub open now), `later` (the hub out of reach: given at the next session) or `old-hub` (a
+  hub of before the values of all machines, which keeps none).
 
 A change emits `about.changed {}`, and so does a value of all machines this machine takes from the
 hub. No tool of an agent reads or writes them: they are in its
