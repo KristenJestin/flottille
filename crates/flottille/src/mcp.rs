@@ -1180,7 +1180,12 @@ pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
     let mut description = definition.description.to_owned();
     if on_demand(definition.name).is_some() {
         without_sentences(&mut schema);
-        if let Some(actions) = schema["properties"]["action"]["enum"].as_array_mut() {
+        // Read, never indexed into: indexing would add `"action": {"enum": null}` to a family
+        // with no action, a schema Claude Code drops its tool for (#1509).
+        if let Some(actions) = schema
+            .pointer_mut("/properties/action/enum")
+            .and_then(Value::as_array_mut)
+        {
             actions.push("guide".into());
             description.push_str(GUIDE_SAID);
         } else {

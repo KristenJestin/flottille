@@ -1481,7 +1481,9 @@ As built (#818):
   and question as a card answered in place (Allow and Deny on the card, the whole call in sight).
   **Sessions**: the window's sidebar, each machine, its projects folded or not, their sessions in one
   list newest first (#1441: a session that reports never moves), led sessions indented under their
-  pilot; the state is the row's mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
+  pilot; the state is the row's mark, so rows never jump between groups. A row says what its session
+  is about, as the window's does (`design.md` §10): the key, then the title, `Free · nothing in hand`
+  faint, and a title the user gave first with the key under it (#1488). **Machines**: their state, their agents, their slots.
   The app opens on Needs you; a notification opens its session.
 - **The connection to the hub lives in a foreground service**, as long as the device is paired: the
   same session every device keeps, which carries the links (#1151). Android requires its permanent
@@ -2660,7 +2662,20 @@ on a real phone, by hand, and reported.
   linked to, waiting longer after each failure (5 seconds at most). A file caught half written,
   or broken by hand, leaves the last one read whole in use (said once in the log).
 - Two machines that dial each other at once each hold two links: both keep the one the machine of
-  the lower key dialled, and close the other (`linked already`).
+  the lower key dialled, and close the other (`linked already`). The other is let go, not cut
+  (#1491): it sends nothing more, and is still read, whether it was linked first or second: what
+  comes on it is turned away unserved (its answer stream reset, which a machine of before reads
+  as a lost link, not a refusal). A request and its one answer under way on it either way are
+  finished; it closes once none is (a second at the soonest, ten at the latest), cutting an answer
+  given frame by frame (a client's request, a git fetch) or a tunnel's connection. A request sent
+  on it goes on the link kept instead, once, waiting ten seconds at most for it, only when it is
+  known not to have been served: it was never written whole on the link let go, or the other
+  machine turned it away; a tool call can so take ten seconds more before it is answered, or said
+  as a machine that cannot be reached now. A message kept for the other machine (the outbox) that
+  meets it stays kept, and goes on the link kept. One whose link was cut after it was written (a
+  machine of before, or the ten seconds past) may have been served: it is not sent again, and
+  fails as today. A link lost for any other reason (the machine left the hub, was removed) says
+  so as before.
 - The version handshake is the first stream of a link: the dialler sends its hello, the other
   answers its own, and each chooses or refuses by itself; the dialler closes a refused link. A
   link that hears nothing for 15 seconds is lost (each side says something every 5).
@@ -3203,6 +3218,9 @@ on a real phone, by hand, and reported.
   another project, is a row of its own in its project rather than under that pilot. "Ended" is one
   group pinned below every machine, its rows newest ended first by their last exchange (the view
   has no `ended_at`).
+- **A renamed session's row on the phone gains a line for its key** (#1488): the phone's row has a
+  second line only for a pilot or an ended session, not the window's two, so a renamed session that
+  has a key is one line higher than the others, and that line unfolds.
 
 ## Open questions
 
