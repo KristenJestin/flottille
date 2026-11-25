@@ -270,12 +270,6 @@ pub fn since_at_offset(ms: u64, now: u64, offset: i64) -> String {
     }
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis() as u64)
-}
-
 /// How far east of UTC the machine's clock was at `ms`, in seconds.
 fn local_offset(ms: u64) -> i64 {
     let time = (ms / 1000) as libc::time_t;
