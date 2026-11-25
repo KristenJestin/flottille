@@ -1711,3 +1711,113 @@ fn mark_all_read_marks_read_on_the_other_machine(cx: &mut TestAppContext) {
         noted_read(&server, id)
     });
 }
+
+/// The heights of the sidebar row of `row` while it is in the tree, as it folds away.
+fn row_heights(shell: &Entity<Shell>, row: &str, cx: &mut VisualTestContext) -> Vec<f32> {
+    frame_of(shell, row, cx)
+        .map(|frame| heights(cx, &frame))
+        .unwrap_or_default()
+}
+
+#[gpui_kit::test]
+fn a_session_launched_on_another_machine_closes_from_this_machine_as_a_local_one(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("its turn ended on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    let full = row_heights(&shell, &row, cx).into_iter().fold(0., f32::max);
+    assert!(full > 0., "{full}");
+
+    // Its row's menu ends it, as a local session's: the confirmation, then End.
+    cx.update(|window, cx| window.hover(session_id(&row), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(flottille_window::tree::session_menu_id(&row), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(flottille_window::tree::session_end_id(&row), cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("sidebar-end-confirm", cx));
+
+    // It folds away from the live list, then is gone, and it ended on its machine.
+    until(&shell, cx, "the row starts folding away", |cx| {
+        row_heights(&shell, &row, cx)
+            .iter()
+            .all(|height| *height < full)
+    });
+    let going = row_heights(&shell, &row, cx);
+    assert!(
+        going.iter().any(|height| *height > 0.),
+        "the row folds away, it does not vanish: {going:?}"
+    );
+    eventually("the session ended on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .unwrap()["agent"]["state"]
+            == "ended"
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, session_id(&row)), "gone once folded");
+}
+
+#[gpui_kit::test]
+fn a_child_launched_on_another_machine_that_reported_goes_into_ended(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    server.user.fake_script(json!({"turns": [
+        {"when": "Render a year of invoices.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "report", "arguments": {"text": "The year is rendered."}}}
+        ]}
+    ]}));
+    let (pilot, mcp) = root(&pc, "auto");
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "machine": "server", "title": "Render the year",
+            "brief": "Render a year of invoices."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer.text.find("(agent ").expect("an agent");
+    let agent = answer.text[at + 7..at + 19].to_owned();
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    open_page(&shell, &pilot, cx);
+    let live = format!("rail-remote-{agent}");
+    until(&shell, cx, "its live row in the rail", |cx| {
+        present(cx, live.clone().into())
+    });
+    settle(&shell, cx);
+    let full = row_heights(&shell, &row, cx).into_iter().fold(0., f32::max);
+
+    std::fs::write(server.user.path("fake/release"), "").unwrap();
+
+    // It leaves the sidebar's live rows, folding away, as an ended local child is no row there.
+    until(&shell, cx, "its sidebar row starts folding away", |cx| {
+        row_heights(&shell, &row, cx)
+            .iter()
+            .all(|height| *height < full)
+    });
+    let going = row_heights(&shell, &row, cx);
+    assert!(
+        going.iter().any(|height| *height > 0.),
+        "the row folds away, it does not vanish: {going:?}"
+    );
+    // In the rail, it is tidied into its parent's "N ended", folded.
+    let ended = format!("rail-ended-{pilot}");
+    until(&shell, cx, "its parent's ended row", |cx| {
+        present(cx, ended.clone().into())
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, session_id(&row)), "a live row of the sidebar");
+    assert!(!present(cx, live.clone().into()), "a live row of the rail");
+    assert_eq!(label(cx, ended.clone().into()).as_deref(), Some("1 ended"));
+    // Unfolded, it is there, as an ended local child.
+    cx.update(|window, cx| window.click(ended.clone(), cx));
+    settle(&shell, cx);
+    assert!(present(cx, live.into()), "behind its parent's ended row");
+}
