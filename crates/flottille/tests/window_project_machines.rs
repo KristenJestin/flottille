@@ -1406,6 +1406,7 @@ fn a_device_that_runs_nothing_is_no_group_of_the_projects_list(cx: &mut TestAppC
 
 #[gpui_kit::test]
 fn a_project_with_nothing_under_it_fades_its_chevron_where_it_stands(cx: &mut TestAppContext) {
+    use gpui_design_system::rows::toggle_id;
     use gpui_design_system::seen::seen;
     let (_hub, pc, server) = machines();
     add(&pc, "app", APP);
