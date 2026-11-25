@@ -248,7 +248,14 @@ pub struct Settings {
     pub do_not_disturb: DoNotDisturb,
     /// Each project's own levels: what is there wins over `kinds`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub projects: BTreeMap<String, BTreeMap<String, Level>>,
+    pub projects: BTreeMap<String, ProjectLevels>,
+}
+
+/// What a project sets itself, `[projects.<name>.kinds]` (`docs/projects.md`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectLevels {
+    pub kinds: BTreeMap<String, Level>,
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -291,7 +298,7 @@ impl Settings {
         };
         levels("kinds.", &self.kinds)?;
         for (project, own) in &self.projects {
-            levels(&format!("projects.{project}."), own)?;
+            levels(&format!("projects.{project}.kinds."), &own.kinds)?;
         }
         if self.sound.volume > 100 {
             return Err(format!("{FILE}: sound.volume: from 0 to 100"));
@@ -338,7 +345,7 @@ impl Settings {
         let kind = kind_of(row_kind);
         let own = project
             .and_then(|project| self.projects.get(project))
-            .and_then(|own| own.get(kind));
+            .and_then(|own| own.kinds.get(kind));
         let level = own
             .or_else(|| self.kinds.get(kind))
             .copied()
@@ -396,7 +403,7 @@ mod tests {
     #[test]
     fn a_project_s_own_level_wins_over_the_default_and_the_users() {
         let settings = Settings::parse(
-            "[kinds]\nreport = \"centre\"\n\n[projects.app]\nreport = \"ring\"\nticket = \"off\"\n",
+            "[kinds]\nreport = \"centre\"\n\n[projects.app.kinds]\nreport = \"ring\"\nticket = \"off\"\n",
         )
         .unwrap();
         assert_eq!(settings.level("report", Some("app")), Level::Ring);
@@ -412,7 +419,7 @@ mod tests {
             let refused = Settings::parse(&format!("[kinds]\n{kind} = \"off\"\n")).unwrap_err();
             assert!(refused.contains("needs you"), "{refused}");
             let refused =
-                Settings::parse(&format!("[projects.app]\n{kind} = \"off\"\n")).unwrap_err();
+                Settings::parse(&format!("[projects.app.kinds]\n{kind} = \"off\"\n")).unwrap_err();
             assert!(refused.contains("needs you"), "{refused}");
         }
         let settings = Settings::parse("[kinds]\nrequest = \"centre\"\n").unwrap();
@@ -457,7 +464,9 @@ mod tests {
         };
         settings.projects.insert(
             "app".into(),
-            BTreeMap::from([("ticket".into(), Level::Ring)]),
+            ProjectLevels {
+                kinds: BTreeMap::from([("ticket".into(), Level::Ring)]),
+            },
         );
 
         let text = settings.to_toml().unwrap();

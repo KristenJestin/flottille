@@ -7,6 +7,7 @@
 //! could silence the user's own gate.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use flottille_core::notification_settings::{
     DAYS, KINDS, Level, LocalTime, Settings, local_time, may_be_off, minute_of,
@@ -30,9 +31,25 @@ pub fn read(paths: &Paths) -> Result<Settings, String> {
 }
 
 /// What the daemon follows: a file that cannot be read is the defaults', which ring what needs the
-/// user and say so (`notifications.settings` says why).
+/// user. It is never silent: the log says why once for each reason, and `notifications.settings`
+/// answers it to Settings.
 pub fn load(paths: &Paths) -> Settings {
-    read(paths).unwrap_or_default()
+    static SAID: Mutex<Option<String>> = Mutex::new(None);
+    let read = read(paths);
+    let mut said = SAID.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match read {
+        Ok(settings) => {
+            *said = None;
+            settings
+        }
+        Err(why) => {
+            if said.as_deref() != Some(why.as_str()) {
+                eprintln!("flottille daemon: {why}: the defaults ring until it is fixed");
+                *said = Some(why);
+            }
+            Settings::default()
+        }
+    }
 }
 
 /// The user's clock. In a test build `FLOTTILLE_TEST_LOCAL_TIME` (`Fri 23:30`) says what it
@@ -87,7 +104,11 @@ fn said(settings: &Settings) -> Value {
             "on": settings.do_not_disturb.holds(now),
             "until": settings.do_not_disturb.until,
         },
-        "projects": settings.projects,
+        "projects": settings
+            .projects
+            .iter()
+            .map(|(project, own)| (project.as_str(), &own.kinds))
+            .collect::<BTreeMap<_, _>>(),
         "muted": settings.muted(now, local_now(now)),
     })
 }
@@ -189,12 +210,13 @@ fn apply(daemon: &Daemon, settings: &mut Settings, set: Set) -> Result<(), Failu
                     .projects
                     .entry(project.clone())
                     .or_default()
+                    .kinds
                     .insert(kind, level);
             }
             (Some(project), None) => {
                 if let Some(own) = settings.projects.get_mut(project) {
-                    own.remove(&kind);
-                    if own.is_empty() {
+                    own.kinds.remove(&kind);
+                    if own.kinds.is_empty() {
                         settings.projects.remove(project);
                     }
                 }
