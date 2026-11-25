@@ -318,7 +318,7 @@ fn the_limits_of_tool_results_are_shared_and_a_machine_may_keep_its_own(
     });
     // The window has the answer before the switch is asked.
     until(&shell, cx, "the window shows the limit", |cx| {
-        settings.read_with(cx, |page, _| page.tool_results_limit() == Some(16_000))
+        settings.read_with(cx, |page, _| page.tool_results_said() == Some(Some(16_000)))
     });
     settle(&shell, cx);
     click(&shell, "tool-results-unchanged-switch", cx);
