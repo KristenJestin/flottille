@@ -882,7 +882,12 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   alone opens that machine's project, never one of this machine's the row does not hold. A project
   another machine has under another name, with the same remotes, is offered there, and choosing
   that machine shows its page or its settings of it, by its name there; a project of the same name
-  with other remotes, or with no remote, is another row, and not offered.
+  with other remotes, or with no remote, is another row, and not offered. A machine the row does
+  not mark is never reached by the name (#1439): the window's machine switch, on a project's page
+  or settings, shows that machine's own Settings, not its project of the same name; and when this
+  machine lacks the project and none of the row's machines is online, opening it says so (`app
+  cannot be started`, each machine with its state) and starts nowhere else, a third machine's
+  project of the same name included.
 - **The same project.** Two projects are the same when the remotes of their repositories are the
   same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
   `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor

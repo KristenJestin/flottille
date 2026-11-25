@@ -1062,6 +1062,98 @@ fn a_row_of_another_machine_alone_opens_that_machine_s_project(cx: &mut TestAppC
     assert!(!present(cx, "project-settings-machine"));
 }
 
+// The window's machine switch and a start take the row's machines only (#1439): a project of the
+// same name that the row does not mark is never opened.
+
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn switching_the_window_to_a_machine_the_row_does_not_mark_opens_no_project_of_its_name(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = ready_machines();
+    // No remote on either machine: the server's `notes` is a row of its own, not this one's.
+    add(&pc, "notes", "");
+    add(&server, "notes", "");
+    told(&pc, &["notes"]);
+
+    let (shell, cx) = page_window(&pc, &["server"], cx);
+    until(&shell, cx, "the server's row", |cx| {
+        present(cx, project_id("notes@server"))
+    });
+    assert_eq!(homes(&shell, "notes@server", cx), ["server"]);
+    show(&shell, Selection::Project("notes@server".into()), cx);
+    until(&shell, cx, "the server's page of notes", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, _| {
+                s.selected() == Some(&Selection::Project("notes".into()))
+            })
+    });
+
+    // Switching to this machine: the row does not mark it, so its own `notes` is not opened.
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
+    settle(&shell, cx);
+    assert_eq!(shown(&shell, cx), None, "this machine is in front");
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Settings),
+        "its Settings, not its `notes`"
+    );
+}
+
+#[gpui_kit::test]
+fn a_row_whose_machines_cannot_run_starts_nowhere_else(cx: &mut TestAppContext) {
+    let (hub, pc, server) = ready_machines();
+    let laptop = Machine::of(ready_user());
+    crate::remote::pair(&hub, &laptop, "laptop", "runner");
+    pc.wait_for("laptop", "online");
+    // This machine lacks `app`; the server has it, and the laptop has another project of that
+    // name (other remote): its own row, which the server's row does not mark.
+    add(&server, "app", APP);
+    add(&laptop, "app", "https://git.example/other/app.git");
+    told_by(&pc, "server", &["app"]);
+    told_by(&pc, "laptop", &["app"]);
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+
+    let (shell, cx) = page_window(&pc, &["laptop"], cx);
+    until(&shell, cx, "both rows", |cx| {
+        present(cx, project_id("app")) && present(cx, project_id("app@laptop"))
+    });
+    assert_eq!(homes(&shell, "app", cx), ["server"]);
+    assert_eq!(homes(&shell, "app@laptop", cx), ["laptop"]);
+
+    // The row's only machine is off: nothing starts, and no other machine's `app` is shown.
+    let before = shell.read_with(cx, |s, _| s.selected().cloned());
+    show(&shell, Selection::Project("app".into()), cx);
+    settle(&shell, cx);
+    assert_eq!(
+        shown(&shell, cx),
+        None,
+        "the laptop's namesake is not shown"
+    );
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        before,
+        "no page of an `app` was opened"
+    );
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|title| title == "app cannot be started"),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+}
+
 // The shared project's page at rest (#1411): nothing is drawn once it settled, whatever the other
 // machines hold, and a read of them that changes nothing on it draws nothing.
 
