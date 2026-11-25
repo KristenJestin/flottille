@@ -32,6 +32,8 @@ mod desktop;
 mod developer;
 mod display;
 mod drafts;
+mod exception_command;
+mod exceptions;
 mod extensions;
 mod files;
 mod findings;
@@ -236,6 +238,11 @@ enum Command {
     },
     /// Deny a request: the agent is told nothing was done
     Deny { number: u64 },
+    /// The rules of the gate you lifted for a session, at its agent's ask: listed, withdrawn
+    Exception {
+        #[command(subcommand)]
+        action: exception_command::ExceptionAction,
+    },
     /// Whether Claude agents can run here: claude, its version and its login
     Doctor {
         #[arg(long)]
@@ -677,6 +684,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
+        Command::Exception { action } => exception_command::run(&paths, action)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Notifications {
             unread,

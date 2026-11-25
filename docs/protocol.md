@@ -326,6 +326,8 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `subscription.resume` | drive |
 | `leave.list` | read |
 | `leave.withdraw` | drive |
+| `exception.list` | read |
+| `exception.withdraw` | drive |
 | `inbox.list` | read |
 | `notifications.list` | read |
 | `notifications.read` | drive |
@@ -2744,6 +2746,32 @@ number of the request the user allowed it in, `granted_at` in milliseconds since
 
 `{"writer", "session"}`. `{"leave": {...}}`: the writer's next message to that session asks the
 user's leave again, and `leave.withdrawn` is emitted. `not-found` when there is no such leave.
+
+### The exception methods
+
+The exceptions a session holds (`docs/design.md` §7.3): a rule of the gate the user lifted for that
+session alone, until it ends or the user withdraws it, as the window lists them where a session's
+rights are shown and lets the user take one back. An exception is given only by allowing the
+request of a call asked with `exception` (`approval.approve`).
+
+#### `exception.list`
+
+`{"session", "tree"?}`. `{"exceptions": [...]}`, the exceptions that agent holds, the oldest first
+(`not-found` when it names no agent); with `tree: true`, those of its sub-agents that have not
+ended after its own, as the window lists them. Each is `{"session", "title", "rule", "said", "why",
+"request", "granted_at", "scope"}`: `session` the agent that holds it, `title` its title or
+`null`, `rule` is `force-push`, `merge-blocked` or `forge-state`, `said` what it lets the session
+do, `why` the agent's reason as the user read it, masked, `request` the number of the request the
+user allowed it in, `granted_at` in milliseconds since the Unix epoch, and `scope` what it covers,
+`{"repository"?, "branch"?, "pull"?, "head"?, "blocks"?}`: the repository and branch of a forced
+push, the pull request of a merge with its head commit and what blocked it as the card said (a
+merge whose head or blockers changed is not covered), `{}` for `forge-state`. A session holds one
+exception of a rule: one granted again for it replaces it.
+
+#### `exception.withdraw`
+
+`{"session", "rule"}`. `{"exception": {...}}`: the rule stops that session again from its next
+call, and `exception.withdrawn` is emitted. `not-found` when the session holds no such exception.
 
 ### `provider.list`
 
