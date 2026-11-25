@@ -415,6 +415,60 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
     );
 }
 
+fn do_not_disturb(user: &User) -> bool {
+    user.call("notifications.settings", json!({})).unwrap()["do_not_disturb"]["on"] == true
+}
+
+fn set_do_not_disturb(user: &User, on: bool) {
+    user.call(
+        "notifications.set_settings",
+        json!({"do_not_disturb": {"on": on}}),
+    )
+    .unwrap();
+}
+
+/// #1003: the bell's Do not disturb is the one of the machine shown, said and turned there.
+#[gpui_kit::test]
+fn the_bell_s_do_not_disturb_is_the_machine_shown_s(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    set_do_not_disturb(&server.user, true);
+    let (shell, cx) = window(&pc, cx);
+    let bell = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).do_not_disturb())
+    };
+    until(&shell, cx, "the bell says this machine's", |cx| {
+        bell(&shell, cx) == Some(false)
+    });
+
+    settings(&shell, "notifications", cx);
+    settings_of(&shell, "server", cx);
+    until(&shell, cx, "the bell says the server's", |cx| {
+        bell(&shell, cx) == Some(true)
+    });
+
+    // Turned off from the bell: on the server, this machine's untouched.
+    click(&shell, "bell", cx);
+    click(&shell, "bell-dnd-switch", cx);
+    eventually("the server lets it go", || !do_not_disturb(&server.user));
+    until(&shell, cx, "the bell says it is off", |cx| {
+        bell(&shell, cx) == Some(false)
+    });
+    assert!(!do_not_disturb(&pc.user), "this machine's is untouched");
+
+    // Changed on the server elsewhere: the bell follows it.
+    set_do_not_disturb(&server.user, true);
+    until(&shell, cx, "the bell follows the server", |cx| {
+        bell(&shell, cx) == Some(true)
+    });
+
+    // Back on this machine: its own again.
+    click(&shell, "bell", cx);
+    settings_of(&shell, "here", cx);
+    until(&shell, cx, "the bell says this machine's again", |cx| {
+        bell(&shell, cx) == Some(false)
+    });
+}
+
 /// Where the element `id` is drawn, `None` when it is not drawn at all.
 fn bounds_of(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
     let id = id.to_owned();

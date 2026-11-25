@@ -102,9 +102,10 @@ fn the_notifications_tab_names_each_kind_and_what_it_does_and_a_request_has_no_o
                 "{kind} {level}"
             );
         }
+        // Each switch says whose sound it is, not "Sound" alone.
         assert_eq!(
-            label(format!("notify-kind-{kind}-sound-label"), cx).as_deref(),
-            Some("Sound"),
+            label(format!("notify-kind-{kind}-sound-label"), cx),
+            Some(format!("{} sound", kind_label(kind))),
             "{kind}"
         );
     }
@@ -131,6 +132,81 @@ fn the_notifications_tab_names_each_kind_and_what_it_does_and_a_request_has_no_o
         label("notify-volume-field-label", cx).as_deref(),
         Some("Volume")
     );
+}
+
+/// Whether `outer` holds `inner`.
+fn holds(outer: &str, inner: &str, cx: &mut VisualTestContext) -> bool {
+    let (outer, inner) = (rect(outer.to_owned(), cx), rect(inner.to_owned(), cx));
+    outer.origin.y <= inner.origin.y
+        && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height + px(0.5)
+}
+
+#[gpui_kit::test]
+fn each_section_s_skeleton_fades_into_what_the_daemon_said(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    open_tab(&shell, cx);
+
+    // The controls are drawn where the skeleton waited, by what fades the one into the other.
+    for section in ["kinds", "sound", "quiet"] {
+        let waiting = format!("notify-{section}-waiting");
+        assert!(has(waiting.clone(), cx), "{section}");
+        assert!(
+            holds(&waiting, &format!("notify-{section}"), cx),
+            "{section}"
+        );
+    }
+    open_project_tab(&shell, cx);
+    assert!(holds("notify-project-waiting", "notify-project", cx));
+}
+
+#[gpui_kit::test]
+fn a_file_that_cannot_be_read_is_said_in_the_tab_and_the_controls_unfold_once_fixed(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let file = user.path("config/flottille/notifications.toml");
+    std::fs::write(&file, "[kinds\nreport = ").unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1440.), px(2800.)));
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the tab is there", |cx| {
+        has("settings-tabs-notifications", cx)
+    });
+    click("settings-tabs-notifications", cx);
+    until(&shell, cx, "the tab says why", |cx| {
+        has("notify-kinds-problem", cx)
+    });
+    settle(cx);
+    // Why comes and goes with its block, in place of the skeleton.
+    let why = label("notify-kinds-problem", cx).unwrap_or_default();
+    assert!(why.contains("notifications.toml"), "{why}");
+    assert!(holds(
+        "notify-kinds-problem-block",
+        "notify-kinds-problem",
+        cx
+    ));
+    assert!(!has("notify-kinds-skeleton", cx), "no skeleton beside why");
+
+    // Fixed, the line folds away and the controls unfold.
+    std::fs::remove_file(&file).unwrap();
+    user.call(
+        "notifications.set_settings",
+        json!({"kinds": {"report": "ring"}}),
+    )
+    .unwrap();
+    until(&shell, cx, "the controls start to unfold", |cx| {
+        has("notify-kinds-content", cx) && rect("notify-kinds-content", cx).size.height > px(0.)
+    });
+    let start = rect("notify-kinds-content", cx).size.height;
+    cx.executor().advance_clock(PANEL / 3);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let part = rect("notify-kinds-content", cx).size.height;
+    settle(cx);
+    let open = rect("notify-kinds-content", cx).size.height;
+    assert!(start < part && part < open, "{start:?} {part:?} {open:?}");
+    assert!(!has("notify-kinds-problem", cx), "folded away");
 }
 
 #[gpui_kit::test]
