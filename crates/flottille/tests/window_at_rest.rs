@@ -20,7 +20,7 @@ use serde_json::json;
 
 /// A user whose fake agent answers "ok", with the project `app` over a throwaway repository and
 /// a session in it whose first turn ended: the session's id.
-fn idle_session(user: &User) -> String {
+pub(crate) fn idle_session(user: &User) -> String {
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -47,7 +47,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-fn window<'a>(
+pub(crate) fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
@@ -64,7 +64,7 @@ fn window<'a>(
 
 /// One step of the window as the platform would run it: what the link sent, a frame if one was
 /// asked, what it started. How many animation frames were asked.
-fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> usize {
+pub(crate) fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> usize {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
     cx.executor().advance_clock(by);
     cx.run_until_parked();
@@ -73,7 +73,7 @@ fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> usiz
     asked
 }
 
-fn until(
+pub(crate) fn until(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
     what: &str,
@@ -95,7 +95,7 @@ fn until(
 /// time, so that what the daemon answers late has come, and starts again from zero when a frame
 /// is asked. How much of its clock a real second holds is the machine's (a loaded one draws
 /// fewer frames in it), so the wait is for the quiet, not for a number of steps.
-fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+pub(crate) fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     const STEP: Duration = Duration::from_millis(16);
     let began = Instant::now();
     let mut last_asked = began;
@@ -118,7 +118,7 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
 /// Lets the pulse of a wait for the user end (`PULSE_SPAN`): it moves, by design, while the wait
 /// is new and draws no animation frame, so `settle` does not wait for it; the window's clock is
 /// moved past it, and the page settles on the still dot.
-fn past_the_pulse(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+pub(crate) fn past_the_pulse(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     step(shell, PULSE_SPAN, cx);
     settle(shell, cx);
 }
@@ -1497,7 +1497,7 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_folded_to_its_answers(
 
 /// The lead `idle_session` started launches a session it leads, titled `title`, allowed by the
 /// user when it is held: the session's id.
-fn led_by_lead(user: &User, mcp: &common::mcp::Mcp, title: &str) -> String {
+pub(crate) fn led_by_lead(user: &User, mcp: &common::mcp::Mcp, title: &str) -> String {
     let answer = mcp.call(
         "agent_launch",
         json!({"kind": "led", "title": title, "brief": format!("{title} now.")}),

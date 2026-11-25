@@ -4,19 +4,28 @@
 //! the window, in front of a real daemon whose agents are the fake ACP agent. No window opens on
 //! a screen.
 
+use crate::common;
 use crate::kit_common;
+use crate::window_at_rest::{idle_session, led_by_lead, past_the_pulse, settle, until, window};
 
 use std::time::{Duration, Instant};
 
 use crate::motion_gate::{Allow, Kind, Recorder, Recording, assert_moves, check};
+use common::User;
+use flottille_window::Shell;
+use flottille_window::shell::Selection;
+use flottille_window::tree::session_id;
 use gpui_design_system::motion::PANEL;
+use gpui_design_system::toggle_id;
 use gpui_design_system::{Button, Item, Listing, enter, presence};
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     Context, Entity, InteractiveElement as _, IntoElement, ParentElement, Render, Styled,
     TestAppContext, TestSupportExt as _, VisualTestContext, Window, div, px,
 };
 use kit_common::{Desktop, init};
+use serde_json::json;
 
 /// Draws the view's first frame and lets whatever it started end.
 fn shown<V: Render>(
@@ -362,4 +371,210 @@ fn a_block_that_moves_for_ever_is_found_as_never_settling(cx: &mut TestAppContex
     recorder.play(Duration::from_millis(100), cx);
     let verdict = check(&recorder.finish(cx), &[]);
     assert!(verdict.has(Kind::NeverSettles, "drift"), "{verdict:#?}");
+}
+
+// ── Pages of the window ────────────────────────────────────────────────────────────────────────
+
+/// The page left when another opens: it goes at once, the page opened enters section by
+/// section (`docs/design.md` §10 animates a page's entrance, not the exit of the one it replaces).
+const LEFT: &str = "the page left goes at once as the page opened enters";
+/// Found by the gate on the session page, to be fixed in the window (each has its follow-up).
+const SESSION_OPENS_AT_ONCE: &str = "a defect the gate found, to fix: the session page's header and composer show at once, with no entrance";
+const NOTHING_SAID_FLASHES: &str = "a defect the gate found, to fix: `Nothing said yet.` shows for a few frames, then is swapped for the conversation with no presence";
+const SESSION_SETTLES_LATE: &str = "a defect the gate found, to fix: the session page's rail and composer move once, in one frame, as its conversation arrives";
+
+/// What the gate allows on the window's pages, each with its reason.
+const PAGES: &[Allow] = &[
+    Allow {
+        scenario: "settings",
+        kind: Kind::CutExit,
+        element: "project-page",
+        why: LEFT,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::CutExit,
+        element: "project-page",
+        why: LEFT,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::PopIn,
+        element: "session-header",
+        why: SESSION_OPENS_AT_ONCE,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::PopIn,
+        element: "reply",
+        why: SESSION_OPENS_AT_ONCE,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::PopIn,
+        element: "conversation-empty-*",
+        why: NOTHING_SAID_FLASHES,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::CutExit,
+        element: "conversation-empty-*",
+        why: NOTHING_SAID_FLASHES,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::SiblingJump,
+        element: "session-rail",
+        why: SESSION_SETTLES_LATE,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::SiblingJump,
+        element: "reply",
+        why: SESSION_SETTLES_LATE,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::CutExit,
+        element: "rail-workspace-skeleton",
+        why: "`awaiting` cross-fades the skeleton out by an opacity the gate does not see: drawn at its size to the end, it is removed once faded",
+    },
+];
+
+/// Records `act` on the window of `shell` once it settled: the frames it draws over three
+/// seconds of its clock, each one after the shell read what its link sent.
+fn record_page(
+    scenario: &'static str,
+    shell: &Entity<Shell>,
+    act: impl FnOnce(&mut VisualTestContext),
+    cx: &mut VisualTestContext,
+) -> Recording {
+    settle(shell, cx);
+    let polled = shell.clone();
+    let mut recorder = Recorder::start(scenario, cx).before_each_frame(move |cx| {
+        polled.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        // The daemon answers in real time: a little of it each frame.
+        std::thread::sleep(Duration::from_millis(5));
+    });
+    recorder.act(cx, act);
+    recorder.play(Duration::from_secs(3), cx);
+    let recording = recorder.finish(cx);
+    eprintln!(
+        "motion gate: `{scenario}`: {} frames, at most {} elements, read in {:?}",
+        recording.frames(),
+        recording.most_elements(),
+        recording.sampling()
+    );
+    recording
+}
+
+#[gpui_kit::test]
+fn the_settings_page_opened_moves_without_a_pop_or_a_jump(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    let recording = record_page(
+        "settings",
+        &shell,
+        |cx| cx.update(|window, cx| window.click("settings", cx)),
+        cx,
+    );
+    assert!(shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some()));
+    assert_moves(&recording, PAGES);
+}
+
+#[gpui_kit::test]
+fn the_project_page_opened_moves_without_a_pop_or_a_jump(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    let opened = shell.clone();
+    let recording = record_page(
+        "project",
+        &shell,
+        move |cx| {
+            opened.update_in(cx, |s, window, cx| {
+                s.open(Selection::Project("app".into()), window, cx)
+            })
+        },
+        cx,
+    );
+    assert!(shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some()));
+    assert_moves(&recording, PAGES);
+}
+
+#[gpui_kit::test]
+fn the_session_page_opened_moves_without_a_pop_or_a_jump(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let id = idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    let row = session_id(&id);
+    let recording = record_page(
+        "session",
+        &shell,
+        move |cx| cx.update(|window, cx| window.click(row, cx)),
+        cx,
+    );
+    assert!(shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()));
+    assert_moves(&recording, PAGES);
+}
+
+#[gpui_kit::test]
+fn the_notification_centre_opened_and_closed_moves_without_a_pop_or_a_jump(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [
+        {"mcp": {"tool": "ask_user", "arguments": {"question": "Which database?"}}},
+        {"say": "Waiting."}]}]}));
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the bell counts the question", |cx| {
+        shell.read_with(cx, |s, cx| s.top().read(cx).count()) == 1
+    });
+    past_the_pulse(&shell, cx);
+    let open = |cx: &mut VisualTestContext| cx.update(|window, cx| window.click("bell", cx));
+    let recording = record_page("bell open", &shell, open, cx);
+    assert!(cx.update(|window, _| window.try_find("bell-list").is_some()));
+    assert_moves(&recording, PAGES);
+    let recording = record_page("bell closed", &shell, open, cx);
+    assert_moves(&recording, PAGES);
+}
+
+#[gpui_kit::test]
+fn a_pilot_folding_and_unfolding_its_led_sessions_moves_without_a_pop_or_a_jump(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    let lead = idle_session(&user);
+    let (url, authorization) = common::mcp::server_of(&user, 0);
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let first = led_by_lead(&user, &mcp, "Docs");
+    let second = led_by_lead(&user, &mcp, "Tests");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "both led sessions under their pilot", |cx| {
+        cx.update(|window, _| {
+            window.try_find(session_id(&first)).is_some()
+                && window.try_find(session_id(&second)).is_some()
+        })
+    });
+    let toggle = toggle_id(session_id(&lead));
+    let fold = move |cx: &mut VisualTestContext| {
+        let toggle = toggle.clone();
+        cx.update(|window, cx| window.click(toggle, cx))
+    };
+    let recording = record_page("fold", &shell, fold.clone(), cx);
+    assert!(cx.update(|window, _| window.try_find(session_id(&first)).is_none()));
+    assert_moves(&recording, PAGES);
+    let recording = record_page("unfold", &shell, fold, cx);
+    assert_moves(&recording, PAGES);
 }
