@@ -100,6 +100,8 @@ fn every_method_the_sources_name_is_catalogued() {
         "review.passes",
         // An event, said in `docs/protocol.md` ("The settings methods").
         "settings.changed",
+        // A file of Claude's, which the gate and its folders name, beside the `settings.` methods.
+        "settings.json",
         // A git setting a push the gate let through keeps of the repository's (`push_folder`).
         "remote.pushdefault",
     ];

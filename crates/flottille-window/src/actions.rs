@@ -1787,6 +1787,7 @@ impl Actions {
             Command::AppearanceRead { .. }
                 | Command::AppearanceSet { .. }
                 | Command::AppearanceReset { .. }
+                | Command::AppearanceLevelsRead
         ) {
             let _ = self.appearance.send(command);
             return;

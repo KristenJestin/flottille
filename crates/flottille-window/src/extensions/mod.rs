@@ -1494,70 +1494,6 @@ pub fn project_page(
 /// What a project's switch says under its label.
 pub const PROJECT_HINT: &str = "On in every project unless you turn it off here.";
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::providers::Providers;
-
-    fn providers() -> Providers {
-        Providers::of(Ok(&json!({"providers": [
-            {"name": "claude", "title": "Claude", "enabled": true, "ready": true, "why": null,
-             "warnings": [], "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
-             "version": "1.0.0", "checked": "1.0.0"},
-             "login": {"present": true, "path": "/tmp/login", "api_key": null}, "override": null,
-             "models": [{"id": "big", "name": "Big", "efforts": null},
-                        {"id": "small", "name": "Small", "efforts": null}]}
-        ]})))
-    }
-
-    /// What the daemon lists for Review: a slot left on its default, saying what it gives.
-    fn listed(gives: Value) -> Listed {
-        Listed::of(&json!({
-            "name": "review", "title": "Review", "sentence": "", "scope": "project",
-            "place": {"icon": "review", "line": "Checks each ticket's work", "order": 1},
-            "switch": "Review the work", "usage": "Runs a **review** pass on each ticket.",
-            "enabled": true, "error": null,
-            "settings": [{"key": "bugs_model", "label": "Bugs", "hint": "", "kind": "model",
-                "per_project": true, "value": null, "set": false,
-                "default": {"rule": "The daemon's rule", "gives": gives}}],
-            "projects": [], "guidance": false
-        }))
-    }
-
-    #[test]
-    fn a_default_slot_says_the_model_the_daemon_picks() {
-        let providers = providers();
-        let said = |gives| listed(gives).settings[0].default_said(&providers);
-        assert_eq!(
-            said(json!({"claude": "big"})),
-            ("The daemon's rule".to_owned(), "Big for Claude".to_owned())
-        );
-        // The daemon's table changes: the window's words follow, it holds none.
-        assert_eq!(
-            said(json!({"claude": "small"})),
-            (
-                "The daemon's rule".to_owned(),
-                "Small for Claude".to_owned()
-            )
-        );
-    }
-
-    #[test]
-    fn a_default_slot_names_a_provider_that_runs_on_its_own_model() {
-        let said = listed(json!({"claude": null})).settings[0].default_said(&providers());
-        assert_eq!(said.1, "Claude's own model");
-    }
-
-    #[test]
-    fn a_default_slot_says_each_provider_the_daemon_names() {
-        let said =
-            listed(json!({"claude": "big", "other": "x"})).settings[0].default_said(&providers());
-        assert_eq!(said.1, "Big for Claude, x for other");
-    }
-}
-
 /// The parts of Flottille whose settings can be shared with all machines, each with the key of
 /// its block on All machines' page of Features.
 const SHARED_PARTS: [(&str, &str); 3] = [
@@ -1623,4 +1559,68 @@ pub fn shared_blocks(registry: &Entity<Registry>, cx: &App) -> Vec<(&'static str
             Some((*key, block))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::providers::Providers;
+
+    fn providers() -> Providers {
+        Providers::of(Ok(&json!({"providers": [
+            {"name": "claude", "title": "Claude", "enabled": true, "ready": true, "why": null,
+             "warnings": [], "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
+             "version": "1.0.0", "checked": "1.0.0"},
+             "login": {"present": true, "path": "/tmp/login", "api_key": null}, "override": null,
+             "models": [{"id": "big", "name": "Big", "efforts": null},
+                        {"id": "small", "name": "Small", "efforts": null}]}
+        ]})))
+    }
+
+    /// What the daemon lists for Review: a slot left on its default, saying what it gives.
+    fn listed(gives: Value) -> Listed {
+        Listed::of(&json!({
+            "name": "review", "title": "Review", "sentence": "", "scope": "project",
+            "place": {"icon": "review", "line": "Checks each ticket's work", "order": 1},
+            "switch": "Review the work", "usage": "Runs a **review** pass on each ticket.",
+            "enabled": true, "error": null,
+            "settings": [{"key": "bugs_model", "label": "Bugs", "hint": "", "kind": "model",
+                "per_project": true, "value": null, "set": false,
+                "default": {"rule": "The daemon's rule", "gives": gives}}],
+            "projects": [], "guidance": false
+        }))
+    }
+
+    #[test]
+    fn a_default_slot_says_the_model_the_daemon_picks() {
+        let providers = providers();
+        let said = |gives| listed(gives).settings[0].default_said(&providers);
+        assert_eq!(
+            said(json!({"claude": "big"})),
+            ("The daemon's rule".to_owned(), "Big for Claude".to_owned())
+        );
+        // The daemon's table changes: the window's words follow, it holds none.
+        assert_eq!(
+            said(json!({"claude": "small"})),
+            (
+                "The daemon's rule".to_owned(),
+                "Small for Claude".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_default_slot_names_a_provider_that_runs_on_its_own_model() {
+        let said = listed(json!({"claude": null})).settings[0].default_said(&providers());
+        assert_eq!(said.1, "Claude's own model");
+    }
+
+    #[test]
+    fn a_default_slot_says_each_provider_the_daemon_names() {
+        let said =
+            listed(json!({"claude": "big", "other": "x"})).settings[0].default_said(&providers());
+        assert_eq!(said.1, "Big for Claude, x for other");
+    }
 }
