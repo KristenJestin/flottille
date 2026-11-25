@@ -3217,6 +3217,9 @@ fn about(id: &str, titled_by: Value, subject: Value) -> Value {
         "created_at": 1, "titled_by": titled_by, "subject": subject})
 }
 
+/// What a session's row is given: its agent, its subject's kind, key and words, and `renamed`.
+type Said = (String, Option<(String, String, String)>, bool);
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_mobile_view_carries_a_session_s_subject() {
     let ticket = json!({"kind": "ticket", "key": "SHOP-60", "title": "Refunds in the export",
@@ -3238,8 +3241,7 @@ async fn the_mobile_view_carries_a_session_s_subject() {
     );
     let (phone, _taken) = place.linked().await;
 
-    /// What each session's row is given: its subject's kind, key and words, and `renamed`.
-    fn said(view: &ViewState) -> Vec<(String, Option<(String, String, String)>, bool)> {
+    fn said(view: &ViewState) -> Vec<Said> {
         let mut said: Vec<_> = view
             .projects
             .iter()
