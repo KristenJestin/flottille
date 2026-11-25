@@ -678,7 +678,13 @@ impl Registry {
                 let title = self
                     .listed(&name)
                     .map_or_else(|| name.clone(), |listed| listed.title.clone());
+                let undelivered = answer
+                    .as_ref()
+                    .ok()
+                    .and_then(|said| said["hub"].as_str())
+                    .and_then(crate::actions::undelivered);
                 match answer {
+                    Ok(_) if let Some(said) = undelivered => toast(said, cx),
                     Ok(_) => toast(
                         Toast::success(format!("{title}: {setting} saved for all machines"))
                             .detail("It applies from now on, on every machine."),

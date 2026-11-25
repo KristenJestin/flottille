@@ -207,7 +207,7 @@ fn height_of(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
     })
 }
 
-fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+pub(crate) fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     shell.read_with(cx, |s, cx| {
         s.toasts()
             .read(cx)

@@ -8,7 +8,7 @@
 //! test on 127.0.0.1. No window opens on a screen; the people are invented.
 
 use crate::remote::{Machine, NoKeyring, pc_and_server_on};
-use crate::window_any_machine::{click, present, runner, settle, step, until, window};
+use crate::window_any_machine::{click, present, runner, settle, step, toasts, until, window};
 
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
@@ -195,6 +195,60 @@ fn a_value_saved_on_all_machines_reaches_every_machine(cx: &mut TestAppContext) 
     });
     assert_eq!(about(&pc)["own"], json!([]));
     assert_eq!(about(&server)["own"], json!([]));
+}
+
+#[gpui_kit::test]
+fn a_value_saved_with_the_hub_out_of_reach_says_it_waits_for_it(cx: &mut TestAppContext) {
+    let (mut hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    shell.update(cx, |s, _| s.sign_with(signing(&pc)));
+    general(&shell, cx);
+    choose(&shell, "all", cx);
+    let editor = editor(&shell, cx);
+    until(&shell, cx, "the values of all machines are read", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some_and(|s| s.all.is_some()))
+    });
+    hub.stop();
+    pc.wait_until("the hub is out of reach", |remote| {
+        remote["hub"]["state"] == "unreachable"
+    });
+
+    type_name(&editor, SAM, cx);
+    settle(&shell, cx);
+    click(&shell, "about-save", cx);
+
+    until(&shell, cx, "the save is said", |cx| {
+        !toasts(&shell, cx).is_empty()
+    });
+    let said = toasts(&shell, cx);
+    assert_eq!(said, ["About you saved on this machine"], "{said:?}");
+    assert_eq!(about(&pc)["all"]["name"], SAM);
+}
+
+#[gpui_kit::test]
+fn all_machines_is_left_by_any_way_of_choosing_a_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    general(&shell, cx);
+    choose(&shell, "all", cx);
+    // The vault is a machine's own: All machines has no tab of it (#1461 added the others).
+    assert!(!present(cx, "settings-tabs-vault"), "All machines is shown");
+
+    // The server chosen another way than the picker, then this machine again.
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
+    settle(&shell, cx);
+    until(&shell, cx, "the server is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown().as_deref() == Some("server"))
+    });
+    shell.update_in(cx, |s, window, cx| s.choose_machine(None, window, cx));
+    settle(&shell, cx);
+
+    assert!(
+        present(cx, "settings-tabs-vault"),
+        "this machine's whole Settings, not All machines"
+    );
 }
 
 #[gpui_kit::test]

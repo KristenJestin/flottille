@@ -1139,6 +1139,20 @@ notifications follow it.
 | `title` | Masked. |
 | `by` | `agent` or `user`. |
 
+#### `agent.updated`
+
+What the session is about changed (`docs/design.md` §10, "What a session is about"): it took
+another ticket in hand, opened a pull request, or what it held was closed or merged; also when
+only the title of its ticket or pull request changed, or the checks of its pull request. Told once
+per change, against what was last said; a session's first subject is one too. A burst of
+events of the items is one change: each session it concerns is told at most once for it. An
+ended session is told no more: it keeps the subject it had when it ended.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `subject` | As `agent.list` gives it (`docs/protocol.md`): `null` when it holds nothing and never did, and when the ticket linked to its workspace, all it had, is unlinked. |
+
 #### `agent.detached`
 
 The user detached a session from the agent that started it (`agent.detach`): `launched_by` is

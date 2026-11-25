@@ -177,8 +177,8 @@ struct Share {
     value: String,
 }
 
-/// Answers `settings.share {name, value}`: the user's change of a setting for all machines. Only
-/// as a request the user's device signed (`docs/remote.md`, "Requests from another machine's
+/// Answers `settings.share {name, value}`: the user's change of a setting for all machines, saying
+/// where it went (`hub`, as `about.share` does). Only as a request the user's device signed (`docs/remote.md`, "Requests from another machine's
 /// clients"), on a machine that has a hub.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     if method != "settings.share" {
@@ -205,13 +205,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                  machines",
             )
         })?;
-    control
+    let delivery = control
         .share(crate::shared::SETTINGS_SHARE, &asked.signed)
         .map_err(Failure::refused)?;
     daemon
         .emit("settings.changed", json!({"names": [name]}))
         .map_err(|error| Failure::new("unavailable", error.to_string()))?;
-    Ok(json!({"name": name, "value": value}))
+    Ok(json!({"name": name, "value": value, "hub": delivery}))
 }
 
 /// What a change of values of all machines taken from the hub says: `about.changed` for About
@@ -224,5 +224,38 @@ pub fn said(emit: &crate::link::Emit, changed: &[String]) {
     }
     if !settings.is_empty() {
         emit("settings.changed", json!({"names": settings}));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hub_keeps_every_setting_this_machine_shares_and_no_other_of_them() {
+        let parts = review().expect("Review has a guidance").parts;
+        let known_here: Vec<String> = SETTINGS
+            .iter()
+            .map(|name| name.to_string())
+            .chain(
+                EXTENSION_SETTINGS
+                    .iter()
+                    .map(|(name, _, _)| name.to_string()),
+            )
+            .chain(parts.iter().map(|part| format!("{REVIEW_PART}{part}")))
+            .collect();
+        for name in &known_here {
+            assert!(
+                flottille_link::SHARED_NAMES.contains(&name.as_str()),
+                "the hub refuses {name}"
+            );
+        }
+        for name in flottille_link::SHARED_NAMES {
+            assert!(
+                name.starts_with("about.") || known(name),
+                "{name} is no setting of this machine"
+            );
+        }
+        assert!(flottille_link::SHARED_NAMES.len() <= flottille_link::MOST_VALUES);
     }
 }

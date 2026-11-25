@@ -231,25 +231,27 @@ fn a_machine_follows_the_rules_of_all_machines_until_it_writes_its_own(
     // pc keeps the rules of all machines.
     assert_eq!(show(&pc, "rules.show", json!({}))["text"], RULES);
 
+    let marked = top(cx, "rules-reset-").expect("the buttons under the field");
     cx.update(|window, cx| window.click("rules-own-reset".to_owned(), cx));
-    // The mark folds away with its gap over several frames, not at once.
-    let marked = top(cx, "rules-text-").expect("the field");
+    // The mark folds away with its gap: the buttons under it come up over several frames, not at
+    // once.
     let mut tops = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     while present(cx, "rules-own-set") {
         assert!(Instant::now() < deadline, "the mark never went");
         step(&shell, cx);
-        tops.extend(top(cx, "rules-text-"));
+        tops.extend(top(cx, "rules-reset-"));
         std::thread::sleep(Duration::from_millis(25));
     }
     settle(&shell, cx);
+    let folded = top(cx, "rules-reset-").expect("the buttons under the field");
+    assert!(folded < marked, "{folded} < {marked}");
+    assert!(
+        tops.iter().any(|at| *at < marked && *at > folded),
+        "no frame between {marked} and {folded}: {tops:?}"
+    );
     assert_eq!(show(&server, "rules.show", json!({}))["source"], "all");
     assert_eq!(show(&server, "rules.show", json!({}))["text"], RULES);
-    let folded = top(cx, "rules-text-").expect("the field");
-    assert!(
-        tops.iter().all(|at| *at <= marked) && folded <= marked,
-        "{folded} {marked} {tops:?}"
-    );
 }
 
 #[gpui_kit::test]

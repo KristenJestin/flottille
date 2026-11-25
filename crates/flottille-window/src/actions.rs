@@ -1292,6 +1292,12 @@ pub enum Outcome {
     },
     /// Where the shade comes from (`appearance.show`'s levels).
     AppearanceLevels(Result<AppearanceLevels, String>),
+    /// A share of a setting for all machines that did not reach the hub now (`later`) or that
+    /// its hub does not keep (`old-hub`): said, then `then`, the section's own answer.
+    SharedWhere {
+        delivery: String,
+        then: Box<Outcome>,
+    },
     /// The compaction as the daemon says it (`compaction.show`), after a read, a change of its
     /// settings (`written`) or of its guidance (`guidance`).
     Compaction {
@@ -2800,8 +2806,20 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 json!({"name": name, "value": value}),
                 bounds.quick,
             );
+            let delivery = shared
+                .as_ref()
+                .ok()
+                .and_then(|said| said["hub"].as_str().map(str::to_owned))
+                .filter(|delivery| delivery != "given");
             let outcome = perform(connect, sign, *then, bounds);
-            after_share(outcome, shared.map(|_| ()))
+            let outcome = after_share(outcome, shared.map(|_| ()));
+            match delivery {
+                Some(delivery) => Outcome::SharedWhere {
+                    delivery,
+                    then: Box::new(outcome),
+                },
+                None => outcome,
+            }
         }
         Command::DeveloperRead | Command::DeveloperSet { .. } => {
             let (method, params, written) = match command {
@@ -4296,6 +4314,23 @@ fn after_share(outcome: Outcome, shared: Result<(), String>) -> Outcome {
             shown: shared.clone().and(read),
         },
         other => other,
+    }
+}
+
+/// What is said of a share that did not reach the hub: `delivery` as `settings.share` says it.
+pub fn undelivered(delivery: &str) -> Option<gpui_design_system::Toast> {
+    use gpui_design_system::Toast;
+    match delivery {
+        "later" => Some(
+            Toast::success("Saved on this machine")
+                .detail("The hub is out of reach: the other machines get it once it answers."),
+        ),
+        "old-hub" => {
+            Some(Toast::failure("Saved on this machine only").detail(
+                "The hub is of a version that keeps no settings for all machines: update it.",
+            ))
+        }
+        _ => None,
     }
 }
 

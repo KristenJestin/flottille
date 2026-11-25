@@ -226,6 +226,27 @@ fn checked(set: Set) -> Result<Given, Failure> {
     Ok((name, pronouns, notes))
 }
 
+/// The field `field` of `about.share` (`name`, `pronouns`, `notes`) as a machine keeps it from
+/// another: trimmed where it is one line, none past its limits or on more than one line, as
+/// `about.set` would refuse it.
+pub(crate) fn received(field: &str, text: &str) -> Option<String> {
+    let (what, limit, lined) = match field {
+        "name" => ("the name", SHORT_LIMIT, true),
+        "pronouns" => ("how to refer to you", SHORT_LIMIT, true),
+        "notes" => ("what every agent should know", LIMIT, false),
+        _ => return None,
+    };
+    let text = match lined {
+        true => text.trim(),
+        false => text,
+    };
+    check(what, text, limit).ok()?;
+    if lined {
+        one_line(what, text).ok()?;
+    }
+    Some(text.to_owned())
+}
+
 /// Why `about.share` is refused unless the user's device signed it here.
 pub(crate) const NOT_SIGNED: &str = "the values of all machines change only as a request signed by the user's \
                           device: change them in the window, on All machines";
@@ -255,10 +276,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                          with all machines",
                     )
                 })?;
-            control
+            let delivery = control
                 .share(crate::shared::ABOUT_SHARE, &asked.signed)
                 .map_err(Failure::refused)?;
             announce(daemon)?;
+            let mut shown = show(daemon)?;
+            shown["hub"] = json!(delivery);
+            return Ok(shown);
         }
         "about.set" => {
             let (name, pronouns, notes) = checked(serde_json::from_value(params)?)?;

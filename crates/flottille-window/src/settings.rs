@@ -3226,16 +3226,18 @@ impl SettingsPage {
         let all = crate::machines::AllMachines {
             chosen: of_all(cx),
             on_choose: Box::new(move |window, cx| {
-                cx.set_global(SettingsOfAll(true));
                 all_page
                     .update(cx, |page, cx| {
                         page.machine_menu = false;
                         cx.notify();
                     })
                     .ok();
+                // This machine is brought at once (`Shell::reach_then`), which chooses no All
+                // machines: chosen after it.
                 all_shell
                     .update(cx, |shell, cx| shell.choose_machine(None, window, cx))
                     .ok();
+                cx.set_global(SettingsOfAll(true));
             }),
         };
         let picker = (!choices.is_empty()).then(|| {

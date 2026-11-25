@@ -735,8 +735,10 @@ them, one line) and `notes` (anything every agent should know). Each is optional
   `about.set` checks them; one given empty is cleared for all machines. Only as a request signed
   by the user's device (`docs/remote.md`, "Requests from another machine's clients"), by a member
   that is no viewer, on a machine that has a hub; else `refused`. The daemon keeps it, seals it for
-  every machine and gives it to the hub, at once or at its next session to it. Answers as
-  `about.show`.
+  every machine and gives it to the hub, at once or at its next session to it; `refused` when a
+  value, sealed, would be larger than the hub keeps. Answers as `about.show`, with `hub`: `given`
+  (to the hub open now), `later` (the hub out of reach: given at the next session) or `old-hub` (a
+  hub of before the values of all machines, which keeps none).
 
 A change emits `about.changed {}`, and so does a value of all machines this machine takes from the
 hub. No tool of an agent reads or writes them: they are in its
@@ -756,7 +758,9 @@ would be: `refused` for a text past its limit, a word the setting does not take,
 no setting of all machines (no vault value, token, key or project variable is one). An empty value
 says nothing: every machine falls back to its default. Only as a request signed by the user's
 device, by a member that is no viewer, on a machine that has a hub; else `refused`; and `refused`
-for a text too long for a sealed copy (40 KiB). Answers `{"name", "value"}`.
+for a text too long for a sealed copy (40 KiB). Answers `{"name", "value", "hub"}`, `hub` saying
+where it went as `about.share` does (`given`, `later`, `old-hub`). The hub keeps only the names it
+knows (`SHARED_NAMES` of `flottille-link`).
 
 A machine takes what the hub keeps, and says it with `settings.changed {names}`: a client reads the
 settings again.
@@ -2279,7 +2283,20 @@ agent writes to it (`docs/remote.md`, "A tree across machines"), `reported_at` w
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `auto` or `full`
-(`agent.mode`).
+(`agent.mode`). `subject` (in `agent.list` and the tree) is what the session is about, derived
+from what it took in hand (`docs/design.md` §10, "What a session is about") and kept as its last
+`agent.updated` said it, so that a list derives nothing: `null` while it
+never held anything, else `{"kind", "key", "title", "from", "last", "pull_request"}`, `kind`
+being `ticket`, `pull_request` or `free`; `key` the ticket's (`#5`, `ABC-12`) or the pull
+request's (`#12`), `null` when free; `title` as the items last read it, `null` when unknown or
+free; `from` where it comes from in a few words (`the workspace's linked ticket`, `a ticket it
+changed`, `a ticket it subscribed to`, `a ticket it read`, `a pull request it opened`, `what it
+last held`); `last`, only when free, what it last held (`#5 done · #12 merged`); `pull_request`
+the pull request it opened or its branch's, from the items the daemon keeps (`details.head`),
+`{"key", "repository", "title", "state", "url", "checks"}`, `checks` one mark (`passing`,
+`failing`, `pending`) or `null`, never read from the forge for this; `null` when there is none.
+A change of it is an `agent.updated` event (`docs/events.md`). An ended session keeps the subject
+it had when it ended.
 
 Each method answers `not-found` when the agent does not exist.
 

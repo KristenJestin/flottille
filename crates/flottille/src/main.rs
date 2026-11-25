@@ -101,6 +101,7 @@ mod skill_command;
 mod skills;
 mod ssh_agent;
 mod ssh_owned;
+mod subject;
 mod subscriptions;
 mod sweep;
 mod tasks;

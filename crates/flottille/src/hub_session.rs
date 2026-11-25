@@ -118,24 +118,32 @@ impl Control {
 
     /// The user's change of values of all machines made on this machine, checked already: kept,
     /// then given to the hub now, or once a session to it is open again. `method` is the request
-    /// the device signed (`about.share`, `settings.share`).
-    pub(crate) fn share(&self, method: &str, text: &str) -> Result<(), String> {
+    /// the device signed (`about.share`, `settings.share`). Refused when a value sealed would be
+    /// larger than the hub keeps. Where it went: `given` to a hub open now, `later` with none
+    /// open, `old-hub` to a hub of before the values of all machines, which keeps none.
+    pub(crate) fn share(&self, method: &str, text: &str) -> Result<&'static str, String> {
         let (_, members) = self.checked()?;
         let changes = crate::shared::from_request(method, text, &members)?;
-        // A value too large for a sealed copy is refused here, before anything is kept.
         for (name, kept) in &changes {
             let sealed = crate::shared::seal(name, kept, &self.key, &members)
-                .ok_or_else(|| format!("{name} cannot be sealed for the machines"))?;
+                .ok_or_else(|| format!("{name} cannot be sealed"))?;
             if sealed.size() > flottille_link::SEALED_LIMIT {
                 return Err(format!(
-                    "{name} is too long to share: a value of all machines holds {} KiB at most",
-                    flottille_link::SEALED_LIMIT / 1024
+                    "{name} is too large to share: sealed for every machine it holds {} bytes, \
+                     and the hub keeps {} at most; shorten it",
+                    sealed.size(),
+                    flottille_link::SEALED_LIMIT
                 ));
             }
         }
         let changed = crate::shared::keep(&self.folder, changes);
+        let delivery = match self.asker.borrow().as_ref() {
+            None => "later",
+            Some(asker) if !asker.takes_shared() => "old-hub",
+            Some(_) => "given",
+        };
         self.give(&members, &changed);
-        Ok(())
+        Ok(delivery)
     }
 
     /// The values `names`, sealed for every machine of `members`, given to the hub while a session
