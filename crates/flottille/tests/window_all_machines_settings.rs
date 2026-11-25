@@ -62,7 +62,12 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 }
 
 fn pc_and_server() -> (crate::remote::TestHub, Machine, Machine) {
-    pc_and_server_on(Machine::of(runner()), runner())
+    // Daemons that cut tool results as they do for everyone: the harness's own file would be
+    // each machine's own limit.
+    pc_and_server_on(
+        Machine::of(runner().with_cut_results()),
+        runner().with_cut_results(),
+    )
 }
 
 /// Settings, the tab `tab`.
