@@ -124,7 +124,7 @@ fn the_next_message_after_an_expired_login_resumes_the_same_session() {
         .find(|e| e["name"] == "agent.started")
         .unwrap();
     assert_eq!(started["data"]["opened"], "resumed");
-    let opens = user.received_requests("session/resume");
+    let resumes = user.received_requests("session/resume");
     assert_eq!(resumes.len(), 1);
     assert_eq!(resumes[0]["params"]["sessionId"], before["native_id"]);
     assert_eq!(user.received_requests("session/new").len(), 1);
