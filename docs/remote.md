@@ -656,7 +656,11 @@ projects and sessions by a link of its own, whose events keep them current while
 machine's projects' pages is shown; nothing of another machine is read for a page that does not
 show it. Coming back to a machine already read shows its copy at once and refreshes it in place:
 the page of the last session of each machine keeps following it, and its Settings are as they were
-left, then read again. The first time, the
+left, then read again. Its Settings follow a change made there by another client while the window
+holds them (#1476): the bell link of that machine, which hears all of its events, says each change
+of its settings (`about.changed`, `developer.changed`, `rules.changed` and the other settings
+events), and only the section it names is read again; no other connection, no read of the whole
+machine. The first time, the
 page says it is reading that machine (its own skeletons, in the pane). A machine that does not
 answer within the window's limit (30 s) is said on its page only, `server does not answer`, a
 line above it that folds away once it answers or another page is shown; the rest of the window is
@@ -2373,7 +2377,7 @@ on a real phone, by hand, and reported.
 - **The bell and "Ended" hold every machine's** (#1280). The window follows each other runner that
   is online: its notification centre by a light link of its own (made once the device key is read, signed as every
   request to that machine, and reading `notifications.list` only, at each connection and on each
-  `notifications.*` event of that machine): the bell lists that machine's notifications beside this
+  `notifications.*` event of that machine, so while the bell's list is open too): the bell lists that machine's notifications beside this
   one's, each session's heading saying `on server`, and its badge and counts add them. Choosing one
   opens that machine's page of its session, and opening that page, or **Mark all read**, marks them
   read on that machine (`notifications.read`); the request or question is answered on that page,
