@@ -1531,16 +1531,16 @@ impl Shell {
         self.open(Selection::Session(agent), window, cx);
     }
 
-    /// The user confirmed the end of the session of the row `session`: one of another machine's
-    /// list is closed through this machine's daemon, which keeps the close while that machine is
-    /// off (`docs/remote.md`, "One list of every machine"), and leaves the list at once; any
-    /// other is stopped where it runs.
+    /// The user confirmed the end of the session of the row `session`: one of another machine,
+    /// of its list or launched there by an agent of this machine, is closed through this machine's
+    /// daemon, which keeps the close while that machine is off (`docs/remote.md`, "One list of
+    /// every machine"), and leaves the list at once; any other is stopped where it runs.
     pub fn end_confirmed(&mut self, session: String, window: &mut Window, cx: &mut Context<Self>) {
         let listed = self
             .snapshot
             .elsewhere(&session)
             .and_then(|found| found.elsewhere.clone())
-            .filter(|there| there.listed && !there.here);
+            .filter(|there| !there.here);
         let Some(there) = listed else {
             self.perform_here(Command::Stop { session });
             return;
@@ -3057,12 +3057,11 @@ impl Shell {
     /// "End session" in a session's row: the confirmation, which counts the agents that end.
     pub fn ask_end_of(&mut self, session: &str, cx: &mut Context<Self>) {
         let Some(found) = self.snapshot.session(session) else {
-            // A session of another machine's list: it alone ends, through its machine.
-            if self
-                .snapshot
-                .elsewhere(session)
-                .is_some_and(|found| found.elsewhere.as_ref().is_some_and(|t| t.listed))
-            {
+            // A session of another machine, of its list or one an agent of this machine launched
+            // there (#1520): it alone ends, through its machine.
+            if self.snapshot.elsewhere(session).is_some_and(|found| {
+                !found.ended && found.elsewhere.as_ref().is_some_and(|t| !t.here)
+            }) {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.ask_end(session.to_owned(), 1, cx));
             }
@@ -5560,10 +5559,10 @@ impl Shell {
                 row.set_scope(scope.as_deref(), cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
-                // A session another machine lists is closed from here, through this machine's
-                // daemon; one an agent of this machine started there is ended or detached there.
+                // A session of another machine, of its list or one an agent of this machine
+                // started there, is closed from here through this machine's daemon (#1520).
                 let there = session.elsewhere.as_ref();
-                let closable = there.is_some_and(|there| there.listed && !there.here);
+                let closable = there.is_some_and(|there| !there.here);
                 row.set_elsewhere(there, cx);
                 row.set_tag(session.tag.as_deref(), cx);
                 // Its machine's mark, when it is another machine's.
