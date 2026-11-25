@@ -12,8 +12,8 @@ use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
     Button, Fold, Icon, Item, Listing, MachineMark, MarkSize, Menu, Modal, ReorderGroup,
-    Reorderable, Tie, TreeRow, changed, changing, fade, hoverable, meta, palette, presence,
-    presence_of, section_label, space, tipped, tree_children, tree_tie,
+    Reorderable, Tie, TreeRow, Type as _, changed, changing, fade, hoverable, meta, palette,
+    presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -2253,9 +2253,26 @@ impl SessionRow {
         if t <= 0.0 || self.key_shown.is_empty() {
             return None;
         }
-        let id = match beside {
-            false => session_key_id(&self.id),
-            true => session_key_beside_id(&self.id),
+        let (key, gap) = match beside {
+            false => (
+                gpui_design_system::Tag::new(session_key_id(&self.id), self.key_shown.clone())
+                    .into_any_element(),
+                px(ROW_GAP),
+            ),
+            // The second line is 16 px high, a tag is taller: there the key is its mono word.
+            true => (
+                div()
+                    .id(session_key_beside_id(&self.id))
+                    .aria_label(self.key_shown.clone())
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .mono(11.)
+                    .child(self.key_shown.clone())
+                    .into_any_element(),
+                space::SM,
+            ),
         };
         Some(
             div()
@@ -2263,8 +2280,10 @@ impl SessionRow {
                 .min_w_0()
                 .overflow_hidden()
                 .max_w(px(KEY_WIDTH * t))
+                // The gap after it comes and goes with it.
+                .mr(-gap * (1.0 - t))
                 .opacity(t)
-                .child(gpui_design_system::Tag::new(id, self.key_shown.clone()))
+                .child(key)
                 .into_any_element(),
         )
     }
@@ -2871,6 +2890,8 @@ impl SessionRow {
 const WAITS_WIDTH: f32 = 400.;
 /// How wide the chip of a key may unfold: a tag is cut at 160 px.
 const KEY_WIDTH: f32 = 160.;
+/// The gap a session's row puts between its key and its title (the kit's `TreeRow`).
+const ROW_GAP: f32 = 7.;
 /// The height of a session's second line.
 const LINE: f32 = 16.;
 /// The height of a row's first line, above its second.

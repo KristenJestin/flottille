@@ -264,6 +264,11 @@ fn a_renamed_session_keeps_its_title_and_shows_the_key_beside_it(cx: &mut TestAp
         cx.update(|window, _| window.try_find(session_key_id(&id)).is_none()),
         "and leaves the first"
     );
+    let beside = cx.update(|window, _| window.find(session_key_beside_id(&id)).bounds());
+    assert!(
+        beside.size.height <= px(16.),
+        "it fits its 16 px line: {beside:?}"
+    );
     assert_eq!(row_height(cx, &id), height, "the row keeps its height");
 }
 
