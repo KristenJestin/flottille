@@ -135,6 +135,7 @@ fn an_allowed_finding_passes_with_its_reason(cx: &mut TestAppContext) {
         kind: Kind::PopIn,
         element: "block",
         why: "a sample: the block is meant to be there at once",
+        racy: false,
     }];
     let verdict = check(&recording, &allow);
     assert!(verdict.findings.is_empty(), "{verdict:#?}");
@@ -157,12 +158,21 @@ fn an_allow_entry_that_matches_nothing_is_reported_as_unused(cx: &mut TestAppCon
             kind: Kind::PopIn,
             element: "block",
             why: "it once popped in",
+            racy: false,
         },
         Allow {
             scenario: "another scenario",
             kind: Kind::PopIn,
             element: "block",
             why: "not this scenario's: not reported here",
+            racy: false,
+        },
+        Allow {
+            scenario: "block",
+            kind: Kind::PopIn,
+            element: "block",
+            why: "racy: it pops in only when a read lands late, not reported here",
+            racy: true,
         },
     ];
     let verdict = check(&recording, &allow);
@@ -381,63 +391,80 @@ const LEFT: &str = "the page left goes at once as the page opened enters";
 /// Found by the gate on the session page, to be fixed in the window (each has its follow-up).
 const SESSION_OPENS_AT_ONCE: &str = "a defect the gate found, to fix: the session page's header and composer show at once, with no entrance";
 const NOTHING_SAID_FLASHES: &str = "a defect the gate found, to fix: `Nothing said yet.` shows for a few frames, then is swapped for the conversation with no presence";
+const FORGES_LATE: &str = "a defect the gate found, to fix: when the forges are read after the settings page entered, their section takes its new height in one frame";
 const SESSION_SETTLES_LATE: &str = "a defect the gate found, to fix: the session page's rail and composer move once, in one frame, as its conversation arrives";
 
 /// What the gate allows on the window's pages, each with its reason.
 const PAGES: &[Allow] = &[
     Allow {
         scenario: "settings",
+        kind: Kind::Jump,
+        element: "enter-settings-forges",
+        why: FORGES_LATE,
+        racy: true,
+    },
+    Allow {
+        scenario: "settings",
         kind: Kind::CutExit,
         element: "project-page",
         why: LEFT,
+        racy: false,
     },
     Allow {
         scenario: "session",
         kind: Kind::CutExit,
         element: "project-page",
         why: LEFT,
+        racy: false,
     },
     Allow {
         scenario: "session",
         kind: Kind::PopIn,
         element: "session-header",
         why: SESSION_OPENS_AT_ONCE,
+        racy: false,
     },
     Allow {
         scenario: "session",
         kind: Kind::PopIn,
         element: "reply",
         why: SESSION_OPENS_AT_ONCE,
+        racy: false,
     },
     Allow {
         scenario: "session",
         kind: Kind::PopIn,
         element: "conversation-empty-*",
         why: NOTHING_SAID_FLASHES,
+        racy: true,
     },
     Allow {
         scenario: "session",
         kind: Kind::CutExit,
         element: "conversation-empty-*",
         why: NOTHING_SAID_FLASHES,
+        racy: true,
     },
     Allow {
         scenario: "session",
         kind: Kind::SiblingJump,
         element: "session-rail",
         why: SESSION_SETTLES_LATE,
+        racy: true,
     },
     Allow {
         scenario: "session",
         kind: Kind::SiblingJump,
         element: "reply",
         why: SESSION_SETTLES_LATE,
+        racy: true,
     },
     Allow {
         scenario: "session",
         kind: Kind::CutExit,
         element: "rail-workspace-skeleton",
         why: "`awaiting` cross-fades the skeleton out by an opacity the gate does not see: drawn at its size to the end, it is removed once faded",
+        racy: false,
     },
 ];
 
