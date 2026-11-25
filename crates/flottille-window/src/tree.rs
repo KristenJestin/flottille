@@ -254,6 +254,18 @@ pub fn session_waits_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-waits-{id}").into())
 }
 
+/// The element id of what a pilot says of the sessions it leads, on its second line after the
+/// place: labelled `leads 4 · 1 needs you · 1 red check`.
+pub fn session_summary_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-summary-{id}").into())
+}
+
+/// The element id of one part of a pilot's summary, `leads`, `needs`, `red` or `blocked`, drawn
+/// in the ink of what it says.
+pub fn session_summary_part_id(id: &str, part: &str) -> ElementId {
+    ElementId::Name(format!("session-summary-{part}-{id}").into())
+}
+
 /// The element id of what a led session runs on, on its second line after the place: labelled
 /// `Sonnet 5.5 · medium`, the model and the effort by name.
 pub fn session_runs_id(id: &str) -> ElementId {

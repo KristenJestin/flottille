@@ -16,6 +16,7 @@ pub mod finding;
 pub mod glob;
 pub mod images;
 pub mod item;
+pub mod leads;
 pub mod notification;
 pub mod pasted;
 pub mod paths;
