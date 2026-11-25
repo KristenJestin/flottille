@@ -112,6 +112,19 @@ pub const SEND: &str = "Send";
 const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Agents holds the default.";
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
+
+/// The widest a chip of the line under the header is (a tag is cut at 160 px, a pull request's
+/// mark follows its tag): a chip that comes or goes unfolds to it or folds from it.
+const ABOUT_CHIP_WIDTH: f32 = 180.;
+
+/// The key of the ticket a subject is about, its chip under the header; none for another kind.
+fn ticket_key(subject: &crate::model::Subject) -> Option<SharedString> {
+    subject
+        .key
+        .clone()
+        .filter(|_| subject.kind == "ticket")
+        .map(SharedString::from)
+}
 /// The same for `Resume at 13:00`.
 const QUOTA_CHIP_WIDTH: f32 = 136.;
 /// What a chip takes once it gave its words up for its icon (12 px each side and the icon).
@@ -294,6 +307,13 @@ pub struct SessionPage {
     machine: Option<String>,
     asks: crate::actions::Actions,
     opened: Opened,
+    /// What the session is about, as the daemon derives it: the line under the header says it.
+    subject: Option<crate::model::Subject>,
+    /// The last subject it said, which stays drawn while its line folds away.
+    subject_shown: Option<crate::model::Subject>,
+    /// The last ticket key and pull request its line showed, drawn while their chips fold away.
+    about_key: Option<SharedString>,
+    about_pull: Option<crate::session_link::PullRequest>,
     follow: Follow,
     layout: Layout,
     /// The session's state, as the shell's tree draws it.
@@ -514,6 +534,10 @@ impl SessionPage {
             _run_drawer,
             _reply,
             opened,
+            subject: None,
+            subject_shown: None,
+            about_key: None,
+            about_pull: None,
         };
         page.relink();
         page.sync_pending(cx);
@@ -1015,6 +1039,160 @@ impl SessionPage {
         };
         let session = self.opened.id.clone();
         self.perform(Command::Detach { session, from }, cx);
+    }
+
+    pub fn subject(&self) -> Option<&crate::model::Subject> {
+        self.subject.as_ref()
+    }
+
+    pub fn set_subject(&mut self, subject: Option<crate::model::Subject>, cx: &mut Context<Self>) {
+        if self.subject != subject {
+            if let Some(subject) = &subject {
+                self.subject_shown = Some(subject.clone());
+                if let Some(key) = ticket_key(subject) {
+                    self.about_key = Some(key);
+                }
+                if let Some(pull) = &subject.pull {
+                    self.about_pull = Some(pull.clone());
+                }
+            }
+            self.subject = subject;
+            cx.notify();
+        }
+    }
+
+    /// Under the header: the chips of what the session is about, its ticket and its pull request
+    /// with its checks, then where that comes from, faint. It unfolds as a subject comes and
+    /// folds away as it goes; each chip fades in and unfolds as it comes, with the gap after it,
+    /// and folds away as it goes; its key, its mark and its words fade as they change.
+    fn about_line(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let present = self.subject.as_ref().map(|subject| {
+            SharedString::from(format!(
+                "{} {}",
+                subject.from,
+                subject.last.clone().unwrap_or_default()
+            ))
+        });
+        let has_key = self.subject.as_ref().and_then(ticket_key).is_some();
+        let has_pull = self.subject.as_ref().is_some_and(|s| s.pull.is_some());
+        let key_t = fade("session-about-ticket-fade", has_key, PANEL, window, cx);
+        let pull_t = fade("session-about-pull-fade", has_pull, PANEL, window, cx);
+        let has_mark = has_pull
+            && self
+                .subject
+                .as_ref()
+                .and_then(|s| s.pull.as_ref())
+                .is_some_and(|pull| pull.mark.is_some());
+        let mark_t = fade(
+            "session-about-pull-checks-fade",
+            has_mark,
+            PANEL,
+            window,
+            cx,
+        );
+        // Drawn while it is there or still folding away; from 0 as it comes.
+        let key = self.about_key.clone().filter(|_| has_key || key_t > 0.0);
+        let pull = self.about_pull.clone().filter(|_| has_pull || pull_t > 0.0);
+        // Built on every frame, a subject or none: the line unfolds when the first one comes.
+        let shown = self.subject_shown.clone();
+        presence_of("session-about-line", present, move |_| {
+            let Some(subject) = shown else {
+                return div().into_any_element();
+            };
+            let from = subject.from.clone();
+            let said = match &subject.last {
+                Some(last) => format!("What it is about, from {from}: {last}."),
+                None => format!("What it is about, from {from}."),
+            };
+            // A chip as wide and as opaque as it is shown, the gap after it with it.
+            let unfolding = |t: f32, chip: AnyElement| {
+                div()
+                    .flex_none()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .max_w(px(ABOUT_CHIP_WIDTH * t))
+                    .mr(space::SM * t)
+                    .opacity(t)
+                    .child(chip)
+                    .into_any_element()
+            };
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .px(space::XL)
+                .py(space::SM)
+                .border_b_1()
+                .border_color(p.line)
+                .children(key.map(|key| {
+                    unfolding(
+                        key_t,
+                        gpui_design_system::Tag::new("session-about-ticket", key)
+                            .into_any_element(),
+                    )
+                }))
+                .children(pull.map(|pull| {
+                    let (mark, ink) = match pull.mark.as_deref() {
+                        Some("passing") => (Some(Icon::Check), p.ok),
+                        Some("failing") => (Some(Icon::Close), p.fail),
+                        Some(_) => (Some(Icon::Running), p.run),
+                        None => (None, p.faint),
+                    };
+                    let checks = SharedString::from(pull.mark.clone().unwrap_or_default());
+                    let chip = div()
+                        .id("session-about-pull")
+                        .flex()
+                        .items_center()
+                        .aria_label(SharedString::from(format!("#{}", pull.number)))
+                        .child(gpui_design_system::Tag::new(
+                            "session-about-pull-key",
+                            format!("#{}", pull.number),
+                        ))
+                        // The mark's room and the gap before it widen as the checks come.
+                        .child(
+                            div()
+                                .flex_none()
+                                .overflow_hidden()
+                                .max_w(px(11. * mark_t))
+                                .ml(space::XS * mark_t)
+                                .opacity(mark_t)
+                                .child(changing(
+                                    "session-about-pull-checks-change",
+                                    checks,
+                                    move |checks| match mark {
+                                        Some(mark) => div()
+                                            .id("session-about-pull-checks")
+                                            .aria_label(checks)
+                                            .child(icon(mark).size(px(11.)).text_color(ink))
+                                            .test_support()
+                                            .into_any_element(),
+                                        None => div().into_any_element(),
+                                    },
+                                )),
+                        )
+                        .test_support()
+                        .into_any_element();
+                    unfolding(pull_t, chip)
+                }))
+                .child(changing(
+                    "session-about-from",
+                    SharedString::from(said),
+                    move |said| {
+                        div()
+                            .id("session-about-from-words")
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(p.faint)
+                            .aria_label(said.clone())
+                            .child(said)
+                            .test_support()
+                            .into_any_element()
+                    },
+                ))
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -2483,6 +2661,7 @@ impl Render for SessionPage {
             .flex_col()
             .child(self.room.watch(crate::ask_dock::Part::Column))
             .child(self.section(0, header))
+            .child(self.section(1, self.about_line(window, cx)))
             // The conversation gives up its room to the dock first, down to what it keeps: past
             // that the questions of the card scroll.
             .child(
