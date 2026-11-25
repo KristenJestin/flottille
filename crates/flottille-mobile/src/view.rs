@@ -470,6 +470,16 @@ impl View {
                 },
             );
         }
+        // A request decided while the link was down never sends its event: what the fresh list no
+        // longer holds leaves, this machine's only.
+        let held: Vec<u64> = requests["requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|request| request["number"].as_u64())
+            .collect();
+        self.requests
+            .retain(|(of, number), _| of != machine || held.contains(number));
         for request in requests["requests"].as_array().into_iter().flatten() {
             self.requested(machine, request);
         }
