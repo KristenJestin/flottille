@@ -295,48 +295,65 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     };
     {
         let daemon = daemon.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(agents) = daemon.read(|store| store.agents()) {
-                for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
-                    refresh(&daemon, agent);
-                }
-            }
-        })
-        .await;
+        let _ = tokio::task::spawn_blocking(move || every_live(&daemon, |_| true)).await;
     }
     loop {
-        let event = tokio::select! {
+        // A lagged bus dropped events it cannot say: every live session is refreshed.
+        let (first, mut lagged) = tokio::select! {
             received = live.recv() => match received {
-                Ok(event) => event,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Ok(event) => (Some(event), false),
+                Err(broadcast::error::RecvError::Lagged(_)) => (None, true),
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; } => return,
         };
-        if !concerns(&event) {
+        if first.as_ref().is_some_and(|event| !concerns(event)) {
             continue;
         }
         // The rest of the burst, gathered: its sessions are refreshed once for all of it.
         tokio::time::sleep(BURST).await;
-        let mut burst = vec![event];
+        let mut burst: Vec<_> = first.into_iter().collect();
         loop {
             match live.try_recv() {
                 Ok(event) if concerns(&event) => burst.push(event),
-                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Lagged(_)) => lagged = true,
                 Err(_) => break,
             }
         }
         let daemon = daemon.clone();
-        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &burst, false)).await;
+        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &burst, lagged)).await;
     }
 }
 
-/// Whether `event` can change a subject: a ticket or a pull request of the items, a ticket linked
-/// to a workspace, a session created or moved.
+/// Refreshes, each once, the live sessions of `project`: after a first round of its items, which
+/// stores them and tells no event of them.
+pub fn project_read(daemon: &Daemon, project: &str) {
+    every_live(daemon, |agent| agent.project == project);
+}
+
+/// Refreshes each live session `which` keeps; how many that was.
+fn every_live(daemon: &Daemon, which: impl Fn(&Agent) -> bool) -> usize {
+    let Ok(agents) = daemon.read(|store| store.agents()) else {
+        return 0;
+    };
+    let mut refreshed = 0;
+    for agent in agents
+        .iter()
+        .filter(|agent| !agent.state.is_final() && which(agent))
+    {
+        refresh(daemon, agent);
+        refreshed += 1;
+    }
+    refreshed
+}
+
+/// Whether `event` can change a subject: a ticket or a pull request of the items, those of a
+/// source forgotten, a ticket linked to a workspace, a session created or moved.
 fn concerns(event: &flottille_core::protocol::Event) -> bool {
     match event.name.as_str() {
         "workspace.ticket" | "agent.created" | "agent.moved" => true,
-        name if name.starts_with("item.") => {
+        name if name.starts_with("item.") || name == "items.forgotten" => {
             matches!(event.data["kind"].as_str(), Some("ticket" | "pull"))
         }
         _ => false,
@@ -344,8 +361,12 @@ fn concerns(event: &flottille_core::protocol::Event) -> bool {
 }
 
 /// Refreshes, each once, the live sessions `events` can concern: those of the projects they
-/// are of, and the sessions they name; how many refreshes that took.
-fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event], _lagged: bool) -> usize {
+/// are of, and the sessions they name, or every one when the bus `lagged`; how many refreshes
+/// that took.
+fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event], lagged: bool) -> usize {
+    if lagged {
+        return every_live(daemon, |_| true);
+    }
     let mut projects = std::collections::BTreeSet::new();
     let mut named = std::collections::BTreeSet::new();
     for event in events.iter().filter(|event| concerns(event)) {
@@ -360,17 +381,9 @@ fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event], _lagged: 
     if projects.is_empty() && named.is_empty() {
         return 0;
     }
-    let Ok(agents) = daemon.read(|store| store.agents()) else {
-        return 0;
-    };
-    let mut refreshed = 0;
-    for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
-        if named.contains(&agent.id) || projects.contains(&agent.project) {
-            refresh(daemon, agent);
-            refreshed += 1;
-        }
-    }
-    refreshed
+    every_live(daemon, |agent| {
+        named.contains(&agent.id) || projects.contains(&agent.project)
+    })
 }
 
 #[cfg(test)]
