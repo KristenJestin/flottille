@@ -1481,7 +1481,9 @@ As built (#818):
   and question as a card answered in place (Allow and Deny on the card, the whole call in sight).
   **Sessions**: the window's sidebar, each machine, its projects folded or not, their sessions in one
   list newest first (#1441: a session that reports never moves), led sessions indented under their
-  pilot; the state is the row's mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
+  pilot; the state is the row's mark, so rows never jump between groups. A row says what its session
+  is about, as the window's does (`design.md` §10): the key, then the title, `Free · nothing in hand`
+  faint, and a title the user gave first with the key under it (#1488). **Machines**: their state, their agents, their slots.
   The app opens on Needs you; a notification opens its session.
 - **The connection to the hub lives in a foreground service**, as long as the device is paired: the
   same session every device keeps, which carries the links (#1151). Android requires its permanent
@@ -3189,6 +3191,9 @@ on a real phone, by hand, and reported.
   another project, is a row of its own in its project rather than under that pilot. "Ended" is one
   group pinned below every machine, its rows newest ended first by their last exchange (the view
   has no `ended_at`).
+- **A renamed session's row on the phone gains a line for its key** (#1488): the phone's row has a
+  second line only for a pilot or an ended session, not the window's two, so a renamed session that
+  has a key is one line higher than the others, and that line unfolds.
 
 ## Open questions
 

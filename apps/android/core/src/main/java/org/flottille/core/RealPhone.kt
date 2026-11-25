@@ -165,6 +165,8 @@ internal fun ViewState.toPhoneView(): PhoneView {
                         (it.machine to it.agent) in waiting,
                         created = it.created.toLong(),
                         pilot = it.pilot,
+                        subject = it.subject?.let { said -> Subject(said.key, said.line, free = said.kind == "free") },
+                        renamed = it.renamed,
                     )
                 },
             )

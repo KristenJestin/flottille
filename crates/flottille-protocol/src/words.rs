@@ -89,6 +89,20 @@ pub fn judged(by: &str, verdict: &str, reason: &str) -> String {
     }
 }
 
+/// What a free session's row says on its first line.
+pub const FREE: &str = "Free · nothing in hand";
+
+/// The words of a session's first line from its subject (`agent.list`'s `subject`), the same in
+/// the window and on the phone: its title, else its key, else that it holds nothing.
+pub fn subject_line(kind: &str, title: Option<&str>, key: Option<&str>) -> String {
+    match (title, key) {
+        _ if kind == "free" => FREE.to_owned(),
+        (Some(title), _) if !title.is_empty() => title.to_owned(),
+        (_, Some(key)) => key.to_owned(),
+        _ => FREE.to_owned(),
+    }
+}
+
 /// The line that says what woke the agent, from the text of a `subscription` delivery
 /// (`subscriptions.rs` of the daemon), the same in the window and on the phone: `checks of #12 ended, 1 failed`, `the timer: <why>`.
 pub fn woken_by(body: &str) -> String {
