@@ -819,6 +819,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.moved"
                 // A session's title, from its agent or the user.
                 | "agent.titled"
+                // What a session is about, which its row and its page say.
+                | "agent.updated"
                 // The session's state says "Compacting" from the first to the last of them.
                 | "agent.compacting"
                 | "agent.compacted"

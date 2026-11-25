@@ -293,6 +293,10 @@ pub struct SessionPage {
     machine: Option<String>,
     asks: crate::actions::Actions,
     opened: Opened,
+    /// What the session is about, as the daemon derives it: the line under the header says it.
+    subject: Option<crate::model::Subject>,
+    /// The last subject it said, which stays drawn while its line folds away.
+    subject_shown: Option<crate::model::Subject>,
     follow: Follow,
     layout: Layout,
     /// The session's state, as the shell's tree draws it.
@@ -513,6 +517,8 @@ impl SessionPage {
             _run_drawer,
             _reply,
             opened,
+            subject: None,
+            subject_shown: None,
         };
         page.relink();
         page.sync_pending(cx);
@@ -1009,6 +1015,97 @@ impl SessionPage {
         };
         let session = self.opened.id.clone();
         self.perform(Command::Detach { session, from }, cx);
+    }
+
+    pub fn subject(&self) -> Option<&crate::model::Subject> {
+        self.subject.as_ref()
+    }
+
+    pub fn set_subject(&mut self, subject: Option<crate::model::Subject>, cx: &mut Context<Self>) {
+        if self.subject != subject {
+            if subject.is_some() {
+                self.subject_shown = subject.clone();
+            }
+            self.subject = subject;
+            cx.notify();
+        }
+    }
+
+    /// Under the header: the chips of what the session is about, its ticket and its pull request
+    /// with its checks, then where that comes from, faint. It unfolds as a subject comes and
+    /// folds away as it goes; its chips and words fade as they change.
+    fn about_line(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let present = self.subject.as_ref().map(|subject| {
+            SharedString::from(format!(
+                "{} {}",
+                subject.from,
+                subject.last.clone().unwrap_or_default()
+            ))
+        });
+        // Built on every frame, a subject or none: the line unfolds when the first one comes.
+        let shown = self.subject_shown.clone();
+        presence_of("session-about-line", present, move |_| {
+            let Some(subject) = shown else {
+                return div().into_any_element();
+            };
+            let from = subject.from.clone();
+            let key = subject.key.clone().filter(|_| subject.kind == "ticket");
+            let said = match &subject.last {
+                Some(last) => format!("What it is about, from {from}: {last}."),
+                None => format!("What it is about, from {from}."),
+            };
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(space::SM)
+                .px(space::XL)
+                .py(space::SM)
+                .border_b_1()
+                .border_color(p.line)
+                .children(key.map(|key| {
+                    gpui_design_system::Tag::new("session-about-ticket", key).into_any_element()
+                }))
+                .children(subject.pull.map(|pull| {
+                    let (mark, ink) = match pull.mark.as_deref() {
+                        Some("passing") => (Some(Icon::Check), p.ok),
+                        Some("failing") => (Some(Icon::Close), p.fail),
+                        Some(_) => (Some(Icon::Running), p.run),
+                        None => (None, p.faint),
+                    };
+                    div()
+                        .id("session-about-pull")
+                        .flex()
+                        .items_center()
+                        .gap(space::XS)
+                        .aria_label(SharedString::from(format!("#{}", pull.number)))
+                        .child(gpui_design_system::Tag::new(
+                            "session-about-pull-key",
+                            format!("#{}", pull.number),
+                        ))
+                        .children(mark.map(|mark| icon(mark).size(px(11.)).text_color(ink)))
+                        .test_support()
+                        .into_any_element()
+                }))
+                .child(changing(
+                    "session-about-from",
+                    SharedString::from(said),
+                    move |said| {
+                        div()
+                            .id("session-about-from-words")
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(p.faint)
+                            .aria_label(said.clone())
+                            .child(said)
+                            .test_support()
+                            .into_any_element()
+                    },
+                ))
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -2449,6 +2546,7 @@ impl Render for SessionPage {
             .flex_col()
             .child(self.room.watch(crate::ask_dock::Part::Column))
             .child(self.section(0, header))
+            .child(self.section(1, self.about_line(cx)))
             // The conversation gives up its room to the dock first, down to what it keeps: past
             // that the questions of the card scroll.
             .child(

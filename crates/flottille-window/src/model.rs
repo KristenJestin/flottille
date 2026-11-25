@@ -455,6 +455,65 @@ pub struct Session {
     /// Its root is a child an agent of another machine launched here, that agent by name
     /// (`agent b1 of pc`): only that agent writes to it, never the user.
     pub child_of: Option<String>,
+    /// What it is about, as the daemon derives it: `None` while it held nothing.
+    pub subject: Option<Subject>,
+    /// The user named it (Rename…): its title stays on its row's first line.
+    pub renamed: bool,
+}
+
+/// What a session is about (`docs/design.md` §10, "What a session is about"), as `agent.list`
+/// gives it: a ticket, a pull request, or nothing in hand any more.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Subject {
+    /// `ticket`, `pull_request` or `free`.
+    pub kind: String,
+    /// `SHOP-60`, `#5`, `#12`; `None` when free.
+    pub key: Option<String>,
+    pub title: Option<String>,
+    /// Where it comes from, in a few words: `the workspace's linked ticket`.
+    pub from: String,
+    /// What a free session last held: `SHOP-60 done · #117 merged`.
+    pub last: Option<String>,
+    /// Its pull request, the one it opened or its branch's.
+    pub pull: Option<crate::session_link::PullRequest>,
+}
+
+/// What a free session's row says on its first line.
+pub const FREE: &str = "Free · nothing in hand";
+
+impl Subject {
+    pub fn of(subject: &Value) -> Option<Subject> {
+        let kind = subject["kind"].as_str()?.to_owned();
+        let said = |field: &str| subject[field].as_str().map(str::to_owned);
+        let pull = &subject["pull_request"];
+        Some(Subject {
+            kind,
+            key: said("key"),
+            title: said("title"),
+            from: said("from").unwrap_or_default(),
+            last: said("last"),
+            pull: pull["key"]
+                .as_str()
+                .and_then(|key| key.trim_start_matches('#').parse().ok())
+                .map(|number| crate::session_link::PullRequest {
+                    repository: pull["repository"].as_str().unwrap_or_default().to_owned(),
+                    number,
+                    state: pull["state"].as_str().unwrap_or_default().to_owned(),
+                    mark: pull["checks"].as_str().map(str::to_owned),
+                    url: pull["url"].as_str().unwrap_or_default().to_owned(),
+                }),
+        })
+    }
+
+    /// The words of its row's first line: its title, else its key, else that it holds nothing.
+    pub fn line(&self) -> String {
+        match (&self.title, &self.key) {
+            _ if self.kind == "free" => FREE.to_owned(),
+            (Some(title), _) if !title.is_empty() => title.clone(),
+            (_, Some(key)) => key.clone(),
+            _ => FREE.to_owned(),
+        }
+    }
 }
 
 /// A session on another machine, as its row under its pilot shows it.
@@ -1219,6 +1278,8 @@ impl Snapshot {
                     elsewhere: None,
                     tag: None,
                     child_of: child_of(agent),
+                    subject: Subject::of(&agent["subject"]),
+                    renamed: agent["titled_by"] == "user",
                     id,
                 }
             })
@@ -1402,6 +1463,7 @@ impl Snapshot {
                 }),
                 tag: Some(machine.to_owned()),
                 child_of: None,
+                subject: None,
                 ..session.clone()
             })
             .collect()
@@ -1479,6 +1541,8 @@ impl Snapshot {
                 }),
                 tag: None,
                 child_of: None,
+                subject: None,
+                renamed: false,
             });
         }
         self.elsewhere = added;
@@ -1611,6 +1675,8 @@ impl Snapshot {
                     }),
                     tag: machine.map(str::to_owned),
                     child_of: None,
+                    subject: None,
+                    renamed: false,
                 });
                 if !self
                     .projects

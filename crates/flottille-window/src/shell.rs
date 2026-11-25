@@ -2820,14 +2820,21 @@ impl Shell {
         };
         // A session of another machine is known here by its row: its id there is its page's.
         let agent = self.agent_of(id);
+        let subject = self.snapshot.session(id).and_then(|s| s.subject.clone());
         if let Some(open) = self.session_page.clone()
             && open.read(cx).id() == agent
         {
+            if open.read(cx).subject() != subject.as_ref() {
+                open.update(cx, |open, cx| open.set_subject(subject, cx));
+            }
             open.update(cx, |open, cx| open.set_title(title, cx));
             return Some(open);
         }
         // Shown before, it followed its session meanwhile: it is shown at once.
         if let Some(kept) = self.kept_pages.get(id).cloned() {
+            if kept.read(cx).subject() != subject.as_ref() {
+                kept.update(cx, |kept, cx| kept.set_subject(subject, cx));
+            }
             kept.update(cx, |kept, cx| kept.set_title(title, cx));
             self.chose_on(&kept, id, cx);
             self.session_page = Some(kept.clone());
@@ -2925,7 +2932,10 @@ impl Shell {
             SessionPage::new(this, opened, status, reply, dock, follow, asked, layout, cx)
         });
         let providers = self.providers.clone();
-        page.update(cx, |page, cx| page.set_providers(&providers, cx));
+        page.update(cx, |page, cx| {
+            page.set_providers(&providers, cx);
+            page.set_subject(subject, cx);
+        });
         self.chose_on(&page, id, cx);
         self.session_page = Some(page.clone());
         // Another machine's, it enters staggered, as a page that shows up, and it is kept,
@@ -5403,16 +5413,24 @@ impl Shell {
             let Some(row) = self.sessions.get(&session.id) else {
                 continue;
             };
-            let pull = self.pull_of(session, &session.place);
-            if row.read(cx).pull() != pull {
-                row.update(cx, |row, cx| row.set_pull(pull, cx));
+            let pull = self.pull_of(session, &session.place).cloned();
+            if row.read(cx).pull() != pull.as_ref() {
+                row.update(cx, |row, cx| row.set_pull(pull.as_ref(), cx));
             }
         }
     }
 
-    /// The pull request of the place a session works in, when the window has read it.
-    /// A session of another machine's list says its own machine's.
-    fn pull_of(&self, session: &crate::model::Session, place: &Place) -> Option<&PullRequest> {
+    /// The pull request of a session: the daemon's, with what it is about, else the one of the
+    /// place it works in, when a project page read it. A session of another machine's list says
+    /// its own machine's.
+    fn pull_of<'a>(
+        &'a self,
+        session: &'a crate::model::Session,
+        place: &Place,
+    ) -> Option<&'a PullRequest> {
+        if let Some(pull) = session.subject.as_ref().and_then(|s| s.pull.as_ref()) {
+            return Some(pull);
+        }
         let workspace = place.as_ref()?;
         let machine = session
             .elsewhere
@@ -5472,6 +5490,14 @@ impl Shell {
             let held = self.draft_held(&session.id, cx);
             if row.read(cx).draft() != held {
                 row.update(cx, |row, cx| row.set_draft(held, cx));
+            }
+            if !row
+                .read(cx)
+                .holds_subject(session.subject.as_ref(), session.renamed)
+            {
+                row.update(cx, |row, cx| {
+                    row.set_subject(session.subject.as_ref(), session.renamed, cx)
+                });
             }
             // Ended, it sits among other projects' sessions: its row says whose it is, and the
             // machine of one of another machine (#1280).
@@ -5829,6 +5855,14 @@ impl Shell {
         {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
+        }
+        // What the open session is about changed: its page says it.
+        if let Some(page) = self.session_page.clone()
+            && let Some(found) = self.snapshot.session(page.read(cx).id())
+            && page.read(cx).subject() != found.subject.as_ref()
+        {
+            let subject = found.subject.clone();
+            page.update(cx, |page, cx| page.set_subject(subject, cx));
         }
         // The sessions on other machines are found there, not here: they are not in `sessions`.
         let read = self.snapshot.clone();
