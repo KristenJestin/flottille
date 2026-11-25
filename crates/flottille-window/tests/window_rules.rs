@@ -844,3 +844,108 @@ fn creating_buttons_say_new() {
         found.join("\n")
     );
 }
+
+/// What opens a form of the vault, by the name of the section's function that calls `fill`. Each
+/// one is reached by the places named; `fill` says whether the entry exists: a form for an entry
+/// that exists says Edit, keeps its secret left empty and shows no error for it (#961, #1308). A
+/// new opener is added here on purpose, with that rule in mind, and never writes through its own
+/// path.
+const VAULT_FORM_OPENERS: [(&str, &str); 4] = [
+    ("add", "Settings → Vault, New entry"),
+    (
+        "add_prefilled",
+        "a project's Tracker or Vault tab, New entry; an agent's request, New entry; a \
+         connection request's New entry…",
+    ),
+    ("edit_proposed", "an agent's proposed edit, Edit"),
+    (
+        "replace",
+        "a row of Settings → Vault or of a project's Vault tab; a connection review's Edit entry",
+    ),
+];
+
+/// The functions of `source` (name and body) whose body holds `needle`.
+fn functions_holding(source: &str, needle: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current: Option<(String, bool)> = None;
+    for line in source.lines() {
+        let code = line.trim_start();
+        if (code.starts_with("pub fn ") || code.starts_with("fn ")) && line.len() - code.len() <= 4
+        {
+            if let Some((name, true)) = current.take() {
+                found.push(name);
+            }
+            let name = code
+                .trim_start_matches("pub ")
+                .trim_start_matches("fn ")
+                .split(['(', '<'])
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            current = Some((name, false));
+        } else if let Some((_, holds)) = current.as_mut()
+            && !code.starts_with("//")
+            && code.contains(needle)
+        {
+            *holds = true;
+        }
+    }
+    if let Some((name, true)) = current {
+        found.push(name);
+    }
+    found
+}
+
+#[test]
+fn a_function_that_holds_a_text_is_found() {
+    let source = "impl A {\n    pub fn one(&mut self) {\n        self.fill(a);\n    }\n    \
+                  fn two(&self) {\n        // self.fill(b);\n    }\n    fn three(&self) {\n        self.fill(c);\n    }\n}";
+    assert_eq!(functions_holding(source, "self.fill("), ["one", "three"]);
+}
+
+#[test]
+fn every_form_of_the_window_that_writes_a_vault_entry_is_listed() {
+    let files = window();
+    let of = |name: &str| {
+        files
+            .iter()
+            .find(|(file, _)| file.ends_with(name))
+            .unwrap_or_else(|| panic!("{name} is a source of the window"))
+    };
+    // One form writes an entry: the section's Save builds the write, the actions send it.
+    let mut writers: Vec<_> = files
+        .iter()
+        .filter(|(_, text)| code(text).any(|(_, line)| line.contains("VaultWrite::Set {")))
+        .map(|(file, _)| file.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    writers.sort();
+    assert_eq!(
+        writers,
+        ["actions.rs", "vault.rs"],
+        "an entry is written by the vault's one form (`VaultSection::save`), sent by the \
+         actions; another place that builds `VaultWrite::Set` has a form of its own, whose rule \
+         for an empty secret is its own: {writers:?}"
+    );
+    let (_, vault) = of("vault.rs");
+    assert_eq!(
+        functions_holding(vault, "VaultWrite::Set {"),
+        ["save"],
+        "only Save builds the write of an entry"
+    );
+    // Every way to open the form goes through `fill`, which says whether the entry exists.
+    let mut openers = functions_holding(vault, "self.fill(");
+    openers.sort();
+    let mut listed: Vec<_> = VAULT_FORM_OPENERS.iter().map(|(name, _)| *name).collect();
+    listed.sort();
+    assert_eq!(
+        openers, listed,
+        "a form of the vault opens through `fill` and is listed in VAULT_FORM_OPENERS: for an \
+         entry that exists it says Edit, keeps the secret left empty, and asks no secret"
+    );
+    // Whether the form is an edit is decided in one place, never by an opener.
+    assert_eq!(
+        functions_holding(vault, "self.form = Form::Editing("),
+        ["fill"],
+        "`fill` alone decides if the form edits an entry that exists"
+    );
+}
