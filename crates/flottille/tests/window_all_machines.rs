@@ -23,7 +23,7 @@ use flottille_window::Shell;
 use flottille_window::about::{AboutEditor, SHARED_LINE, USE_ALL};
 use flottille_window::link::Sign;
 use flottille_window::settings::MACHINE_ONLY_LINE;
-use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 use serde_json::{Value, json};
 

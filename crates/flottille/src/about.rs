@@ -200,8 +200,11 @@ struct Set {
     notes: Option<String>,
 }
 
+/// The name, how to refer to the user and the notes given, each left out or not.
+type Given = (Option<String>, Option<String>, Option<String>);
+
 /// The fields of a `Set`, trimmed where they are one line, once each passes its limits.
-fn checked(set: Set) -> Result<(Option<String>, Option<String>, Option<String>), Failure> {
+fn checked(set: Set) -> Result<Given, Failure> {
     let Set {
         name,
         pronouns,
