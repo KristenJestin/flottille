@@ -1037,11 +1037,6 @@ fn a_following_says_what_its_session_waits_for_you_and_folds_it_away_once_answer
     );
 }
 
-/// A call of the tool `tool` with `arguments`, in a turn of the fake agent.
-fn call(tool: &str, arguments: Value) -> Value {
-    json!({"mcp": {"tool": tool, "arguments": arguments}})
-}
-
 /// A session of `kind` titled `title` that the agent of `mcp` starts: its id and MCP session.
 fn launch(user: &User, mcp: &Mcp, title: &str, brief: &str, kind: &str) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
@@ -1080,8 +1075,7 @@ fn a_child_asks_below_a_followed_session<'a>(
 ) {
     script(user, pull());
     user.fake_script(json!({"turns": [
-        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
-            {"say": "Waiting for my parent."}]},
+        {"when": "Read the env.", "do": [{"say": "Waiting for my parent."}]},
         {"when": "Fix the login.", "do": [{"say": "Ready."}]}
     ]}));
     let (lead, mcp) = lead(user);
@@ -1102,21 +1096,20 @@ fn a_child_asks_below_a_followed_session<'a>(
     assert!(rows(&page, cx)[0].waits.is_empty());
     assert!(!present(cx, &format!("subscription-waits-{id}")));
 
-    let (child, _) = launch(user, &second, "Reader", "Read the env.", "child");
-    let number = std::cell::Cell::new(0);
-    eventually("the child's call held by its parent", || {
-        let listed = user
-            .call("approval.list", json!({"tree": session}))
-            .unwrap();
-        listed["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|request| request["agent"] == child.as_str())
-            .map(|request| number.set(request["number"].as_u64().unwrap()))
-            .is_some()
-    });
-    let number = number.get();
+    let (child, worker) = launch(user, &second, "Reader", "Read the env.", "child");
+    // Its call is held by its parent, which passes it up: it is the user's now.
+    let held = worker.call("fs_read", json!({"path": ".env"}));
+    assert!(!held.error, "{}", held.text);
+    let number: u64 = held
+        .text
+        .split_once("request #")
+        .unwrap_or_else(|| panic!("not held: {}", held.text))
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap();
     let forwarded = second.call(
         "approval_answer",
         json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
