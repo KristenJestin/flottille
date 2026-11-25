@@ -5611,7 +5611,7 @@ impl Shell {
                 now,
                 cx,
             );
-            let rows = nested(&live, &rows, &crate::leads::summaries_of(&snapshot), cx);
+            let rows = nested(&live, &rows, &crate::leads::summaries_of(snapshot), cx);
             let key = (gone.name.clone(), machine.map(str::to_owned));
             let node = self.gone.remove(&key).unwrap_or_else(|| {
                 let this = this.clone();
