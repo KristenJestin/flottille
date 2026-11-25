@@ -1065,7 +1065,7 @@ impl RoutinesTab {
         let mut column = stack(space::MD);
         let mut at = 0;
         for (n, (group, items)) in run.sections().into_iter().enumerate() {
-            let mut rows = div().w_full().flex().flex_col().gap(px(2.));
+            let mut rows = div().w_full().flex().flex_col().gap(space::XS);
             let count = items.len();
             for item in items {
                 rows = rows.child(self.item_row(run.id, item, at, cx));
