@@ -1380,9 +1380,10 @@ impl Excepted {
 
     /// Whether the pull request the exception is for is, at `head` and blocked by `blocks`, what
     /// the user read on the card: a commit pushed or a blocker come since are not covered.
+    /// A head neither side knows covers nothing: it would cover any commit.
     fn as_read(&self, head: Option<&str>, blocks: Option<&str>) -> bool {
-        matches!(self, Excepted::Holds(scope)
-            if scope.head.as_deref() == head && scope.blocks.as_deref() == blocks)
+        matches!((self, head), (Excepted::Holds(scope), Some(head))
+            if scope.head.as_deref() == Some(head) && scope.blocks.as_deref() == blocks)
     }
 
     /// The refusal of a merge of the pull request the exception was for, which changed since the
@@ -1399,7 +1400,10 @@ impl Excepted {
             });
         let then = scope.blocks.as_deref().unwrap_or("nothing");
         format!(
-            "refused: the pull request #{number} of {branch} in {slug} is not merged: {blocks};              the session's exception covers it as the user read it, at {head} while {then}, and              it changed since: ask again with exception if it should still be merged past it,              or wait for its checks"
+            "refused: the pull request #{number} of {branch} in {slug} is not merged: {blocks}; \
+             the session's exception covers it as the user read it, at {head} while {then}, and \
+             it changed since: ask again with exception if it should still be merged past it, \
+             or wait for its checks"
         )
     }
 
@@ -3848,6 +3852,9 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
             let number_said = number;
             let number = number.to_string();
             let mut bypass = false;
+            // The head the user read: a commit pushed between that read and the merge is not
+            // merged past the protection.
+            let mut bound: Option<String> = None;
             if asked.waive.is_none() || held || reading {
                 let viewed =
                     match gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS]).await {
@@ -3878,6 +3885,9 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
                 let covered = held && asked.excepted.as_read(head.as_deref(), blocked.as_deref());
                 // Bypassed only where a block refuses it: a merge nothing blocks is a plain one.
                 bypass = covered && blocked.is_some();
+                if bypass {
+                    bound = head;
+                }
                 if let Some(blocks) = &blocked
                     && held
                     && !covered
@@ -3919,6 +3929,9 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
             // What the user could do by hand on the forge, they let this session do.
             if bypass {
                 args.push("--admin");
+            }
+            if let Some(head) = &bound {
+                args.extend(["--match-head-commit", head]);
             }
             let message = asked.message.as_deref().map(squash_message);
             if let Some((subject, body)) = &message {

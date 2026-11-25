@@ -417,11 +417,19 @@ pub async fn asked(
                     read.number, read.branch, read.slug
                 ));
             };
+            // With no head, a commit pushed after the user's yes could not be told apart.
+            let Some(head) = &read.head else {
+                return refused(format!(
+                    "refused: the head commit of the pull request #{} of {} in {} could not be \
+                     read, so no exception can be bound to it: ask again once the forge says it",
+                    read.number, read.branch, read.slug
+                ));
+            };
             let scope = Scope {
                 repository: read.repository.clone(),
                 branch: read.branch.clone(),
                 pull: Some(read.number),
-                head: read.head.clone(),
+                head: Some(head.clone()),
                 blocks: Some(blocks.clone()),
             };
             if held(daemon, &grant.agent, rule).is_some_and(|held| held.scope == scope) {
@@ -432,9 +440,7 @@ pub async fn asked(
                 true => "its branch protection bypassed (gh pr merge --admin)",
                 false => "Flottille's refusal lifted; Bitbucket's own merge checks still answer",
             };
-            let at = read.head.as_deref().map_or(String::new(), |head| {
-                format!(" at {}", head.chars().take(7).collect::<String>())
-            });
+            let at = format!(" at {}", head.chars().take(7).collect::<String>());
             let exact = format!(
                 "merge the pull request #{} of {}{at} into {} in {} (repository {}) although \
                  {blocks}, {bypass}; a commit pushed or a blocker come since asks again",
