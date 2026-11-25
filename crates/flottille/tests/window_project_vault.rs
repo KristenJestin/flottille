@@ -456,3 +456,50 @@ fn editing_an_entry_that_is_gone_comes_back_to_the_tab(cx: &mut TestAppContext) 
     );
     assert!(!shown("project-vault-jira", cx), "the entry is gone");
 }
+
+#[gpui_kit::test]
+fn a_project_s_vault_row_keeps_the_secret_left_empty(cx: &mut TestAppContext) {
+    let user = User::new();
+    project(&user, "atlas");
+    entry(&user, "own", Some("atlas"));
+    entry(&user, "shared", None);
+    let (shell, cx) = window(&user, cx);
+    open_vault_tab(&shell, "atlas", cx);
+    until(&shell, cx, "the entries are listed", |cx| {
+        shown("project-vault-own", cx) && shown("project-vault-shared", cx)
+    });
+    settle(cx);
+    let section = vault_section(&shell, cx);
+    for (name, description) in [("own", "Own token"), ("shared", "Shared token")] {
+        click(&format!("project-vault-{name}"), cx);
+        settle(cx);
+        assert_eq!(
+            section.read_with(cx, |s, _| s.form_title()),
+            Some(format!("Edit {name}"))
+        );
+        assert_eq!(
+            label_of("vault-secret-field-hint", cx).as_deref(),
+            Some("Leave empty to keep the current secret")
+        );
+        let field = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+        cx.update(|window, cx| field.update(cx, |f, cx| f.set_value(description, window, cx)));
+        click("save-vault-entry", cx);
+        assert_eq!(
+            section.read_with(cx, |s, _| s.form_error().map(str::to_owned)),
+            None,
+            "an empty secret on an entry that exists is no error"
+        );
+        until(&shell, cx, "the entry is saved", |cx| {
+            let entries = user.call("vault.list", json!({})).unwrap()["entries"].clone();
+            entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["name"] == name && e["description"] == description)
+                && !section.read_with(cx, |s, _| s.is_open())
+        });
+        settle(cx);
+    }
+    let entries = user.call("vault.list", json!({})).unwrap()["entries"].clone();
+    assert_eq!(entries.as_array().unwrap().len(), 2);
+}
