@@ -391,7 +391,7 @@ const LEFT: &str = "the page left goes at once as the page opened enters";
 /// Found by the gate on the session page, to be fixed in the window (each has its follow-up).
 const SESSION_OPENS_AT_ONCE: &str = "a defect the gate found, to fix: the session page's header and composer show at once, with no entrance";
 const NOTHING_SAID_FLASHES: &str = "a defect the gate found, to fix: `Nothing said yet.` shows for a few frames, then is swapped for the conversation with no presence";
-const FORGES_LATE: &str = "a defect the gate found, to fix: when the forges are read after the settings page entered, their section takes its new height in one frame";
+const SECTIONS_LATE: &str = "a defect the gate found, to fix: a section of the settings page whose read lands after the page entered (the forges, the providers) takes its new height in one frame, and the sections below it jump";
 const SESSION_SETTLES_LATE: &str = "a defect the gate found, to fix: the session page's rail and composer move once, in one frame, as its conversation arrives";
 
 /// What the gate allows on the window's pages, each with its reason.
@@ -399,8 +399,8 @@ const PAGES: &[Allow] = &[
     Allow {
         scenario: "settings",
         kind: Kind::Jump,
-        element: "enter-settings-forges",
-        why: FORGES_LATE,
+        element: "settings-page",
+        why: SECTIONS_LATE,
         racy: true,
     },
     Allow {
