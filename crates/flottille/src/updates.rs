@@ -70,21 +70,43 @@ struct State {
     when_idle: bool,
 }
 
-/// `updates.toml`'s `check`: automatically (the default) or never.
+/// The name of the value of all machines that is the check for updates.
+pub const SHARED: &str = "update.check";
+
+/// Whether a value of the check for updates, `automatically` or `never`, checks.
+pub fn shared_check(value: &str) -> Result<bool, String> {
+    match value {
+        "automatically" => Ok(true),
+        "never" => Ok(false),
+        _ => Err("check is \"automatically\" or \"never\"".into()),
+    }
+}
+
+/// What applies here: `updates.toml`'s `check` (`own_check`), else all machines' value, else
+/// automatically.
 pub(crate) fn checks_automatically(paths: &Paths) -> Result<bool, String> {
+    Ok(own_check(paths)?.unwrap_or_else(|| {
+        flottille_core::all_machines::value(paths, SHARED)
+            .and_then(|value| shared_check(&value).ok())
+            .unwrap_or(true)
+    }))
+}
+
+/// `updates.toml`'s `check`, none while the file says nothing of it.
+pub(crate) fn own_check(paths: &Paths) -> Result<Option<bool>, String> {
     let file = paths.config.join("updates.toml");
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("updates.toml: {error}")),
     };
     let document: toml_edit::DocumentMut = text
         .parse()
         .map_err(|e: toml_edit::TomlError| format!("updates.toml: {}", e.message()))?;
     match document.get("check").map(|check| check.as_str()) {
-        None => Ok(true),
-        Some(Some("automatically")) => Ok(true),
-        Some(Some("never")) => Ok(false),
+        None => Ok(None),
+        Some(Some("automatically")) => Ok(Some(true)),
+        Some(Some("never")) => Ok(Some(false)),
         Some(_) => Err("updates.toml: check: it is \"automatically\" or \"never\"".into()),
     }
 }
@@ -167,7 +189,23 @@ fn stops(daemon: &Daemon) -> Vec<Value> {
         .collect()
 }
 
-fn changed(daemon: &Daemon) {
+/// Drops this machine's own `check`: all machines' applies again.
+pub(crate) fn forget_check(paths: &Paths) -> Result<(), String> {
+    let file = paths.config.join("updates.toml");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("updates.toml: {error}")),
+    };
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| format!("updates.toml: {}", e.message()))?;
+    document.remove("check");
+    crate::providers::write_in_place(&file, &document.to_string())
+        .map_err(|e| format!("updates.toml: {e}"))
+}
+
+pub(crate) fn changed(daemon: &Daemon) {
     if let Err(error) = daemon.emit("update.changed", shown(daemon)) {
         eprintln!("flottille daemon: update.changed was not stored: {error}");
     }

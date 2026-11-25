@@ -152,6 +152,8 @@ pub struct Settings {
     /// Whether the file says anything of the judge, a judge or `judge = "none"`: Flottille picks
     /// one only while it does not, so that a user who chose none never gets one.
     pub judge_set: bool,
+    /// The judge, or no judge, is all machines' (`all_machines`): this machine chose none.
+    pub judge_from_all: bool,
     /// What a new session starts on (`[new_session]`), when the user chose: none follows what the
     /// provider proposes.
     pub new_session: Option<NewSession>,
@@ -174,6 +176,34 @@ pub struct NewSession {
 
 /// What `judge = "none"` says: the user chose no judge, and Auto asks like Ask.
 pub const NO_JUDGE: &str = "none";
+
+/// The names of the values of all machines these settings read (`all_machines`).
+pub const NEW_SESSION: &str = "new_session";
+pub const JUDGE: &str = "judge";
+
+/// All machines' new session, as its value says it: `{"provider", "model", "effort"}` in JSON.
+pub fn shared_new_session(value: &str) -> Result<NewSession, String> {
+    let chosen: NewSession = serde_json::from_str(value).map_err(|error| error.to_string())?;
+    match known(&chosen.provider) {
+        true => Ok(chosen),
+        false => Err(format!("unknown provider {}", chosen.provider)),
+    }
+}
+
+/// All machines' judge, as its value says it: `none`, or `{"provider", "model"}` in JSON.
+pub fn shared_judge(value: &str) -> Result<Option<Judge>, String> {
+    if value == NO_JUDGE {
+        return Ok(None);
+    }
+    let judge: Judge = serde_json::from_str(value).map_err(|error| error.to_string())?;
+    if judge.picked {
+        return Err("picked is Flottille's to say".to_owned());
+    }
+    match known(&judge.provider) {
+        true => Ok(Some(judge)),
+        false => Err(format!("unknown provider {}", judge.provider)),
+    }
+}
 
 /// The model that judges the calls to judge in Auto (`docs/design.md` §7), as `[judge]` holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -215,6 +245,7 @@ impl Default for Settings {
             unqualified: Vec::new(),
             judge: None,
             judge_set: false,
+            judge_from_all: false,
             new_session: None,
             new_session_mode: GateMode::default(),
         }
@@ -231,13 +262,38 @@ impl Settings {
         self.unqualified.contains(&name)
     }
 
+    /// What this machine runs on: its own `providers.toml` (`own`), under which all machines'
+    /// choice of a new session and of the judge applies while it made none.
+    pub fn load(paths: &Paths) -> Result<Settings, String> {
+        let mut settings = Settings::own(paths)?;
+        settings.follow(&crate::all_machines::all(paths));
+        Ok(settings)
+    }
+
     /// Reads `providers.toml`: the defaults when there is none. The error names the file and
     /// the key at fault.
-    pub fn load(paths: &Paths) -> Result<Settings, String> {
+    pub fn own(paths: &Paths) -> Result<Settings, String> {
         match std::fs::read_to_string(file(paths)) {
             Ok(text) => Settings::parse(&text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
             Err(error) => Err(format!("providers.toml: {error}")),
+        }
+    }
+
+    /// `all` machines' values, where this machine chose nothing: a judge Flottille picked is no
+    /// choice of the user's. A value that cannot be read is none.
+    fn follow(&mut self, all: &BTreeMap<String, String>) {
+        if self.new_session.is_none() {
+            self.new_session = all
+                .get(NEW_SESSION)
+                .and_then(|value| shared_new_session(value).ok());
+        }
+        if (!self.judge_set || self.judge.as_ref().is_some_and(|judge| judge.picked))
+            && let Some(judge) = all.get(JUDGE).and_then(|value| shared_judge(value).ok())
+        {
+            self.judge = judge;
+            self.judge_set = true;
+            self.judge_from_all = true;
         }
     }
 

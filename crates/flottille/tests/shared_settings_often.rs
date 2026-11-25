@@ -315,12 +315,24 @@ fn use_all_machines_value_restores_it() {
     call(&server, "sessions.set", json!({"days": 3, "resume": false}));
     call(&server, "workspaces_folder.set", json!({"place": "beside"}));
     call(&server, "update.set", json!({"check": "automatically"}));
+    // A connection of all machines edited here is this machine's own.
     call(
         &server,
-        "connection.add",
-        json!({"name": "almanac", "about": "My own notes.", "url": "https://notes.invalid/mcp"}),
+        "connection.edit",
+        json!({"name": "almanac", "url": "https://notes.invalid/mcp"}),
     );
+    assert_eq!(
+        connection(&server, "almanac").unwrap()["url"],
+        "https://notes.invalid/mcp"
+    );
+    assert_eq!(connection(&pc, "almanac").unwrap()["url"], ALMANAC);
     let own = shared(&server)["own"].clone();
+    assert!(
+        own.as_array()
+            .unwrap()
+            .contains(&json!("connections.almanac")),
+        "{own}"
+    );
 
     let back = call(&server, "settings.use_all", json!({"names": own}));
 

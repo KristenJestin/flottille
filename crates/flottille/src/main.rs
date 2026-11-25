@@ -9,6 +9,7 @@ mod adf;
 mod agent_command;
 mod agent_folders;
 mod agents;
+mod all_settings;
 mod appearance;
 mod approval_command;
 mod approvals;

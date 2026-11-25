@@ -254,21 +254,30 @@ pub async fn chosen(daemon: &Arc<Daemon>) -> Option<Judge> {
     let daemon = daemon.clone();
     tokio::task::spawn_blocking(move || {
         // A provider installed and signed in since the daemon started.
-        chosen_or(&daemon.paths, || providers::pick_judge(&daemon))
+        chosen_or(
+            &daemon.paths,
+            |judge| providers::lacks(&daemon, &judge.provider, judge.model.as_deref()).is_some(),
+            || providers::pick_judge(&daemon),
+        )
     })
     .await
     .ok()
     .flatten()
 }
 
-/// The judge `providers.toml` says, or the one `pick` picks while it says none. A pick that
-/// picks nothing may have lost to another judgement's, which wrote its own: the file is read
-/// again.
+/// The judge `providers.toml` or all machines say, or the one `pick` picks while they say none. A
+/// pick that picks nothing may have lost to another judgement's, which wrote its own: the file is
+/// read again. All machines' judge this machine `lacked` is ignored here: this machine's own pick
+/// judges.
 fn chosen_or(
     paths: &flottille_core::paths::Paths,
+    lacked: impl FnOnce(&Judge) -> bool,
     pick: impl FnOnce() -> Option<Judge>,
 ) -> Option<Judge> {
-    let settings = Settings::load(paths).ok()?;
+    let mut settings = Settings::load(paths).ok()?;
+    if settings.judge_from_all && settings.judge.as_ref().is_some_and(lacked) {
+        settings = Settings::own(paths).ok()?;
+    }
     if settings.judge_set {
         return settings.judge;
     }
@@ -1346,14 +1355,18 @@ mod tests {
         std::fs::create_dir_all(&paths.config).unwrap();
         let file = flottille_core::provider::file(&paths);
         // Another judgement picks first: this one's pick finds the file already set.
-        let chosen = chosen_or(&paths, || {
-            std::fs::write(
-                &file,
-                "[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\npicked = true\n",
-            )
-            .unwrap();
-            None
-        });
+        let chosen = chosen_or(
+            &paths,
+            |_| false,
+            || {
+                std::fs::write(
+                    &file,
+                    "[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\npicked = true\n",
+                )
+                .unwrap();
+                None
+            },
+        );
         assert_eq!(chosen.map(|judge| judge.provider), Some("claude".into()));
     }
 

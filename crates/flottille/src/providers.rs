@@ -1602,6 +1602,37 @@ fn set_judge(paths: &Paths, judge: Option<&Judge>) -> Result<bool, Failure> {
     })
 }
 
+/// Drops this machine's own `[new_session]`: all machines' applies again.
+pub(crate) fn forget_new_session(paths: &Paths) -> Result<(), Failure> {
+    set_new_session(paths, None).map(drop)
+}
+
+/// Drops this machine's own judge, or its choice of none: all machines' applies again.
+pub(crate) fn forget_judge(paths: &Paths) -> Result<(), Failure> {
+    edit_judge(paths, |_, document| document.remove("judge").is_some()).map(drop)
+}
+
+/// Why this machine cannot run `model` of `provider`, as far as it knows: the provider is not
+/// ready here, or the models it said it offers have none of that name nor of its family.
+pub fn lacks(daemon: &Daemon, provider: &str, model: Option<&str>) -> Option<String> {
+    let settings = Settings::load(&daemon.paths).ok()?;
+    let provider = get(provider)?;
+    let check = Check::of(provider, &settings, Version::Known);
+    if let Some(why) = check.why_not() {
+        return Some(format!("provider {} {why}", provider.name));
+    }
+    let model = model?;
+    let models = known_models(daemon, &Check::of(provider, &settings, Version::Skip))?;
+    let offered = models.iter().filter_map(|m| m["id"].as_str());
+    match provider::resolved_model(offered, model) {
+        Some(_) => None,
+        None => Some(format!(
+            "this machine's {} offers no model {model}",
+            provider.name
+        )),
+    }
+}
+
 /// Sets `[new_session]` in `providers.toml`, or removes it when `chosen` is none: new sessions
 /// follow what the provider proposes again. The rest of the file is kept as the user wrote it.
 /// Whether it changed.
@@ -1710,7 +1741,12 @@ const PICKED: &str = "# Picked by Flottille as the Auto judge: the smallest mode
 /// a judge is picked again.
 pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
     let chose_none = match chose_none(daemon) {
-        Ok(chose_none) => chose_none,
+        // While all machines say a judge, this machine's old "no judge" is not written back: it
+        // would stand over theirs, as when its user chose to use all machines' value.
+        Ok(chose_none) => {
+            chose_none
+                && flottille_core::all_machines::value(&daemon.paths, provider::JUDGE).is_none()
+        }
         Err(error) => {
             unpicked(&error.to_string());
             return None;

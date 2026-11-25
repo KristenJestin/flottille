@@ -16,6 +16,8 @@ pub struct Registry {
     /// once.
     default: PathBuf,
     home: Option<PathBuf>,
+    /// For all machines' folder, which applies while this machine named none.
+    paths: Paths,
 }
 
 /// Every file of the folder, read.
@@ -35,6 +37,7 @@ impl Registry {
             data: paths.data.clone(),
             default: paths.workspaces_place(),
             home: place::home(),
+            paths: paths.clone(),
         }
     }
 
@@ -45,8 +48,14 @@ impl Registry {
         self.place_read().unwrap_or_default()
     }
 
-    /// What `workspaces.toml` says, or why it cannot be followed.
+    /// What `workspaces.toml` says, else all machines' folder, or why it cannot be followed.
     pub fn place_read(&self) -> std::result::Result<Place, String> {
+        if !place::says_a_place(&self.default)
+            && let Some(template) = crate::all_machines::value(&self.paths, place::SHARED)
+        {
+            return place::shared(&template, &self.avoid())
+                .map_err(|why| format!("all machines' workspaces folder: {why}"));
+        }
         place::read(&self.default, &self.avoid())
     }
 

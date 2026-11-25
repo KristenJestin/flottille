@@ -1099,7 +1099,15 @@ fn slot(
 ) -> std::result::Result<providers::Asked, Failure> {
     if pass != "pilot" {
         let set = super::value(daemon, &EXTENSION, project, &format!("{pass}_model"))?;
-        if let Some(slot) = set.as_object() {
+        // All machines' model this machine lacks is ignored here: the rule picks.
+        let lacked = set.as_object().is_some_and(|slot| {
+            let text = |key: &str| slot.get(key).and_then(Value::as_str);
+            super::from_all(daemon, &EXTENSION, project, &format!("{pass}_model"))
+                && text("provider").is_some_and(|provider| {
+                    providers::lacks(daemon, provider, text("model")).is_some()
+                })
+        });
+        if let Some(slot) = set.as_object().filter(|_| !lacked) {
             let text = |key: &str| slot.get(key).and_then(Value::as_str).map(str::to_owned);
             return Ok(providers::Asked {
                 provider: text("provider"),

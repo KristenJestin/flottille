@@ -166,6 +166,32 @@ pub fn checked_default(text: &str, avoid: &Avoid, field: &str) -> Result<(), Str
     allowed(&folder, avoid, &[], field)
 }
 
+/// The name of the value of all machines that is this default (`all_machines`).
+pub const SHARED: &str = "workspaces_folder";
+
+/// Whether `workspaces.toml` chooses a place: a file with no `place` chooses none, and one that
+/// cannot be read is this machine's to repair, never replaced by all machines'.
+pub fn says_a_place(file: &Path) -> bool {
+    match std::fs::read_to_string(file) {
+        Ok(text) => text
+            .parse::<toml::Table>()
+            .map_or(true, |table| table.contains_key("place")),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// All machines' folder: only a template under the home folder, which each machine has of its
+/// own, and one it would take itself (`checked_default`).
+pub fn shared(template: &str, avoid: &Avoid) -> Result<Place, String> {
+    if !template.starts_with("~/") || template.split('/').any(|part| part == "..") {
+        return Err(
+            "path: only a folder under your home, written ~/…, is one for all machines".to_owned(),
+        );
+    }
+    checked_default(template, avoid, "path")?;
+    Ok(Place::Own(template.to_owned()))
+}
+
 /// What `workspaces.toml` says: the data folder when there is no file. A folder of the user's
 /// that would be refused when set (`checked_default`) is an error here too, so that a hand edit
 /// cannot do what the window would not.
