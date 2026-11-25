@@ -25,6 +25,9 @@ pub enum AgentState {
     NeedsYou,
     /// A sub-agent waiting on its parent.
     Waiting,
+    /// A session at rest that waits on a person: a review asked of them, a ticket assigned to
+    /// them.
+    Blocked,
     Completed,
     Idle,
     Denied,
@@ -43,6 +46,8 @@ pub enum Mark {
     Hollow,
     /// A clock: waits for something outside, nothing for the user to do.
     Clock,
+    /// A person's silhouette: waits on someone else.
+    Person,
     /// A check in a round.
     Check,
     /// A cross in a round.
@@ -50,10 +55,11 @@ pub enum Mark {
 }
 
 impl AgentState {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Running,
         Self::NeedsYou,
         Self::Waiting,
+        Self::Blocked,
         Self::Completed,
         Self::Idle,
         Self::Denied,
@@ -67,6 +73,7 @@ impl AgentState {
             Self::Running => "RUNNING",
             Self::NeedsYou => "NEEDS YOU",
             Self::Waiting => "WAITING",
+            Self::Blocked => "BLOCKED",
             Self::Completed => "COMPLETED",
             Self::Idle => "IDLE",
             Self::Denied => "DENIED",
@@ -80,6 +87,7 @@ impl AgentState {
             Self::Running => Mark::Spinner,
             Self::NeedsYou => Mark::Pulse,
             Self::Waiting => Mark::Clock,
+            Self::Blocked => Mark::Person,
             Self::Idle | Self::Denied | Self::Stopped => Mark::Hollow,
             Self::Completed => Mark::Check,
             Self::Failed => Mark::Cross,
@@ -99,6 +107,7 @@ impl AgentState {
             Self::Completed => (p.ok, p.ok_bg),
             Self::Failed => (p.fail, p.fail_bg),
             Self::Waiting => (p.pend, p.pend_bg),
+            Self::Blocked => (p.away, p.away_bg),
             Self::Idle | Self::Denied | Self::Stopped => (p.faint, p.card2),
         }
     }
@@ -300,6 +309,7 @@ pub fn mark_id(mark: Mark) -> SharedString {
         Mark::Pulse => "pulse",
         Mark::Hollow => "hollow",
         Mark::Clock => "clock",
+        Mark::Person => "person",
         Mark::Check => "check",
         Mark::Cross => "cross",
     };
@@ -356,6 +366,10 @@ impl Render for StateIcon {
             Mark::Clock => gpui_design_system::icon(Icon::Clock)
                 .size(size(13.))
                 .text_color(p.pend)
+                .into_any_element(),
+            Mark::Person => gpui_design_system::icon(crate::glyphs::PERSON)
+                .size(size(13.))
+                .text_color(p.away)
                 .into_any_element(),
             Mark::Check => round(p.ok_bg)
                 .size(size(15.))
@@ -565,6 +579,7 @@ mod tests {
         assert_eq!(Running.mark(), Mark::Spinner);
         assert_eq!(NeedsYou.mark(), Mark::Pulse);
         assert_eq!(Waiting.mark(), Mark::Clock);
+        assert_eq!(Blocked.mark(), Mark::Person);
         for quiet in [Idle, Denied, Stopped] {
             assert_eq!(quiet.mark(), Mark::Hollow);
         }
@@ -583,6 +598,16 @@ mod tests {
         let p = Palette::base();
         assert_ne!(AgentState::Waiting.colors(&p).0, p.wait);
         assert_eq!(AgentState::NeedsYou.colors(&p).0, p.wait);
+    }
+
+    #[test]
+    fn blocked_by_someone_else_has_the_away_ink_in_both_shades() {
+        use gpui_design_system::theme::Shade;
+        for shade in [Shade::Dark, Shade::Light] {
+            let p = Palette::own(shade);
+            assert_eq!(AgentState::Blocked.colors(&p), (p.away, p.away_bg));
+            assert_ne!(p.away, p.pend, "{shade:?}: not what comes by itself");
+        }
     }
 
     #[test]

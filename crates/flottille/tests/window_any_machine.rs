@@ -226,6 +226,26 @@ fn settings(shell: &Entity<Shell>, tab: &str, cx: &mut VisualTestContext) {
     click(shell, &format!("settings-tabs-{tab}"), cx);
 }
 
+/// The Settings page has the daemon's answer about what a control changes. Before it the control
+/// is drawn, found and disabled, and a click on it is dropped for good: a wait for the control to
+/// be there is not a wait for it to take a click (the answer of another machine comes through the
+/// hub, later than the settle).
+fn read_by_settings(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    read: impl Fn(&flottille_window::settings::SettingsPage) -> bool,
+) {
+    until(shell, cx, what, |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .settings_page()
+                .is_some_and(|page| read(page.read(cx)))
+        })
+    });
+}
+
 /// The chooser at the top of Settings, on `machine` (`here`: this one): the window then shows it.
 fn settings_of(shell: &Entity<Shell>, machine: &str, cx: &mut VisualTestContext) {
     click(shell, "settings-machine", cx);
@@ -332,6 +352,12 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
     until(&shell, cx, "the server's developer mode is read", |cx| {
         present(cx, "developer-switch")
     });
+    read_by_settings(
+        &shell,
+        cx,
+        "the server's developer mode is answered",
+        |page| page.developer().is_some(),
+    );
     click(&shell, "developer-switch", cx);
     eventually("the server's developer mode is on", || {
         developer_on(&server.user)
@@ -403,6 +429,9 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
     // server's Settings read the window's appearance of this machine for themselves.
     until(&shell, cx, "the appearance is drawn", |cx| {
         present(cx, "appearance-shade-light")
+    });
+    read_by_settings(&shell, cx, "the appearance is answered", |page| {
+        page.appearance_known()
     });
     click(&shell, "appearance-shade-light", cx);
     until(&shell, cx, "this machine keeps the appearance", |_| {

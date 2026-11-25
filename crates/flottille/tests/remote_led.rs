@@ -1495,6 +1495,61 @@ fn an_answer_waiting_for_the_lead_s_machine_is_not_lost_when_what_waits_there_is
 }
 
 #[test]
+fn two_answers_told_at_once_while_the_lead_s_machine_is_off_are_each_told_once() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    with_vault(&server);
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            vault_ask("staging-login"), vault_ask("billing-login"), vault_ask("mail-login"),
+            vault_ask("backup-login"), vault_ask("chat-login"),
+            {"say": "Waiting for the vault entries."}]}]),
+    );
+    let (_, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "a vault entry asked: chat-login");
+    let numbers: Vec<u64> = vault_asks(&server)
+        .iter()
+        .map(|ask| ask["ask"].as_u64().unwrap())
+        .collect();
+    assert_eq!(numbers.len(), 5, "{numbers:?}");
+    off(&pc);
+    eventually("pc offline", || server.seen("pc")["state"] != "online");
+
+    // One message waits already, which each of the answers told now would absorb.
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": numbers[0]}))
+        .unwrap();
+    a_while();
+    let barrier = std::sync::Barrier::new(numbers.len() - 1);
+    std::thread::scope(|scope| {
+        for number in &numbers[1..] {
+            let (server, barrier) = (&server, &barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                server
+                    .user
+                    .call("vault.ask_dismiss", json!({"ask": number}))
+                    .unwrap();
+            });
+        }
+    });
+    on(&pc);
+    eventually("the lead there is told", || {
+        !delivered_there(&pc, &root, ANSWERED).is_empty()
+    });
+    a_while();
+    let told = delivered_there(&pc, &root, ANSWERED).join("\n");
+    for number in &numbers {
+        assert_eq!(
+            told.matches(&format!("request #{number},")).count(),
+            1,
+            "{number}: {told}"
+        );
+    }
+}
+
+#[test]
 fn a_child_s_request_of_a_session_led_from_another_machine_is_said_and_answered_there() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     with_vault(&server);
