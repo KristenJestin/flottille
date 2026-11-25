@@ -265,6 +265,9 @@ class AppScreensTest {
         )
         start(phone)
 
+        // An offline machine's projects are folded: unfolded, its rows are greyed.
+        rule.onNodeWithTag("machine:laptop").performClick()
+        rule.waitForIdle()
         rule.onNodeWithTag("session:laptop:l1").assertIsNotEnabled()
         rule.onNodeWithTag("session:laptop:l1").assert(
             SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Machine offline"),

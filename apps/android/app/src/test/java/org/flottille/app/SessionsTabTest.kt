@@ -137,6 +137,7 @@ class SessionsTabTest {
         rule.waitForIdle()
         // The machine is said once, above its projects, not on each row.
         rule.onNodeWithTag("machine:server").assertTextContains("server", substring = true)
+        rule.onNodeWithTag("machine:server").assert(hasContentDescription("server, online", substring = true))
         rule.onNodeWithTag("project:server/alpha").assertIsDisplayed()
         assertEquals(listOf("session:server:a1", "session:server:b1"), rows())
 
@@ -169,7 +170,7 @@ class SessionsTabTest {
                 Project(
                     "alpha",
                     listOf(
-                        session("l2", 400, state = "working", pilot = "p1"),
+                        session("l2", 400, state = "working", waiting = true, pilot = "p1"),
                         session("u1", 300),
                         session("l1", 200, pilot = "p1"),
                         session("p1", 100),
@@ -180,10 +181,11 @@ class SessionsTabTest {
         start(phone)
         rule.waitForIdle()
 
-        // Folded: the pilot's row says how many it leads and their state.
+        // Folded: the pilot's row says how many it leads and how many of them wait, and its mark
+        // is the most urgent of its own and theirs.
         assertEquals(listOf("session:server:u1", "session:server:p1"), rows())
-        rule.onNodeWithTag("session:server:p1").assertTextContains("Leads 2", substring = true)
-        rule.onNodeWithTag("session:server:p1").assertTextContains("1 running", substring = true)
+        rule.onNodeWithTag("session:server:p1").assertTextContains("leads 2 · 1 waiting")
+        rule.onNodeWithTag("mark:server:p1", useUnmergedTree = true).assert(hasContentDescription("Needs you", substring = true))
         assertTrue(!exists("session:server:l1"))
 
         // Unfolded: its led sessions under it, indented, newest first.
