@@ -11,9 +11,9 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
-    Button, Fold, Icon, Item, Listing, Menu, Modal, ReorderGroup, Reorderable, Tie, TreeRow,
-    changed, changing, fade, hoverable, meta, palette, presence, presence_of, section_label, space,
-    tipped, tree_children, tree_tie,
+    Button, Fold, Icon, Item, Listing, MachineMark, MarkSize, Menu, Modal, ReorderGroup,
+    Reorderable, Tie, TreeRow, changed, changing, fade, hoverable, meta, palette, presence,
+    presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -1482,19 +1482,22 @@ impl ProjectNode {
         mark: Option<AgentState>,
         cx: &mut Context<Self>,
     ) {
-        if self.sessions.read(cx).rows != sessions {
-            self.sessions
-                .update(cx, |level, cx| level.set(sessions, cx));
-        }
+        self.set_rows(sessions, cx);
         self.held = mark;
         self.show_mark(cx);
     }
 
     /// Its sessions' rows alone, as a fold under a session's row changed them.
     pub fn set_rows(&mut self, sessions: Vec<Entity<SessionRow>>, cx: &mut Context<Self>) {
-        if self.sessions.read(cx).rows != sessions {
+        let rows = &self.sessions.read(cx).rows;
+        if *rows != sessions {
+            // Its chevron comes with its first row and goes with its last.
+            let chevron = rows.is_empty() != sessions.is_empty();
             self.sessions
                 .update(cx, |level, cx| level.set(sessions, cx));
+            if chevron {
+                cx.notify();
+            }
         }
     }
 
@@ -1515,41 +1518,34 @@ impl ProjectNode {
     }
 }
 
+/// The side of a first-level row's chevron, whose place a row with nothing to fold keeps.
+const CHEVRON: f32 = 12.;
+
 /// What a row says of a project whose settings file is gone.
 const MISSING: &str = "settings file missing";
 
-/// The height of a machine's mark, which its tooltip hangs from.
-const MACHINE_MARK: f32 = 16.;
-
-/// A machine's mark: its icon in its colour, saying its name and state in a tooltip as in its
-/// label, which tells it for the eyes that do not see colours.
-fn machine_mark(
-    id: ElementId,
-    home: &Home,
-    size: f32,
-    window: &mut Window,
-    cx: &mut App,
-) -> gpui_kit::AnyElement {
-    let said = SharedString::from(home.said());
-    tipped(
-        div()
-            .id(id)
-            .flex_none()
-            .flex()
-            .items_center()
-            .h(px(MACHINE_MARK))
-            .aria_label(said.clone())
-            .child(
-                gpui_design_system::icon(glyphs::device(&home.icon))
-                    .size(px(size))
-                    .text_color(shade(&home.colour)),
-            ),
-        said,
-        MACHINE_MARK,
-        window,
-        cx,
-    )
-    .into_any_element()
+/// A machine's mark (the kit's `MachineMark`): its icon in its colour, a badge whose shape says
+/// its state, and its name and state in words in its tooltip and label, for the eyes that do not
+/// see colours.
+fn machine_mark(id: ElementId, home: &Home, size: MarkSize) -> gpui_kit::AnyElement {
+    // The badge hangs out of the icon by a quarter of its side at most (4 px at 16): the room
+    // left for it beside the next element.
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .pr(space::XS)
+        .child(
+            MachineMark::new(
+                id,
+                glyphs::device(&home.icon),
+                shade(&home.colour),
+                home.presence(),
+                home.said(),
+            )
+            .size(size),
+        )
+        .into_any_element()
 }
 
 impl Render for ProjectNode {
@@ -1578,18 +1574,17 @@ impl Render for ProjectNode {
             window,
             cx,
         );
+        // Inside a machine's group, the heading has the machine's mark: its projects do not repeat it.
         let marks: Vec<_> = self
             .homes
             .iter()
+            .filter(|_| self.machine.is_none())
             .map(|home| {
                 machine_mark(
                     project_mark_id(&self.name, &home.machine),
                     home,
-                    15.,
-                    window,
-                    cx,
+                    MarkSize::Medium,
                 )
-                .into_any_element()
             })
             .collect();
         let apart = self.apart.clone().map(|machine| {
@@ -1624,9 +1619,21 @@ impl Render for ProjectNode {
         // A project with no file has no page: its row folds and unfolds what it holds.
         let unconfigured = self.unconfigured;
         let toggled = cx.entity().downgrade();
+        // A project with nothing under it has no chevron, its place kept so that its title starts
+        // where the others' do; the row fades over the change as a chevron comes or goes.
+        let holds = !self.sessions.read(cx).rows.is_empty();
+        let swapped = changed(
+            &ElementId::Name(format!("project-holds-{key}").into()),
+            &SharedString::from(if holds { "holds" } else { "empty" }),
+            window,
+            cx,
+        );
         let row = TreeLevel::Project
             .row(id, self.title.clone())
-            .expanded(self.open)
+            .when(holds, |row| row.expanded(self.open))
+            .when(!holds, |row| {
+                row.leading(div().flex_none().w(px(CHEVRON)).h(px(CHEVRON)))
+            })
             .trailing(trailing)
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             .when_some(self.menu.as_ref(), |row, (menu, _)| {
@@ -1698,7 +1705,7 @@ impl Render for ProjectNode {
                     .opacity(1.0 - GREYED * greyed)
                     .flex()
                     .flex_col()
-                    .child(row)
+                    .child(div().opacity(swapped).child(row))
                     .child(missing)
                     .child(offline),
             )
@@ -1822,33 +1829,12 @@ impl MachineNode {
 
 impl Render for MachineNode {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let state = match self.home.here {
-            true => "this machine".to_owned(),
-            false => self.home.state.clone(),
-        };
-        let mark = machine_mark(machine_mark_id(&self.machine), &self.home, 16., window, cx);
-        let said = changed(
-            &machine_state_id(&self.machine),
-            &SharedString::from(state.clone()),
-            window,
-            cx,
-        );
+        // Its state is the mark's badge, said in its tooltip: the heading ends with no words.
+        let mark = machine_mark(machine_mark_id(&self.machine), &self.home, MarkSize::Large);
         let row = TreeLevel::Project
             .row(machine_id(&self.machine), self.machine.clone())
             .expanded(self.open)
             .leading(mark)
-            .trailing(
-                div()
-                    .id(machine_state_id(&self.machine))
-                    .flex_none()
-                    .aria_label(SharedString::from(state.clone()))
-                    .opacity(said)
-                    .text_size(px(11.5))
-                    .text_color(p.faint)
-                    .child(SharedString::from(state))
-                    .test_support(),
-            )
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
         // A machine that is off fades its ink, and takes it back when it is online.
@@ -2130,6 +2116,8 @@ pub struct SessionRow {
     /// It runs on another machine: its second line says which and its state as last known, and
     /// opening it shows that machine.
     elsewhere: Option<crate::model::Elsewhere>,
+    /// The machine it runs on, when it is another one, as the sidebar marks it.
+    home: Option<Home>,
     /// The machine it runs on, when it is not this one: its second line says it.
     tag: Option<SharedString>,
     shell: WeakEntity<Shell>,
@@ -2181,6 +2169,7 @@ impl SessionRow {
             tie: None,
             tie_shown: Tie::default(),
             elsewhere: None,
+            home: None,
             tag: None,
             shell,
         }
@@ -2215,6 +2204,14 @@ impl SessionRow {
     ) {
         if self.elsewhere.as_ref() != elsewhere {
             self.elsewhere = elsewhere.cloned();
+            cx.notify();
+        }
+    }
+
+    /// The machine it runs on, when it is another one, as the sidebar marks it.
+    pub fn set_home(&mut self, home: Option<&Home>, cx: &mut Context<Self>) {
+        if self.home.as_ref() != home {
+            self.home = home.cloned();
             cx.notify();
         }
     }
@@ -2854,7 +2851,7 @@ impl SessionRow {
             return self.machine_line(there, window, cx);
         }
         if let Some(tag) = self.tag.clone() {
-            return self.tag_line(tag, window, cx);
+            return self.tag_line(tag, cx);
         }
         let place = div()
             .id(session_place_id(&self.id))
@@ -2986,17 +2983,37 @@ impl SessionRow {
         tipped(line, SharedString::from(tip), LINE, window, cx).into_any_element()
     }
 
-    /// The mark of the machine a session runs on: its icon in its colour, as the member list signs
-    /// them, a plain mark while that list is not read. It says both in words.
+    /// The mark of the machine a session runs on (the kit's `MachineMark`, at its small size): its
+    /// icon in its colour with the badge of its state, saying its name and state in its tooltip; a
+    /// plain mark of unknown state while the member list is not read. The element around it says
+    /// the machine's look in words, as the member list signs it.
     fn machine_mark(&self, p: &gpui_design_system::Palette) -> gpui_kit::AnyElement {
         let look = self.elsewhere.as_ref().and_then(|there| there.look.clone());
-        let (icon, colour) = look
-            .as_deref()
-            .and_then(|look| look.split_once(" in "))
-            .unwrap_or(("", ""));
-        let (glyph, ink) = match look {
-            Some(_) => (crate::glyphs::device(icon), crate::machines::shade(colour)),
-            None => (Icon::Service, p.faint),
+        let presence = ElementId::Name(format!("session-machine-presence-{}", self.id).into());
+        let mark = match &self.home {
+            Some(home) => machine_mark(presence, home, MarkSize::Small),
+            None => {
+                let machine = self
+                    .elsewhere
+                    .as_ref()
+                    .map(|there| there.machine.clone())
+                    .or_else(|| self.tag.as_ref().map(|tag| tag.to_string()))
+                    .unwrap_or_default();
+                div()
+                    .flex_none()
+                    .pr(space::XS)
+                    .child(
+                        MachineMark::new(
+                            presence,
+                            Icon::Service,
+                            p.faint,
+                            gpui_design_system::MachineState::Unknown,
+                            machine,
+                        )
+                        .size(MarkSize::Small),
+                    )
+                    .into_any_element()
+            }
         };
         div()
             .id(ElementId::Name(
@@ -3004,71 +3021,32 @@ impl SessionRow {
             ))
             .aria_label(SharedString::from(look.unwrap_or_default()))
             .flex_none()
-            .child(
-                gpui_design_system::icon(glyph)
-                    .size(px(11.))
-                    .text_color(ink),
-            )
+            .child(mark)
             .test_support()
             .into_any_element()
     }
 
-    /// The second line of a session of another machine in the one list: the machine's name, and
-    /// since when it is off while it is, whose words fade as they change.
-    fn tag_line(
-        &self,
-        tag: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
+    /// The second line of a session of another machine in the one list: the machine's mark alone,
+    /// its name and state (since when it is off) in the mark's words.
+    fn tag_line(&self, tag: SharedString, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
-        let off = self
-            .elsewhere
-            .as_ref()
-            .filter(|there| there.offline)
-            .map(|there| there.state.clone());
-        let said = SharedString::from(match &off {
-            Some(state) => format!("{tag} {state}"),
+        let said = SharedString::from(match &self.home {
+            Some(home) => home.said(),
             None => tag.to_string(),
         });
-        let line = div()
+        div()
             .id(session_machine_id(&self.id))
-            .aria_label(said.clone())
+            .aria_label(said)
             .flex()
             .items_center()
-            .gap(space::XS)
-            .min_w_0()
             .h(px(LINE))
-            .overflow_hidden()
-            .text_size(px(11.5))
-            .text_color(p.faint)
             .child(self.machine_mark(&p))
-            .child(div().flex_none().whitespace_nowrap().child(tag))
-            .child(changing(
-                ElementId::Name(format!("session-machine-off-{}", self.id).into()),
-                SharedString::from(off.unwrap_or_default()),
-                move |state| {
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(state)
-                        .into_any_element()
-                },
-            ))
-            .test_support();
-        let tip = div()
-            .id(ElementId::Name(
-                format!("session-machine-tip-{}", self.id).into(),
-            ))
-            .h(px(LINE))
-            .child(line);
-        tipped(tip, said, LINE, window, cx).into_any_element()
+            .test_support()
+            .into_any_element()
     }
 
-    /// The second line of a session on another machine: the machine's name, then its state as
-    /// last known, whose words fade as they change.
+    /// The second line of a session on another machine: the machine's mark, then the session's
+    /// state as last known, whose words fade as they change.
     fn machine_line(
         &self,
         there: crate::model::Elsewhere,
@@ -3089,13 +3067,6 @@ impl SessionRow {
             .text_size(px(11.5))
             .text_color(p.faint)
             .child(self.machine_mark(&p))
-            .child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(there.machine.clone())),
-            )
-            .child(div().flex_none().child("·"))
             .child(changing(
                 ElementId::Name(format!("session-machine-state-{}", self.id).into()),
                 SharedString::from(there.state.clone()),
