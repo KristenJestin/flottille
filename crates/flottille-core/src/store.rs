@@ -4149,6 +4149,24 @@ impl Store {
         Ok(items)
     }
 
+    /// One item of the project as it is kept, without its checks; none when it is not kept.
+    pub fn item(
+        &self,
+        project: &str,
+        kind: &str,
+        repository: &str,
+        key: &str,
+    ) -> Result<Option<Item>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT project, kind, source, repository, key, title, state, author, assignees, \
+             labels, url, updated_at, seen_at, mine, details FROM items WHERE project = ?1 \
+             AND kind = ?2 AND repository = ?3 AND key = ?4",
+        )?;
+        Ok(statement
+            .query_row(params![project, kind, repository, key], item_row)
+            .optional()?)
+    }
+
     /// One item of the project by its kind and key, with its checks: the repository's when one is
     /// named, else the most recently changed of that key.
     pub fn item_by_key(

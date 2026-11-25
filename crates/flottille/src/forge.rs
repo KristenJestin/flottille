@@ -4349,7 +4349,7 @@ fn threads_text(text: &mut String, pull: &Pull, full: bool, again: &str) {
 /// alone. The checks, reviews and comments nested in a list of a whole history are what makes
 /// GitHub's GraphQL time out; they are read one pull request at a time (`Pulls::detail`).
 const LIST_FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,\
-    isCrossRepository,url,author,assignees,labels,updatedAt,createdAt";
+    isCrossRepository,url,author,assignees,labels,updatedAt,createdAt,reviewRequests";
 /// The most pull requests or issues one list asks `gh` for.
 pub(crate) const ALL: &str = "1000";
 const ALL_COUNT: usize = 1000;
@@ -4483,7 +4483,12 @@ impl Pulls {
         let pull = Pull::of(&viewed)
             .ok_or_else(|| format!("gh pr view {number} answered no pull request"))?;
         let read = fetched_pull(&self.path, "github", &pull, true);
+        // What the list said of it that `gh pr view` is not asked: whom a review waits on.
+        let requested = fetched.item.details["requested"].take();
         fetched.item.details = read.item.details;
+        if !requested.is_null() {
+            fetched.item.details["requested"] = requested;
+        }
         fetched.item.checks = github_checks(&viewed);
         fetched.comments = read.comments;
         fetched.reviews = read.reviews;
@@ -4525,10 +4530,33 @@ fn listed_pull(path: &str, value: &Value) -> Option<crate::items::Fetched> {
     item.assignees = names_of(&value["assignees"], "login");
     item.labels = names_of(&value["labels"], "name");
     item.updated_at = value["updatedAt"].as_str().map(masked);
+    item.details["requested"] = requested(&value["reviewRequests"]).into();
     fetched.created_at = value["createdAt"]
         .as_str()
         .and_then(crate::session_read::form);
     Some(fetched)
+}
+
+/// The people a review is asked of and not given yet, as `gh pr list --json reviewRequests` says
+/// them (GitHub drops a reviewer from it once they reviewed): each `{name, login}`, by the name
+/// they set, else their login, never their account's id or an e-mail. The login is only compared
+/// with the user's (`blocked`). A team or a bot is no person: gh says which (`__typename`).
+fn requested(list: &Value) -> Vec<Value> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|who| who["__typename"].as_str().is_none_or(|kind| kind == "User"))
+        .filter(|who| who["login"].as_str().is_some_and(|login| !login.is_empty()) && !is_bot(who))
+        .map(|who| {
+            let login = masked(who["login"].as_str().unwrap_or_default());
+            let name = who["name"].as_str().unwrap_or_default();
+            let name = match name.is_empty() || name.contains('@') {
+                true => login.clone(),
+                false => masked(name),
+            };
+            json!({"name": name, "login": login})
+        })
+        .collect()
 }
 
 /// The stored open pull requests or issues (`kind`: `pr`, `issue`) of `repo` that its open list
