@@ -567,6 +567,12 @@ fn follow(
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);
         }
+        // A value of all machines taken from the hub: what shows it is read again.
+        if event.name == "settings.changed" {
+            for update in settings_changed(&event.data) {
+                let _ = updates.unbounded_send(update);
+            }
+        }
         if event.name.starts_with("service.") || event.name == "project.changed" {
             let _ = updates.unbounded_send(Update::ServicesChanged);
         }
@@ -684,6 +690,38 @@ fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.")
         || event.name == "agent.started"
         || event.name == "agent.options_taken"
+}
+
+/// What a `settings.changed {names}` event makes the window read again: each name is a value of
+/// all machines (`docs/protocol.md`, "The settings methods").
+fn settings_changed(data: &serde_json::Value) -> Vec<Update> {
+    let mut updates = Vec::new();
+    let mut push = |update: Update| {
+        if !updates
+            .iter()
+            .any(|known| format!("{known:?}") == format!("{update:?}"))
+        {
+            updates.push(update);
+        }
+    };
+    for name in data["names"].as_array().into_iter().flatten() {
+        match name.as_str().unwrap_or_default() {
+            "rules" => push(Update::TextChanged {
+                judge: false,
+                project: None,
+            }),
+            "judge.guidance" => push(Update::TextChanged {
+                judge: true,
+                project: None,
+            }),
+            "compaction.guidance" => push(Update::CompactionChanged),
+            name if name.starts_with("tool_results.") => push(Update::ToolResultsChanged),
+            "appearance.shade" => push(Update::AppearanceChanged),
+            // An extension's setting or guidance, read with the list.
+            _ => push(Update::Extensions),
+        }
+    }
+    updates
 }
 
 /// What an event says of an edited text an editor shows (`Update::TextChanged`).

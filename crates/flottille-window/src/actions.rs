@@ -245,6 +245,11 @@ pub enum Command {
         limit: Option<usize>,
     },
     /// Chooses whether `fs_read` says a file is unchanged (`tool_results.set`).
+    /// Drops this machine's own `limit` or `unchanged` (`tool_results.set {reset}`): it follows
+    /// all machines' value again.
+    ToolResultsReset {
+        key: String,
+    },
     UnchangedSet {
         unchanged: bool,
     },
@@ -263,11 +268,19 @@ pub enum Command {
     AppearanceRead {
         seq: u64,
     },
-    /// Keeps the window's appearance (`appearance.set`).
+    /// Keeps the window's appearance (`appearance.set`): its theme, and its shade when `shade`
+    /// (a machine that never chose the shade follows all machines').
     AppearanceSet {
         appearance: gpui_design_system::Appearance,
         seq: u64,
+        shade: bool,
     },
+    /// Drops this machine's own shade: it follows all machines' again (`appearance.set {reset}`).
+    AppearanceReset {
+        seq: u64,
+    },
+    /// What the daemon says of where the shade comes from (`appearance.show`'s `own` and `all`).
+    AppearanceLevelsRead,
     /// What the daemon keeps of a composer's draft (`draft.get`).
     DraftRead {
         key: DraftKey,
@@ -1237,7 +1250,7 @@ pub enum Outcome {
     /// unchanged, after a read (`written` false) or a choice.
     ToolResults {
         written: bool,
-        shown: Result<(Option<usize>, bool), String>,
+        shown: Result<crate::settings::ToolResultsShown, String>,
     },
     /// After how many days an inactive session is ended as the daemon says it (`None` is off),
     /// and whether a session is resumed at its quota's reset, after a read (`written` none) or a
@@ -1277,6 +1290,8 @@ pub enum Outcome {
         written: bool,
         shown: Result<gpui_design_system::Appearance, String>,
     },
+    /// Where the shade comes from (`appearance.show`'s levels).
+    AppearanceLevels(Result<AppearanceLevels, String>),
     /// The compaction as the daemon says it (`compaction.show`), after a read, a change of its
     /// settings (`written`) or of its guidance (`guidance`).
     Compaction {
@@ -1763,7 +1778,9 @@ impl Actions {
         }
         if matches!(
             command,
-            Command::AppearanceRead { .. } | Command::AppearanceSet { .. }
+            Command::AppearanceRead { .. }
+                | Command::AppearanceSet { .. }
+                | Command::AppearanceReset { .. }
         ) {
             let _ = self.appearance.send(command);
             return;
@@ -2845,6 +2862,7 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
         }
         Command::ToolResultsRead
         | Command::ToolResultsSet { .. }
+        | Command::ToolResultsReset { .. }
         | Command::UnchangedSet { .. } => {
             let (method, params, written) = match command {
                 Command::ToolResultsSet { limit } => (
@@ -2855,14 +2873,13 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Command::UnchangedSet { unchanged } => {
                     ("tool_results.set", json!({"unchanged": unchanged}), true)
                 }
+                Command::ToolResultsReset { key } => {
+                    ("tool_results.set", json!({"reset": [key]}), true)
+                }
                 _ => ("tool_results.show", json!({}), false),
             };
-            let shown = answer(ask_alone(connect, method, params, bounds.quick)).map(|shown| {
-                (
-                    shown["limit"].as_u64().map(|limit| limit as usize),
-                    shown["unchanged"] == true,
-                )
-            });
+            let shown = answer(ask_alone(connect, method, params, bounds.quick))
+                .map(|shown| crate::settings::ToolResultsShown::of(&shown));
             Outcome::ToolResults { written, shown }
         }
         Command::SessionsRead | Command::SessionsSet { .. } | Command::ResumeSet { .. } => {
@@ -2883,10 +2900,30 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 .map(|shown| (shown["days"].as_u64(), shown["resume"] == true));
             Outcome::Sessions { written, shown }
         }
-        Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
+        Command::AppearanceLevelsRead => Outcome::AppearanceLevels(
+            answer(ask_alone(
+                connect,
+                "appearance.show",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|shown| AppearanceLevels::of(&shown)),
+        ),
+        Command::AppearanceRead { seq }
+        | Command::AppearanceSet { seq, .. }
+        | Command::AppearanceReset { seq } => {
             let (method, params, written) = match command {
-                Command::AppearanceSet { appearance, .. } => {
-                    ("appearance.set", appearance_json(appearance), true)
+                Command::AppearanceSet {
+                    appearance, shade, ..
+                } => {
+                    let mut params = appearance_json(appearance);
+                    if !shade {
+                        params.as_object_mut().map(|keys| keys.remove("shade"));
+                    }
+                    ("appearance.set", params, true)
+                }
+                Command::AppearanceReset { .. } => {
+                    ("appearance.set", json!({"reset": ["shade"]}), true)
                 }
                 _ => ("appearance.show", json!({}), false),
             };
@@ -4186,6 +4223,30 @@ pub(crate) fn appearance_json(appearance: gpui_design_system::Appearance) -> Val
         Shade::Dark => "dark",
     };
     json!({"theme": theme, "shade": shade})
+}
+
+/// Where the shade comes from, as `appearance.show` says it: whether this machine holds its own,
+/// and the shade of all machines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppearanceLevels {
+    /// This machine's file holds the shade.
+    pub own: bool,
+    /// The shade of all machines (`light` or `dark`), none while they say none.
+    pub all: Option<String>,
+    /// This machine has a hub: it has values of all machines to follow.
+    pub hub: bool,
+}
+
+impl AppearanceLevels {
+    pub fn of(shown: &Value) -> Self {
+        Self {
+            own: shown["own"]
+                .as_array()
+                .is_some_and(|own| own.iter().any(|key| key == "shade")),
+            all: shown["all"]["shade"].as_str().map(str::to_owned),
+            hub: shown["all"].is_object(),
+        }
+    }
 }
 
 /// The outcome of the read that follows a share of a setting for all machines: what the section

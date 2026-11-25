@@ -3011,12 +3011,49 @@ impl Shell {
     /// Asks the daemon to keep `choice` as the appearance, or what it keeps when there is none.
     /// Each request is numbered; the window only believes the answer to the latest.
     pub fn ask_appearance(&mut self, choice: Option<gpui_design_system::Appearance>) {
+        self.ask_appearance_keeping(choice, false);
+    }
+
+    /// [`Shell::ask_appearance`], writing the shade too when `shade`: a machine that never
+    /// chose it follows all machines' shade.
+    pub fn ask_appearance_keeping(
+        &mut self,
+        choice: Option<gpui_design_system::Appearance>,
+        shade: bool,
+    ) {
         self.appearance_asked += 1;
         let seq = self.appearance_asked;
         self.actions.send(match choice {
-            Some(appearance) => Command::AppearanceSet { appearance, seq },
+            Some(appearance) => Command::AppearanceSet {
+                appearance,
+                seq,
+                shade,
+            },
             None => Command::AppearanceRead { seq },
         });
+        // Where the shade comes from is asked with it.
+        self.actions.send(Command::AppearanceLevelsRead);
+    }
+
+    /// Keeps `shade` as the shade of all machines (`settings.share`), signed with this device's
+    /// key; the window then reads what this machine shows.
+    pub fn share_shade(&mut self, shade: &str) {
+        self.appearance_asked += 1;
+        let seq = self.appearance_asked;
+        self.actions.send(Command::Shared {
+            name: "appearance.shade".to_owned(),
+            value: shade.to_owned(),
+            then: Box::new(Command::AppearanceRead { seq }),
+        });
+        self.actions.send(Command::AppearanceLevelsRead);
+    }
+
+    /// Drops this machine's own shade: it follows all machines' again.
+    pub fn use_all_shade(&mut self) {
+        self.appearance_asked += 1;
+        let seq = self.appearance_asked;
+        self.actions.send(Command::AppearanceReset { seq });
+        self.actions.send(Command::AppearanceLevelsRead);
     }
 
     /// A place's "New session here": the composer, set to start there.
@@ -3494,6 +3531,7 @@ impl Shell {
                     | Outcome::DraftWritten { .. }
                     | Outcome::WindowKept { .. }
                     | Outcome::Appearance { .. }
+                    | Outcome::AppearanceLevels(_)
                     | Outcome::Update { .. }
                     | Outcome::Tunnel(_)
             )
@@ -4532,6 +4570,10 @@ impl Shell {
                 }
                 self.settings
                     .update(cx, |page, cx| page.appearance_answered(shown, written, cx));
+            }
+            Outcome::AppearanceLevels(levels) => {
+                self.settings
+                    .update(cx, |page, cx| page.shade_levels_answered(levels, cx));
             }
             Outcome::Compaction {
                 written,

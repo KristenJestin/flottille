@@ -279,6 +279,16 @@ impl RulesEditor {
         cx.notify();
     }
 
+    /// Where an editor not drawn yet will be: no field holds a text to put in another place.
+    pub fn placed_at(&mut self, place: Place) {
+        if self.field.is_none() {
+            self.place = Place {
+                on_all: place.on_all && self.shared_name().is_some(),
+                ..place
+            };
+        }
+    }
+
     pub fn on_all(&self) -> bool {
         self.place.on_all
     }
@@ -720,6 +730,8 @@ impl Render for RulesEditor {
             "judge-guidance".to_owned()
         } else if compaction {
             "compaction-guidance".to_owned()
+        } else if scope.is_empty() {
+            "rules".to_owned()
         } else {
             format!("rules-{scope}")
         };

@@ -37,6 +37,7 @@ use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{NewSession, Provider, Providers};
 use crate::rules::RulesEditor;
+use crate::shared_level::{Place, follows_line, set_here};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -341,6 +342,8 @@ pub struct SettingsPage {
     narrow: bool,
     /// The list of the machine chooser at the top is open.
     machine_menu: bool,
+    /// Where the sections that hold shared settings are drawn, as the page last drew them.
+    place: Place,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
     /// What the user says of themselves, edited on this page.
@@ -388,6 +391,8 @@ pub struct SettingsPage {
     exporting: bool,
     /// The limit above which a tool result is cut, once the daemon said it (`Some(None)` is Off).
     tool_results: Option<Option<usize>>,
+    /// What the daemon last said of the limits, with the levels they come from.
+    tool_results_levels: Option<ToolResultsShown>,
     /// A limit chosen, until the daemon answers: what it was asked to become.
     tool_results_pending: Option<Option<usize>>,
     /// Whether `fs_read` says a file is unchanged, as the daemon last said it, and what the user
@@ -405,6 +410,8 @@ pub struct SettingsPage {
     resume_pending: Option<bool>,
     /// The window's appearance, once the daemon said it.
     appearance: Option<Appearance>,
+    /// Where the shade comes from: this machine's own, all machines'.
+    shade_levels: Option<crate::actions::AppearanceLevels>,
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
     /// a choice writes it again.
     appearance_unread: Option<String>,
@@ -429,6 +436,54 @@ enum Part {
     Feature(String),
     /// What the compaction's "More settings" holds.
     CompactionMore,
+}
+
+/// What the daemon says of the limits of tool results (`tool_results.show`): what this machine
+/// reads, the keys it holds itself, and the values of all machines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolResultsShown {
+    /// The limit in characters (`None` is Off).
+    pub limit: Option<usize>,
+    pub unchanged: bool,
+    /// `limit` and `unchanged`, the keys this machine holds itself.
+    pub own: Vec<String>,
+    /// The values of all machines, `None` while this machine has no hub.
+    pub all: Option<AllToolResults>,
+}
+
+/// The values of all machines of the limits of tool results: each `None` while they say none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AllToolResults {
+    /// `Some(None)` is Off.
+    pub limit: Option<Option<usize>>,
+    pub unchanged: Option<bool>,
+}
+
+impl ToolResultsShown {
+    pub fn of(value: &Value) -> Self {
+        Self {
+            limit: value["limit"].as_u64().map(|limit| limit as usize),
+            unchanged: value["unchanged"] == true,
+            own: value["own"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|key| key.as_str().map(str::to_owned))
+                .collect(),
+            all: value["all"].as_object().map(|all| AllToolResults {
+                limit: match &all.get("limit") {
+                    Some(Value::String(_)) => Some(None),
+                    Some(limit) => limit.as_u64().map(|limit| Some(limit as usize)),
+                    None => None,
+                },
+                unchanged: all.get("unchanged").and_then(Value::as_bool),
+            }),
+        }
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        self.own.iter().any(|own| own == key)
+    }
 }
 
 /// A view that has the page draw one of its parts: it observes the page and the registry, and
@@ -508,6 +563,7 @@ impl SettingsPage {
             refused: HashMap::new(),
             narrow: false,
             machine_menu: false,
+            place: Place::default(),
             judge_pending: false,
             judge_turning: None,
             judge_refused: None,
@@ -521,6 +577,7 @@ impl SettingsPage {
             finding_menus: HashMap::new(),
             exporting: false,
             tool_results: None,
+            tool_results_levels: None,
             tool_results_pending: None,
             unchanged: None,
             unchanged_pending: None,
@@ -530,6 +587,7 @@ impl SettingsPage {
             resume_pending: None,
             appearance: None,
             appearance_unread: None,
+            shade_levels: None,
             tab: 0,
             feature: None,
             parts: HashMap::new(),
@@ -1622,9 +1680,59 @@ impl SettingsPage {
     /// The limit the select shows, in characters (`None` is Off): what it was asked to become
     /// while the daemon has not answered.
     pub fn tool_results_limit(&self) -> Option<usize> {
-        self.tool_results_pending
-            .or(self.tool_results)
-            .unwrap_or(Some(8_000))
+        // On All machines, what they say, else the default.
+        let said = match (self.place.on_all, &self.tool_results_levels) {
+            (true, Some(levels)) => Some(
+                levels
+                    .all
+                    .as_ref()
+                    .and_then(|all| all.limit)
+                    .unwrap_or(Some(8_000)),
+            ),
+            _ => self.tool_results,
+        };
+        self.tool_results_pending.or(said).unwrap_or(Some(8_000))
+    }
+
+    /// Whether the switch of unchanged files shows on: the daemon's word where the section is
+    /// drawn, whatever was asked since.
+    fn unchanged_shown(&self) -> bool {
+        let said = match (self.place.on_all, &self.tool_results_levels) {
+            (true, Some(levels)) => Some(
+                levels
+                    .all
+                    .as_ref()
+                    .and_then(|all| all.unchanged)
+                    .unwrap_or(false),
+            ),
+            _ => self.unchanged,
+        };
+        self.unchanged_pending.or(said).unwrap_or(false)
+    }
+
+    /// Whether this machine holds the limit, or the switch of unchanged files, itself.
+    fn holds(&self, key: &str) -> bool {
+        self.tool_results_levels
+            .as_ref()
+            .is_some_and(|levels| levels.holds(key))
+    }
+
+    /// Drops this machine's own `key`: it follows all machines' value again.
+    fn use_all_tool_results(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        if self.asked_tool_results() || !self.holds(key) {
+            return;
+        }
+        match key {
+            "limit" => self.tool_results_pending = Some(self.tool_results.flatten()),
+            _ => self.unchanged_pending = self.unchanged,
+        }
+        self.shell.perform(
+            Command::ToolResultsReset {
+                key: key.to_owned(),
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     /// Whether the daemon last said `fs_read` answers "unchanged" for a file the agent already
@@ -1638,19 +1746,25 @@ impl SettingsPage {
     }
 
     fn choose_unchanged(&mut self, cx: &mut Context<Self>) {
-        let Some(unchanged) = self.unchanged else {
+        if self.unchanged.is_none() {
             return;
-        };
+        }
+        let unchanged = self.unchanged_shown();
         if self.asked_tool_results() {
             return;
         }
         self.unchanged_pending = Some(!unchanged);
-        self.shell.perform(
-            Command::UnchangedSet {
+        let command = match self.place.on_all {
+            true => Command::Shared {
+                name: "tool_results.unchanged".to_owned(),
+                value: (!unchanged).to_string(),
+                then: Box::new(Command::ToolResultsRead),
+            },
+            false => Command::UnchangedSet {
                 unchanged: !unchanged,
             },
-            cx,
-        );
+        };
+        self.shell.perform(command, cx);
         cx.notify();
     }
 
@@ -1659,7 +1773,15 @@ impl SettingsPage {
             return;
         }
         self.tool_results_pending = Some(limit);
-        self.shell.perform(Command::ToolResultsSet { limit }, cx);
+        let command = match self.place.on_all {
+            true => Command::Shared {
+                name: "tool_results.limit".to_owned(),
+                value: limit.map_or("off".to_owned(), |limit| limit.to_string()),
+                then: Box::new(Command::ToolResultsRead),
+            },
+            false => Command::ToolResultsSet { limit },
+        };
+        self.shell.perform(command, cx);
         cx.notify();
     }
 
@@ -1667,7 +1789,7 @@ impl SettingsPage {
     /// why.
     pub fn tool_results_answered(
         &mut self,
-        shown: Result<(Option<usize>, bool), String>,
+        shown: Result<ToolResultsShown, String>,
         written: bool,
         cx: &mut Context<Self>,
     ) {
@@ -1677,9 +1799,10 @@ impl SettingsPage {
             self.unchanged_pending = None;
         }
         match shown {
-            Ok((limit, unchanged)) => {
-                self.tool_results = Some(limit);
-                self.unchanged = Some(unchanged);
+            Ok(shown) => {
+                self.tool_results = Some(shown.limit);
+                self.unchanged = Some(shown.unchanged);
+                self.tool_results_levels = Some(shown);
             }
             Err(why) if written => toast(
                 Toast::failure(if asked_unchanged {
@@ -1725,7 +1848,7 @@ impl SettingsPage {
         let p = palette(cx);
         let unchanged = Switch::new(
             "tool-results-unchanged-switch",
-            self.unchanged_pending.or(self.unchanged).unwrap_or(false),
+            self.unchanged_shown(),
             "Say when a file is unchanged",
         )
         .hint(UNCHANGED_HINT)
@@ -1740,15 +1863,52 @@ impl SettingsPage {
             .border_color(p.line)
             .child(unchanged)
             .test_support();
+        // On a machine with a hub, a limit or a switch it holds itself wears the mark of a value
+        // set apart, and the way back to all machines' value.
+        let place = self.place.clone();
+        let follows = place.follows()
+            && self
+                .tool_results_levels
+                .as_ref()
+                .is_some_and(|levels| levels.all.is_some());
+        let marked = |key: &'static str, element: AnyElement, cx: &mut Context<Self>| {
+            if !follows {
+                return element;
+            }
+            let this = cx.entity().downgrade();
+            set_here(
+                &format!("tool-results-{key}"),
+                &place,
+                element,
+                self.holds(key),
+                move |_, cx| {
+                    this.update(cx, |this, cx| this.use_all_tool_results(key, cx))
+                        .ok();
+                },
+            )
+            .into_any_element()
+        };
+        let limit_field = marked(
+            "limit",
+            Field::new("tool-results-field", "Cut above", select).into_any_element(),
+            cx,
+        );
+        let unchanged_card = marked("unchanged", unchanged_card.into_any_element(), cx);
         Section::new("tool-results", "Long tool results")
             .sentence(TOOL_RESULTS_SENTENCE)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
-                    .child(Field::new("tool-results-field", "Cut above", select))
-                    .child(unchanged_card),
+                    .child(follows_line("tool-results", follows, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(space::MD)
+                            .child(limit_field)
+                            .child(unchanged_card),
+                    ),
             )
     }
 
@@ -1922,7 +2082,12 @@ impl SettingsPage {
     }
 
     /// Uses `appearance` at once, and asks the daemon to keep it for every window.
-    pub fn choose_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+    pub fn choose_appearance(
+        &mut self,
+        appearance: Appearance,
+        shade: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !self.appearance_known() || self.appearance.as_ref() == Some(&appearance) {
             return;
         }
@@ -1930,9 +2095,56 @@ impl SettingsPage {
         appearance::appear(appearance.clone(), cx);
         crate::look::remember(&appearance, cx);
         self.shell
-            .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
+            .update(cx, |shell, _| {
+                shell.ask_appearance_keeping(Some(appearance), shade)
+            })
             .ok();
         cx.notify();
+    }
+
+    /// Keeps `shade` as the shade of all machines: the window shows what this machine reads next.
+    fn share_shade(&mut self, shade: Shade, cx: &mut Context<Self>) {
+        let word = match shade {
+            Shade::Light => "light",
+            Shade::Dark => "dark",
+        };
+        self.shell
+            .update(cx, |shell, _| shell.share_shade(word))
+            .ok();
+        cx.notify();
+    }
+
+    /// Drops this machine's own shade: it follows all machines' again.
+    fn use_all_shade(&mut self, cx: &mut Context<Self>) {
+        if !self.shade_levels.as_ref().is_some_and(|levels| levels.own) {
+            return;
+        }
+        self.shell.update(cx, |shell, _| shell.use_all_shade()).ok();
+        cx.notify();
+    }
+
+    /// Where the shade comes from, as the daemon said it.
+    pub fn shade_levels_answered(
+        &mut self,
+        levels: Result<crate::actions::AppearanceLevels, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(levels) = levels {
+            self.shade_levels = Some(levels);
+            cx.notify();
+        }
+    }
+
+    /// Whether this machine holds its own shade, while it has a hub.
+    pub fn shade_is_own(&self) -> bool {
+        self.shade_levels.as_ref().is_some_and(|levels| levels.own)
+    }
+
+    /// The shade of all machines, when they say one.
+    pub fn shade_of_all(&self) -> Option<&str> {
+        self.shade_levels
+            .as_ref()
+            .and_then(|levels| levels.all.as_deref())
     }
 
     /// The daemon's answer to a read or a choice: a choice not kept is said in a toast (the
@@ -2006,6 +2218,7 @@ impl SettingsPage {
                         source,
                         shade: kept.shade,
                     },
+                    false,
                     cx,
                 )
             })
@@ -2016,9 +2229,10 @@ impl SettingsPage {
             "appearance-shade",
             "Shade",
             [("light", "Light"), ("dark", "Dark")],
-            match shown.shade {
-                Shade::Light => 0,
-                Shade::Dark => 1,
+            // On All machines, the shade they say; the dark one while they say none.
+            match (self.place.on_all, self.shade_of_all(), shown.shade) {
+                (true, Some("light"), _) | (false, _, Shade::Light) => 0,
+                _ => 1,
             },
         )
         .disabled(!known)
@@ -2028,17 +2242,50 @@ impl SettingsPage {
             } else {
                 Shade::Dark
             };
-            this.update(cx, |this, cx| {
-                this.choose_appearance(
+            this.update(cx, |this, cx| match this.place.on_all {
+                // On All machines the shade every machine follows, signed with the device key.
+                true => this.share_shade(shade, cx),
+                false => this.choose_appearance(
                     Appearance {
                         source: Source::Theme(crate::OWN_THEME.into()),
                         shade,
                     },
+                    true,
                     cx,
-                )
+                ),
             })
             .ok();
         });
+        // On a machine with a hub, a shade it holds itself wears the mark of a value set apart,
+        // and the way back to all machines' shade.
+        let on_all = self.place.on_all;
+        let follows =
+            self.place.follows() && self.shade_levels.as_ref().is_some_and(|levels| levels.hub);
+        let shade_row = row(
+            "Shade",
+            match on_all {
+                true => "Used by every machine that did not choose its own.",
+                false => "",
+            },
+            shade.into_any_element(),
+        );
+        let shade_row = match follows {
+            true => {
+                let this = cx.entity().downgrade();
+                set_here(
+                    "appearance-shade",
+                    &self.place,
+                    shade_row,
+                    self.shade_is_own(),
+                    move |_, cx| {
+                        this.update(cx, |this, cx| this.use_all_shade(cx)).ok();
+                    },
+                )
+                .into_any_element()
+            }
+            false => shade_row.into_any_element(),
+        };
+        // On All machines the colours are the machine's own: only the shade is shown.
         let card = div()
             .id("appearance")
             .p(space::LG)
@@ -2048,11 +2295,14 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
-            .child(row(
-                "Colours",
-                "Omarchy follows your desktop's theme as it changes.",
-                theme.into_any_element(),
-            ))
+            .child(follows_line("appearance", follows, cx))
+            .when(!on_all, |card| {
+                card.child(row(
+                    "Colours",
+                    "Omarchy follows your desktop's theme as it changes.",
+                    theme.into_any_element(),
+                ))
+            })
             .child(
                 presence_of(
                     "appearance-omarchy-why-line",
@@ -2092,8 +2342,8 @@ impl SettingsPage {
             .child(
                 presence(
                     "appearance-shade-block",
-                    matches!(shown.source, Source::Theme(_)),
-                    row("Shade", "", shade.into_any_element()),
+                    on_all || matches!(shown.source, Source::Theme(_)),
+                    shade_row,
                 )
                 .space(space::MD),
             )
@@ -2712,7 +2962,11 @@ impl Render for SettingsPage {
         let tab = self.tab.min(SECTIONS.len() - 1);
         // All machines is shown on this machine's page: it is what this machine's daemon keeps.
         let all = self.of.is_none() && of_all(cx) && self.has_hub(cx);
-        let tab = if all { SECTIONS.len() - 1 } else { tab };
+        // The tabs that hold a setting every machine may share; the others have none to show.
+        let tab = match SECTIONS[tab].0 {
+            "vault" | "machines" if all => SECTIONS.len() - 1,
+            _ => tab,
+        };
         let header = PageHeader::new("settings-header", "Settings");
         if SECTIONS[tab].0 == "general" {
             self.check.update(cx, |check, cx| check.ensure(cx));
@@ -2728,12 +2982,48 @@ impl Render for SettingsPage {
             })
             .unwrap_or_else(|| "this machine".to_owned());
         let hub = self.has_hub(cx);
+        let place = Place {
+            on_all: all,
+            machine: this_machine.clone(),
+            hub,
+        };
         self.about.update(cx, |about, cx| {
             about.place(all, this_machine, hub, window, cx)
         });
+        for editor in [&self.rules, &self.judge_guidance, &self.compaction_guidance] {
+            editor.update(cx, |editor, cx| editor.place(place.clone(), window, cx));
+        }
+        let registry = self.registry(cx);
+        if let Some(registry) = &registry {
+            registry.update(cx, |registry, cx| registry.place(place.clone(), window, cx));
+        }
+        self.place = place.clone();
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
-            // Only what every machine may share: About you, for now.
-            _ if all => vec![("about", self.about.clone().into_any_element())],
+            // Only what every machine may share.
+            "agents" if all => vec![
+                ("rules", self.rules.clone().into_any_element()),
+                (
+                    "tool-results",
+                    self.tool_results_section(cx).into_any_element(),
+                ),
+            ],
+            "approvals" if all => {
+                vec![("guidance", self.judge_guidance.clone().into_any_element())]
+            }
+            "features" if all => registry
+                .as_ref()
+                .map(|registry| crate::extensions::shared_blocks(registry, cx))
+                .unwrap_or_default()
+                .into_iter()
+                .chain([(
+                    "compaction-guidance",
+                    self.compaction_guidance.clone().into_any_element(),
+                )])
+                .collect(),
+            _ if all => vec![
+                ("about", self.about.clone().into_any_element()),
+                ("appearance", self.appearance_section(cx).into_any_element()),
+            ],
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
                 ("forges", self.sign_in.clone().into_any_element()),
@@ -2771,7 +3061,7 @@ impl Render for SettingsPage {
         // All machines has the tabs that hold a section every machine may share: General.
         let shown_tabs: Vec<(&str, &str)> = SECTIONS
             .iter()
-            .filter(|(key, _)| !all || *key == "general")
+            .filter(|(key, _)| !all || !matches!(*key, "vault" | "machines"))
             .copied()
             .collect();
         let at = shown_tabs

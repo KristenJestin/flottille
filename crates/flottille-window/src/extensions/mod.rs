@@ -28,6 +28,7 @@ use serde_json::{Map, Value, json};
 use crate::actions::Command;
 use crate::commands::perform_later;
 use crate::rules::RulesEditor;
+use crate::shared_level::{Place, set_here};
 
 /// One of its settings, as the daemon lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +49,10 @@ pub struct Setting {
     /// Its global value: its default when not `set`.
     pub value: Value,
     pub set: bool,
+    /// The setting can be shared with all machines (`docs/remote.md`, "Settings for all
+    /// machines"), and the value of all machines: none while they say none or there is no hub.
+    pub shared: bool,
+    pub all: Option<Value>,
     /// For a `model` slot, what it gives left unset, as the daemon says it.
     pub default: Option<SlotDefault>,
 }
@@ -189,6 +194,8 @@ impl Listed {
                     per_project: setting["per_project"] == true,
                     value: setting["value"].clone(),
                     set: setting["set"] == true,
+                    shared: setting["shared"] == true,
+                    all: Some(setting["all"].clone()).filter(|all| !all.is_null()),
                     default: setting["default"]["rule"].as_str().map(|rule| SlotDefault {
                         rule: rule.to_owned(),
                         gives: setting["default"]["gives"]
@@ -251,6 +258,11 @@ pub enum Then {
         project: Option<String>,
         setting: Option<String>,
     },
+    /// `settings.share` of a setting of `name`, labelled: the daemon keeps it for all machines.
+    Shared {
+        name: String,
+        setting: String,
+    },
     Specs(specs::Then),
     Review(review::Then),
     /// Connections' own: the shell gives the answer to its section of Settings.
@@ -292,6 +304,8 @@ pub struct Registry {
     /// The parts whose editor is unfolded.
     unfolded: HashSet<(String, String)>,
     quiet: Option<Task<()>>,
+    /// Where the settings are drawn: on All machines, or on a machine with a hub or not.
+    place: Place,
 }
 
 impl Registry {
@@ -309,7 +323,24 @@ impl Registry {
             parts: HashMap::new(),
             unfolded: HashSet::new(),
             quiet: None,
+            place: Place::default(),
         }
+    }
+
+    /// Where the settings are drawn: its guidance editors follow.
+    pub fn place(&mut self, place: Place, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
+        if self.place == place {
+            return;
+        }
+        self.place = place.clone();
+        for editor in self.guidance.values().chain(self.parts.values()) {
+            editor.update(cx, |editor, cx| editor.place(place.clone(), window, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn placed(&self) -> &Place {
+        &self.place
     }
 
     /// Asks the daemon for the list.
@@ -448,7 +479,11 @@ impl Registry {
                     })
                 })
                 .clone();
-            editor.update(cx, |editor, cx| editor.read(cx));
+            let place = self.place.clone();
+            editor.update(cx, |editor, cx| {
+                editor.placed_at(place);
+                editor.read(cx)
+            });
             for part in &listed.guidance_parts {
                 let title = listed
                     .settings
@@ -463,7 +498,11 @@ impl Registry {
                         cx.new(|_| RulesEditor::check(shell, &listed.name, part, &title))
                     })
                     .clone();
-                editor.update(cx, |editor, cx| editor.read(cx));
+                let place = self.place.clone();
+                editor.update(cx, |editor, cx| {
+                    editor.placed_at(place);
+                    editor.read(cx)
+                });
             }
         }
     }
@@ -518,6 +557,22 @@ impl Registry {
         value: Option<Value>,
         cx: &mut Context<Self>,
     ) {
+        // On All machines a shared setting is the value every machine uses, signed with the
+        // device key; an empty value says nothing.
+        if project.is_none() && self.place.on_all && setting.shared {
+            let command = Command::Signed {
+                machine: None,
+                method: "settings.share".into(),
+                params: json!({"name": format!("{name}.{}", setting.key),
+                    "value": value.map(|value| value.to_string()).unwrap_or_default()}),
+                then: Then::Shared {
+                    name: name.to_owned(),
+                    setting: setting.label.clone(),
+                },
+            };
+            perform_later(&self.shell, command, cx);
+            return;
+        }
         let command = Command::Ask {
             method: "extension.set".into(),
             params: json!({"name": name, "project": project,
@@ -617,6 +672,25 @@ impl Registry {
                 }
                 self.pending.remove(&(name, project));
                 self.read_specs(cx);
+                cx.notify();
+            }
+            Then::Shared { name, setting } => {
+                let title = self
+                    .listed(&name)
+                    .map_or_else(|| name.clone(), |listed| listed.title.clone());
+                match answer {
+                    Ok(_) => toast(
+                        Toast::success(format!("{title}: {setting} saved for all machines"))
+                            .detail("It applies from now on, on every machine."),
+                        cx,
+                    ),
+                    Err(why) => toast(
+                        Toast::failure(format!("{title}: {setting} was not saved")).detail(why),
+                        cx,
+                    ),
+                }
+                // Read again: the value of all machines is what the page shows.
+                self.read(cx);
                 cx.notify();
             }
             Then::Specs(then) => specs::answered(self, then, answer, cx),
@@ -992,14 +1066,24 @@ fn fields<'a>(
     cx: &App,
 ) -> AnyElement {
     let side = project.and_then(|project| listed.in_project(project));
+    // Where Settings draws them: on All machines only the settings that can be shared, each with
+    // the value of all machines; on a machine with a hub, each of them under the mark of a value
+    // the machine holds itself.
+    let place = registry.read(cx).place.clone();
+    let on_all = place.on_all && project.is_none();
+    let settings: Vec<&Setting> = settings
+        .filter(|setting| !on_all || setting.shared)
+        .collect();
+    let follows = project.is_none() && place.follows() && settings.iter().any(|s| s.shared);
     let providers = registry
         .read(cx)
         .shell
         .upgrade()
         .map(|shell| shell.read(cx).providers().clone())
         .unwrap_or_default();
-    let (models, settings): (Vec<&Setting>, Vec<&Setting>) =
-        settings.partition(|setting| setting.kind == "model");
+    let (models, settings): (Vec<&Setting>, Vec<&Setting>) = settings
+        .into_iter()
+        .partition(|setting| setting.kind == "model");
     let models_card = (!models.is_empty()).then(|| {
         let p = palette(cx);
         let lines = models.iter().filter_map(|setting| {
@@ -1034,7 +1118,7 @@ fn fields<'a>(
                 .test_support(),
         )
     });
-    div()
+    let list = div()
         .flex()
         .flex_col()
         .gap(space::LG)
@@ -1045,6 +1129,7 @@ fn fields<'a>(
                 .filter_map(|(at, setting)| {
                     let global = setting.value.clone();
                     let (own, default) = match side {
+                        None if on_all => (setting.all.clone(), global),
                         None => (setting.set.then(|| global.clone()), global),
                         Some(side) => (side.settings.get(&setting.key).cloned(), global),
                     };
@@ -1059,6 +1144,23 @@ fn fields<'a>(
                         &id,
                         &providers,
                     )?;
+                    // A value this machine holds itself wears the mark of one set apart, and the
+                    // way back to all machines' value.
+                    let control = match project.is_none() && place.follows() && setting.shared {
+                        true => {
+                            let (registry, name, setting) =
+                                (registry.downgrade(), listed.name.clone(), setting.clone());
+                            set_here(&id, &place, control, setting.set, move |_, cx| {
+                                registry
+                                    .update(cx, |registry, cx| {
+                                        registry.set(&name, None, &setting, None, cx)
+                                    })
+                                    .ok();
+                            })
+                            .into_any_element()
+                        }
+                        false => control,
+                    };
                     let field = Field::new(
                         SharedString::from(id.clone()),
                         setting.label.clone(),
@@ -1074,7 +1176,17 @@ fn fields<'a>(
                 1,
                 card,
             )
-        }))
+        }));
+    // Its line has the space it needs inside it: it folds away with it.
+    div()
+        .flex()
+        .flex_col()
+        .child(crate::shared_level::follows_line(
+            &format!("{prefix}-settings"),
+            follows,
+            cx,
+        ))
+        .child(list)
         .into_any_element()
 }
 
@@ -1438,4 +1550,71 @@ mod tests {
             listed(json!({"claude": "big", "other": "x"})).settings[0].default_said(&providers());
         assert_eq!(said.1, "Big for Claude, x for other");
     }
+}
+
+/// The parts of Flottille whose settings can be shared with all machines, each with the key of
+/// its block on All machines' page of Features.
+const SHARED_PARTS: [(&str, &str); 3] = [
+    (specs::NAME, "specs"),
+    ("autosubscriptions", "subscriptions"),
+    (review::NAME, "review"),
+];
+
+/// What All machines' Features page holds of the part `name`: a section of the settings that can
+/// be shared, then its guidance and its checks' instructions where it has some, each editing the
+/// value every machine uses. None while the daemon has not listed it.
+pub fn shared_blocks(registry: &Entity<Registry>, cx: &App) -> Vec<(&'static str, AnyElement)> {
+    use gpui_design_system::Section;
+    let read = registry.read(cx);
+    SHARED_PARTS
+        .iter()
+        .filter_map(|(name, key)| {
+            let listed = read.listed(name)?;
+            if !listed.settings.iter().any(|setting| setting.shared) {
+                return None;
+            }
+            let settings = fields(registry, listed, None, listed.settings.iter(), name, cx);
+            let section = Section::new(format!("{name}-shared"), listed.title.clone())
+                .sentence(listed.line.clone())
+                .child(settings);
+            let guidance = read.guidance(name).cloned().map(|editor| {
+                let checks = listed.guidance_parts.iter().filter_map(|part| {
+                    let editor = read.check_guidance(name, part)?.clone();
+                    let title = listed
+                        .settings
+                        .iter()
+                        .find(|setting| setting.key == format!("{part}_model"))
+                        .map_or_else(|| capitalized(part), |setting| setting.label.clone());
+                    Some(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(space::SM)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("{name}-{part}-shared-title")))
+                                    .text_size(px(13.))
+                                    .child(SharedString::from(format!("Instructions for {title}")))
+                                    .test_support(),
+                            )
+                            .child(editor),
+                    )
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XXL)
+                    .child(editor)
+                    .children(checks)
+            });
+            let block = div()
+                .flex()
+                .flex_col()
+                .gap(space::XXL)
+                .child(section)
+                .children(guidance)
+                .into_any_element();
+            Some((*key, block))
+        })
+        .collect()
 }
