@@ -85,11 +85,12 @@ data class Request(
     val always: String,
     val source: String,
     val says: List<String>,
-    /**
-     * When it came to wait (milliseconds since the epoch), which orders Needs you across machines;
-     * 0 while the core does not say it.
-     */
+    /** When it came to wait (milliseconds since the epoch), which orders Needs you across machines. */
     val at: Long = 0,
+    /** The session whose tree asked: [agent] itself, or the root of the child that asked. */
+    val session: String = agent,
+    /** The child that asked, by its title; empty when the session asked itself. */
+    val child: String = "",
 ) {
     /** A proposal to write a connection: what it would write is read on a computer, as in the window. */
     val proposesAConnection: Boolean get() = tool == "connections" && kind == "action"
@@ -106,7 +107,7 @@ data class Ask(
     val asked: Long,
     val question: String,
     val questions: List<AskQuestion>,
-    /** When it was asked (milliseconds since the epoch); 0 while the core does not say it. */
+    /** When it was asked (milliseconds since the epoch). */
     val at: Long = 0,
 )
 
