@@ -1913,6 +1913,8 @@ impl Shell {
         if machine == self.front {
             return;
         }
+        // Another machine shown, however it was chosen: All machines is chosen again to be shown.
+        cx.set_global(crate::settings::SettingsOfAll(false));
         // The tab of the Settings left is the one the next machine's shows.
         if self.selected == Some(Selection::Settings) {
             let tab = self.settings.read(cx).tab();

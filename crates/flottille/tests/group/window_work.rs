@@ -10,6 +10,8 @@ mod common;
 mod guard;
 #[path = "../kit_common/mod.rs"]
 mod kit_common;
+#[path = "../remote/mod.rs"]
+mod remote;
 
 #[path = "../window_at_rest.rs"]
 mod window_at_rest;

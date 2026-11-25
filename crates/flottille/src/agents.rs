@@ -1127,7 +1127,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     if new.launched.is_some() {
         rules.own.clear();
     }
-    let about = crate::about::effective(&daemon.paths);
+    let about = crate::about::effective(daemon);
     let mut instructions = roles::instructions(
         new.role,
         &roles::Session {

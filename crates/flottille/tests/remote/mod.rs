@@ -94,6 +94,11 @@ impl TestHub {
         self.served = Some(served);
     }
 
+    /// The hub's state file, `hub.json`, as it writes it.
+    pub fn state_file(&self) -> std::path::PathBuf {
+        self._folder.path().join("hub/hub.json")
+    }
+
     pub fn url(&self) -> String {
         format!("http://{}", self.address)
     }

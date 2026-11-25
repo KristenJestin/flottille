@@ -16,6 +16,7 @@ mod pairing;
 mod request;
 mod serial;
 mod sessions;
+mod shared;
 mod transport;
 mod tunnel;
 mod upload;
@@ -57,6 +58,9 @@ pub use request::{
 pub use sessions::{
     LightPilot, LightProject, LightSession, MOST_SESSIONS, PilotList, ProjectList, STATES,
     SessionList, TITLE_LIMIT,
+};
+pub use shared::{
+    Bytes, MOST_VALUES, NAME_LIMIT, SEALED_LIMIT, SHARED_NAMES, Sealed, SealedKey, check_shared,
 };
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;

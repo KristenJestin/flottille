@@ -2480,12 +2480,14 @@ name = "flottille-link"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "curve25519-dalek",
  "ed25519-dalek",
  "flottille-protocol",
  "getrandom 0.3.4",
  "hmac",
  "libc",
  "quinn",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",

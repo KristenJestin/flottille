@@ -144,6 +144,18 @@ fn until(
     }
 }
 
+/// Waits for what the daemon keeps of the user's changes, the window going on while it waits: the
+/// window asks its changes one at a time and takes each answer in a poll, so a wait that only
+/// sleeps leaves the changes behind the first unasked, as soon as the daemon is slow to answer.
+fn kept_until(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    check: impl Fn() -> bool,
+) {
+    until(shell, cx, what, |_| check());
+}
+
 /// The clock and the frames of a window to the last frame of any motion.
 fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     for _ in 0..60 {
@@ -304,7 +316,7 @@ fn a_project_is_dragged_to_its_place_and_the_order_is_kept(cx: &mut TestAppConte
     assert!(b < c && c < a, "the rows are drawn in the new order");
 
     // The daemon keeps it: a click on a row after a drag is no click, and the order is written.
-    eventually("the daemon keeps the order", || {
+    kept_until(&shell, cx, "the daemon keeps the order", || {
         strings(&kept(&user)["order"]) == ["bravo", "charlie", "alpha"]
     });
 }
@@ -331,7 +343,7 @@ fn a_group_is_made_and_projects_are_dragged_into_it(cx: &mut TestAppContext) {
         "the row is under its heading"
     );
 
-    eventually("the daemon keeps the group", || {
+    kept_until(&shell, cx, "the daemon keeps the group", || {
         let sidebar = kept(&user);
         sidebar["groups"][0]["name"] == "Work"
             && strings(&sidebar["groups"][0]["projects"]) == ["bravo"]
@@ -357,7 +369,7 @@ fn a_group_folds_and_unfolds_and_the_daemon_keeps_it(cx: &mut TestAppContext) {
     settle(&shell, cx);
     assert!(!present(cx, project_id("alpha")), "its rows folded away");
     assert_eq!(label(cx, group_count_id(&id)).as_deref(), Some("1"));
-    eventually("the daemon keeps the fold", || {
+    kept_until(&shell, cx, "the daemon keeps the fold", || {
         kept(&user)["groups"][0]["open"] == false
     });
 
@@ -388,7 +400,7 @@ fn groups_are_dragged_among_themselves(cx: &mut TestAppContext) {
         cx,
     );
     assert_eq!(order(&shell, cx), names(&["Two", "One"]));
-    eventually("the daemon keeps the groups' order", || {
+    kept_until(&shell, cx, "the daemon keeps the groups' order", || {
         kept(&user)["groups"][0]["name"] == "Two"
     });
 }
@@ -416,7 +428,7 @@ fn removing_a_group_keeps_its_projects(cx: &mut TestAppContext) {
         3,
         "no project was removed"
     );
-    eventually("the daemon forgot the group", || {
+    kept_until(&shell, cx, "the daemon forgot the group", || {
         kept(&user)["groups"].as_array().is_some_and(Vec::is_empty)
     });
 }
@@ -470,7 +482,7 @@ fn the_arrangement_survives_a_restart_of_the_window(
     drag(project_id("bravo"), project_id("charlie"), 6., &shell, cx);
     cx.update(|window, cx| window.click(group_header_id(&id), cx));
     settle(&shell, cx);
-    eventually("the daemon keeps it", || {
+    kept_until(&shell, cx, "the daemon keeps it", || {
         let sidebar = kept(&user);
         strings(&sidebar["order"]) == ["charlie", "bravo"] && sidebar["groups"][0]["open"] == false
     });
@@ -621,14 +633,14 @@ fn groups_made_in_one_window_survive_a_sidebar_write_from_another(
     });
 
     new_group("Work", &one, cx_one);
-    eventually("the daemon keeps the group", || {
+    kept_until(&one, cx_one, "the daemon keeps the group", || {
         kept(&user)["groups"][0]["name"] == "Work"
     });
 
     // The other window, which never heard of the group, folds a project: it writes the sidebar.
     cx_two.update(|window, cx| window.click(toggle_id(project_id("alpha")), cx));
     settle(&two, cx_two);
-    eventually("the daemon keeps the fold", || {
+    kept_until(&two, cx_two, "the daemon keeps the fold", || {
         user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["projects"]["alpha"]
             == false
     });
@@ -691,14 +703,14 @@ fn a_window_that_never_heard_of_a_group_does_not_erase_it(
     settle(&two, cx_two);
 
     new_group("Work", &one, cx_one);
-    eventually("the daemon keeps the group", || {
+    kept_until(&one, cx_one, "the daemon keeps the group", || {
         kept(&user)["groups"][0]["name"] == "Work"
     });
 
     // The other window drags a project: what it writes is the daemon's arrangement with this
     // change, not its own copy.
     drag(project_id("alpha"), project_id("bravo"), 6., &two, cx_two);
-    eventually("the daemon keeps the order", || {
+    kept_until(&two, cx_two, "the daemon keeps the order", || {
         strings(&kept(&user)["order"]) == ["bravo", "alpha"]
     });
     assert_eq!(
@@ -984,7 +996,7 @@ fn a_group_is_renamed_from_its_menu(cx: &mut TestAppContext) {
         Some("Office"),
         "its heading says it"
     );
-    eventually("the daemon kept the name", || {
+    kept_until(&shell, cx, "the daemon kept the name", || {
         kept(&user)["groups"][0]["name"] == "Office"
     });
 }
@@ -1074,7 +1086,7 @@ fn removing_a_group_from_its_menu_keeps_its_projects_and_folds_it_away(cx: &mut 
             Some("Its 2 projects are back in the list.".to_owned())
         )]
     );
-    eventually("the daemon forgot the group", || {
+    kept_until(&shell, cx, "the daemon forgot the group", || {
         kept(&user)["groups"].as_array().is_some_and(Vec::is_empty)
     });
 }
@@ -1247,6 +1259,11 @@ impl Relay {
         self.held.load(Ordering::SeqCst)
     }
 
+    /// What was held goes on to the daemon, late.
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
+    }
+
     /// The connections are lost: what was held never reaches the daemon.
     fn drop_connections(&self) {
         for (toward, outside) in self.open.lock().unwrap().drain(..) {
@@ -1305,4 +1322,35 @@ fn a_change_retried_after_a_lost_connection_keeps_the_user_s_order(cx: &mut Test
         names(&["alpha"]),
         "the window keeps it too"
     );
+}
+
+/// What the daemon keeps of the arrangement comes back to the window one change at a time, and
+/// each answer is taken by a poll of the window: a daemon that answers late (a loaded runner) must
+/// still be heard by a test that waits for it, which therefore keeps the window going.
+#[gpui_kit::test]
+fn removing_a_group_is_kept_when_the_daemon_answers_late(cx: &mut TestAppContext) {
+    let user = user();
+    for name in ["alpha", "bravo", "charlie"] {
+        project(&user, name);
+    }
+    let relay = Relay::default();
+    let (shell, cx) = window_through(&user, relay.connector(&user), cx);
+    until(&shell, cx, "the rows", |cx| {
+        present(cx, project_id("charlie"))
+    });
+    settle(&shell, cx);
+
+    // The creation of the group is stuck on its way: what the user does next waits behind it.
+    relay.hold();
+    new_group("Work", &shell, cx);
+    let id = group_id(&shell, "Work", cx);
+    drag(project_id("alpha"), group_header_id(&id), 0., &shell, cx);
+    shell.update_in(cx, |shell, window, cx| shell.remove_group(&id, window, cx));
+    settle(&shell, cx);
+    assert!(relay.holding(), "the first change is stuck in the relay");
+    relay.release();
+
+    kept_until(&shell, cx, "the daemon forgot the group", || {
+        kept(&user)["groups"].as_array().is_some_and(Vec::is_empty)
+    });
 }

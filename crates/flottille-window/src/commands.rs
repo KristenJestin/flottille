@@ -136,6 +136,16 @@ pub(crate) fn boxed(
     field: impl IntoElement,
     cx: &App,
 ) -> impl IntoElement {
+    boxed_edged(id, field, palette(cx).line2, cx)
+}
+
+/// [`boxed`], its edge in `edge`: a field whose edge says something of its value.
+pub(crate) fn boxed_edged(
+    id: impl Into<ElementId>,
+    field: impl IntoElement,
+    edge: gpui_kit::Hsla,
+    cx: &App,
+) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id(id)
@@ -145,7 +155,7 @@ pub(crate) fn boxed(
         .rounded(px(8.))
         .bg(p.field)
         .border_1()
-        .border_color(p.line2)
+        .border_color(edge)
         .flex()
         .items_center()
         .mono(12.5)

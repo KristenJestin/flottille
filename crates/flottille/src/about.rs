@@ -5,6 +5,11 @@
 //!
 //! Like the rules, it is read when an agent is created and frozen in its instructions. Agents read
 //! it and never change it.
+//!
+//! With a hub (`docs/remote.md`, "Settings for all machines"), each field is read on three levels:
+//! the machine's own (`about.toml`), else the value of all machines (`crate::shared`, set with
+//! `about.share`, which the user's device signs), else nothing. A field written on a machine is
+//! its own; written empty, the machine follows all machines' value again.
 
 use flottille_core::paths::Paths;
 use serde::Deserialize;
@@ -72,11 +77,57 @@ pub fn read(paths: &Paths) -> Result<About, Failure> {
     })
 }
 
-/// What agents created now are told: what the user wrote, cut to the limits. A file that cannot be
-/// read is nothing, said in the daemon's log: no agent is kept from starting.
-pub fn effective(paths: &Paths) -> About {
-    match read(paths) {
+/// The values of all machines this machine last checked, while it has a hub: none without one.
+fn all(daemon: &Daemon) -> Option<About> {
+    let link = daemon.link()?.ok()?;
+    let values = link.control.get()?.shared()?;
+    let text = |name: &str| {
+        values
+            .get(name)
+            .map(|kept| kept.value.clone())
+            .unwrap_or_default()
+    };
+    Some(About {
+        name: text("about.name"),
+        pronouns: text("about.pronouns"),
+        notes: text("about.notes"),
+    })
+}
+
+/// The machine's own fields, else all machines' values: what agents read.
+fn merged(own: &About, all: Option<&About>) -> About {
+    let pick = |own: &str, all: Option<&str>| match own.trim().is_empty() {
+        false => own.to_owned(),
+        true => all.unwrap_or_default().to_owned(),
+    };
+    About {
+        name: pick(&own.name, all.map(|all| all.name.as_str())),
+        pronouns: pick(&own.pronouns, all.map(|all| all.pronouns.as_str())),
+        notes: pick(&own.notes, all.map(|all| all.notes.as_str())),
+    }
+}
+
+/// The fields this machine holds itself, by their key.
+fn own_fields(own: &About) -> Vec<&'static str> {
+    [
+        ("name", &own.name),
+        ("pronouns", &own.pronouns),
+        ("notes", &own.notes),
+    ]
+    .into_iter()
+    .filter(|(_, text)| !text.trim().is_empty())
+    .map(|(key, _)| key)
+    .collect()
+}
+
+/// What agents created now are told: what the user wrote, this machine's own field else all
+/// machines' value, cut to the limits. A file that cannot be read is nothing, said in the
+/// daemon's log: no agent is kept from starting.
+pub fn effective(daemon: &Daemon) -> About {
+    let all = all(daemon);
+    match read(&daemon.paths) {
         Ok(about) => {
+            let about = merged(&about, all.as_ref());
             let (about, cuts) = limited(about);
             for cut in cuts {
                 eprintln!("flottille daemon: about: {cut}");
@@ -85,7 +136,7 @@ pub fn effective(paths: &Paths) -> About {
         }
         Err(failure) => {
             eprintln!("flottille daemon: about: {}", failure.message);
-            About::default()
+            limited(merged(&About::default(), all.as_ref())).0
         }
     }
 }
@@ -149,30 +200,90 @@ struct Set {
     notes: Option<String>,
 }
 
-/// Answers an `about.*` request: `about.show`, `about.set`, `about.reset`.
+/// The name, how to refer to the user and the notes given, each left out or not.
+type Given = (Option<String>, Option<String>, Option<String>);
+
+/// The fields of a `Set`, trimmed where they are one line, once each passes its limits.
+fn checked(set: Set) -> Result<Given, Failure> {
+    let Set {
+        name,
+        pronouns,
+        notes,
+    } = set;
+    let name = name.map(|text| text.trim().to_owned());
+    let pronouns = pronouns.map(|text| text.trim().to_owned());
+    for (field, text, limit, lined) in [
+        ("the name", &name, SHORT_LIMIT, true),
+        ("how to refer to you", &pronouns, SHORT_LIMIT, true),
+        ("what every agent should know", &notes, LIMIT, false),
+    ] {
+        let Some(text) = text else { continue };
+        check(field, text, limit).map_err(Failure::refused)?;
+        if lined {
+            one_line(field, text).map_err(Failure::refused)?;
+        }
+    }
+    Ok((name, pronouns, notes))
+}
+
+/// The field `field` of `about.share` (`name`, `pronouns`, `notes`) as a machine keeps it from
+/// another: trimmed where it is one line, none past its limits or on more than one line, as
+/// `about.set` would refuse it.
+pub(crate) fn received(field: &str, text: &str) -> Option<String> {
+    let (what, limit, lined) = match field {
+        "name" => ("the name", SHORT_LIMIT, true),
+        "pronouns" => ("how to refer to you", SHORT_LIMIT, true),
+        "notes" => ("what every agent should know", LIMIT, false),
+        _ => return None,
+    };
+    let text = match lined {
+        true => text.trim(),
+        false => text,
+    };
+    check(what, text, limit).ok()?;
+    if lined {
+        one_line(what, text).ok()?;
+    }
+    Some(text.to_owned())
+}
+
+/// Why `about.share` is refused unless the user's device signed it here.
+const NOT_SIGNED: &str = "the values of all machines change only as a request signed by the user's \
+                          device: change them in the window, on All machines";
+
+/// Answers an `about.*` request: `about.show`, `about.set`, `about.reset`, `about.share`.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let paths = &daemon.paths;
     match method {
         "about.show" => {}
+        "about.share" => {
+            // Checked as `about.set` is, before anything is sealed: a field of no other name.
+            checked(serde_json::from_value(params)?)?;
+            let asked = crate::daemon::asked()
+                .filter(|asked| {
+                    serde_json::from_str::<Value>(&asked.signed).is_ok_and(|request| {
+                        request["signed"]["method"] == crate::shared::ABOUT_SHARE
+                    })
+                })
+                .ok_or_else(|| Failure::refused(NOT_SIGNED))?;
+            let control = daemon
+                .link()
+                .and_then(Result::ok)
+                .and_then(|link| link.control.get().cloned())
+                .ok_or_else(|| {
+                    Failure::refused(
+                        "this machine has no hub: turn remote on and pair it to share a value \
+                         with all machines",
+                    )
+                })?;
+            let delivery = control.share(&asked.signed).map_err(Failure::refused)?;
+            announce(daemon)?;
+            let mut shown = show(daemon)?;
+            shown["hub"] = json!(delivery);
+            return Ok(shown);
+        }
         "about.set" => {
-            let Set {
-                name,
-                pronouns,
-                notes,
-            } = serde_json::from_value(params)?;
-            let name = name.map(|text| text.trim().to_owned());
-            let pronouns = pronouns.map(|text| text.trim().to_owned());
-            for (field, text, limit, lined) in [
-                ("the name", &name, SHORT_LIMIT, true),
-                ("how to refer to you", &pronouns, SHORT_LIMIT, true),
-                ("what every agent should know", &notes, LIMIT, false),
-            ] {
-                let Some(text) = text else { continue };
-                check(field, text, limit).map_err(Failure::refused)?;
-                if lined {
-                    one_line(field, text).map_err(Failure::refused)?;
-                }
-            }
+            let (name, pronouns, notes) = checked(serde_json::from_value(params)?)?;
             // What is around the keys the user wrote by hand (their comments) is kept.
             let mut document = match std::fs::read_to_string(paths.about()) {
                 Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|e| {
@@ -235,14 +346,19 @@ fn announce(daemon: &Daemon) -> Result<(), Failure> {
         .map_err(|error| Failure::new("unavailable", error.to_string()))
 }
 
-/// `{"name", "pronouns", "notes", "limit", "cut"}`: what the user wrote (`""` for a field they
-/// did not), the notes' limit in characters, and why a text edited by hand past a limit is cut
-/// for the agents (`null` when it is not).
+/// `{"name", "pronouns", "notes", "own", "all", "limit", "cut"}`: what agents read (`""` for a
+/// field said nowhere), the fields this machine holds itself, all machines' values (`null`
+/// without a hub), the notes' limit in characters, and why a text edited by hand past a limit is
+/// cut for the agents (`null` when it is not).
 fn show(daemon: &Daemon) -> Result<Value, Failure> {
-    let about = read(&daemon.paths)?;
+    let own = read(&daemon.paths)?;
+    let all = all(daemon);
+    let about = merged(&own, all.as_ref());
     let (_, cuts) = limited(about.clone());
     Ok(
         json!({"name": about.name, "pronouns": about.pronouns, "notes": about.notes,
+        "own": own_fields(&own),
+        "all": all.map(|all| json!({"name": all.name, "pronouns": all.pronouns, "notes": all.notes})),
         "limit": LIMIT, "cut": (!cuts.is_empty()).then(|| cuts.join("; "))}),
     )
 }

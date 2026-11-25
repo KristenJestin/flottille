@@ -16,6 +16,11 @@
 //! every member's session that asked for the notices (`Ask::About`'s `notices`, which the app
 //! says), said to be from that machine (`docs/remote.md`, "Notifications"); nothing of it is kept.
 //!
+//! The values of all machines (`Ask::Share`, `docs/remote.md`, "Settings for all machines") are
+//! kept, the latest of each name, as the machines sealed them: the hub checks the sealing
+//! machine's signature and never reads a value. A session that asked for them (`Ask::Shared`) is
+//! sent them whole, then again whenever one changes.
+//!
 //! A device that is no member yet may pair (`flottille_link::Pairing`) while pair mode is open:
 //! its proof is checked against the pair mode's secret, the device is paired, and its session is
 //! sent the list and may declare its machine, `PAIR_IDLE` at most.
@@ -423,6 +428,8 @@ struct Sent {
     presence: Option<Vec<PresenceOf>>,
     facts: Option<Vec<Facts>>,
     online: Option<Vec<PublicKey>>,
+    /// The values of all machines last sent, once the session asked for them.
+    shared: Option<Vec<flottille_link::Sealed>>,
 }
 
 /// The member a session is: its device's, its machine's, or, for a pairing's, the device paired.
@@ -471,6 +478,8 @@ async fn run<C: Clock + Send + 'static>(
     let mut notices = shared.notices.subscribe();
     // Whether this session asked for the notices (`Ask::About`).
     let mut takes_notices = false;
+    // Whether this session asked for the values of all machines (`Ask::Shared`).
+    let mut takes_shared = false;
     // Every session is told when this one closes, once it is no longer open to the links: this is
     // let go after `opened`.
     struct SayClosed<'a>(&'a watch::Sender<u64>);
@@ -497,6 +506,10 @@ async fn run<C: Clock + Send + 'static>(
                     // Until it declared its machine, or when it is the device itself (a phone).
                     pairing = paired.is_some() && hub.welcome(&device, pinned).is_err();
                     let mut frames = news(&hub, &device, paired.as_ref(), &mut sent);
+                    if takes_shared && sent.shared.as_deref() != Some(hub.shared()) {
+                        frames.push(ToDevice::Shared(hub.shared().to_vec()));
+                        sent.shared = Some(hub.shared().to_vec());
+                    }
                     let member = is_member(&hub, &device);
                     if member && opened.is_none() {
                         opened = Some(shared.relay.open(device));
@@ -576,11 +589,16 @@ async fn run<C: Clock + Send + 'static>(
                     Err(why) => return why,
                 };
                 let asks_notices = matches!(asked.ask, Ask::About { notices: true, .. });
+                let asks_shared = matches!(asked.ask, Ask::Shared {});
                 let refused = handle(shared, &device, pinned, paired.as_ref(), asked.ask)
                     .err()
                     .map(|error| error.to_string());
                 // Said once a session; a phone of before never says it, and is sent none.
                 takes_notices |= asks_notices && refused.is_none();
+                if asks_shared && refused.is_none() && !takes_shared {
+                    takes_shared = true;
+                    stale = true;
+                }
                 let answer = ToDevice::Answer { id: asked.id, refused };
                 if session.send(&answer).await.is_err() {
                     return "it closed the connection".to_owned();
@@ -704,6 +722,17 @@ fn handle<C: Clock>(
         // on 2026-11-21: answered, so that it keeps its session until it is updated, and
         // nothing of them kept nor told.
         Ask::Addresses { .. } => Ok(()),
+        // The values of all machines: only from a member's machine, and only a member's device
+        // or machine hears them.
+        Ask::Share { sealed } => match hub.share(sealed) {
+            Ok(true) => Ok(()),
+            Ok(false) => return Ok(()),
+            Err(error) => Err(error),
+        },
+        Ask::Shared {} => match member {
+            Some(_) => return Ok(()),
+            None => Err(not_member()),
+        },
         Ask::Presence { active, last_input } => match member {
             Some(member) => hub.tell_presence(&member, Presence { active, last_input }),
             None => Err(not_member()),

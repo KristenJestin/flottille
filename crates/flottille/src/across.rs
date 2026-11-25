@@ -537,46 +537,41 @@ pub(crate) fn tell_answered(daemon: &Arc<Daemon>, agent: &str, kind: &str, line:
         return;
     }
     let prefix = format!("{kind}-{}-", launch.launch);
-    let waiting = match linked_now(daemon, &launch.machine) {
-        true => Vec::new(),
-        false => daemon
-            .read(|store| store.outgoing(Some(&launch.machine)))
-            .unwrap_or_default(),
-    };
-    let mut lines: Vec<String> = Vec::new();
-    let mut replacing = Vec::new();
-    for old in waiting
-        .into_iter()
-        .filter(|old| old.id.starts_with(&prefix))
-    {
-        if let Ok(MachineMessage::Deliver(told)) =
-            serde_json::from_value::<MachineMessage>(old.message)
-        {
-            lines.extend(told.body.lines().map(str::to_owned));
-        }
-        replacing.push(old.id);
-    }
-    lines.push(line.to_owned());
-    let mut listed = std::collections::HashSet::new();
-    lines.retain(|told| listed.insert(told.clone()));
-    // The newest answers, when all of them would not fit.
-    while lines.len() > 1 && lines.iter().map(|l| l.chars().count() + 1).sum::<usize>() > LONGEST {
-        lines.remove(0);
-    }
     let id = format!(
         "{prefix}{}",
         flottille_core::agent::new_id().unwrap_or_default()
     );
+    let merged = |waiting: Vec<String>| {
+        let mut lines: Vec<String> = waiting
+            .iter()
+            .flat_map(|told| told.lines().map(str::to_owned))
+            .collect();
+        lines.push(line.to_owned());
+        let mut listed = std::collections::HashSet::new();
+        lines.retain(|told| listed.insert(told.clone()));
+        // The newest answers, when all of them would not fit.
+        while lines.len() > 1
+            && lines.iter().map(|l| l.chars().count() + 1).sum::<usize>() > LONGEST
+        {
+            lines.remove(0);
+        }
+        lines.join("\n")
+    };
+    // Linked, the waiting message may be on its way already: each answer is one of its own.
+    let replacing = (!linked_now(daemon, &launch.machine)).then_some(Replacing {
+        prefix: &prefix,
+        merged: &merged,
+    });
     kept_replacing(
         daemon,
         &launch,
         Some(id),
         kind,
-        &lines.join("\n"),
+        line,
         approval::BETWEEN_TURNS,
         false,
         false,
-        &replacing,
+        replacing.as_ref(),
     );
 }
 
@@ -610,17 +605,12 @@ pub(crate) fn tell_plain_turn_end(
     // Each one has an id of its own, which the receiver stores once; the prefix finds the one
     // still waiting.
     let prefix = format!("{kind}-plain-{}-", launch.launch);
-    let waiting = daemon
-        .read(|store| store.outgoing(Some(&launch.machine)))
-        .unwrap_or_default();
-    for old in waiting.iter().filter(|old| old.id.starts_with(&prefix)) {
-        let _ = daemon.write(|store| store.forget_outgoing(&old.id).map(|()| ((), None)));
-    }
     let id = format!(
         "{prefix}{}",
         flottille_core::agent::new_id().unwrap_or_default()
     );
-    kept_for_caller(
+    let latest = |_: Vec<String>| body.to_owned();
+    kept_replacing(
         daemon,
         &launch,
         Some(id),
@@ -629,6 +619,10 @@ pub(crate) fn tell_plain_turn_end(
         approval::BETWEEN_TURNS,
         false,
         false,
+        Some(&Replacing {
+            prefix: &prefix,
+            merged: &latest,
+        }),
     );
     true
 }
@@ -701,11 +695,11 @@ fn kept_for_caller(
     back: bool,
     ended: bool,
 ) {
-    kept_replacing(daemon, launch, id, kind, body, urgency, back, ended, &[]);
+    kept_replacing(daemon, launch, id, kind, body, urgency, back, ended, None);
 }
 
-/// As [`kept_for_caller`], the messages `replacing` forgotten in the same write, which then counts
-/// against nothing: a message that replaces others never fills what waits.
+/// As [`kept_for_caller`], the messages `replacing` finds forgotten in the same write, which then
+/// counts against nothing: a message that replaces others never fills what waits.
 #[allow(clippy::too_many_arguments)]
 fn kept_replacing(
     daemon: &Arc<Daemon>,
@@ -716,7 +710,7 @@ fn kept_replacing(
     urgency: &str,
     back: bool,
     ended: bool,
-    replacing: &[String],
+    replacing: Option<&Replacing>,
 ) {
     let id = id.unwrap_or_else(|| {
         format!(
@@ -813,20 +807,21 @@ fn keep(
     beyond: bool,
 ) -> Result<(), String> {
     keep_replacing(
-        daemon,
-        machine,
-        launch,
-        name,
-        id,
-        message,
-        back,
-        beyond,
-        &[],
+        daemon, machine, launch, name, id, message, back, beyond, None,
     )
 }
 
-/// As [`keep`], the messages `replacing` forgotten in the same write; never refused when it
-/// replaces one, as a close is (`keep_close`).
+/// The messages that wait for a machine and a new one takes the place of: those whose id starts
+/// with `prefix`, forgotten in the write that keeps it, and `merged` says the body it keeps from
+/// theirs, in the order they wait.
+struct Replacing<'a> {
+    prefix: &'a str,
+    merged: &'a dyn Fn(Vec<String>) -> String,
+}
+
+/// As [`keep`], what `replacing` finds forgotten in the same write that reads it, so that two
+/// messages kept at once never both take the same one; never refused when it replaces one, as a
+/// close is (`keep_close`).
 #[allow(clippy::too_many_arguments)]
 fn keep_replacing(
     daemon: &Arc<Daemon>,
@@ -837,30 +832,59 @@ fn keep_replacing(
     message: &MachineMessage,
     back: bool,
     beyond: bool,
-    replacing: &[String],
+    replacing: Option<&Replacing>,
 ) -> Result<(), String> {
-    let outgoing = outgoing(machine, launch, name, id, message, back);
-    let waiting = daemon
-        .read(|store| store.outgoing(Some(machine)))
-        .map_err(|error| format!("it cannot be kept: {error}"))?
-        .len();
-    let waiting = waiting.max(playing_kept_full().unwrap_or(0));
+    let played = playing_kept_full().unwrap_or(0);
     let most = if beyond {
         MOST_KEPT_WITH_ANSWERS
     } else {
         MOST_KEPT
     };
-    if replacing.is_empty() && waiting >= most {
-        return Err(format!("{most} messages wait for {name} already"));
-    }
-    daemon
+    let kept = daemon
         .write(|store| {
-            for id in replacing {
-                store.forget_outgoing(id)?;
+            let waiting = store.outgoing(Some(machine))?;
+            let old: Vec<&Outgoing> = waiting
+                .iter()
+                .filter(|old| replacing.is_some_and(|r| old.id.starts_with(r.prefix)))
+                .collect();
+            if old.is_empty() && waiting.len().max(played) >= most {
+                return Ok((
+                    Err(format!("{most} messages wait for {name} already")),
+                    None,
+                ));
             }
-            store.keep_outgoing(&outgoing).map(|()| ((), None))
+            let mut message = message.clone();
+            if let (Some(replacing), MachineMessage::Deliver(deliver)) = (replacing, &mut message) {
+                let told = old
+                    .iter()
+                    .filter_map(|old| {
+                        match serde_json::from_value::<MachineMessage>(old.message.clone()) {
+                            Ok(MachineMessage::Deliver(told)) => Some(told.body),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                deliver.body = (replacing.merged)(told);
+                let length = deliver.body.chars().count();
+                if length > LONGEST {
+                    return Ok((
+                        Err(format!(
+                            "a delivery to another machine is {LONGEST} characters at most, \
+                             this one {length}"
+                        )),
+                        None,
+                    ));
+                }
+            }
+            for old in &old {
+                store.forget_outgoing(&old.id)?;
+            }
+            store
+                .keep_outgoing(&outgoing(machine, launch, name, id, &message, back))
+                .map(|()| (Ok(()), None))
         })
         .map_err(|error| format!("it cannot be kept: {error}"))?;
+    kept?;
     send_kept(daemon, machine);
     Ok(())
 }

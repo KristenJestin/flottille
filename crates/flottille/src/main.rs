@@ -94,6 +94,7 @@ mod services;
 mod session_name;
 mod session_read;
 mod setup;
+mod shared;
 mod show;
 mod sign_in;
 mod skill_command;

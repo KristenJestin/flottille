@@ -1099,7 +1099,7 @@ async fn control(inner: Arc<Inner>, mut session: Session) {
         match pushed {
             Pushed::List(list) => inner.took_list(list),
             // A notice is drawn by the app (#828).
-            Pushed::Presence(_) | Pushed::Facts(_) | Pushed::Notice { .. } => {}
+            Pushed::Presence(_) | Pushed::Facts(_) | Pushed::Notice { .. } | Pushed::Shared(_) => {}
         }
     }
     let why = session.ended();

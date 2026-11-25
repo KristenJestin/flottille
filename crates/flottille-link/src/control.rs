@@ -23,7 +23,7 @@
 //!                                                                 reset, reason)}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
 //!                {"list": […]}, {"presence": […]}, {"facts": […]},
-//!                {"notice": {"from": K', "notice": N}}
+//!                {"notice": {"from": K', "notice": N}}, {"shared": [S, …]}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
 //!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
 //! and each way   {"keepalive": {}}
@@ -106,6 +106,7 @@ use sha2::Sha256;
 
 use crate::members::Signature;
 use crate::serial::{from_hex_text, invisible, shown, to_hex};
+use crate::shared::Sealed;
 use crate::{
     Change, ChangeHash, Hello, HubKey, ListError, MachineKey, MemberList, Members, NeedsUpdate,
     PairCode, PairSecret, Proposed, PublicKey, choose_hub,
@@ -591,6 +592,12 @@ pub enum Ask {
     Presence { active: bool, last_input: u64 },
     /// What a runner's machine tells the user's phones (`docs/remote.md`, "Notifications").
     Notify { notice: Notice },
+    /// A value of all machines, sealed by this machine (`docs/remote.md`, "Settings for all
+    /// machines"): the hub keeps the latest of each name. Asked only of a hub whose welcome said
+    /// `shared`.
+    Share { sealed: Sealed },
+    /// This session takes the values of all machines: the hub sends them now and at each change.
+    Shared {},
 }
 
 /// What a runner tells the user's phones through the hub: a kind and ids, never a title, an
@@ -694,6 +701,10 @@ pub enum ToDevice {
     Welcome {
         #[serde(default)]
         notices: bool,
+        /// The hub keeps the values of all machines (`Ask::Share`); a hub of before #1330 says
+        /// nothing, and would close a session that asks it.
+        #[serde(default)]
+        shared: bool,
     },
     /// The device is not one of the members; `reset` when the list it pinned is not the hub's
     /// any more, the hub having been set up again. At the end of the handshake, `proof` is the
@@ -727,6 +738,8 @@ pub enum ToDevice {
     Online(Vec<PublicKey>),
     /// What the runner whose machine's key is `from` tells this phone.
     Notice { from: PublicKey, notice: Notice },
+    /// The values of all machines the hub keeps, whole, to a session that asked for them.
+    Shared(Vec<Sealed>),
     /// Nothing to say: the session is alive.
     Keepalive {},
 }
@@ -899,6 +912,8 @@ pub enum Pushed {
     List(MemberList),
     Presence(Vec<PresenceOf>),
     Facts(Vec<Facts>),
+    /// The values of all machines, as the hub keeps them.
+    Shared(Vec<Sealed>),
     /// What the runner whose machine's key is `from` tells this phone.
     Notice {
         from: PublicKey,
@@ -1206,6 +1221,8 @@ pub struct Session {
     relay: Option<RelayPort>,
     /// Whether the hub said it takes `Ask::Notify`.
     notices: bool,
+    /// Whether the hub said it keeps the values of all machines.
+    shared: bool,
 }
 
 impl fmt::Debug for Session {
@@ -1225,6 +1242,7 @@ pub struct Asker {
     asks: mpsc::UnboundedSender<(Ask, Answered)>,
     ended: Arc<Mutex<Option<String>>>,
     notices: bool,
+    shared: bool,
 }
 
 impl Asker {
@@ -1233,9 +1251,21 @@ impl Asker {
         self.notices
     }
 
+    /// Whether the hub said it keeps the values of all machines (`Ask::Share`, `Ask::Shared`).
+    pub fn takes_shared(&self) -> bool {
+        self.shared
+    }
+
     /// Asks the hub, and waits for its answer. `Ask::Notify` is never sent to a hub that did not
     /// say it takes it: such a hub would close the session.
     pub async fn ask(&self, ask: Ask) -> Result<(), ControlError> {
+        if matches!(ask, Ask::Share { .. } | Ask::Shared {}) && !self.shared {
+            return Err(ControlError::Refused {
+                hub: self.authority.clone(),
+                reason: "it keeps no value of all machines, being of before them: update it"
+                    .to_owned(),
+            });
+        }
         if matches!(ask, Ask::Notify { .. }) && !self.notices {
             return Err(ControlError::Refused {
                 hub: self.authority.clone(),
@@ -1415,9 +1445,11 @@ impl Session {
         let ended = Arc::new(Mutex::new(None));
         let (relay, carried) = relay_ends();
         let mut takes_notices = false;
+        let mut takes_shared = false;
         let refused = match welcome {
-            ToDevice::Welcome { notices } => {
+            ToDevice::Welcome { notices, shared } => {
                 takes_notices = notices;
+                takes_shared = shared;
                 tokio::spawn(drive(
                     reader,
                     writer,
@@ -1470,6 +1502,7 @@ impl Session {
             refused,
             relay: Some(relay),
             notices: takes_notices,
+            shared: takes_shared,
         })
     }
 
@@ -1500,6 +1533,7 @@ impl Session {
             asks: self.asks.clone(),
             ended: self.ended.clone(),
             notices: self.notices,
+            shared: self.shared,
         }
     }
 
@@ -1710,6 +1744,7 @@ async fn drive(
                         }
                     }
                     Some(Ok(ToDevice::Facts(facts))) => { let _ = pushing.send(Pushed::Facts(facts)); }
+                    Some(Ok(ToDevice::Shared(shared))) => { let _ = pushing.send(Pushed::Shared(shared)); }
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
                     Some(Ok(ToDevice::Addresses(_))) => {}
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
@@ -1806,7 +1841,14 @@ impl Arriving {
     /// [`Arriving::welcome`], the session lost after `silence` without a word from the device, or
     /// a line it does not read for as long.
     pub async fn welcome_within(mut self, silence: Duration) -> std::io::Result<HubSession> {
-        write_line(&mut self.writer, &ToDevice::Welcome { notices: true }).await?;
+        write_line(
+            &mut self.writer,
+            &ToDevice::Welcome {
+                notices: true,
+                shared: true,
+            },
+        )
+        .await?;
         let (sender, asks) = mpsc::channel(16);
         let (relaying, relays) = mpsc::channel(RELAY_WAITING);
         let mut reader = self.reader;

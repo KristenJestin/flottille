@@ -6,19 +6,35 @@
 //!
 //! The text is frozen in an agent when it is created, so a change reaches the agents created
 //! after it only: the toast that follows a save says so.
+//!
+//! With a hub (`docs/remote.md`, "Settings for all machines"), the section is drawn on All machines
+//! or on one machine. On All machines it edits the values every machine uses, a change signed with
+//! the device key (`about.share`). On a machine it says once that the values are all machines'
+//! unless changed there; a field changed there is the machine's own, its edge in the colour of
+//! what is set apart and one line under it, "Changed on pc", with Use all machines' value, which
+//! drops it (`about.set` of the field empty).
 
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Field, Section, Toast, follow_theme, palette, presence, presence_of, space, toast,
+    Button, Field, Section, SetHere, Toast, follow_theme, palette, presence, presence_of, space,
+    tint, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, TestSupportExt as _, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _,
+    Window, div, px,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, perform_later, spaced, stack};
+use crate::commands::{boxed_edged, line_field, perform_later, spaced, stack};
+
+/// What a machine's section says once while it follows the values of all machines.
+pub const SHARED_LINE: &str = "The values of all machines, unless changed here.";
+
+/// The way back of a field changed on a machine.
+pub const USE_ALL: &str = "Use all machines' value";
 
 /// What the section says under its title.
 const SENTENCE: &str = "What every agent is told about you, before the rules, and what an agent \
@@ -39,19 +55,46 @@ pub struct Shown {
     pub limit: usize,
     /// Why a text edited by hand past a limit is cut for the agents.
     pub cut: Option<String>,
+    /// The fields the machine holds itself, by key (`name`, `pronouns`, `notes`).
+    pub own: Vec<String>,
+    /// The values of all machines (name, how to refer to the user, notes), with a hub.
+    pub all: Option<(String, String, String)>,
+    /// Where a change of all machines went (`about.share`): `given` to the hub, `later` with the
+    /// hub out of reach, `old-hub` to a hub that keeps none.
+    pub hub: Option<String>,
 }
 
 impl Shown {
     pub fn of(value: &Value) -> Shown {
         let text = |key: &str| value[key].as_str().unwrap_or_default().to_owned();
+        let all = value["all"].as_object().map(|all| {
+            let text = |key: &str| {
+                all.get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            (text("name"), text("pronouns"), text("notes"))
+        });
         Shown {
             name: text("name"),
             pronouns: text("pronouns"),
             notes: text("notes"),
+            own: value["own"]
+                .as_array()
+                .map(|own| {
+                    own.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            all,
             limit: value["limit"]
                 .as_u64()
                 .map_or(8_000, |limit| limit as usize),
             cut: value["cut"].as_str().map(str::to_owned),
+            hub: value["hub"].as_str().map(str::to_owned),
         }
     }
 
@@ -72,8 +115,17 @@ pub struct AboutEditor {
     waiting: bool,
     /// What waits is a reset.
     resetting: bool,
+    /// The section is drawn on All machines: it edits the values every machine uses.
+    on_all: bool,
+    /// The machine whose section this is, by name: what a field changed there says.
+    machine: String,
+    /// The machine has a hub and another machine to share with: Settings offers All machines.
+    hub: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+/// The keys of the fields, in their order.
+const KEYS: [&str; 3] = ["name", "pronouns", "notes"];
 
 #[derive(Clone)]
 struct Fields {
@@ -90,8 +142,96 @@ impl AboutEditor {
             shown: None,
             waiting: false,
             resetting: false,
+            on_all: false,
+            machine: String::new(),
+            hub: false,
             _subscriptions: Vec::new(),
         }
+    }
+
+    /// Where the section is drawn: on All machines, or on `machine`, which has a hub and another
+    /// machine to share with or not. Coming to All machines or leaving it puts in the fields what
+    /// that place holds.
+    pub fn place(
+        &mut self,
+        on_all: bool,
+        machine: String,
+        hub: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hub = hub;
+        self.machine = machine;
+        if self.on_all == on_all {
+            return;
+        }
+        self.on_all = on_all;
+        if let (Some(fields), Some(shown)) = (self.fields.clone(), self.shown.clone()) {
+            let (name, pronouns, notes) = self.values_of(&shown);
+            Self::put(&fields, [&name, &pronouns, &notes], window, cx);
+        }
+    }
+
+    /// Whether the section is drawn on All machines.
+    pub fn on_all(&self) -> bool {
+        self.on_all
+    }
+
+    /// What the fields show of `shown` where the section is drawn: all machines' values on All
+    /// machines, what the machine's agents read on a machine.
+    fn values_of(&self, shown: &Shown) -> (String, String, String) {
+        match (self.on_all, &shown.all) {
+            (true, Some(all)) => all.clone(),
+            (true, None) => Default::default(),
+            (false, _) => (
+                shown.name.clone(),
+                shown.pronouns.clone(),
+                shown.notes.clone(),
+            ),
+        }
+    }
+
+    /// The fields that differ from what the daemon last said, with what they hold.
+    fn changed(&self, cx: &gpui_kit::App) -> Vec<(String, String)> {
+        let (Some(shown), Some((name, pronouns, notes))) = (&self.shown, self.typed(cx)) else {
+            return Vec::new();
+        };
+        let (was_name, was_pronouns, was_notes) = self.values_of(shown);
+        KEYS.iter()
+            .zip([
+                (name, was_name),
+                (pronouns, was_pronouns),
+                (notes, was_notes),
+            ])
+            .filter(|(_, (now, was))| now != was)
+            .map(|(key, (now, _))| (key.to_string(), now))
+            .collect()
+    }
+
+    /// Whether the machine holds the field `key` itself, while it has a hub.
+    pub fn is_own(&self, key: &str) -> bool {
+        !self.on_all
+            && self.hub
+            && self
+                .shown
+                .as_ref()
+                .is_some_and(|shown| shown.all.is_some() && shown.own.iter().any(|own| own == key))
+    }
+
+    /// Drops the machine's own `key`: the field follows all machines again.
+    pub fn use_all(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.waiting || !self.is_own(key) {
+            return;
+        }
+        self.waiting = true;
+        perform_later(
+            &self.shell,
+            Command::AboutWrite {
+                fields: Some(vec![(key.to_owned(), String::new())]),
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     /// Asks the daemon for what the user said.
@@ -128,17 +268,25 @@ impl AboutEditor {
 
     /// A field differs from what the daemon last said.
     pub fn is_edited(&self, cx: &gpui_kit::App) -> bool {
-        match (&self.shown, self.typed(cx)) {
-            (Some(shown), Some((name, pronouns, notes))) => {
-                shown.name != name || shown.pronouns != pronouns || shown.notes != notes
-            }
-            _ => false,
-        }
+        !self.changed(cx).is_empty()
     }
 
-    /// Whether Reset has something to forget.
+    /// Whether Reset has something to forget: on All machines a value, on a machine with a hub
+    /// a field of its own, else a field.
     pub fn is_set(&self) -> bool {
-        self.shown.as_ref().is_some_and(|shown| !shown.is_empty())
+        let Some(shown) = &self.shown else {
+            return false;
+        };
+        match (self.on_all, &shown.all) {
+            (true, _) => {
+                let (name, pronouns, notes) = self.values_of(shown);
+                [name, pronouns, notes]
+                    .iter()
+                    .any(|text| !text.trim().is_empty())
+            }
+            (false, Some(_)) if self.hub => !shown.own.is_empty(),
+            (false, _) => !shown.is_empty(),
+        }
     }
 
     fn make_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Fields {
@@ -165,29 +313,34 @@ impl AboutEditor {
                     cx.notify();
                 }
             }));
-        if let Some(shown) = &self.shown {
-            Self::put(&name, &pronouns, &notes, shown, window, cx);
-        }
         let fields = Fields {
             name,
             pronouns,
             notes,
         };
+        if let Some(shown) = self.shown.clone() {
+            let (name, pronouns, notes) = self.values_of(&shown);
+            Self::put(&fields, [&name, &pronouns, &notes], window, cx);
+        }
         self.fields = Some(fields.clone());
         fields
     }
 
     fn put(
-        name: &Entity<InputState>,
-        pronouns: &Entity<InputState>,
-        notes: &Entity<TextareaState>,
-        shown: &Shown,
+        fields: &Fields,
+        [name, pronouns, notes]: [&String; 3],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        name.update(cx, |field, cx| field.set_value(&shown.name, window, cx));
-        pronouns.update(cx, |field, cx| field.set_value(&shown.pronouns, window, cx));
-        notes.update(cx, |field, cx| field.set_value(&shown.notes, window, cx));
+        fields
+            .name
+            .update(cx, |field, cx| field.set_value(name, window, cx));
+        fields
+            .pronouns
+            .update(cx, |field, cx| field.set_value(pronouns, window, cx));
+        fields
+            .notes
+            .update(cx, |field, cx| field.set_value(notes, window, cx));
     }
 
     /// The daemon's answer to a read, a save or a reset. Typing in progress is kept when a read
@@ -204,8 +357,25 @@ impl AboutEditor {
         if written {
             toast(
                 match &said {
+                    Ok(_) if resetting && self.on_all => {
+                        Toast::success("About you reset for all machines")
+                            .detail("A machine that changed a field keeps its own.")
+                    }
                     Ok(_) if resetting => Toast::success("About you reset")
                         .detail("Agents started from now on are told nothing of you."),
+                    Ok(shown) if self.on_all && shown.hub.as_deref() == Some("later") => {
+                        Toast::success("About you saved on this machine").detail(
+                            "The hub is out of reach: the other machines get it once it answers.",
+                        )
+                    }
+                    Ok(shown) if self.on_all && shown.hub.as_deref() == Some("old-hub") => {
+                        Toast::failure("About you saved on this machine only").detail(
+                            "The hub is of a version that keeps no settings for all machines: \
+                             update it.",
+                        )
+                    }
+                    Ok(_) if self.on_all => Toast::success("About you saved for all machines")
+                        .detail("Agents started from now on read it, on every machine."),
                     Ok(_) => Toast::success("About you saved")
                         .detail("Agents started from now on read it."),
                     Err(why) => Toast::failure("About you not saved").detail(why.clone()),
@@ -216,35 +386,28 @@ impl AboutEditor {
         if let Ok(shown) = said {
             let keep = !written && self.is_edited(cx);
             if !keep && let Some(fields) = self.fields.clone() {
-                Self::put(
-                    &fields.name,
-                    &fields.pronouns,
-                    &fields.notes,
-                    &shown,
-                    window,
-                    cx,
-                );
+                let (name, pronouns, notes) = self.values_of(&shown);
+                Self::put(&fields, [&name, &pronouns, &notes], window, cx);
             }
             self.shown = Some(shown);
         }
         cx.notify();
     }
 
+    /// Saves the fields changed: for all machines on All machines, else as the machine's own.
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        let Some((name, pronouns, notes)) = self.typed(cx) else {
-            return;
-        };
-        if self.waiting || !self.is_edited(cx) {
+        let fields = self.changed(cx);
+        if self.waiting || fields.is_empty() {
             return;
         }
         self.waiting = true;
-        perform_later(
-            &self.shell,
-            Command::AboutWrite {
-                text: Some((name, pronouns, notes)),
+        let command = match self.on_all {
+            true => Command::AboutShare { fields },
+            false => Command::AboutWrite {
+                fields: Some(fields),
             },
-            cx,
-        );
+        };
+        perform_later(&self.shell, command, cx);
         cx.notify();
     }
 
@@ -254,8 +417,52 @@ impl AboutEditor {
         }
         self.waiting = true;
         self.resetting = true;
-        perform_later(&self.shell, Command::AboutWrite { text: None }, cx);
+        let command = match self.on_all {
+            true => Command::AboutShare {
+                fields: KEYS
+                    .iter()
+                    .map(|key| (key.to_string(), String::new()))
+                    .collect(),
+            },
+            false => Command::AboutWrite { fields: None },
+        };
+        perform_later(&self.shell, command, cx);
         cx.notify();
+    }
+
+    /// `field`, under the mark of a field the machine holds itself, its edge in the colour of what
+    /// is set apart, both moving as it becomes the machine's own or follows all machines again.
+    fn own_field(
+        &self,
+        key: &'static str,
+        field: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> SetHere {
+        let editor = cx.entity().downgrade();
+        SetHere::new(
+            gpui_kit::ElementId::Name(format!("about-{key}-own").into()),
+            field,
+            format!("Changed on {}", self.machine),
+            USE_ALL,
+        )
+        .set(self.is_own(key))
+        .on_reset(move |_, cx| {
+            editor.update(cx, |editor, cx| editor.use_all(key, cx)).ok();
+        })
+    }
+
+    /// The edge of the field `key`'s box: the colour of what is set apart while the machine holds
+    /// it itself, the line's otherwise, fading over `PANEL`.
+    fn edge(&self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::Hsla {
+        let p = palette(cx);
+        let target = if self.is_own(key) { p.wait } else { p.line2 };
+        tint(
+            gpui_kit::ElementId::Name(format!("about-{key}-edge").into()),
+            target,
+            PANEL,
+            window,
+            cx,
+        )
     }
 }
 
@@ -267,17 +474,23 @@ impl Render for AboutEditor {
             None => self.make_fields(window, cx),
         };
         let limit = self.shown.as_ref().map_or(8_000, |shown| shown.limit);
+        let edges = KEYS.map(|key| self.edge(key, window, cx));
         let name = Field::new(
             "about-name",
             "Name",
-            boxed("about-name-box", Input::new(&fields.name), cx),
+            boxed_edged("about-name-box", Input::new(&fields.name), edges[0], cx),
         )
         .optional()
         .hint("What agents call you.");
         let pronouns = Field::new(
             "about-pronouns",
             "How to refer to you",
-            boxed("about-pronouns-box", Input::new(&fields.pronouns), cx),
+            boxed_edged(
+                "about-pronouns-box",
+                Input::new(&fields.pronouns),
+                edges[1],
+                cx,
+            ),
         )
         .optional()
         .hint("One line: he/him, she/her, they.");
@@ -292,7 +505,7 @@ impl Render for AboutEditor {
                 .rounded(px(10.))
                 .bg(p.field)
                 .border_1()
-                .border_color(p.line2)
+                .border_color(edges[2])
                 .text_size(px(13.))
                 .line_height(px(20.))
                 .child(fields.notes.clone())
@@ -321,10 +534,31 @@ impl Render for AboutEditor {
                         .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                 )),
             );
+        // Said once, on a machine that has a hub: the fields follow all machines unless changed.
+        let follows = !self.on_all
+            && self.hub
+            && self.shown.as_ref().is_some_and(|shown| shown.all.is_some());
+        let name = self.own_field("name", name, cx);
+        let pronouns = self.own_field("pronouns", pronouns, cx);
+        let notes = self.own_field("notes", notes, cx);
         Section::new("about", "About you")
             .sentence(SENTENCE)
             .child(
                 stack(space::MD)
+                    .child(
+                        presence(
+                            "about-shared-block",
+                            follows,
+                            div()
+                                .id("about-shared")
+                                .aria_label(SHARED_LINE)
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child(SHARED_LINE)
+                                .test_support(),
+                        )
+                        .space(space::MD),
+                    )
                     .child(spaced(space::MD, name))
                     .child(spaced(space::MD, pronouns))
                     .child(spaced(space::MD, notes))
