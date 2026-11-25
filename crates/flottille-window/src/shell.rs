@@ -57,7 +57,7 @@ use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{Arranged, ArrangedGroup};
-use crate::tree::{EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
+use crate::tree::{BlockedNode, EndedNode, MachineNode, ProjectNode, SessionRow, Sidebar};
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -238,6 +238,8 @@ pub struct Shell {
     grouped: bool,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
     ended: Option<Entity<EndedNode>>,
+    /// The "Blocked by others" group above it, made when a root is first blocked.
+    blocked: Option<Entity<BlockedNode>>,
     /// What the daemon keeps of what the sidebar has folded: read once at opening, which makes
     /// the nodes as they were left, then what was last written. `None` until it is read: nothing
     /// is written before, which would replace it with the defaults.
@@ -914,6 +916,7 @@ impl Shell {
             starts: HashMap::new(),
             grouped: false,
             ended: None,
+            blocked: None,
             kept: Folds::default(),
             kept_read: false,
             kept_asked: None,
@@ -2934,9 +2937,11 @@ impl Shell {
             SessionPage::new(this, opened, status, reply, dock, follow, asked, layout, cx)
         });
         let providers = self.providers.clone();
+        let blocked = self.snapshot.session(id).and_then(|s| s.blocked.clone());
         page.update(cx, |page, cx| {
             page.set_providers(&providers, cx);
             page.set_subject(subject, cx);
+            page.set_blocked(blocked, cx);
         });
         self.chose_on(&page, id, cx);
         self.session_page = Some(page.clone());
@@ -3442,6 +3447,11 @@ impl Shell {
                 .as_ref()
                 .map(|group| group.read(cx).is_open())
                 .or(self.kept.ended),
+            blocked: self
+                .blocked
+                .as_ref()
+                .map(|group| group.read(cx).is_open())
+                .or(self.kept.blocked),
         }
     }
 
@@ -3495,6 +3505,11 @@ impl Shell {
     /// The "Ended" group at the bottom of the tree, once a session ended.
     pub fn ended(&self) -> Option<&Entity<EndedNode>> {
         self.ended.as_ref()
+    }
+
+    /// The "Blocked by others" group above "Ended", once a root was blocked.
+    pub fn blocked(&self) -> Option<&Entity<BlockedNode>> {
+        self.blocked.as_ref()
     }
 
     fn relayout(&mut self, first: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -5563,9 +5578,9 @@ impl Shell {
                     row.set_subject(session.subject.as_ref(), session.renamed, cx)
                 });
             }
-            // Ended, it sits among other projects' sessions: its row says whose it is, and the
-            // machine of one of another machine (#1280).
-            let scope = session.ended.then(|| {
+            // Ended or blocked apart, it sits among other projects' sessions: its row says whose
+            // it is, and the machine of one of another machine (#1280).
+            let scope = (session.ended || self.snapshot.blocked_apart(session)).then(|| {
                 match session.elsewhere.as_ref().filter(|there| !there.here) {
                     Some(there) => format!("{} on {}", session.project, there.machine),
                     None => session.project.clone(),
@@ -5893,6 +5908,30 @@ impl Shell {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
+        // The roots blocked by someone else leave their projects for one folded group above it.
+        let blocked = snapshot.blocked_sessions();
+        let who = blocked_who(&blocked);
+        let mut marks = Vec::new();
+        let rows = self.session_rows(
+            blocked.iter().copied(),
+            &snapshot.homes,
+            &mut sessions,
+            &mut marks,
+            now,
+            cx,
+        );
+        let present = !rows.is_empty();
+        if self.blocked.is_none() && present {
+            let open = self.kept.blocked.unwrap_or(false);
+            self.blocked = Some(cx.new(|cx| BlockedNode::new(this.clone(), open, cx)));
+        }
+        if let Some(group) = self.blocked.clone() {
+            if !group.read(cx).holds(&rows, &who, cx) {
+                group.update(cx, |group, cx| group.set(rows, who, cx));
+            }
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_blocked(group, present, cx));
+        }
         self.say_unlisted(cx);
         match grouped {
             true => {
@@ -5953,6 +5992,14 @@ impl Shell {
         {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
+        }
+        // A session blocked by someone else, or no longer: its open page's banner says it.
+        if let Some(page) = self.session_page.clone()
+            && let Some(found) = self.snapshot.session(page.read(cx).id())
+            && page.read(cx).blocked() != found.blocked.as_ref()
+        {
+            let blocked = found.blocked.clone();
+            page.update(cx, |page, cx| page.set_blocked(blocked, cx));
         }
         // What the open session is about changed: its page says it.
         if let Some(page) = self.session_page.clone()
@@ -7901,6 +7948,21 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
             }
         },
     )
+}
+
+/// Whom the blocked roots wait on, each once, in the order of their rows.
+fn blocked_who(sessions: &[&crate::model::Session]) -> Vec<String> {
+    let mut who: Vec<String> = Vec::new();
+    for name in sessions
+        .iter()
+        .filter_map(|session| session.blocked.as_ref())
+        .flat_map(|blocked| blocked.by.iter())
+    {
+        if !who.contains(name) {
+            who.push(name.clone());
+        }
+    }
+    who
 }
 
 /// The rows of a project's live sessions as the tree draws them: a session led by another of

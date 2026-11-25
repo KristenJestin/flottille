@@ -853,6 +853,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.quota"
                 // A session given another model or effort says it on its row.
                 | "agent.options_taken"
+                // Blocked by someone else, or no longer: its mark, its row's place, its banner.
+                | "agent.blocked"
         ),
         _ => false,
     }
@@ -983,18 +985,24 @@ fn needing_the_user(conn: &mut Conn) -> Result<(HashSet<String>, Questions)> {
 }
 
 /// Follows the notification centre of the machine `connect` reaches, for the bell (#1280): read
-/// at each connection and whenever a notification comes, is read or is answered there; nothing
-/// else of that machine is read. Connects again with a backoff, which starts over only once the
-/// machine was read: a connection that this machine's daemon makes and the other refuses at once
-/// is no reason to ask again at once. Ends with its updates.
+/// at each connection and whenever a notification comes, is read or is answered there. Its
+/// settings and its providers follow too while its pages are shown (#1476, #1483): its events say
+/// what changed, and the providers are read again, off this link ([`ProviderReads`]), so that a
+/// daemon slow to list them never holds its notices. Connects again with a backoff, which starts
+/// over only once the machine was read: a connection that this machine's daemon makes and the
+/// other refuses at once is no reason to ask again at once. The events resume after the last one
+/// seen, so that nothing made while it was cut is lost. Ends with its updates.
 pub fn spawn_bell_into(connect: Connect, updates: Updates) {
     std::thread::Builder::new()
         .name("flottille-bell".into())
         .spawn(move || {
             let mut retry = FIRST_RETRY;
+            let mut last = None;
+            let reads = ProviderReads::default();
             while !updates.is_closed() {
                 if let Ok(stream) = connect()
-                    && let Ok(()) = follow_bell(stream, &updates, &mut retry)
+                    && let Ok(()) =
+                        follow_bell(stream, &connect, &updates, &reads, &mut retry, &mut last)
                 {
                     return;
                 }
@@ -1005,20 +1013,39 @@ pub fn spawn_bell_into(connect: Connect, updates: Updates) {
         .expect("a thread for the bell of another machine");
 }
 
-fn follow_bell(stream: UnixStream, updates: &Updates, retry: &mut Duration) -> Result<()> {
+fn follow_bell(
+    stream: UnixStream,
+    connect: &Connect,
+    updates: &Updates,
+    reads: &ProviderReads,
+    retry: &mut Duration,
+    last: &mut Option<u64>,
+) -> Result<()> {
     updates.hold(&stream);
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
-    conn.request("events.watch", json!({}))?;
+    // The first connection starts after the events there are; a later one, after the last it saw.
+    let started = conn.request("events.watch", json!({"after": *last}))?;
+    if last.is_none() {
+        *last = Some(started["after"].as_u64().unwrap_or(0));
+    }
+    // Only a provider's own events: a session's start says no change of the providers here.
+    let providers_of = |event: &Event| event.name.starts_with("provider.");
     let about = |event: &Event| event.name.starts_with("notifications.");
     let mut stale = Some(Instant::now());
+    let mut providers: Option<Instant> = None;
     let mut heard = Instant::now();
     loop {
-        let wait = quiet_wait(stale).unwrap_or_else(|| PING.saturating_sub(heard.elapsed()));
+        let since = [stale, providers].into_iter().flatten().min();
+        let wait = quiet_wait(since).unwrap_or_else(|| PING.saturating_sub(heard.elapsed()));
         match conn.next_event(Some(wait))? {
             Some(event) => {
                 heard = Instant::now();
+                *last = Some(event.seq);
                 if about(&event) {
                     stale.get_or_insert_with(Instant::now);
+                }
+                if providers_of(&event) {
+                    providers.get_or_insert_with(Instant::now);
                 }
                 if let Some(changed) = settings_changed(&event)
                     && updates.unbounded_send(changed).is_err()
@@ -1029,23 +1056,34 @@ fn follow_bell(stream: UnixStream, updates: &Updates, retry: &mut Duration) -> R
                     let _ = updates.unbounded_send(changed);
                 }
             }
-            None if stale.is_none() => {
+            None if since.is_none() => {
                 conn.request("daemon.status", json!({}))?;
                 heard = Instant::now();
             }
             None => {
-                stale = None;
-                let mut read = Snapshot::default();
-                read.set_notifications(
-                    &conn.request("notifications.list", json!({"limit": 1000}))?,
-                );
-                if updates.unbounded_send(Update::Bell(read)).is_err() {
-                    return Ok(());
+                if stale.take().is_some() {
+                    let mut read = Snapshot::default();
+                    read.set_notifications(
+                        &conn.request("notifications.list", json!({"limit": 1000}))?,
+                    );
+                    if updates.unbounded_send(Update::Bell(read)).is_err() {
+                        return Ok(());
+                    }
+                    *retry = FIRST_RETRY;
                 }
-                *retry = FIRST_RETRY;
+                if providers.take().is_some() {
+                    // On a thread of its own, one at a time: a daemon slow to list them never
+                    // holds the notices of this link.
+                    reads.start(connect, updates);
+                }
+                // Events that came while it read are queued: they make it stale again.
                 while let Some(event) = conn.queued() {
+                    *last = Some(event.seq);
                     if about(&event) {
                         stale.get_or_insert_with(Instant::now);
+                    }
+                    if providers_of(&event) {
+                        providers.get_or_insert_with(Instant::now);
                     }
                     if let Some(changed) = settings_changed(&event) {
                         let _ = updates.unbounded_send(changed);
@@ -1355,6 +1393,10 @@ mod tests {
         );
         assert!(matters(&event("workspace.created", json!({}))));
         assert!(matters(&event("agent.moved", json!({}))), "the rail");
+        assert!(
+            matters(&event("agent.blocked", json!({}))),
+            "the row's place and mark"
+        );
         assert!(
             matters(&event("workspace.step_done", json!({}))),
             "a card shows the preparation"

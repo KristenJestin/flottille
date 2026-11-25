@@ -567,6 +567,51 @@ fn a_delivery_named_after_an_extension_other_than_review_is_refused() {
 }
 
 #[test]
+fn the_user_s_answer_to_a_request_over_a_child_s_launch_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let parent = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = server.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![MachineMessage::Deliver(Box::new(Deliver {
+            id: format!("session-request-answered-{launch}-1"),
+            launch: launch.clone(),
+            agent: parent.clone(),
+            kind: "session-request-answered".into(),
+            body: format!("Session {child}: its call request #3, a call held, is answered."),
+            urgency: "between-turns".into(),
+            ended: false,
+        }))],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(
+        refused.contains("taken for a led session only"),
+        "{refused}"
+    );
+    let stored = Store::open_read_only(&pc.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_deliveries(&parent, 64)
+        .unwrap();
+    assert!(
+        stored
+            .iter()
+            .all(|delivery| delivery.kind != "session-request-answered"),
+        "{stored:?}"
+    );
+}
+
+#[test]
 fn a_call_from_a_third_machine_for_a_launch_it_did_not_make_is_refused() {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let laptop = Machine::of(server_user(None));
@@ -763,6 +808,46 @@ fn plain_turn_ends_kept_for_a_machine_never_push_out_a_report() {
     a_while();
     // The one it was told of before the machine went off, and the latest after.
     assert_eq!(prompts_with(&pc, PLAIN_END), 2, "{:#?}", pc.prompts());
+}
+
+#[test]
+fn a_plain_turn_end_waiting_for_a_full_outbox_is_not_lost() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([
+            {"when": "Finish the export.", "do": [{"say": "Started."}]},
+            {"when": "More.", "do": [{"say": "More done."}]},
+            {"when": "Again.", "do": [{"say": "Again done."}]}
+        ]),
+    );
+    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "Started.");
+    off(&pc);
+    offline(&server, "pc");
+    server
+        .user
+        .call("agent.send", json!({"agent": session, "message": "More."}))
+        .unwrap();
+    eventually("the turn that waits", || turns_of(&server, &session) == 2);
+
+    // As many messages wait for pc as may: the next plain end replaces the one waiting.
+    let full = server.user.path("kept-full");
+    std::fs::write(&full, "").unwrap();
+    server
+        .user
+        .call("agent.send", json!({"agent": session, "message": "Again."}))
+        .unwrap();
+    eventually("the turn that replaces it", || {
+        turns_of(&server, &session) == 3
+    });
+    eventually("the full outbox played", || !full.exists());
+    on(&pc);
+
+    pc.wait_for("server");
+    prompted(&pc, "Again done.");
+    a_while();
+    assert_eq!(prompts_with(&pc, "More done."), 0, "{:#?}", pc.prompts());
 }
 
 /// A secret only pc knows, in a secret file of its project's folder: the place of its root.
