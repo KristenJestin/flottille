@@ -571,7 +571,11 @@ fn a_held_launch_is_a_row_of_leads_until_it_starts(cx: &mut TestAppContext) {
     );
     assert_eq!(*going.last().unwrap(), 0.0, "it ends gone: {going:?}");
     assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 1"));
-    assert_eq!(label(cx, lead_row_id(&led)).as_deref(), Some("Docs"));
+    // The session's row says its title as the sidebar does: the first line of its brief.
+    assert_eq!(
+        label(cx, lead_row_id(&led)).as_deref(),
+        Some("Write the docs")
+    );
     assert!(
         cx.update(|window, _| window.find(lead_item_id(&led)).bounds().size.height) > px(0.),
         "the session's row unfolded"
