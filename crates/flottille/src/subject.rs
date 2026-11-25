@@ -331,6 +331,91 @@ mod tests {
         }
     }
 
+    fn event(name: &str, data: Value) -> flottille_core::protocol::Event {
+        flottille_core::protocol::Event {
+            seq: 0,
+            at: 0,
+            name: name.into(),
+            data,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_list_says_the_subject_kept_without_deriving_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = crate::daemon::tests::an_agent("c1");
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &agent);
+        // Kept as last said; what it holds would derive nothing.
+        let kept = json!({"kind": "ticket", "key": "#7", "title": "Kept", "from": FROM_CHANGED,
+            "pull_request": null});
+        daemon
+            .write(|store| Ok(((), Some(store.set_agent_subject_shown("c1", &kept)?))))
+            .unwrap();
+        assert_eq!(crate::tree::summary(&daemon, &agent)["subject"], kept);
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_item_events_refreshes_each_session_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = crate::daemon::tests::an_agent("c1");
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &agent);
+        let burst: Vec<_> = (0..40)
+            .map(|at| {
+                event(
+                    if at % 2 == 0 {
+                        "item.checks"
+                    } else {
+                        "item.changed"
+                    },
+                    json!({"project": "app", "kind": if at % 3 == 0 { "ticket" } else { "pull" },
+                        "key": at.to_string()}),
+                )
+            })
+            .collect();
+        assert_eq!(settle(&daemon, &burst), 1);
+        // Another project's items, or an item that is neither a ticket nor a pull request.
+        let others = [
+            event(
+                "item.changed",
+                json!({"project": "web", "kind": "ticket", "key": "1"}),
+            ),
+            event(
+                "item.changed",
+                json!({"project": "app", "kind": "review", "key": "2"}),
+            ),
+        ];
+        assert_eq!(settle(&daemon, &others), 0);
+    }
+
+    #[tokio::test]
+    async fn two_calls_of_one_session_served_at_once_both_keep_what_they_took() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = crate::daemon::tests::an_agent("c1");
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &agent);
+        for round in 0..300 {
+            daemon
+                .write(|store| {
+                    store.set_agent_held("c1", &json!({}))?;
+                    Ok(((), None::<flottille_core::protocol::Event>))
+                })
+                .unwrap();
+            let start = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                for (action, ticket) in [("show", "#3"), ("subscribe", "#7")] {
+                    let (start, daemon) = (&start, &daemon);
+                    scope.spawn(move || {
+                        start.wait();
+                        let args = json!({"action": action, "ticket": ticket});
+                        served(daemon, "c1", "tickets", &args, true);
+                    });
+                }
+            });
+            let (held, _) = daemon.read(|store| store.agent_subject("c1")).unwrap();
+            assert_eq!(held["read"]["key"], "#3", "round {round}: {held}");
+            assert_eq!(held["ticket"]["key"], "#7", "round {round}: {held}");
+        }
+    }
+
     #[test]
     fn a_session_that_never_held_anything_has_no_subject() {
         let none = |_: &str| None;

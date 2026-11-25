@@ -328,3 +328,164 @@ fn a_session_page_says_where_its_subject_comes_from(cx: &mut TestAppContext) {
         Some("fix the login form")
     );
 }
+
+/// The branch of the workspace `login`.
+fn branch(user: &User) -> String {
+    user.call("workspace.list", json!({"project": "app"}))
+        .unwrap()["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "login")
+        .unwrap()["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// What the fake `gh` answers of the pull request #12 of `acme/api` on `branch`, its checks one
+/// run of `status` and `conclusion`.
+fn pull(branch: &str, status: &str, conclusion: &str) -> Value {
+    json!({
+        "number": 12, "title": "Fix the login", "state": "OPEN", "isDraft": false,
+        "headRefName": branch, "baseRefName": "main",
+        "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+        "url": "https://github.com/acme/api/pull/12",
+        "author": {"login": "someone"}, "assignees": [], "labels": [],
+        "updatedAt": format!("2999-02-01T00:00:{:02}Z", if status == "COMPLETED" { 2 } else { 1 }),
+        "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED",
+        "statusCheckRollup": [{"__typename": "CheckRun", "name": "build", "status": status,
+            "conclusion": conclusion,
+            "detailsUrl": "https://github.com/acme/api/actions/runs/900/job/build"}],
+        "comments": [], "reviews": [], "body": ""
+    })
+}
+
+/// The fake `gh` answers these issues and pull requests, and a round of the items reads them.
+fn forge(user: &User, issues: &[Value], pulls: &[Value]) {
+    let issues: serde_json::Map<String, Value> = issues
+        .iter()
+        .map(|issue| (issue["number"].to_string(), issue.clone()))
+        .collect();
+    let pulls: serde_json::Map<String, Value> = pulls
+        .iter()
+        .map(|pull| {
+            (
+                pull["headRefName"].as_str().unwrap().to_owned(),
+                pull.clone(),
+            )
+        })
+        .collect();
+    user.gh_script(json!({"issues": {"acme/api": issues}, "pulls": {"acme/api": pulls}}));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+}
+
+/// How much of the chip `id` is drawn: the strongest ink of its border, 0 when it is not drawn.
+fn chip_drawn(cx: &mut VisualTestContext, id: &str) -> f32 {
+    cx.update(|window, _| {
+        let Some(found) = window.try_find(id.to_owned()) else {
+            return 0.0;
+        };
+        let bounds = found.bounds().scale(window.scale_factor());
+        if bounds.size.width.0 <= 0.0 {
+            return 0.0;
+        }
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| bounds.contains(&quad.bounds.center()))
+            .map(|quad| quad.border_color.a)
+            .fold(0.0, f32::max)
+    })
+}
+
+/// The chip `id` drawn at each of 30 frames of 16 ms.
+fn chip_frames(cx: &mut VisualTestContext, id: &str) -> Vec<f32> {
+    (0..30)
+        .map(|_| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            chip_drawn(cx, id)
+        })
+        .collect()
+}
+
+/// Whether the element `id` is drawn inside the element `within`.
+fn drawn_within(cx: &mut VisualTestContext, id: &str, within: &str) -> bool {
+    cx.update(|window, _| {
+        window.try_find(id.to_owned()).is_some_and(|found| {
+            found
+                .path()
+                .contains(&gpui_kit::ElementId::Name(within.to_owned().into()))
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn the_page_s_chips_unfold_fade_and_fold_away_as_its_subject_changes(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, cx) = about_five(&user, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the page's ticket chip", |cx| {
+        label(cx, "session-about-ticket").as_deref() == Some("#5")
+    });
+    settle(cx);
+    let open = [
+        issue(5, "The login fails", "OPEN"),
+        issue(6, "The logout hangs", "OPEN"),
+    ];
+    let branch = branch(&user);
+
+    // Its branch's pull request comes, its checks running: its chip fades in beside the ticket's.
+    forge(&user, &open, &[pull(&branch, "IN_PROGRESS", "")]);
+    until(&shell, cx, "the pull request's chip", |cx| {
+        label(cx, "session-about-pull").as_deref() == Some("#12")
+    });
+    let coming = chip_frames(cx, "session-about-pull-key");
+    let full = *coming.last().unwrap();
+    assert!(full > 0.0, "it ends drawn: {coming:?}");
+    assert!(
+        coming.iter().any(|&a| a > 0.0 && a < full),
+        "it fades in: {coming:?}"
+    );
+
+    // Its checks pass: the mark fades to the new one.
+    forge(&user, &open, &[pull(&branch, "COMPLETED", "SUCCESS")]);
+    until(&shell, cx, "the checks' new mark", |cx| {
+        label(cx, "session-about-pull-checks").as_deref() == Some("passing")
+    });
+    assert!(
+        drawn_within(
+            cx,
+            "session-about-pull-checks",
+            "session-about-pull-checks-change"
+        ),
+        "the mark is drawn by a fade of the kit"
+    );
+    assert!(pending_frames(cx) > 0, "the new mark fades in");
+    settle(cx);
+
+    // The ticket is done: the session is free, its ticket chip folds away, the pull request's
+    // stays.
+    forge(
+        &user,
+        &[
+            issue(5, "The login fails", "CLOSED"),
+            issue(6, "The logout hangs", "OPEN"),
+        ],
+        &[pull(&branch, "COMPLETED", "SUCCESS")],
+    );
+    eventually("free", || subject(&user, &id)["kind"] == "free");
+    until(&shell, cx, "the page says what it last held", |cx| {
+        label(cx, "session-about-from-words").is_some_and(|words| words.contains("#5 done"))
+    });
+    let going = chip_frames(cx, "session-about-ticket");
+    assert!(
+        going.iter().any(|&a| a > 0.0),
+        "it does not leave at once: {going:?}"
+    );
+    assert_eq!(*going.last().unwrap(), 0.0, "it ends gone: {going:?}");
+    assert!(chip_drawn(cx, "session-about-pull-key") > 0.0);
+}
