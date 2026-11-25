@@ -989,6 +989,99 @@ mod tests {
         assert_eq!(listed, vec!["a1"]);
     }
 
+    /// The ids of the sessions of the first project, from the top of the list down.
+    fn order(view: &View) -> Vec<String> {
+        view.state().projects[0]
+            .sessions
+            .iter()
+            .map(|session| session.agent.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_session_that_reports_keeps_its_place() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "a1", "parent": null, "depth": 0, "title": "Old", "project": "app",
+                "created_at": 100, "exchanged_at": 100},
+            {"id": "a2", "parent": null, "depth": 0, "title": "New", "project": "app",
+                "created_at": 200, "exchanged_at": 200},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        assert_eq!(order(&view), ["a2", "a1"]);
+
+        // The older one reports: its state and its last exchange change, its place does not.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.prompted", "at": 900, "data": {"agent": "a1"}}),
+        );
+        let state = view.state();
+        let a1 = &state.projects[0].sessions[1];
+        assert_eq!(
+            (a1.state.as_str(), a1.last, a1.created),
+            ("working", 900, 100)
+        );
+        assert_eq!(order(&view), ["a2", "a1"]);
+
+        // A new one is the newest: it comes first.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 1000, "data": {"agent": "a3",
+                "parent": null, "depth": 0, "title": "Newest", "project": "app"}}),
+        );
+        assert_eq!(order(&view), ["a3", "a2", "a1"]);
+    }
+
+    #[test]
+    fn a_led_session_names_the_session_of_its_pilot() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "p1", "parent": null, "depth": 0, "title": "Ship", "project": "app",
+                "created_at": 1},
+            {"id": "c1", "parent": "p1", "depth": 1, "title": "Plan", "project": "app"},
+            // Led by a child of the pilot's tree: its row sits under that tree's root.
+            {"id": "l1", "parent": null, "depth": 0, "title": "Export", "project": "app",
+                "created_at": 2, "led_by": "c1"},
+            {"id": "l2", "parent": null, "depth": 0, "title": "Invoice", "project": "app",
+                "created_at": 3, "led_by": "p1"},
+            {"id": "u1", "parent": null, "depth": 0, "title": "Mine", "project": "app",
+                "created_at": 4, "led_by": null},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 5, "data": {"agent": "l3",
+                "parent": null, "depth": 0, "title": "Refunds", "project": "app",
+                "led_by": "p1"}}),
+        );
+        let pilots = |view: &View| -> Vec<(String, String)> {
+            view.state().projects[0]
+                .sessions
+                .iter()
+                .map(|session| (session.agent.clone(), session.pilot.clone()))
+                .collect()
+        };
+        let pair = |a: &str, p: &str| (a.to_owned(), p.to_owned());
+        assert_eq!(
+            pilots(&view),
+            [
+                pair("l3", "p1"),
+                pair("u1", ""),
+                pair("l2", "p1"),
+                pair("l1", "p1"),
+                pair("p1", ""),
+            ]
+        );
+
+        // Detached, it is the user's alone: under no pilot.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.detached", "at": 6,
+                "data": {"agent": "l2", "from": "p1"}}),
+        );
+        assert_eq!(pilots(&view)[2], pair("l2", ""));
+    }
+
     #[test]
     fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {
         let (owner, phone) = (DeviceKey::make().unwrap(), DeviceKey::make().unwrap());
