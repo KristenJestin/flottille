@@ -179,6 +179,8 @@ struct Runner {
     name: String,
     /// Its endpoint's key: the machine the phone dials.
     machine: PublicKey,
+    /// What asks its session to the hub: what tells the phones a notice, as its daemon does.
+    asker: Arc<Mutex<Option<flottille_link::Asker>>>,
 }
 
 impl Runner {
@@ -206,7 +208,25 @@ impl Runner {
             hello: hello(),
             name: name.to_owned(),
             machine,
+            asker: Arc::default(),
         }
+    }
+
+    /// Tells the user's phones `notice` through the hub, as its daemon does
+    /// (`crates/flottille/src/phone.rs`).
+    async fn notify(&self, notice: Value) {
+        let asker = self
+            .asker
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("its session to the hub");
+        asker
+            .ask(flottille_link::Ask::Notify {
+                notice: serde_json::from_value(notice).unwrap(),
+            })
+            .await
+            .unwrap();
     }
 
     /// An event of its daemon's, numbered after the last.
@@ -617,6 +637,7 @@ async fn add_runner_as(
         drop(session);
         return runner;
     }
+    *runner.asker.lock().unwrap() = Some(session.asker());
     // As the daemon does: the links to this machine go through its session to the hub.
     let endpoint = Endpoint::new(&machine).unwrap();
     endpoint.through(session.relay().expect("the session's relay"));
@@ -3208,5 +3229,99 @@ async fn the_app_and_the_browser_never_share_a_tunnel() {
     })
     .await;
     assert!(still_held(&phone, &browser.tunnel.tunnel, Duration::from_millis(200)).await);
+    place.served.stop().await;
+}
+
+/// The runner `server` with a session `a1` whose child `c1` holds the request 7 for the user, and
+/// the row 12 of its notification centre about it; the phone linked to it.
+async fn a_request_held(place: &Place) -> Arc<Core> {
+    place.runner.answer(
+        "agent.list",
+        json!({"agents": [
+            {"id": "a1", "project": "app", "title": "Fix the login", "state": "idle", "parent": null},
+            {"id": "c1", "project": "app", "title": "Run the tests", "state": "working", "parent": "a1"},
+        ]}),
+    );
+    place.runner.answer(
+        "notifications.list",
+        json!({"notifications": [{"id": 12, "at": 1, "kind": "request", "session": "a1",
+            "project": "app", "workspace": null, "title": "Request #7 waits for you",
+            "excerpt": "Run make", "read_at": null, "resolved": false, "needs_you": true}],
+            "unread": {"needs_you": 1, "new": 0}}),
+    );
+    let (phone, _taken) = place.linked().await;
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 6, "agent": "c1", "tool": "command", "held_by": "user"}),
+    );
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 7, "agent": "c1", "tool": "command", "held_by": "user"}),
+    );
+    until(&phone, "the requests held", |view| view.requests.len() == 2).await;
+    phone
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_notice_is_in_the_view_with_the_request_to_answer() {
+    let place = Place::new().await;
+    let phone = a_request_held(&place).await;
+    place
+        .runner
+        .notify(json!({"kind": "request", "notification": 12, "session": "a1"}))
+        .await;
+    let view = until(&phone, "the notice in the view", |view| {
+        !view.notices.is_empty()
+    })
+    .await;
+    let notice = &view.notices[0];
+    assert_eq!(
+        (
+            notice.machine.as_str(),
+            notice.notification,
+            notice.kind.as_str()
+        ),
+        ("server", 12, "request")
+    );
+    assert_eq!(notice.session, "a1");
+    assert_eq!(notice.title, "Request #7 waits for you");
+    assert_eq!(notice.excerpt, "Run make");
+    // The newest request of the session's tree that waits: what Allow and Deny answer.
+    assert_eq!(notice.request, 7);
+    // The row was read from the runner, after the one before it.
+    let listed = place.runner.taken("notifications.list");
+    assert_eq!(
+        serde_json::from_str::<Value>(listed[0].0["signed"]["params"].as_str().unwrap()).unwrap(),
+        json!({"after": 11, "limit": 1})
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dismissed_notice_leaves_the_view_and_is_said_dismissed() {
+    let place = Place::new().await;
+    let phone = a_request_held(&place).await;
+    place
+        .runner
+        .notify(json!({"kind": "request", "notification": 12, "session": "a1"}))
+        .await;
+    until(&phone, "the notice in the view", |view| {
+        !view.notices.is_empty()
+    })
+    .await;
+    place
+        .runner
+        .notify(json!({"kind": "dismissed", "notification": 12, "session": "a1"}))
+        .await;
+    let view = until(&phone, "the notice dismissed", |view| {
+        view.notices.is_empty()
+    })
+    .await;
+    let dismissed: Vec<(&str, u64)> = view
+        .dismissed
+        .iter()
+        .map(|gone| (gone.machine.as_str(), gone.notification))
+        .collect();
+    assert_eq!(dismissed, vec![("server", 12)]);
     place.served.stop().await;
 }
