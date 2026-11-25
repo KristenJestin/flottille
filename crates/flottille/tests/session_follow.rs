@@ -1448,3 +1448,311 @@ fn the_answer_to_a_child_s_request_is_told_to_the_lead_once() {
         assert!(told[0].contains(word), "{word}: {}", told[0]);
     }
 }
+
+/// Whether `agent` is in a turn.
+fn working(user: &User, agent: &str) -> bool {
+    agents(user)
+        .iter()
+        .any(|a| a["id"] == agent && a["state"] == "working")
+}
+
+/// The wakes of `lead` that say `request #<number>,`.
+fn wakes_saying(user: &User, lead: &str, number: u64) -> Vec<String> {
+    let said = format!("request #{number},");
+    wakes(user, lead)
+        .into_iter()
+        .filter(|wake| wake.contains(&said))
+        .collect()
+}
+
+/// A followed session in Ask, in a turn that holds until the fake agents are released (and
+/// then does `then`), whose child "Reader" asked to read `.env` during that turn, the session
+/// forwarding it to the user: the lead's id, the session's id, the child's id and the request's
+/// number.
+fn forwarded_during_a_turn(user: &User, then: Value) -> (String, String, String, u64) {
+    let mut held = vec![json!({"hold": "release"})];
+    held.extend(then.as_array().cloned().unwrap_or_default());
+    user.fake_script(json!({"turns": [
+        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
+            {"say": "Waiting for my parent."}]},
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Wait here.", "do": held},
+        {"when": "Use the median.", "do": [{"say": "Using it."}]},
+        {"when": "Go on.", "do": [{"say": "Going on."}]}
+    ]}));
+    let (lead, _, session, second) = followed(user, "Fix the login.");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Wait here."}),
+    )
+    .unwrap();
+    eventually("its held turn", || working(user, &session));
+    let (answer, child) = launch(user, &second, "Reader", "Read the env.", "child");
+    assert!(!answer.error, "{}", answer.text);
+    let (child, _) = child.unwrap();
+    let number = std::cell::Cell::new(0);
+    eventually("the child's call held by its parent", || {
+        let held = store(user).pending_requests(&session).unwrap();
+        held.iter()
+            .find(|request| request.agent == child)
+            .map(|request| number.set(request.number))
+            .is_some()
+    });
+    let number = number.get();
+    let forwarded = second.call(
+        "approval_answer",
+        json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
+    );
+    assert!(!forwarded.error, "{}", forwarded.text);
+    assert!(working(user, &session), "the turn ended before the forward");
+    (lead, session, child, number)
+}
+
+#[test]
+fn a_child_s_request_forwarded_during_a_turn_cancelled_for_a_delivery_is_said_in_the_next_wake() {
+    let user = User::with_fake_agent();
+    let (lead, session, child, number) = forwarded_during_a_turn(&user, json!([]));
+
+    // What the 30 s fallback does to a turn that took no note: it is cancelled, and the delivery
+    // is sent as the next prompt.
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Use the median."}),
+    )
+    .unwrap();
+    user.call("agent.cancel", json!({"agent": session}))
+        .unwrap();
+
+    eventually("a wake says the child's request", || {
+        !wakes_saying(&user, &lead, number).is_empty()
+    });
+    let woken = wakes_saying(&user, &lead, number).remove(0);
+    assert!(woken.contains(child.as_str()), "{woken}");
+    settle();
+    assert_eq!(wakes_saying(&user, &lead, number).len(), 1);
+}
+
+#[test]
+fn a_child_s_request_forwarded_during_a_turn_its_process_died_in_is_said_in_the_next_wake() {
+    let user = User::with_fake_agent();
+    let (lead, session, child, number) = forwarded_during_a_turn(&user, json!([{"die": 3}]));
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    eventually("the turn cut by the death", || {
+        store(&user)
+            .last_agent_events(&session, "agent.turn_ended", 1)
+            .unwrap()
+            .first()
+            .is_some_and(|end| end.data["stop_reason"] == "interrupted")
+    });
+    eventually("the session at rest", || !working(&user, &session));
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+
+    eventually("a wake says the child's request", || {
+        !wakes_saying(&user, &lead, number).is_empty()
+    });
+    let woken = wakes_saying(&user, &lead, number).remove(0);
+    assert!(woken.contains(child.as_str()), "{woken}");
+}
+
+#[test]
+fn a_request_a_led_session_makes_in_a_turn_cancelled_for_a_delivery_is_said_in_the_next_wake() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Wait here.", "do": [vault_ask(), {"hold": "release"}]},
+        {"when": "Use the median.", "do": [{"say": "Using it."}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Wait here."}),
+    )
+    .unwrap();
+    eventually("its ask", || vault_asks(&user).len() == 1);
+    let number = vault_asks(&user)[0]["ask"].as_u64().unwrap();
+
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Use the median."}),
+    )
+    .unwrap();
+    user.call("agent.cancel", json!({"agent": session}))
+        .unwrap();
+
+    eventually("a wake says the request", || {
+        !wakes_saying(&user, &lead, number).is_empty()
+    });
+    let woken = wakes_saying(&user, &lead, number).remove(0);
+    assert!(
+        woken.contains("a vault entry asked: staging-login"),
+        "{woken}"
+    );
+}
+
+#[test]
+fn a_child_s_call_held_before_the_previous_turn_end_and_forwarded_after_it_is_said() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
+            {"say": "Waiting for my parent."}]},
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Go on.", "do": [{"say": "Going on."}]}
+    ]}));
+    let (lead, _, session, second) = followed(&user, "Fix the login.");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+    let (answer, child) = launch(&user, &second, "Reader", "Read the env.", "child");
+    assert!(!answer.error, "{}", answer.text);
+    let (child, _) = child.unwrap();
+    let number = std::cell::Cell::new(0);
+    eventually("the child's call held by its parent", || {
+        let held = store(&user).pending_requests(&session).unwrap();
+        held.iter()
+            .find(|request| request.agent == child)
+            .map(|request| number.set(request.number))
+            .is_some()
+    });
+    let number = number.get();
+    // A turn of the session ends while the call is still its own to answer.
+    let before = turns(&user, &session);
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+    eventually("that turn", || turns(&user, &session) > before);
+
+    let forwarded = second.call(
+        "approval_answer",
+        json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
+    );
+    assert!(!forwarded.error, "{}", forwarded.text);
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+
+    eventually("a wake says the child's request", || {
+        !wakes_saying(&user, &lead, number).is_empty()
+    });
+}
+
+/// A followed session whose child "Reader" asked the user for the vault entry `staging-login`
+/// (the project sees another entry, so the child has the tool): the lead's id, the session's id,
+/// the child's id and the ask's number.
+fn asked_by_a_child(user: &User, session_asks: bool) -> (String, String, String, u64) {
+    with_vault(user);
+    user.call(
+        "vault.set",
+        json!({"name": "deploy-key", "secret": "d3ploy-fake-value", "project": "app"}),
+    )
+    .unwrap();
+    let first = match session_asks {
+        true => json!([vault_ask(), {"say": "Ready."}]),
+        false => json!([{"say": "Ready."}]),
+    };
+    user.fake_script(json!({"turns": [
+        {"when": "Ask the vault.", "do": [vault_ask(), {"say": "Waiting for the user."}]},
+        {"when": "Fix the login.", "do": first},
+        {"when": "Go on.", "do": [{"say": "Going on."}]}
+    ]}));
+    let (lead, _, session, second) = followed(user, "Fix the login.");
+    let (answer, child) = launch(user, &second, "Reader", "Ask the vault.", "child");
+    assert!(!answer.error, "{}", answer.text);
+    let (child, _) = child.unwrap();
+    eventually("the child's ask", || {
+        vault_asks(user).iter().any(|ask| {
+            ask["agent"] == child.as_str()
+                || ask["joined"]
+                    .as_array()
+                    .is_some_and(|joined| joined.iter().any(|j| j == child.as_str()))
+        })
+    });
+    let number = vault_asks(user)[0]["ask"].as_u64().unwrap();
+    (lead, session, child, number)
+}
+
+#[test]
+fn a_vault_entry_a_led_session_s_child_asks_is_said_to_its_lead_and_its_answer_told() {
+    let user = User::with_fake_agent();
+    let (lead, session, child, number) = asked_by_a_child(&user, false);
+
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+
+    eventually("a wake says the child's ask", || {
+        !wakes_saying(&user, &lead, number).is_empty()
+    });
+    let woken = wakes_saying(&user, &lead, number).remove(0);
+    for word in [
+        "\"Reader\"",
+        child.as_str(),
+        "a vault entry asked: staging-login: to sign in to staging",
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+    let following = subscriptions(&user, &lead).remove(0);
+    let waits = following["waits"].as_array().unwrap();
+    assert_eq!(waits.len(), 1, "{following}");
+    assert_eq!(waits[0]["by"], child.as_str(), "{following}");
+
+    user.call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    settle();
+    let told = delivered(&user, &lead, ANSWERED);
+    assert_eq!(told.len(), 1, "{told:?}");
+    for word in [
+        &format!("vault request #{number} of its child \"Reader\""),
+        "staging-login",
+        "dismissed it",
+    ] {
+        assert!(told[0].contains(word), "{word}: {}", told[0]);
+    }
+}
+
+#[test]
+fn a_lead_is_told_only_answered_when_the_entry_a_child_asked_is_one_its_project_cannot_see() {
+    let user = User::with_fake_agent();
+    other_project(&user);
+    let (lead, _, _, number) = asked_by_a_child(&user, false);
+
+    // The user saves the entry for another project: the child's project does not see it.
+    user.call(
+        "vault.set",
+        json!({"name": "staging-login", "secret": "st4ging-s3cret-value", "project": "other"}),
+    )
+    .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    let told = delivered(&user, &lead, ANSWERED).remove(0);
+    assert!(told.contains(&format!("request #{number}")), "{told}");
+    assert!(told.contains("answered it"), "{told}");
+    assert!(!told.contains("set it"), "{told}");
+}
+
+#[test]
+fn an_ask_a_led_session_and_its_child_both_joined_waits_once() {
+    let user = User::with_fake_agent();
+    let (lead, session, _, number) = asked_by_a_child(&user, true);
+
+    let following = subscriptions(&user, &lead).remove(0);
+
+    let waits = following["waits"].as_array().unwrap();
+    assert_eq!(waits.len(), 1, "{following}");
+    assert_eq!(waits[0]["number"], number, "{following}");
+    assert!(waits[0].get("by").is_none(), "{following}");
+    user.call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    settle();
+    assert_eq!(delivered(&user, &lead, ANSWERED).len(), 1);
+    drop(session);
+}

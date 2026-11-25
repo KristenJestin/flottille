@@ -1262,3 +1262,245 @@ fn a_lead_on_another_machine_is_told_the_user_answered() {
         assert!(told[0].contains(word), "{word}: {}", told[0]);
     }
 }
+
+/// The kind of the delivery that tells a lead how the user answered a request.
+const ANSWERED: &str = "session-request-answered";
+
+/// The deliveries of `kind` stored for `agent` of `machine`: their id and their state.
+fn delivered_states(machine: &Machine, agent: &str, kind: &str) -> Vec<(String, String)> {
+    Store::open_read_only(&machine.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_deliveries(agent, 64)
+        .unwrap()
+        .into_iter()
+        .filter(|delivery| delivery.kind == kind)
+        .map(|delivery| (delivery.id, delivery.state))
+        .collect()
+}
+
+/// A vault ask of the entry `name`, as a fake agent plays it.
+fn vault_ask(name: &str) -> Value {
+    json!({"mcp": {"tool": "vault", "arguments": {"action": "ask", "name": name,
+        "why": "to sign in to staging"}}})
+}
+
+/// The open vault asks of `machine`.
+fn vault_asks(machine: &Machine) -> Vec<Value> {
+    machine.user.call("vault.asks", json!({})).unwrap()["asks"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// Connections on, on `machine`: its led sessions have the tool `vault`.
+fn with_vault(machine: &Machine) {
+    machine
+        .user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+}
+
+#[test]
+fn the_user_s_answer_there_rings_nobody_and_goes_with_the_lead_s_next_wake() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    with_vault(&server);
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            vault_ask("staging-login"), {"say": "Waiting for the vault entry."}]}]),
+    );
+    let (_, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "a vault entry asked: staging-login");
+    eventually("the root at rest", || pc.agent(&root)["state"] == "idle");
+    let number = vault_asks(&server)[0]["ask"].as_u64().unwrap();
+
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    eventually("the lead there is told", || {
+        !delivered_states(&pc, &root, ANSWERED).is_empty()
+    });
+    let (id, _) = delivered_states(&pc, &root, ANSWERED).remove(0);
+    // Taken with the wake of the session's next turn (it is told of the answer), never alone.
+    eventually("the next wake takes it", || {
+        delivered_states(&pc, &root, ANSWERED)[0].1 == "sent"
+    });
+    let prompts = Store::open_read_only(&pc.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_agent_events(&root, "agent.prompted", 64)
+        .unwrap();
+    let with = prompts
+        .iter()
+        .find(|prompt| {
+            prompt.data["deliveries"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|i| i == id.as_str()))
+        })
+        .unwrap_or_else(|| panic!("no prompt took {id}"));
+    let ids = with.data["deliveries"].as_array().unwrap();
+    assert!(ids.len() > 1, "played alone: {ids:?}");
+}
+
+#[test]
+fn two_sessions_led_from_another_machine_that_join_one_ask_each_tell_their_lead_once() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    with_vault(&server);
+    script(
+        &server,
+        json!([
+            {"when": "Finish the export.", "times": 1, "do": [
+                vault_ask("staging-login"), {"say": "Waiting for the vault entry."}]},
+            {"when": "Finish the import.", "times": 1, "do": [
+                vault_ask("staging-login"), {"say": "Waiting for it too."}]}
+        ]),
+    );
+    let (export, first, _, _one) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    eventually("the first ask", || vault_asks(&server).len() == 1);
+    let (import, second, _, _two) = led_on_server(&pc, &server, "Finish the import.", "auto");
+    eventually("the second joined it", || {
+        vault_asks(&server)[0]["joined"]
+            .as_array()
+            .is_some_and(|joined| !joined.is_empty())
+    });
+    let number = vault_asks(&server)[0]["ask"].as_u64().unwrap();
+
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    for (root, session) in [(&first, &export), (&second, &import)] {
+        eventually("each lead there is told", || {
+            !delivered_there(&pc, root, ANSWERED).is_empty()
+        });
+        a_while();
+        let told = delivered_there(&pc, root, ANSWERED);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains(session.as_str()), "{}", told[0]);
+        assert!(
+            told[0].contains(&format!("request #{number}")),
+            "{}",
+            told[0]
+        );
+    }
+}
+
+#[test]
+fn the_answers_while_the_lead_s_machine_is_off_wait_there_as_one_message() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    with_vault(&server);
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            vault_ask("staging-login"), vault_ask("billing-login"), vault_ask("mail-login"),
+            {"say": "Waiting for the vault entries."}]}]),
+    );
+    let (_, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "a vault entry asked: mail-login");
+    let numbers: Vec<u64> = vault_asks(&server)
+        .iter()
+        .map(|ask| ask["ask"].as_u64().unwrap())
+        .collect();
+    assert_eq!(numbers.len(), 3, "{numbers:?}");
+    off(&pc);
+    eventually("pc offline", || server.seen("pc")["state"] != "online");
+
+    for number in &numbers {
+        server
+            .user
+            .call("vault.ask_dismiss", json!({"ask": number}))
+            .unwrap();
+    }
+
+    let waiting = || {
+        Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+            .unwrap()
+            .outgoing(None)
+            .unwrap()
+            .into_iter()
+            .filter(|kept| kept.id.starts_with(ANSWERED))
+            .count()
+    };
+    a_while();
+    assert_eq!(waiting(), 1, "one message keeps every answer");
+    on(&pc);
+    eventually("the lead there is told", || {
+        !delivered_there(&pc, &root, ANSWERED).is_empty()
+    });
+    a_while();
+    let told = delivered_there(&pc, &root, ANSWERED);
+    assert_eq!(told.len(), 1, "{told:?}");
+    for number in &numbers {
+        assert!(
+            told[0].contains(&format!("request #{number},")),
+            "{number}: {}",
+            told[0]
+        );
+    }
+}
+
+#[test]
+fn a_child_s_request_of_a_session_led_from_another_machine_is_said_and_answered_there() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    with_vault(&server);
+    // The project there sees an entry: the child has the tool `vault`.
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "deploy-key", "secret": "d3ploy-fake-value", "project": "app"}),
+        )
+        .unwrap();
+    script(
+        &server,
+        json!([
+            {"when": "Ask the vault.", "times": 1, "do": [
+                vault_ask("staging-login"), {"say": "Waiting for the user."}]},
+            {"when": "Finish the export.", "times": 1, "do": [
+                {"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
+                    "title": "Reader", "brief": "Ask the vault."}}},
+                {"say": "Started a reader."}]},
+            {"when": "Go on.", "do": [{"say": "Going on."}]}
+        ]),
+    );
+    let (session, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    eventually("the child's ask", || vault_asks(&server).len() == 1);
+    let ask = vault_asks(&server).remove(0);
+    let (number, child) = (
+        ask["ask"].as_u64().unwrap(),
+        ask["agent"].as_str().unwrap().to_owned(),
+    );
+    assert_ne!(child, session);
+    eventually("the session at rest", || {
+        server.agent(&session)["state"] == "idle"
+    });
+
+    server
+        .user
+        .call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+
+    prompted(
+        &pc,
+        &format!("asked by its child \"Reader\" (agent {child})"),
+    );
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+    eventually("the lead there is told", || {
+        !delivered_there(&pc, &root, ANSWERED).is_empty()
+    });
+    let told = delivered_there(&pc, &root, ANSWERED).remove(0);
+    for word in [
+        &format!("vault request #{number} of its child \"Reader\""),
+        "dismissed it",
+    ] {
+        assert!(told.contains(word), "{word}: {told}");
+    }
+}
