@@ -990,6 +990,132 @@ mod tests {
     }
 
     #[test]
+    fn a_request_and_a_question_say_when_they_came() {
+        let mut view = View::default();
+        let before = now_millis();
+        view.load(
+            "server",
+            &serde_json::json!({"agents": []}),
+            &serde_json::json!({"requests": [
+                {"number": 4, "agent": "a1", "tool": "run", "call": {"line": "ls"},
+                    "created_at": 1_000},
+                {"number": 5, "agent": "a1", "tool": "run", "call": {"line": "ls"}},
+            ]}),
+        );
+        let requested = serde_json::json!({"name": "approval.requested", "seq": 7, "at": 2,
+            "data": {"number": 4, "agent": "b1", "tool": "run", "call": {"line": "pwd"},
+                "held_by": "user"}});
+        view.apply("laptop", &requested);
+        view.apply(
+            "laptop",
+            &serde_json::json!({"name": "agent.asked", "seq": 9, "at": 3,
+                "data": {"agent": "b1", "to": "user", "question": "Push?"}}),
+        );
+        view.follow("server", "a1");
+        view.tree(
+            "server",
+            "a1",
+            &serde_json::json!({"agents": [{"agent": {"id": "a1", "parent": null},
+                "questions": [{"seq": 12, "at": 1_500, "question": "Which one?"}]}]}),
+        );
+        let after = now_millis();
+        let state = view.state();
+        let request = |machine: &str, number: u64| {
+            state
+                .requests
+                .iter()
+                .find(|r| r.machine == machine && r.number == number)
+                .unwrap()
+                .at
+        };
+        let ask = |machine: &str, asked: u64| {
+            state
+                .asks
+                .iter()
+                .find(|a| a.machine == machine && a.asked == asked)
+                .unwrap()
+                .at
+        };
+        // Already there at the link: its own time, else the link's.
+        assert_eq!(request("server", 4), 1_000);
+        assert!((before..=after).contains(&request("server", 5)));
+        assert_eq!(ask("server", 12), 1_500);
+        // Come since: when the phone saw it, the daemon's counters and clock aside.
+        assert!((before..=after).contains(&request("laptop", 4)));
+        assert!((before..=after).contains(&ask("laptop", 9)));
+
+        // Seen again (a link again, the tree again): it keeps the time it came at.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let first = request("laptop", 4);
+        view.apply("laptop", &requested);
+        view.tree(
+            "server",
+            "a1",
+            &serde_json::json!({"agents": [{"agent": {"id": "a1", "parent": null},
+                "questions": [{"seq": 12, "question": "Which one?"}]}]}),
+        );
+        let again = view.state();
+        assert_eq!(
+            again
+                .requests
+                .iter()
+                .find(|r| r.machine == "laptop")
+                .unwrap()
+                .at,
+            first
+        );
+        assert_eq!(again.asks.iter().find(|a| a.asked == 12).unwrap().at, 1_500);
+    }
+
+    #[test]
+    fn a_child_s_request_names_its_session_and_the_child() {
+        let mut view = View::default();
+        let request = |number: u64, agent: &str| {
+            serde_json::json!({"number": number, "agent": agent, "tool": "run",
+                "call": {"line": "ls"}})
+        };
+        view.load(
+            "server",
+            &serde_json::json!({"agents": [
+                {"id": "a1", "parent": null, "depth": 0, "title": "Fix the login",
+                    "project": "app"},
+                {"id": "c1", "parent": "a1", "depth": 1, "title": "Check"},
+                {"id": "c2", "parent": "c1", "depth": 2, "title": ""},
+            ]}),
+            &serde_json::json!({"requests": [request(4, "c2"), request(5, "a1"),
+                request(6, "c1"), request(8, "x9")]}),
+        );
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 1, "data": {"agent": "c3",
+                "parent": "a1", "depth": 1, "title": "Write"}}),
+        );
+        let mut held = request(7, "c3");
+        held["held_by"] = "user".into();
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "approval.requested", "at": 2, "data": held}),
+        );
+        let state = view.state();
+        let said: Vec<(u64, &str, &str)> = state
+            .requests
+            .iter()
+            .map(|r| (r.number, r.session.as_str(), r.child.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                (4, "a1", "agent c2"),
+                (5, "a1", ""),
+                (6, "a1", "Check"),
+                (7, "a1", "Write"),
+                // An agent the phone does not know is taken for a session.
+                (8, "x9", ""),
+            ]
+        );
+    }
+
+    #[test]
     fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {
         let (owner, phone) = (DeviceKey::make().unwrap(), DeviceKey::make().unwrap());
         let mut list = MemberList::default();
