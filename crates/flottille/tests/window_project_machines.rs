@@ -1132,6 +1132,7 @@ fn a_row_whose_machines_cannot_run_starts_nowhere_else(cx: &mut TestAppContext) 
     assert_eq!(homes(&shell, "app@laptop", cx), ["laptop"]);
 
     // The row's only machine is off: nothing starts, and no other machine's `app` is shown.
+    let before = shell.read_with(cx, |s, _| s.selected().cloned());
     show(&shell, Selection::Project("app".into()), cx);
     settle(&shell, cx);
     assert_eq!(
@@ -1139,9 +1140,9 @@ fn a_row_whose_machines_cannot_run_starts_nowhere_else(cx: &mut TestAppContext) 
         None,
         "the laptop's namesake is not shown"
     );
-    assert_ne!(
+    assert_eq!(
         shell.read_with(cx, |s, _| s.selected().cloned()),
-        Some(Selection::Project("app".into())),
+        before,
         "no page of an `app` was opened"
     );
     assert!(
