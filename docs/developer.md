@@ -144,7 +144,8 @@ that answered nothing. `agent` is `null`.
 | `tracker` | The Jira project's key. |
 | `listed` | How many work items the search of what changed found. |
 | `mine` | How many of them the search with `currentUser()` found. |
-| `nulls` | How many work items the two searches answered as `null`, left out. |
+| `assigned` | How many of them the search with `assignee = currentUser()` found. |
+| `nulls` | How many work items the three searches answered as `null`, left out. |
 | `cut` | Whether a search reached `bound`: the work items past it are not read. |
 | `bound` | How many work items a search reads at most, page after page. |
 

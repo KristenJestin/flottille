@@ -104,9 +104,12 @@ fn waits_on(
                 })
                 .collect(),
         },
-        // Jira says not whether the user is its assignee or its reporter: one of theirs blocks
-        // nothing.
-        _ if item.source == "jira" && item.mine => Vec::new(),
+        // One of the user's assigned to them blocks nothing; one they reported, assigned to
+        // someone else, does. Stored before Jira was asked which (no `assigned_to_me`), one of
+        // theirs blocks nothing.
+        _ if item.source == "jira" && item.mine && item.details["assigned_to_me"] != false => {
+            Vec::new()
+        }
         _ => item
             .assignees
             .iter()

@@ -4028,9 +4028,22 @@ async fn changed_work_items(
         .iter()
         .filter_map(|item| item["key"].as_str().map(masked))
         .collect();
+    // Those of the user's that are assigned to them, not only reported by them: one assigned to
+    // someone else blocks the session that waits on it (`blocked`).
+    let (assigned, assigned_nulls) = jira_search(
+        &format!("{query} AND assignee = currentUser() ORDER BY updated DESC"),
+        "key,summary",
+    )
+    .await
+    .map_err(|error| format!("{MINE_UNKNOWN}: {error}"))?;
+    let assigned: Vec<String> = assigned
+        .iter()
+        .filter_map(|item| item["key"].as_str().map(masked))
+        .collect();
     let cut = items.len() >= JIRA_ALL || mine.len() >= JIRA_ALL;
     let logged = json!({"tracker": key, "listed": items.len(), "mine": mine.len(),
-        "nulls": nulls + mine_nulls, "cut": cut, "bound": JIRA_ALL});
+        "assigned": assigned.len(), "nulls": nulls + mine_nulls + assigned_nulls, "cut": cut,
+        "bound": JIRA_ALL});
     let fetched = items
         .iter()
         // An item whose `self` names another site is not the tracker's (`list_work_items`).
@@ -4042,6 +4055,15 @@ async fn changed_work_items(
             let fields = &item["fields"];
             let key = masked(item["key"].as_str()?);
             let name = |value: &Value| Some(said(value)).filter(|name| !name.is_empty());
+            let mut details = json!({
+                "status": name(&fields["status"]["name"]),
+                "type": name(&fields["issuetype"]["name"]),
+                "priority": name(&fields["priority"]["name"]),
+                "category": name(&fields["status"]["statusCategory"]["key"]),
+            });
+            if mine.contains(&key) {
+                details["assigned_to_me"] = json!(assigned.contains(&key));
+            }
             Some(crate::items::Fetched {
                 item: flottille_core::item::Item {
                     project: String::new(),
@@ -4069,12 +4091,7 @@ async fn changed_work_items(
                         .collect(),
                     updated_at: fields["updated"].as_str().map(masked),
                     seen_at: 0,
-                    details: json!({
-                        "status": name(&fields["status"]["name"]),
-                        "type": name(&fields["issuetype"]["name"]),
-                        "priority": name(&fields["priority"]["name"]),
-                        "category": name(&fields["status"]["statusCategory"]["key"]),
-                    }),
+                    details,
                     checks: Vec::new(),
                 },
                 comments: Vec::new(),
