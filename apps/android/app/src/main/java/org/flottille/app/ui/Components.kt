@@ -43,6 +43,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
@@ -355,7 +357,8 @@ fun Sheet(visible: Boolean, title: String, tag: String, onClose: () -> Unit, con
                     .fillMaxWidth()
                     .heightIn(max = 600.dp)
                     .background(palette.bg, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                    // A tap on the panel is not one on the scrim; with no semantics, its rows stay their own.
+                    .pointerInput(Unit) { detectTapGestures { } }
                     .testTag(tag)
                     .navigationBarsPadding()
                     .padding(bottom = Space.Lg),

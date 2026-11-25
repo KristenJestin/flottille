@@ -612,9 +612,9 @@ class SessionPageTest {
         rule.onNodeWithText("Send").assertDoesNotExist()
     }
 
-    /** The node tagged [tag] holds [text] somewhere inside it: a card is a few texts, not one. */
+    /** The node tagged [tag] holds [text], itself or somewhere inside it: a card is a few texts, a control merges its own. */
     private fun assertHas(tag: String, text: String) {
-        rule.onNode(hasTestTag(tag) and hasAnyDescendant(hasText(text, substring = true))).assertExists()
+        rule.onNode(hasTestTag(tag) and (hasText(text, substring = true) or hasAnyDescendant(hasText(text, substring = true)))).assertExists()
     }
 
     private fun fill(tag: String) = rule.onNodeWithTag(tag).fetchSemanticsNode().config.getOrNull(FillColour)
