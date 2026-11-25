@@ -368,7 +368,7 @@ pub fn lifted(
 /// action as Flottille read it, a merge's pull request and what blocks it from the forge, then
 /// the agent's reason.
 pub async fn asked(
-    daemon: &Daemon,
+    daemon: &std::sync::Arc<Daemon>,
     grant: &Grant,
     tool: &str,
     args: &Value,

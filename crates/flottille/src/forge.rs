@@ -1434,7 +1434,11 @@ impl MergeRead {
 }
 
 /// What a merge of `args` would merge and what blocks it, read on the forge, nothing merged.
-pub async fn merge_read(daemon: &Daemon, place: &Place, args: &Value) -> Result<MergeRead, String> {
+pub async fn merge_read(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    args: &Value,
+) -> Result<MergeRead, String> {
     let mut asked: ForgeCall = match arguments("forge", args.clone()) {
         Ok(asked) => asked,
         Err(Outcome::Done(why) | Outcome::Refused(why) | Outcome::Invalid(why))
