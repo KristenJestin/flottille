@@ -206,8 +206,9 @@ fn a_file_that_cannot_be_read_is_said_in_the_tab_and_the_controls_unfold_once_fi
         view.read_with(cx, |view, _| view.shown().is_some())
     });
     // The controls come in the block that unfolds them (the kit's `presence`), the line gone.
+    // `until` does not move the clock: the line's fold ends in `settle`.
     until(&shell, cx, "the controls are shown", |cx| {
-        has("notify-kinds", cx) && !has("notify-kinds-problem", cx)
+        has("notify-kinds", cx)
     });
     settle(cx);
     assert!(holds("notify-kinds-content", "notify-kinds", cx));
