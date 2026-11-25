@@ -1252,9 +1252,35 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   indented one step, tied to it by a connector (the line from the pilot turning into the row,
   ending there with no arrowhead); only a led row is indented, every root's title
   starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
-  "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
-  and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
-  added to the row; each led row keeps its own unread dot and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  "⋯", that folds its led rows away with it; **its led rows are folded by default** (the user's
+  unfolding is kept with the sidebar's folds), the pilot speaking for them; folded, its state mark
+  is the most urgent of its own and its hidden led sessions' (waits for the user, then running,
+  then its own); each led row keeps its own unread dot and draft pencil.
+  **A pilot sums up** what it leads, while it leads at least one live session: its first line
+  keeps its own title, and its second line is its place then the summary, `main · leads 4 · 1
+  needs you · 1 red check · 1 blocked by Maya`, each part in the ink of what it says, in place of
+  what it waits for (still said in the line's tooltip). The words are one function of
+  `flottille-core` (`leads::summary`) over the lines of its tree, so that every client says the
+  same: the count of the live sessions it leads; those that ask something of the user (every
+  request its pilot hears, #1305: a question, a vault entry, a call held, a connection), its own
+  launches of a led session held for the user's approval counted there too; those whose pull
+  request's checks ended red; those blocked by someone else, with who (once the tree's line says
+  it, #1451). A part with a zero is not said. A pilot that leads nothing has no summary and its
+  row says what it is about, as any session's. The summary unfolds and fades in after the place
+  when it first leads a session, its words fade as they change, and it folds away once it leads
+  none.
+  **Its page lists them in a Leads section**, under the header and the line of what it is about,
+  before the conversation, titled `Leads` with the count: one row per live session it leads, in
+  launch order, after its launches held for the user: its state mark, its ticket (the key as a
+  tag, its title, else the session's title), its workspace with the mark of its machine when it is
+  another machine, and what it runs on, its pull request with its checks' mark (`no pull request
+  yet`), the runs it follows, and what it waits for in the colour of its mark (`needs you: a
+  permission`, `waits for run 900`, `working`, `at rest`). A launch of the pilot's held for the
+  user is a row (`launch held on server · 2 files`, `needs you: allow its launch`, `no session
+  yet`) until it starts, when the session's row takes its place. A click on a session's row opens
+  it. The section unfolds with its first row and folds away with its last; it enters with the
+  page, staggered; its rows unfold, fold away and slide, their marks and their words fade as they
+  change, and a row's hover fades over `HOVER`. Its page's header says "led by <pilot>", and a line above its composer says
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
@@ -1279,7 +1305,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `#123` with its checks' mark (a check, a cross or a dot: shape as well as colour); it is cut
   with an ellipsis inside the row and the whole is in a tooltip. While the session waits, the line
   says, right after the place, what it waits for in a few words (`main · waits for checks of
-  #812`, `waits for <title of the session it leads>` (its title as it is now, renamed or not),
+  #812`, `waits for <title of the session it leads>` (its title as it is now, renamed or not;
+  in the tooltip only while its summary takes the line, above),
   `wakes at 10:42`, `out of quota until 13:00`, `paused, resumes when you write` for a following
   paused because the two sessions wrote to each other alone, the same facts as the mark's
   tooltip): cut with an ellipsis inside the row, the whole in the line's tooltip, unfolding and
@@ -1842,6 +1869,14 @@ included, built in today (§7.1, §5.8), later specs, review and a handbook) are
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
+
+- A pilot's summary and its Leads (#1452): a red check is a led session's pull request whose
+  checks failed; a run it follows that ends red is not counted yet (the window learns its end
+  only as the following closes), and the blocked part waits for #1451. A session it leads in
+  another project sits among that project's rows and is counted in neither. Leads shows while
+  the pilot has a launch held for the user even when it leads nothing yet (the held row is the
+  only one), and the summary only once it leads a session. A Leads row's title is the kit's row
+  title, which changes at once; its marks and its words fade.
 
 - An agent's proposed edit of a vault entry (`docs/vault.md`, "Proposing an edit of an entry"):
   a second one for the entry while one waits is refused rather than joined (it would hide what
