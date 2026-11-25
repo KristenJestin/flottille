@@ -479,6 +479,42 @@ pub struct Session {
     pub subject: Option<Subject>,
     /// The user named it (Rename…): its title stays on its row's first line.
     pub renamed: bool,
+    /// The launches of led sessions its root asked that wait for the user's approval: each is a
+    /// row of its page's Leads until it starts, and needs the user in its summary.
+    pub held: Vec<HeldLaunch>,
+    /// The runs its root follows, by name (`run 900`), as its Leads row says them.
+    pub followed: Vec<String>,
+}
+
+/// A launch of a led session held for the user's approval, as its pilot's Leads says it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldLaunch {
+    /// The request's number.
+    pub number: u64,
+    /// The title the launch gives the session.
+    pub title: String,
+    /// The machine it starts on, when it is another one.
+    pub machine: Option<String>,
+    /// How many files it needs shared there first.
+    pub files: usize,
+}
+
+impl HeldLaunch {
+    /// A request of `approval.list` that is a held launch of a led session; `None` for another.
+    pub fn of(request: &Value) -> Option<HeldLaunch> {
+        let call = &request["call"];
+        (request["tool"] == "agent_launch" && call["kind"] == "led").then_some(())?;
+        let needs = crate::waiting::Needs::of(&call["needs"]);
+        Some(HeldLaunch {
+            number: request["number"].as_u64()?,
+            title: text(call, "title"),
+            machine: call["machine"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| needs.as_ref().map(|needs| needs.to.clone())),
+            files: needs.map_or(0, |needs| needs.files.len()),
+        })
+    }
 }
 
 /// What a session is about (`docs/design.md` §10, "What a session is about"), as `agent.list`
@@ -1067,9 +1103,16 @@ impl Snapshot {
 
         // What each session waits on, for its row's words: the bell is the daemon's.
         let mut asks: Vec<(String, &'static str)> = Vec::new();
+        // The launches of led sessions each root asked, held for the user: rows of its Leads.
+        let mut held: HashMap<&str, Vec<HeldLaunch>> = HashMap::new();
         for request in list(answers.approvals, "requests") {
             let asker = request["agent"].as_str().unwrap_or_default();
             asks.push((root_of(&parents, asker).to_owned(), "a permission"));
+            if let Some(launch) = HeldLaunch::of(request) {
+                held.entry(root_of(&parents, asker))
+                    .or_default()
+                    .push(launch);
+            }
         }
         // An agent's request for a vault entry waits for the user as a held request does: its
         // session's row says it, the card being in the rail's "Waiting for you".
@@ -1136,6 +1179,7 @@ impl Snapshot {
         };
         // What each of those roots waits for, in a few words: the first of its subscriptions.
         let mut waiting_for: HashMap<&str, (String, String)> = HashMap::new();
+        let mut followed: HashMap<&str, Vec<String>> = HashMap::new();
         for subscription in list(answers.subscriptions, "subscriptions") {
             let Some(agent) = subscription["agent"].as_str() else {
                 continue;
@@ -1163,6 +1207,12 @@ impl Snapshot {
                     Some(session) => name_of(session),
                     None => target["title"].as_str().unwrap_or_default().to_owned(),
                 });
+            if let Some(run) = &run {
+                followed
+                    .entry(root_of(&parents, agent))
+                    .or_default()
+                    .push(run.clone());
+            }
             let paused = following.is_some() && subscription["paused"] == true;
             // What it waits for, said once: the tooltip puts "Waiting: " before it, the row's
             // line "waits for " (a wake is `wakes at`).
@@ -1300,6 +1350,8 @@ impl Snapshot {
                     child_of: child_of(agent),
                     subject: Subject::of(&agent["subject"]),
                     renamed: agent["titled_by"] == "user",
+                    held: held.remove(id.as_str()).unwrap_or_default(),
+                    followed: followed.remove(id.as_str()).unwrap_or_default(),
                     id,
                 }
             })
@@ -1563,6 +1615,8 @@ impl Snapshot {
                 child_of: None,
                 subject: None,
                 renamed: false,
+                held: Vec::new(),
+                followed: Vec::new(),
             });
         }
         self.elsewhere = added;
@@ -1697,6 +1751,8 @@ impl Snapshot {
                     child_of: None,
                     subject: None,
                     renamed: false,
+                    held: Vec::new(),
+                    followed: Vec::new(),
                 });
                 if !self
                     .projects

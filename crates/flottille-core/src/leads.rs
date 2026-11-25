@@ -34,8 +34,36 @@ pub struct Part {
 /// The summary of a pilot that leads `led` (its live led sessions) and has `held` launches of
 /// its own held for the user's approval, which need the user too. `None` while it leads nothing:
 /// a part with a zero is never said, and neither is a summary of nothing.
-pub fn summary(_led: &[Led], _held: usize) -> Option<Vec<Part>> {
-    None
+pub fn summary(led: &[Led], held: usize) -> Option<Vec<Part>> {
+    if led.is_empty() {
+        return None;
+    }
+    let part = |kind, words: String| Part { kind, words };
+    let mut parts = vec![part(Kind::Leads, format!("leads {}", led.len()))];
+    let needs = led.iter().filter(|l| l.needs_you).count() + held;
+    if needs > 0 {
+        let verb = if needs == 1 { "needs" } else { "need" };
+        parts.push(part(Kind::NeedsYou, format!("{needs} {verb} you")));
+    }
+    let red = led.iter().filter(|l| l.red).count();
+    if red > 0 {
+        let checks = if red == 1 { "check" } else { "checks" };
+        parts.push(part(Kind::Red, format!("{red} red {checks}")));
+    }
+    let blocked: Vec<&Led> = led.iter().filter(|l| !l.blocked_by.is_empty()).collect();
+    if !blocked.is_empty() {
+        let mut by: Vec<&str> = Vec::new();
+        for name in blocked.iter().flat_map(|l| &l.blocked_by) {
+            if !by.contains(&name.as_str()) {
+                by.push(name);
+            }
+        }
+        parts.push(part(
+            Kind::Blocked,
+            format!("{} blocked by {}", blocked.len(), by.join(", ")),
+        ));
+    }
+    Some(parts)
 }
 
 /// The summary in words, its parts joined: `leads 4 · 1 needs you`.
@@ -77,7 +105,10 @@ mod tests {
             blocked_by: vec!["Maya".into()],
             ..Led::default()
         };
-        assert_eq!(said(&[quiet.clone()], 0).as_deref(), Some("leads 1"));
+        assert_eq!(
+            said(std::slice::from_ref(&quiet), 0).as_deref(),
+            Some("leads 1")
+        );
         assert_eq!(
             said(
                 &[quiet.clone(), needs.clone(), red.clone(), maya.clone()],
