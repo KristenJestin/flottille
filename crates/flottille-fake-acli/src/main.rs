@@ -55,7 +55,8 @@
 //! holds one of its keys end with 1, saying that value: one query fails, the others answer.
 //!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
-//! the work items of the signed-in user. A search whose `--fields` is `key` alone prints `null`
+//! the work items of the signed-in user. One that asks `assignee = currentUser()` alone (no
+//! `reporter`) is answered with the script's `assigned_search` when it has one. A search whose `--fields` is `key` alone prints `null`
 //! for each work item it finds, as the real one was seen to: `key` is no field of `fields`.
 //! Otherwise each work item is Jira's REST issue as a real site printed it: `key`, `id` and `self`
 //! at the top, the other parts (`changelog`, `names`, …) `null`; its `fields` are those of the
@@ -500,8 +501,16 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 .unwrap_or(usize::MAX);
             // The user's own: what the script says is theirs, none without.
             let theirs = rest.iter().any(|word| word.contains("currentUser()"));
-            let mut found: Vec<Value> = match &script[if theirs { "mine_search" } else { "search" }]
-            {
+            // Those assigned to the user alone, when the script says them apart.
+            let assigned = rest.iter().any(|word| {
+                word.contains("assignee = currentUser()") && !word.contains("reporter")
+            }) && script["assigned_search"].is_array();
+            let answered = match (assigned, theirs) {
+                (true, _) => "assigned_search",
+                (_, true) => "mine_search",
+                _ => "search",
+            };
+            let mut found: Vec<Value> = match &script[answered] {
                 Value::Array(items) => items.clone(),
                 _ if theirs => Vec::new(),
                 _ => {

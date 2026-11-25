@@ -172,6 +172,32 @@ fn blocked(user: &User, id: &str) -> Value {
     listed(user, id)["blocked"].clone()
 }
 
+/// The item `key` of `kind` as the daemon stored it: a test that finds nothing blocked first
+/// knows there was something to read.
+fn stored(user: &User, kind: &str, key: &str) -> Value {
+    let items = user
+        .call("items.list", json!({"project": "app", "kind": kind}))
+        .unwrap()["items"]
+        .clone();
+    items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["key"] == key)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {kind} {key} stored: {items}"))
+}
+
+/// The last `agent.blocked` of `id` among `events`.
+fn last_blocked(events: &[Value], id: &str) -> Value {
+    events
+        .iter()
+        .filter(|e| e["name"] == "agent.blocked" && e["data"]["agent"] == id)
+        .next_back()
+        .unwrap_or_else(|| panic!("no agent.blocked of {id}: {events:?}"))["data"]["blocked"]
+        .clone()
+}
+
 #[test]
 fn a_session_at_rest_waiting_on_a_requested_review_is_blocked_by_its_reviewer() {
     let user = user();
@@ -235,6 +261,7 @@ fn a_session_waiting_on_checks_is_waiting_not_blocked() {
     subscribe(&mcp, "forge", json!({"events": ["checks"]}));
     a_round(&user);
 
+    stored(&user, "pull", "12");
     let line = listed(&user, &id);
     assert!(line["blocked"].is_null(), "{line}");
     let tree = user.call("agent.tree", json!({"agent": id})).unwrap();
@@ -256,6 +283,8 @@ fn a_ticket_assigned_to_the_user_blocks_nothing() {
     );
     a_round(&user);
 
+    let issue = stored(&user, "ticket", "5");
+    assert_eq!(issue["assignees"], json!(["someone"]), "{issue}");
     let line = listed(&user, &id);
     assert!(line["blocked"].is_null(), "{line}");
 }
@@ -279,11 +308,157 @@ fn a_blocked_session_is_no_longer_blocked_when_the_review_comes() {
     script(&user, reviewed, issue(json!([])));
     a_round(&user);
 
-    eventually("the session no longer blocked", || {
+    // The review wakes the agent, which is blocked by no one while it runs: it is back at rest,
+    // its subscription still open, that says whether Maya still blocks it.
+    let mut events = watch.until(|e| e["name"] == "agent.turn_ended" && e["data"]["agent"] == id);
+    eventually("the session at rest again", || {
+        listed(&user, &id)["state"] == "idle"
+    });
+    events.extend(watch.within(Duration::from_secs(1)));
+    let open = user.call("subscription.list", json!({"tree": id})).unwrap();
+    assert!(
+        open.to_string().contains("\"forge\""),
+        "the subscription ended: {open}"
+    );
+    let line = listed(&user, &id);
+    assert!(line["blocked"].is_null(), "{line}");
+    assert!(last_blocked(&events, &id).is_null(), "{events:?}");
+}
+
+#[test]
+fn a_review_asked_after_subscribing_blocks_the_session() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull(json!([])), issue(json!([])));
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, "forge", json!({"events": ["review"]}));
+    a_round(&user);
+    stored(&user, "pull", "12");
+    assert!(listed(&user, &id)["blocked"].is_null());
+    let watch = user.watch(&["--after", "0"]);
+
+    // The user asks Maya for a review: nothing else of the pull request changes.
+    let maya = json!([{"__typename": "User", "login": "maya", "name": "Maya"}]);
+    script(&user, pull(maya), issue(json!([])));
+    a_round(&user);
+
+    let events = watch.until(|e| {
+        e["name"] == "agent.blocked" && e["data"]["agent"] == id && !e["data"]["blocked"].is_null()
+    });
+    let blocked = &events.last().unwrap()["data"]["blocked"];
+    assert_eq!(blocked["by"], json!(["Maya"]), "{blocked}");
+    assert_eq!(listed(&user, &id)["blocked"], *blocked);
+
+    // The request is withdrawn: blocked by no one, and said.
+    script(&user, pull(json!([])), issue(json!([])));
+    a_round(&user);
+    watch.until(|e| {
+        e["name"] == "agent.blocked" && e["data"]["agent"] == id && e["data"]["blocked"].is_null()
+    });
+    assert!(listed(&user, &id)["blocked"].is_null());
+}
+
+#[test]
+fn a_review_requested_of_the_user_blocks_nothing() {
+    let user = user();
+    fixture(&user);
+    // `someone` is whom the fake `gh` says the user is, here by the name they set.
+    let requested = json!([
+        {"__typename": "User", "login": "someone", "name": "Some One"},
+        {"__typename": "User", "login": "maya", "name": "Maya"}
+    ]);
+    script(&user, pull(requested), issue(json!([])));
+    let (id, mcp) = agent(&user);
+
+    subscribe(&mcp, "forge", json!({"events": ["review"]}));
+
+    let blocked = blocked(&user, &id);
+    assert_eq!(blocked["by"], json!(["Maya"]), "{blocked}");
+}
+
+#[test]
+fn a_review_requested_of_a_bot_blocks_nothing() {
+    let user = user();
+    fixture(&user);
+    // As gh asks `requestedReviewer`: a bot and a team are no person.
+    let requested = json!([
+        {"__typename": "Bot", "login": "copilot-pull-request-reviewer"},
+        {"__typename": "Team", "name": "Backend", "slug": "backend"},
+        {"__typename": "User", "login": "maya", "name": "Maya"}
+    ]);
+    script(&user, pull(requested), issue(json!([])));
+    let (id, mcp) = agent(&user);
+
+    subscribe(&mcp, "forge", json!({"events": ["review"]}));
+
+    let blocked = blocked(&user, &id);
+    assert_eq!(blocked["by"], json!(["Maya"]), "{blocked}");
+}
+
+#[test]
+fn a_jira_ticket_the_user_reported_assigned_to_someone_else_blocks() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull(json!([])), issue(json!([])));
+    track(
+        &user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    let work_item = |key: &str, assignee: &str| {
+        json!({
+            "key": key,
+            "self": "https://example.atlassian.net/rest/api/3/issue/10001",
+            "fields": {
+                "summary": "Log in", "description": null,
+                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+                "assignee": {"displayName": assignee},
+                "reporter": {"displayName": "Some One"},
+                "labels": [], "issuetype": {"name": "Story"}, "priority": {"name": "High"},
+                "updated": "2026-10-01T10:00:00.000+0000",
+                "comment": {"comments": [], "total": 0}
+            }
+        })
+    };
+    // The user filed both: ABC-1 is Noor's, ABC-2 the user's own.
+    let (reported, theirs) = (
+        work_item("ABC-1", "Noor Haddad"),
+        work_item("ABC-2", "Some One"),
+    );
+    user.acli_script(json!({
+        "items": {"ABC-1": reported, "ABC-2": theirs},
+        "search": [reported, theirs],
+        "mine_search": [reported, theirs],
+        "assigned_search": [theirs]
+    }));
+    let (id, mcp) = agent(&user);
+    stored(&user, "ticket", "ABC-1");
+
+    subscribe(
+        &mcp,
+        "tickets",
+        json!({"ticket": "ABC-1", "events": ["status"]}),
+    );
+    let blocked = blocked(&user, &id);
+    assert_eq!(blocked["by"], json!(["Noor Haddad"]), "{blocked}");
+    assert_eq!(blocked["why"], "ticket ABC-1", "{blocked}");
+
+    // The one assigned to the user blocks nothing.
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "unsubscribe", "ticket": "ABC-1"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    subscribe(
+        &mcp,
+        "tickets",
+        json!({"ticket": "ABC-2", "events": ["status"]}),
+    );
+    eventually("no longer blocked", || {
         listed(&user, &id)["blocked"].is_null()
     });
-    let events = watch.until(|e| e["name"] == "agent.blocked" && e["data"]["blocked"].is_null());
-    assert_eq!(events.last().unwrap()["data"]["agent"], id.as_str());
+    std::thread::sleep(Duration::from_millis(500));
+    let line = listed(&user, &id);
+    assert!(line["blocked"].is_null(), "{line}");
 }
 
 #[test]
