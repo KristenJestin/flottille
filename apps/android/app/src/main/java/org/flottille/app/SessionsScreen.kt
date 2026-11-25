@@ -11,8 +11,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -52,11 +55,15 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.time.ZoneId
 import org.flottille.app.ui.Entrance
 import org.flottille.app.ui.Label
@@ -66,6 +73,7 @@ import org.flottille.app.ui.Space
 import org.flottille.app.ui.Type
 import org.flottille.core.Machine
 import org.flottille.core.MachineState
+import org.flottille.core.Member
 import org.flottille.core.PhoneView
 import org.flottille.core.SessionRow
 
@@ -89,11 +97,18 @@ private fun strongest(marks: List<Mark>): Mark = marks.minByOrNull { it.ordinal 
 private sealed interface Line {
     val key: String
 
-    data class MachineHeader(val machine: String, val known: Machine?) : Line {
+    data class MachineHeader(val machine: String, val known: Machine?, val member: Member?, val open: Boolean) : Line {
         override val key get() = "machine:$machine"
     }
 
-    data class ProjectHeader(val machine: String, val project: String, val open: Boolean, val hidden: Mark) : Line {
+    data class ProjectHeader(
+        val machine: String,
+        val project: String,
+        val count: Int,
+        val open: Boolean,
+        val hidden: Mark,
+        val offline: Boolean,
+    ) : Line {
         override val key get() = "project:$machine/$project"
     }
 
@@ -105,22 +120,24 @@ private sealed interface Line {
         val open: Boolean = false,
         val led: Boolean = false,
         val lastLed: Boolean = false,
-        val scope: String = "",
+        val project: String = "",
+        val member: Member? = null,
     ) : Line {
         override val key get() = "session:${session.machine}:${session.agent}"
     }
 
-    data class EndedHeader(val count: Int, val open: Boolean) : Line {
-        override val key get() = "ended"
+    /** What "Ended" says once of a machine whose ended sessions it cannot list. */
+    data class Unlisted(val machine: String, val member: Member?, val said: String) : Line {
+        override val key get() = "unlisted:$machine"
     }
 }
 
 /**
- * What the tab has folded, kept on the phone as the window keeps its sidebar's: each project of a
- * machine, each pilot, the "Ended" group. A node that was never folded or unfolded keeps its
- * default: a project open, a pilot and "Ended" folded.
+ * What the tab has folded, kept on the phone as the window keeps its sidebar's: each machine, each
+ * project of a machine, each pilot, the "Ended" group. A node that was never folded or unfolded
+ * keeps its default: a machine open when it is online, a project open, a pilot and "Ended" folded.
  */
-private class Folds(private val context: Context) {
+private class Folds(context: Context) {
     private val prefs = context.getSharedPreferences("sessions-folds", Context.MODE_PRIVATE)
     private val open = mutableStateMapOf<String, Boolean>().apply {
         prefs.all.forEach { (key, value) -> if (value is Boolean) put(key, value) }
@@ -135,6 +152,8 @@ private class Folds(private val context: Context) {
     }
 
     companion object {
+        fun machine(machine: String) = "machine:$machine"
+
         fun project(machine: String, project: String) = "project:$machine\u001f$project"
 
         fun lead(session: SessionRow) = "lead:${session.machine}:${session.agent}"
@@ -143,19 +162,27 @@ private class Folds(private val context: Context) {
     }
 }
 
-private fun lines(view: PhoneView, folds: Folds): List<Line> {
+/** The tree of the live sessions, and the rows of "Ended" with what it says of the machines it cannot list. */
+private class Tree(val lines: List<Line>, val ended: List<Line>, val endedCount: Int)
+
+private fun tree(view: PhoneView, folds: Folds, zone: ZoneId): Tree {
     val online = view.machines.filter { it.state == MachineState.Online }.map { it.name }.toSet()
+    val members = view.members.associateBy { it.name }
     val all = view.projects.flatMap { project -> project.sessions.map { project.name to it } }
     // Newest first, as the window's sidebar: what a session reports never moves its row.
     val live = all.filterNot { it.second.ended() }.sortedByDescending { it.second.created }
     val ended = all.filter { it.second.ended() }.sortedByDescending { it.second.last }
-    val machines = (view.machines.map { it.name } + live.map { it.second.machine }).distinct()
+    val machines = (view.machines.map { it.name } + all.map { it.second.machine }).distinct()
     val out = mutableListOf<Line>()
     for (machine in machines) {
+        val known = view.machines.firstOrNull { it.name == machine }
         val mine = live.filter { it.second.machine == machine }
         if (mine.isEmpty()) continue
         val offline = machine !in online
-        out += Line.MachineHeader(machine, view.machines.firstOrNull { it.name == machine })
+        // An offline machine keeps its projects as last read, folded and greyed.
+        val machineOpen = folds.isOpen(Folds.machine(machine), default = !offline)
+        out += Line.MachineHeader(machine, known, members[machine], machineOpen)
+        if (!machineOpen) continue
         for (project in mine.map { it.first }.distinct().sorted()) {
             val sessions = mine.filter { it.first == project }.map { it.second }
             val ids = sessions.map { it.agent }.toSet()
@@ -163,7 +190,7 @@ private fun lines(view: PhoneView, folds: Folds): List<Line> {
             // is a row of its own, as the window shows a session whose pilot works elsewhere.
             fun pilotOf(session: SessionRow) = session.pilot.takeIf { it.isNotEmpty() && it != session.agent && it in ids }
             val open = folds.isOpen(Folds.project(machine, project), default = true)
-            out += Line.ProjectHeader(machine, project, open, strongest(sessions.map { it.mark() }))
+            out += Line.ProjectHeader(machine, project, sessions.size, open, strongest(sessions.map { it.mark() }), offline)
             if (!open) continue
             for (root in sessions.filter { pilotOf(it) == null }) {
                 val leads = sessions.filter { pilotOf(it) == root.agent }
@@ -177,21 +204,22 @@ private fun lines(view: PhoneView, folds: Folds): List<Line> {
             }
         }
     }
-    if (ended.isNotEmpty()) {
-        val open = folds.isOpen(Folds.ENDED, default = false)
-        out += Line.EndedHeader(ended.size, open)
-        // Ended, a row sits among other projects' and machines' rows: it says whose it is.
-        if (open) out += ended.map { (project, s) -> Line.Session(s, s.machine !in online, scope = "$project · ${s.machine}") }
-    }
-    return out
+    // Ended, a row has left its place: it says its project and its machine's icon.
+    val endedLines = ended.map { (project, s) -> Line.Session(s, s.machine !in online, project = project, member = members[s.machine]) } +
+        view.machines.filter { it.state != MachineState.Online }.map {
+            val why = if (it.state == MachineState.Offline) "is ${stateLine(it, zone).lowercase()}" else "needs an update"
+            Line.Unlisted(it.name, members[it.name], "${it.name} $why: its ended sessions are not listed")
+        }
+    return Tree(out, endedLines, ended.size)
 }
 
 /**
- * The Sessions tab (`docs/remote.md`, "The Android app"): the window's sidebar. Each machine, said
- * once; its projects, folded or not; their sessions newest first, a session led by another under
- * its pilot (folded by default); the state is the row's mark, so a row never moves when its session
- * reports. The ended sessions leave their places for one folded group below every machine. A
- * session of a machine that is offline is greyed and is not opened.
+ * The Sessions tab (`docs/remote.md`, "The Android app"; design B, #1441): the window's sidebar.
+ * Each machine, said once with its mark and its state, folded or not; its projects, folded or not;
+ * their sessions in compact rows newest first, a session led by another under its pilot (folded by
+ * default); the state is the row's mark, so a row never moves when its session reports. The ended
+ * sessions leave their places for one folded group pinned at the bottom. A session of a machine
+ * that is offline is greyed and is not opened.
  */
 @Composable
 fun SessionsScreen(
@@ -200,38 +228,49 @@ fun SessionsScreen(
     now: () -> Long,
     onOpen: (machine: String, agent: String) -> Unit,
 ) {
+    val palette = LocalPalette.current
     val context = LocalContext.current
     val folds = remember(context) { Folds(context) }
-    val lines = lines(view, folds)
+    val tree = tree(view, folds, zone)
+    val at = now()
     Entrance(0, Modifier.fillMaxSize()) {
-        if (lines.isEmpty()) {
+        if (tree.lines.isEmpty() && tree.endedCount == 0) {
             Column(Modifier.fillMaxSize().padding(Space.Xl), verticalArrangement = Arrangement.spacedBy(Space.Sm)) {
                 Label("No sessions yet", style = Type.Heading)
-                Label("The sessions of your machines show here as they start.", color = LocalPalette.current.mute)
+                Label("The sessions of your machines show here as they start.", color = palette.mute)
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = Space.Lg)) {
-                items(lines, key = { it.key }) { line ->
-                    // A row inserted, removed or moved unfolds, folds away or slides, never jumps.
-                    val move = Modifier.animateItem(
-                        fadeInSpec = Motion.spec(Motion.ENTER),
-                        placementSpec = Motion.spec(Motion.PANEL),
-                        fadeOutSpec = Motion.spec(Motion.HOVER),
-                    )
-                    when (line) {
-                        is Line.MachineHeader -> MachineHeader(line, zone, move)
-                        is Line.ProjectHeader -> ProjectHeader(line, move) {
-                            folds.toggle(Folds.project(line.machine, line.project), default = true)
-                        }
-                        is Line.Session -> SessionLine(
-                            line,
-                            view,
-                            now(),
-                            onOpen,
-                            onFold = { folds.toggle(Folds.lead(line.session), default = false) },
-                            modifier = move,
+            Column(Modifier.fillMaxSize()) {
+                LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = Space.Md)) {
+                    items(tree.lines, key = { it.key }) { line ->
+                        // A row inserted, removed or moved unfolds, folds away or slides, never jumps.
+                        val move = Modifier.animateItem(
+                            fadeInSpec = Motion.spec(Motion.ENTER),
+                            placementSpec = Motion.spec(Motion.PANEL),
+                            fadeOutSpec = Motion.spec(Motion.HOVER),
                         )
-                        is Line.EndedHeader -> EndedHeader(line, move) { folds.toggle(Folds.ENDED, default = false) }
+                        when (line) {
+                            is Line.MachineHeader -> MachineHeader(line, zone, move) {
+                                folds.toggle(Folds.machine(line.machine), default = line.known?.state == MachineState.Online)
+                            }
+                            is Line.ProjectHeader -> ProjectHeader(line, move) {
+                                folds.toggle(Folds.project(line.machine, line.project), default = true)
+                            }
+                            is Line.Session -> SessionLine(
+                                line,
+                                view,
+                                at,
+                                onOpen,
+                                onFold = { folds.toggle(Folds.lead(line.session), default = false) },
+                                modifier = move,
+                            )
+                            is Line.Unlisted -> {}
+                        }
+                    }
+                }
+                if (tree.endedCount > 0) {
+                    EndedGroup(tree, folds.isOpen(Folds.ENDED, default = false), view, at, onOpen) {
+                        folds.toggle(Folds.ENDED, default = false)
                     }
                 }
             }
@@ -240,28 +279,29 @@ fun SessionsScreen(
 }
 
 @Composable
-private fun MachineHeader(line: Line.MachineHeader, zone: ZoneId, modifier: Modifier) {
+private fun MachineHeader(line: Line.MachineHeader, zone: ZoneId, modifier: Modifier, onToggle: () -> Unit) {
     val palette = LocalPalette.current
-    val online = line.known?.state == MachineState.Online
-    val dot by animateColorAsState(if (online) palette.ok else palette.bg.copy(alpha = 0f), Motion.spec(Motion.PANEL), label = "machine dot")
-    val ring by animateColorAsState(if (online) palette.ok else palette.faint, Motion.spec(Motion.PANEL), label = "machine ring")
+    val source = remember { MutableInteractionSource() }
+    val offline = line.known?.state != MachineState.Online
+    val name by animateColorAsState(if (offline) palette.mute else palette.text, Motion.spec(Motion.PANEL), label = "machine name")
+    val state = line.known?.let { stateLine(it, zone).lowercase() } ?: "not known"
     Row(
         modifier
             .fillMaxWidth()
+            .background(pressFill(source))
             .testTag(line.key)
-            .semantics(mergeDescendants = true) {}
-            .padding(start = Space.Lg, end = Space.Lg, top = 14.dp, bottom = Space.Xs),
+            .semantics { stateDescription = if (line.open) "Unfolded" else "Folded" }
+            .clickable(interactionSource = source, indication = null, role = Role.Button, onClick = onToggle)
+            .padding(start = Space.Lg, end = Space.Lg, top = Space.Md, bottom = Space.Xs),
         horizontalArrangement = Arrangement.spacedBy(Space.Sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Canvas(Modifier.size(8.dp)) {
-            drawCircle(dot)
-            drawCircle(ring, style = Stroke(1.5.dp.toPx()))
-        }
-        Label(line.machine, style = Type.Body.copy(fontWeight = FontWeight.SemiBold))
-        Crossfade(line.known?.let { stateLine(it, zone).lowercase() }.orEmpty(), animationSpec = Motion.spec(Motion.PANEL), label = "machine state") {
+        MachineMark(line.member, badgeOf(line.known?.state), said = "${line.machine}, $state")
+        Label(line.machine, style = Type.Body.copy(fontWeight = FontWeight.SemiBold), color = name)
+        Crossfade(state, Modifier.weight(1f), animationSpec = Motion.spec(Motion.PANEL), label = "machine state") {
             Label(it, style = Type.Label, color = palette.faint)
         }
+        Chevron(line.open)
     }
 }
 
@@ -289,13 +329,14 @@ private fun ProjectHeader(line: Line.ProjectHeader, modifier: Modifier, onToggle
             .testTag(line.key)
             .semantics { stateDescription = if (line.open) "Unfolded" else "Folded" }
             .clickable(interactionSource = source, indication = null, role = Role.Button, onClick = onToggle)
-            .padding(horizontal = Space.Lg, vertical = Space.Sm),
+            .padding(start = 20.dp, end = Space.Lg, top = 7.dp, bottom = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(Space.Sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Chevron(line.open)
         Folder()
-        Label(line.project, modifier = Modifier.weight(1f), style = Type.Body.copy(fontWeight = FontWeight.Medium), color = palette.mute)
+        Label(line.project, style = Type.Label.copy(fontWeight = FontWeight.Medium), color = palette.mute)
+        Label("${line.count}", modifier = Modifier.weight(1f), style = Type.Small, color = palette.faint)
         // Folded, the project shows the most urgent of what it hides; open, its rows say it.
         AnimatedVisibility(
             !line.open && line.hidden != Mark.Rest,
@@ -307,24 +348,64 @@ private fun ProjectHeader(line: Line.ProjectHeader, modifier: Modifier, onToggle
     }
 }
 
+/**
+ * "Ended", pinned at the bottom of the tab: folded, it says how many; unfolded, its rows rise above
+ * it, each saying its project and its machine, and it says once of each machine that is not online
+ * that its ended sessions are not listed.
+ */
 @Composable
-private fun EndedHeader(line: Line.EndedHeader, modifier: Modifier, onToggle: () -> Unit) {
+private fun EndedGroup(tree: Tree, open: Boolean, view: PhoneView, now: Long, onOpen: (String, String) -> Unit, onToggle: () -> Unit) {
     val palette = LocalPalette.current
     val source = remember { MutableInteractionSource() }
-    Row(
-        modifier
+    val turn by animateFloatAsState(if (open) 90f else -90f, Motion.spec(Motion.PANEL), label = "ended chevron")
+    Column(
+        Modifier
             .fillMaxWidth()
-            .background(pressFill(source))
-            .testTag(line.key)
-            .semantics { stateDescription = if (line.open) "Unfolded" else "Folded" }
-            .clickable(interactionSource = source, indication = null, role = Role.Button, onClick = onToggle)
-            .padding(start = Space.Lg, end = Space.Lg, top = Space.Lg, bottom = Space.Sm),
-        horizontalArrangement = Arrangement.spacedBy(Space.Sm),
-        verticalAlignment = Alignment.CenterVertically,
+            .drawBehind { drawLine(palette.line, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
+            .background(palette.side),
     ) {
-        Label("Ended", style = Type.Heading, color = palette.faint)
-        Label("${line.count}", style = Type.Small, color = palette.faint, modifier = Modifier.weight(1f))
-        Chevron(line.open)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(pressFill(source))
+                .testTag("ended")
+                .semantics { stateDescription = if (open) "Unfolded" else "Folded" }
+                .clickable(interactionSource = source, indication = null, role = Role.Button, onClick = onToggle)
+                .padding(horizontal = Space.Lg, vertical = Space.Md),
+            horizontalArrangement = Arrangement.spacedBy(Space.Sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Label("Ended", style = Type.Label.copy(fontWeight = FontWeight.SemiBold), color = palette.mute)
+            Label("${tree.endedCount}", modifier = Modifier.weight(1f), style = Type.Label, color = palette.faint)
+            Box(Modifier.rotate(turn - 90f)) { Chevron(true) }
+        }
+        AnimatedVisibility(
+            open,
+            enter = fadeIn(Motion.spec(Motion.PANEL)) + expandVertically(Motion.spec(Motion.PANEL)),
+            exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
+        ) {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                items(tree.ended, key = { it.key }) { line ->
+                    val move = Modifier.animateItem(
+                        fadeInSpec = Motion.spec(Motion.ENTER),
+                        placementSpec = Motion.spec(Motion.PANEL),
+                        fadeOutSpec = Motion.spec(Motion.HOVER),
+                    )
+                    when (line) {
+                        is Line.Session -> SessionLine(line, view, now, onOpen, onFold = {}, modifier = move)
+                        is Line.Unlisted -> Row(
+                            move.fillMaxWidth().testTag(line.key).padding(horizontal = Space.Lg, vertical = Space.Sm),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            MachineIcon(line.member, offline = true)
+                            Label(line.said, style = Type.Small, color = palette.faint)
+                        }
+                        else -> {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -344,11 +425,6 @@ private fun SessionLine(
     val pilot = line.leads.isNotEmpty()
     // A folded pilot shows the most urgent of its own state and its led sessions'.
     val mark = if (pilot && !line.open) strongest(listOf(session.mark()) + line.leads.map { it.mark() }) else session.mark()
-    val line2 = when {
-        pilot -> leadsLine(line.leads)
-        line.scope.isNotEmpty() -> line.scope
-        else -> ""
-    }
     val connector = palette.line2
     val indent: Dp = if (line.led) 40.dp else 0.dp
     Box(
@@ -379,36 +455,43 @@ private fun SessionLine(
                     role = Role.Button,
                     onClick = { onOpen(session.machine, session.agent) },
                 )
-                .padding(start = if (line.led) 0.dp else Space.Lg, end = Space.Lg, top = 10.dp, bottom = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+                .padding(start = if (line.led) 0.dp else Space.Lg, end = Space.Lg, top = 7.dp, bottom = 7.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(Space.Sm), verticalAlignment = Alignment.CenterVertically) {
                 BasicText(
                     session.title.ifEmpty { "Untitled session" },
                     Modifier.weight(1f),
-                    style = Type.Body.copy(color = palette.text, fontWeight = FontWeight.Medium),
+                    style = Type.Body.copy(color = palette.text, fontWeight = FontWeight.Medium, fontSize = 14.sp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (pilot) FoldButton(session, line.open, onFold)
                 Crossfade(mark, animationSpec = Motion.spec(Motion.HOVER), label = "row mark") { shown ->
                     MarkView(shown, said = said(shown, view, session), tag = "mark:${session.machine}:${session.agent}", ago = ago(session.last, now))
                 }
+                if (pilot) FoldButton(session, line.open, onFold)
             }
-            if (line2.isNotEmpty()) {
-                BasicText(line2, style = Type.Small.copy(color = palette.faint), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            when {
+                pilot -> BasicText(leadsLine(line.leads, palette.faint, palette.wait), style = Type.Small, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                line.project.isNotEmpty() -> Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    MachineIcon(line.member, line.offline)
+                    Label(line.project, style = Type.Small, color = palette.faint)
+                }
             }
         }
     }
 }
 
-/** What a pilot's row says of the sessions it leads: how many, and their states. */
-private fun leadsLine(leads: List<SessionRow>): String {
-    val counts = leads.groupingBy { it.mark() }.eachCount()
-    val states = listOf(Mark.Needs to "need you", Mark.Running to "running", Mark.Rest to "idle")
-        .mapNotNull { (mark, word) -> counts[mark]?.let { n -> if (mark == Mark.Needs && n == 1) "1 needs you" else "$n $word" } }
-    return (listOf("Leads ${leads.size}") + states).joinToString(" · ")
-}
+/** What a pilot's row says of the sessions it leads: `leads 3 · 1 waiting`, the waiting ones in the colour of what needs the user. */
+private fun leadsLine(leads: List<SessionRow>, faint: androidx.compose.ui.graphics.Color, wait: androidx.compose.ui.graphics.Color) =
+    buildAnnotatedString {
+        withStyle(SpanStyle(color = faint)) { append("leads ${leads.size}") }
+        val waiting = leads.count { it.mark() == Mark.Needs }
+        if (waiting > 0) {
+            withStyle(SpanStyle(color = faint)) { append(" · ") }
+            withStyle(SpanStyle(color = wait, fontWeight = FontWeight.Medium)) { append("$waiting waiting") }
+        }
+    }
 
 private fun said(mark: Mark, view: PhoneView, session: SessionRow): String =
     when (mark) {

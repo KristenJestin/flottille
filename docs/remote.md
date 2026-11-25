@@ -1538,23 +1538,29 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   and its key's fingerprint, read from the code, no network); the user confirms this phone's name
   (the model's) and its role (**Control** or **View only**); the result says the role the hub gave.
   A refused code or a refused join stays on its screen, said.
-- **The screens**: a bottom bar, **Sessions** (the window's sidebar, #1441: each machine in the
-  list's order, said once with its state; its projects by name, each folded or not, a folded one
-  showing the most urgent mark of what it hides; their sessions in compact rows newest first, the
-  state the row's mark (a spinner, a pulsing dot for what needs the user, the time of the last
-  exchange at rest), so that a row never moves when its session reports; a session led by another
-  under its pilot, indented, **folded by default**, the pilot's row saying how many it leads and
-  their states and, folded, the most urgent of their marks; the ended sessions in one **Ended**
-  group below every machine, folded by default, each row saying its project and machine. The folds
-  are kept on the phone, as the window keeps its sidebar's. A session of a machine that is offline
-  is greyed and not opened) and **Machines**
+- **The screens**: a bottom bar, **Sessions** (the window's sidebar, design B, #1441: each machine
+  in the list's order, said once, its header carrying its **mark** (#1249: its icon in its colour
+  from the member list, a badge of one shape per state: a filled dot online, a hollow ring offline
+  with the icon greyed, an amber dot with an arrow for an update, a dashed ring unknown) and its
+  state, folded or not, an offline one folded by default; its projects by name with their count,
+  each folded or not, a folded one showing the most urgent mark of what it hides; their sessions in
+  compact two-line rows newest first, the state the row's mark (a spinner, a pulsing dot for what
+  needs the user, the time of the last exchange at rest), so that a row never moves when its
+  session reports; a session led by another under its pilot, indented with the window's connector,
+  **folded by default**, the pilot's row saying `leads 3 · 1 waiting` and, folded, carrying the
+  most urgent mark of its own and theirs; the ended sessions out of the list, in one **Ended**
+  group pinned at the bottom, folded by default, each row saying its project and its machine's
+  icon, and the group saying once of a machine that is not online that its ended sessions are not
+  listed. The folds are kept on the phone, as the window keeps its sidebar's. A session of a
+  machine that is offline is greyed and not opened) and **Machines**
   (the hub, reachable or not, and each machine: `Online`, `Offline since 22:14` with why, `Needs an
   update`); **Settings**, from the top bar: this device's name and role, the
   members, **Remove this device** (it asks once). There is no Add a device. The hub's card says
   that the link is in clear when its URL is `http://`.
 - **The core's view state** gives each session its `created` (what orders the list) and its `pilot`
   (#1441: the root of the tree of the agent that leads it, `led_by`, on the same machine; a pilot on
-  another machine is not drawn yet, its session is a row of its own), read from `agent.list` and
+  another machine is not drawn yet: its session is a row of its own, without design B's `led from
+  <machine> <title>` line, which the view cannot say), read from `agent.list` and
   `agent.created`, which says `led_by` since; `agent.detached` takes it away.
 - **The core's view state** gained what the screens say: a machine's `state` (`online`, `offline`,
   `needs an update`) and `since`, the `members` (this device marked, who added each), `hub_card`
@@ -2874,16 +2880,17 @@ on a real phone, by hand, and reported.
 - The mobile core (#824): a batch is what arrives within 30 ms of its first event, 256 events at
   most; a runner that cannot be linked is dialled again after 250 ms, doubling up to 30 s, and at
   once when the hub says another list of the members online. Its sessions list holds root sessions only, by project
-  name, projects by name (rows never move between groups), sessions by last exchange. The
+  name, projects by name (rows never move between groups), sessions newest first by when they were
+  made (#1441: by last exchange, a session that reported jumped to the top). The
   questions that wait come from the events seen (`agent.asked`), not from a read when the phone
   links: one asked before the phone's first link shows from the next one. The phone links to the
   runners of the list only, never to another phone or a controller's computer.
 
 - The Android app (#825): the bottom bar has **Sessions** and **Machines** and Settings is reached
   from the top bar (Needs you, which `docs/remote.md` puts first, comes with the session page);
-  the app opens on Sessions. In a project, the sessions that wait for the user come first and the
-  ended ones last, then the most recent; the groups stay by project name as the core gives them.
-  An ended session stays in its project, said **Ended**, rather than disappearing. Tapping a
+  the app opens on Sessions. Since #1441 the tab is design B's: by machine, then project, newest
+  first, the state the row's mark; an ended session leaves its project for the folded **Ended**
+  group pinned at the bottom (it said **Ended** in its project before). Tapping a
   session of an online machine opens its page (#826). The app connects to the hub only while it is on screen (the foreground
   service comes later) and dials it again after a wait that grows (1 s, up to 30 s) when it cannot
   be reached. A phone proposes its model's name, as a computer proposes its host's. The QR reader is
@@ -2973,8 +2980,8 @@ on a real phone, by hand, and reported.
   left as is kept in the app's storage, not in the window's state on a machine (`window.get`), so
   the phone and the window fold apart. A session whose pilot runs on another machine, or works in
   another project, is a row of its own in its project rather than under that pilot. "Ended" is one
-  group below every machine, its rows newest ended first by their last exchange (the view has no
-  `ended_at`).
+  group pinned below every machine, its rows newest ended first by their last exchange (the view
+  has no `ended_at`).
 
 ## Open questions
 
