@@ -942,8 +942,8 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   would close it, and any row it still finds in no walk from a root it draws as a root, so a lying
   `pilots` never hides, moves or duplicates a row. A row whose line gains its machine's mark, once
   its pilot's list comes, fades from one line to the other.
-- **A machine that is off.** Its sessions stay in the list, greyed, with `server offline since
-  22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
+- **A machine that is off.** Its sessions stay in the list, greyed, their machine's mark under a
+  hollow ring saying `server · offline since 22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
   machine's list for this: each live root session's title, project, state and last exchange, never
   its conversation, the copy replaced whenever that machine lists again, kept across a restart.
   A machine lists only the sessions of the projects it knows (the window of that machine shows
@@ -1932,6 +1932,13 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **A machine's state this machine cannot vouch for is the dashed ring** (#1249): the badge of a
+  machine's mark follows the state the hub's list gives it (`online`, `offline`, `needs an
+  update`); any other one is drawn as not known, the dashed ring. A hub that cannot be reached
+  does not turn the last states read into unknown ones: they stay as last read, as the words did.
+- **The badge's cut-out takes the sidebar's colour** (#1249): a hovered or chosen row keeps it,
+  the mark not following the row's fill.
 
 - **The window reads the device key at its start once the user has another runner** (#1280): the
   bell follows every machine, so its links need the key before any page of another machine is
