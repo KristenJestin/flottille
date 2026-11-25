@@ -1139,6 +1139,17 @@ notifications follow it.
 | `title` | Masked. |
 | `by` | `agent` or `user`. |
 
+#### `agent.updated`
+
+What the session is about changed (`docs/design.md` §10, "What a session is about"): it took
+another ticket in hand, opened a pull request, or what it held was closed or merged. Told once
+per change, against what was last said; a session's first subject is one too.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `subject` | As `agent.list` gives it (`docs/protocol.md`): `null` when it holds nothing and never did. |
+
 #### `agent.detached`
 
 The user detached a session from the agent that started it (`agent.detach`): `launched_by` is

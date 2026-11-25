@@ -1447,7 +1447,8 @@ model, and state. Every
 agent, ended ones and children included, oldest first: a plain listing of the daemon's
 `agent.list`. (The pilot door's `agents_list` and `agent_status` page through the root agents,
 newest first, with `agent.trees`; the command line has no equivalent, it reads `agent list` or
-`agent tree <agent>`.) `--json` prints `agent.list`: `{"agents": [...]}`.
+`agent tree <agent>`.) `--json` prints `agent.list`: `{"agents": [...]}`, each with its
+`subject`, what the session is about (`docs/protocol.md`).
 
 ```
 $ flottille agent list
