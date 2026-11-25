@@ -944,20 +944,22 @@ fn needing_the_user(conn: &mut Conn) -> Result<(HashSet<String>, Questions)> {
 /// Follows the notification centre of the machine `connect` reaches, for the bell (#1280): read
 /// at each connection and whenever a notification comes, is read or is answered there. Its
 /// settings and its providers follow too while its pages are shown (#1476, #1483): its events say
-/// what changed, and the providers are read again on this connection. Connects again with a
-/// backoff, which starts over only once the machine was read: a connection that this machine's
-/// daemon makes and the other refuses at once is no reason to ask again at once. The events
-/// resume after the last one seen, so that nothing made while it was cut is lost. Ends with its
-/// updates.
+/// what changed, and the providers are read again, off this link ([`ProviderReads`]), so that a
+/// daemon slow to list them never holds its notices. Connects again with a backoff, which starts
+/// over only once the machine was read: a connection that this machine's daemon makes and the
+/// other refuses at once is no reason to ask again at once. The events resume after the last one
+/// seen, so that nothing made while it was cut is lost. Ends with its updates.
 pub fn spawn_bell_into(connect: Connect, updates: Updates) {
     std::thread::Builder::new()
         .name("flottille-bell".into())
         .spawn(move || {
             let mut retry = FIRST_RETRY;
             let mut last = None;
+            let reads = ProviderReads::default();
             while !updates.is_closed() {
                 if let Ok(stream) = connect()
-                    && let Ok(()) = follow_bell(stream, &updates, &mut retry, &mut last)
+                    && let Ok(()) =
+                        follow_bell(stream, &connect, &updates, &reads, &mut retry, &mut last)
                 {
                     return;
                 }
@@ -970,7 +972,9 @@ pub fn spawn_bell_into(connect: Connect, updates: Updates) {
 
 fn follow_bell(
     stream: UnixStream,
+    connect: &Connect,
     updates: &Updates,
+    reads: &ProviderReads,
     retry: &mut Duration,
     last: &mut Option<u64>,
 ) -> Result<()> {
@@ -1022,20 +1026,9 @@ fn follow_bell(
                     *retry = FIRST_RETRY;
                 }
                 if providers.take().is_some() {
-                    // The daemon's answer or its sentence, as the shell's own read says it; a
-                    // connection that does not answer ends this one, and the events resumed
-                    // after it say the providers again.
-                    let listed =
-                        conn.ask_within("provider.list", json!({}), crate::actions::BOUNDS.quick)?;
-                    let read = crate::providers::next_read();
-                    let providers =
-                        crate::providers::Providers::of(listed.as_ref().map_err(Clone::clone));
-                    if updates
-                        .unbounded_send(Update::Providers(read, providers))
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
+                    // On a thread of its own, one at a time: a daemon slow to list them never
+                    // holds the notices of this link.
+                    reads.start(connect, updates);
                 }
                 // Events that came while it read are queued: they make it stale again.
                 while let Some(event) = conn.queued() {
