@@ -207,6 +207,9 @@ pub struct Items {
     /// Why a source cannot tell which of its items are the user's, by source (`source_key`), as
     /// its last round found: `items.list` says it of each source.
     mine_unknown: crate::locks::Lock<HashMap<String, String>>,
+    /// Rung when items were stored or the user was learned: what blocks a session may have
+    /// changed with no event (a reviewer asked or withdrawn), which `blocked` reads again.
+    pub stored: tokio::sync::Notify,
 }
 
 /// A source of a project, as the maps of [`Items`] know it.
@@ -519,6 +522,7 @@ async fn me_of(daemon: &Daemon, found: &forge::Forge) -> Option<String> {
     let me = forge::me(found).await;
     if let Some(me) = &me {
         daemon.items.me.lock().unwrap().insert(host, me.clone());
+        daemon.items.stored.notify_one();
     }
     me
 }
@@ -632,6 +636,7 @@ fn flush(
         .map_err(|error| format!("the items could not be stored: {error}"))?;
     crate::subscriptions::items(daemon, project, &items, &events);
     crate::extensions::heard(daemon, &events);
+    daemon.items.stored.notify_one();
     Ok(true)
 }
 

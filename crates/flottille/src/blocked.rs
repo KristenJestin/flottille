@@ -165,14 +165,25 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
         return;
     };
     loop {
-        let moved = tokio::select! {
+        let mut moved = tokio::select! {
             received = live.recv() => match received {
                 Ok(event) => moves(&event.name),
                 Err(broadcast::error::RecvError::Lagged(_)) => true,
                 Err(broadcast::error::RecvError::Closed) => return,
             },
+            // What a round stores may change no event says: a reviewer asked or withdrawn.
+            () = daemon.items.stored.notified() => true,
             _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; } => return,
         };
+        // A round says hundreds of `item.*` at once: one reading for all that is queued.
+        loop {
+            match live.try_recv() {
+                Ok(event) => moved |= moves(&event.name),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => moved = true,
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Closed) => return,
+            }
+        }
         if !moved {
             continue;
         }
