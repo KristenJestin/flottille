@@ -155,7 +155,8 @@ next), a `cut-exit` (removed while drawn, before it folded away or in the middle
 (a jump in the frame where another element popped) and `never-settles` (still moving, or still
 asking for frames, a second after the scenario). An intended finding is an entry of the
 scenario's allow list (the scenario, the finding, the element, and why); an entry that matches
-nothing fails too. A page a pull request changes gets a scenario there (open it, add a row, fold a
+nothing fails too, unless it is `racy`: a finding that happens only when the daemon answers late
+(a read that lands during an entrance is hidden by it). A page a pull request changes gets a scenario there (open it, add a row, fold a
 level, open and close a panel), beside its scenario at rest. What it does not see, and the
 checklist still holds: an opacity between 0 and 1 (GPUI says only whether an element is drawn:
 a fade in place, a cross-fade, a hover), a colour, an element with no `test_support` (seen only
