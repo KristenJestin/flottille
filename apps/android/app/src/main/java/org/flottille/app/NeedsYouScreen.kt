@@ -1,5 +1,6 @@
 package org.flottille.app
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
@@ -7,6 +8,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -51,6 +53,12 @@ private sealed interface Waiting {
     val key: String
     val machine: String
     val agent: String
+
+    /** The session whose page it is on: a child's request is on its root's. */
+    val session: String
+
+    /** The child that asked, by its title; empty when the session asked itself. */
+    val child: String
     val at: Long
     val number: Long
 
@@ -58,6 +66,8 @@ private sealed interface Waiting {
         override val key get() = "request:${request.machine}:${request.number}"
         override val machine get() = request.machine
         override val agent get() = request.agent
+        override val session get() = request.session
+        override val child get() = request.child
         override val at get() = request.at
         override val number get() = request.number
     }
@@ -66,6 +76,8 @@ private sealed interface Waiting {
         override val key get() = "ask:${ask.machine}:${ask.asked}"
         override val machine get() = ask.machine
         override val agent get() = ask.agent
+        override val session get() = ask.agent
+        override val child get() = ""
         override val at get() = ask.at
         override val number get() = ask.asked
     }
@@ -98,14 +110,12 @@ fun NeedsYouScreen(
     val live = view.requests.map { Waiting.OfRequest(it) } + view.asks.map { Waiting.OfAsk(it) }
     val waiting = (live + refused.values.map { it.first }.filter { r -> live.none { it.key == r.key } })
         .filter { it.key !in folded }
-    // A card that no longer waits (answered here or elsewhere) stays while it folds away, then goes.
-    val last = remember { mutableMapOf<String, Waiting>() }
-    val leaving = remember { mutableStateMapOf<String, Waiting>() }
+    // A card that no longer waits (answered here or elsewhere) stays while it folds away, then goes:
+    // what was seen and waits no more is leaving, until its fold has ended.
+    val seen = remember { mutableStateMapOf<String, Waiting>() }
+    LaunchedEffect(waiting) { waiting.forEach { seen[it.key] = it } }
     val waitingKeys = waiting.map { it.key }.toSet()
-    last.forEach { (key, item) -> if (key !in waitingKeys && key !in leaving) leaving[key] = item }
-    waitingKeys.forEach { if (it in leaving) leaving.remove(it) }
-    last.clear()
-    waiting.forEach { last[it.key] = it }
+    val leaving = seen.filterKeys { it !in waitingKeys }
     val shown = (waiting + leaving.values)
         .sortedWith(compareByDescending<Waiting> { it.at }.thenBy { it.machine }.thenByDescending { it.number })
 
@@ -132,44 +142,54 @@ fun NeedsYouScreen(
     }
 
     Entrance(0, Modifier.fillMaxSize().testTag("needs-you")) {
-        if (shown.isEmpty()) {
-            Label("Nothing waits for you.", color = LocalPalette.current.mute, modifier = Modifier.padding(Space.Xl).testTag("needs-you-empty"))
-        } else {
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = Space.Lg, vertical = Space.Sm)) {
-                items(shown, key = { it.key }) { item ->
-                    // A card that comes unfolds and fades in, one that leaves fades and folds away,
-                    // the others slide.
-                    val presence = remember { MutableTransitionState(false) }
-                    presence.targetState = item.key !in leaving
-                    if (presence.isIdle && !presence.currentState && !presence.targetState) {
-                        LaunchedEffect(item.key) { leaving.remove(item.key) }
-                    }
-                    AnimatedVisibility(
-                        visibleState = presence,
-                        modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = Motion.spec(Motion.PANEL), fadeOutSpec = null),
-                        enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.ENTER)),
-                        exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
-                    ) {
-                        WaitingCard(
-                            item = item,
-                            title = titles[item.machine to item.agent] ?: item.agent,
-                            onOpen = { onOpen(item.machine, item.agent) },
+        // The line of an empty screen fades in once the last card has folded, and out as one comes.
+        AnimatedContent(
+            targetState = shown.isEmpty(),
+            transitionSpec = { fadeIn(Motion.spec(Motion.ENTER)) togetherWith fadeOut(Motion.spec(Motion.HOVER)) },
+            label = "nothing waits",
+        ) { empty ->
+            if (empty) {
+                Label("Nothing waits for you.", color = LocalPalette.current.mute, modifier = Modifier.padding(Space.Xl).testTag("needs-you-empty"))
+            } else {
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = Space.Lg, vertical = Space.Sm)) {
+                    items(shown, key = { it.key }) { item ->
+                        // A card that comes unfolds and fades in, one that leaves fades and folds away,
+                        // the others slide.
+                        val presence = remember { MutableTransitionState(false) }
+                        presence.targetState = item.key !in leaving
+                        if (presence.isIdle && !presence.currentState && !presence.targetState) {
+                            LaunchedEffect(item.key) { seen.remove(item.key) }
+                        }
+                        // A card that folds answers nothing: what it would answer is gone.
+                        val off = item.key in answering || item.key in leaving
+                        AnimatedVisibility(
+                            visibleState = presence,
+                            modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = Motion.spec(Motion.PANEL), fadeOutSpec = null),
+                            enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.ENTER)),
+                            exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
                         ) {
-                            when (item) {
-                                is Waiting.OfRequest -> RequestCard(
-                                    request = item.request,
-                                    readOnly = readOnly,
-                                    answering = item.key in answering,
-                                    refusal = refused[item.key]?.second,
-                                    onAnswer = { allow -> answer(item) { phone.answer(item.machine, item.request.number, allow) } },
-                                )
-                                is Waiting.OfAsk -> AskCard(
-                                    ask = item.ask,
-                                    readOnly = readOnly,
-                                    answering = item.key in answering,
-                                    refusal = refused[item.key]?.second,
-                                    onAnswer = { replies -> answer(item) { phone.answerAsk(item.machine, item.agent, item.ask.asked, replies) } },
-                                )
+                            val session = titles[item.machine to item.session] ?: item.session
+                            WaitingCard(
+                                item = item,
+                                title = if (item.child.isEmpty()) session else "$session · ${item.child}",
+                                onOpen = { onOpen(item.machine, item.session) },
+                            ) {
+                                when (item) {
+                                    is Waiting.OfRequest -> RequestCard(
+                                        request = item.request,
+                                        readOnly = readOnly,
+                                        answering = off,
+                                        refusal = refused[item.key]?.second,
+                                        onAnswer = { allow -> answer(item) { phone.answer(item.machine, item.request.number, allow) } },
+                                    )
+                                    is Waiting.OfAsk -> AskCard(
+                                        ask = item.ask,
+                                        readOnly = readOnly,
+                                        answering = off,
+                                        refusal = refused[item.key]?.second,
+                                        onAnswer = { replies -> answer(item) { phone.answerAsk(item.machine, item.agent, item.ask.asked, replies) } },
+                                    )
+                                }
                             }
                         }
                     }
