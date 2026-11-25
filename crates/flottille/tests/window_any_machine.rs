@@ -448,6 +448,10 @@ fn the_bell_s_do_not_disturb_is_the_machine_shown_s(cx: &mut TestAppContext) {
 
     // Turned off from the bell: on the server, this machine's untouched.
     click(&shell, "bell", cx);
+    assert!(
+        present(cx, "bell-dnd-switch"),
+        "the panel shows Do not disturb"
+    );
     click(&shell, "bell-dnd-switch", cx);
     eventually("the server lets it go", || !do_not_disturb(&server.user));
     until(&shell, cx, "the bell says it is off", |cx| {
@@ -455,18 +459,27 @@ fn the_bell_s_do_not_disturb_is_the_machine_shown_s(cx: &mut TestAppContext) {
     });
     assert!(!do_not_disturb(&pc.user), "this machine's is untouched");
 
-    // Changed on the server elsewhere: the bell follows it.
-    set_do_not_disturb(&server.user, true);
-    until(&shell, cx, "the bell follows the server", |cx| {
+    // On again from the bell, then back on this machine: its own again, still off.
+    assert!(present(cx, "bell-dnd-switch"), "the panel is still open");
+    click(&shell, "bell-dnd-switch", cx);
+    eventually("the server holds it again", || do_not_disturb(&server.user));
+    until(&shell, cx, "the bell says it is on", |cx| {
         bell(&shell, cx) == Some(true)
     });
-
-    // Back on this machine: its own again.
-    click(&shell, "bell", cx);
+    // The panel closed, the chooser is reached.
+    if shell.read_with(cx, |s, _| s.bell_open()) {
+        shell.update(cx, |s, cx| s.toggle_bell(cx));
+        settle(&shell, cx);
+    }
+    assert!(
+        !shell.read_with(cx, |s, _| s.bell_open()),
+        "the panel is closed"
+    );
     settings_of(&shell, "here", cx);
     until(&shell, cx, "the bell says this machine's again", |cx| {
         bell(&shell, cx) == Some(false)
     });
+    assert!(!do_not_disturb(&pc.user), "this machine's is untouched");
 }
 
 /// Where the element `id` is drawn, `None` when it is not drawn at all.

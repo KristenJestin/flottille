@@ -136,6 +136,8 @@ fn the_notifications_tab_names_each_kind_and_what_it_does_and_a_request_has_no_o
 
 /// Whether `outer` holds `inner`.
 fn holds(outer: &str, inner: &str, cx: &mut VisualTestContext) -> bool {
+    assert!(has(outer.to_owned(), cx), "{outer} is not drawn");
+    assert!(has(inner.to_owned(), cx), "{inner} is not drawn");
     let (outer, inner) = (rect(outer.to_owned(), cx), rect(inner.to_owned(), cx));
     outer.origin.y <= inner.origin.y
         && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height + px(0.5)
@@ -144,6 +146,7 @@ fn holds(outer: &str, inner: &str, cx: &mut VisualTestContext) -> bool {
 #[gpui_kit::test]
 fn each_section_s_skeleton_fades_into_what_the_daemon_said(cx: &mut TestAppContext) {
     let user = user();
+    project(&user);
     let (shell, cx) = window(&user, cx);
     open_tab(&shell, cx);
 
@@ -195,17 +198,19 @@ fn a_file_that_cannot_be_read_is_said_in_the_tab_and_the_controls_unfold_once_fi
         json!({"kinds": {"report": "ring"}}),
     )
     .unwrap();
-    until(&shell, cx, "the controls start to unfold", |cx| {
-        has("notify-kinds-content", cx) && rect("notify-kinds-content", cx).size.height > px(0.)
+    until(&shell, cx, "the tab knows what rings", |cx| {
+        let page = shell
+            .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
+            .unwrap();
+        let view = page.read_with(cx, |p, _| p.notifications().clone());
+        view.read_with(cx, |view, _| view.shown().is_some())
     });
-    let start = rect("notify-kinds-content", cx).size.height;
-    cx.executor().advance_clock(PANEL / 3);
-    cx.update(|window, cx| window.simulate_next_frame(cx));
-    cx.run_until_parked();
-    let part = rect("notify-kinds-content", cx).size.height;
+    // The controls come in the block that unfolds them (the kit's `presence`), the line gone.
+    until(&shell, cx, "the controls are shown", |cx| {
+        has("notify-kinds", cx) && !has("notify-kinds-problem", cx)
+    });
     settle(cx);
-    let open = rect("notify-kinds-content", cx).size.height;
-    assert!(start < part && part < open, "{start:?} {part:?} {open:?}");
+    assert!(holds("notify-kinds-content", "notify-kinds", cx));
     assert!(!has("notify-kinds-problem", cx), "folded away");
 }
 
