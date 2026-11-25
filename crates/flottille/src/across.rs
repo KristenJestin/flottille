@@ -524,21 +524,51 @@ pub(crate) fn tell(
     true
 }
 
-/// `tell`, under `id`: the same id told twice is kept, and stored there, once.
-pub(crate) fn tell_once(daemon: &Arc<Daemon>, agent: &str, kind: &str, id: &str, body: &str) {
-    if let Some(launch) = launch_here(daemon, agent) {
-        let id = Some(id.to_owned());
-        tell_with(
-            daemon,
-            &launch,
-            id,
-            kind,
-            body,
-            approval::BETWEEN_TURNS,
-            false,
-            false,
-        );
+/// Tells the agent of another machine that leads `agent` how the user answered a request here,
+/// `line`: one message per launch waits for that machine, the latest listing every answer not sent
+/// yet (each once), so that answers given while it is off never fill what may wait there and push
+/// out a report.
+pub(crate) fn tell_answered(daemon: &Arc<Daemon>, agent: &str, kind: &str, line: &str) {
+    let Some(launch) = launch_here(daemon, agent) else {
+        return;
+    };
+    if launch.kind != "led" {
+        return;
     }
+    let prefix = format!("{kind}-{}-", launch.launch);
+    let waiting = daemon
+        .read(|store| store.outgoing(Some(&launch.machine)))
+        .unwrap_or_default();
+    let mut lines: Vec<String> = Vec::new();
+    for old in waiting.iter().filter(|old| old.id.starts_with(&prefix)) {
+        if let Ok(MachineMessage::Deliver(told)) =
+            serde_json::from_value::<MachineMessage>(old.message.clone())
+        {
+            lines.extend(told.body.lines().map(str::to_owned));
+        }
+        let _ = daemon.write(|store| store.forget_outgoing(&old.id).map(|()| ((), None)));
+    }
+    if !lines.iter().any(|told| told == line) {
+        lines.push(line.to_owned());
+    }
+    // The newest answers, when all of them would not fit.
+    while lines.len() > 1 && lines.iter().map(|l| l.chars().count() + 1).sum::<usize>() > LONGEST {
+        lines.remove(0);
+    }
+    let id = format!(
+        "{prefix}{}",
+        flottille_core::agent::new_id().unwrap_or_default()
+    );
+    kept_for_caller(
+        daemon,
+        &launch,
+        Some(id),
+        kind,
+        &lines.join("\n"),
+        approval::BETWEEN_TURNS,
+        false,
+        false,
+    );
 }
 
 /// Tells the agent of another machine that leads `agent` that a turn of it ended with nothing to
@@ -1156,6 +1186,14 @@ fn delivered(
         return Err(format!(
             "no delivery of kind {:?} is taken from another machine",
             deliver.kind
+        )
+        .into());
+    }
+    // The user's answer to a request is told a pilot, never the starter of a child.
+    if deliver.kind == crate::subscriptions::REQUEST_ANSWERED && launch.kind != "led" {
+        return Err(format!(
+            "a {} is taken for a led session only",
+            crate::subscriptions::REQUEST_ANSWERED
         )
         .into());
     }

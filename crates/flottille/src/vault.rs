@@ -1312,15 +1312,21 @@ pub(crate) fn asking(store: &Store) -> flottille_core::Result<Vec<String>> {
     Ok(asks(store)?.open.into_iter().map(|ask| ask.agent).collect())
 }
 
-/// The requests for a vault entry of `agent` that wait for the user, oldest first: each one's
-/// number, when the agent asked it (its own ask, or its ask joined to another's), the entry's name
-/// and the agent's reason. Never a secret: an ask holds none.
-pub(crate) fn asked_by(
-    store: &Store,
-    agent: &str,
-) -> flottille_core::Result<Vec<(u64, u64, String, String)>> {
+/// A vault ask still open, as one agent asked or joined it.
+pub(crate) struct OpenAsk {
+    pub agent: String,
+    /// The ask's number.
+    pub number: u64,
+    /// The event of that agent's ask or join.
+    pub seq: u64,
+    pub name: String,
+    pub why: String,
+}
+
+/// The asks still open, once per agent that asked or joined one, oldest first.
+pub(crate) fn open_asks(store: &Store) -> flottille_core::Result<Vec<OpenAsk>> {
     let open = asks(store)?.open;
-    let mut asked: Vec<(u64, u64, String, String)> = Vec::new();
+    let mut asked = Vec::new();
     for event in store.events_named(&["vault.asked", "vault.ask_joined"], 0)? {
         let data = &event.data;
         let number = match event.name.as_str() {
@@ -1328,9 +1334,15 @@ pub(crate) fn asked_by(
             _ => data["ask"].as_u64().unwrap_or_default(),
         };
         // Only the asks still open: an ask answered, and a join to it, wait for no one.
-        if data["agent"] == agent && open.iter().any(|ask| ask.number == number) {
+        if open.iter().any(|ask| ask.number == number) {
             let text = |key: &str| data[key].as_str().unwrap_or_default().to_owned();
-            asked.push((number, event.at, text("name"), text("why")));
+            asked.push(OpenAsk {
+                agent: text("agent"),
+                number,
+                seq: event.seq,
+                name: text("name"),
+                why: text("why"),
+            });
         }
     }
     Ok(asked)
@@ -1450,21 +1462,25 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, answer: Answer) {
             .iter()
             .map(|(agent, project)| (agent, project)),
     );
+    // A session and an agent below it that both joined the ask: their leads are told once.
+    let mut told = std::collections::HashSet::new();
     for (agent, project) in asked {
         // An entry the agent's project does not see is not said to it, nor to its lead: the lead
         // is told only that the request is answered.
         let seen = set.is_none_or(|entry| entry.seen_by(project));
-        crate::subscriptions::request_answered(
-            daemon,
-            agent,
-            "vault",
-            request.number,
-            &format!("a vault entry asked: {name}"),
-            &match seen {
-                true => format!("{outcome} it"),
-                false => "answered it".to_owned(),
-            },
-        );
+        if told.insert(crate::tree::root_of(daemon, agent)) {
+            crate::subscriptions::request_answered(
+                daemon,
+                agent,
+                "vault",
+                request.number,
+                &format!("a vault entry asked: {name}"),
+                &match seen {
+                    true => format!("{outcome} it"),
+                    false => "answered it".to_owned(),
+                },
+            );
+        }
         if !seen {
             continue;
         }
