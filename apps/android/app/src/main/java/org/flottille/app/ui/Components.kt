@@ -11,6 +11,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,10 +21,15 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
@@ -40,10 +46,12 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -51,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /** A text, in the palette's ink. */
@@ -276,3 +285,93 @@ fun Confirm(
     }
 }
 
+
+/**
+ * A button that is an icon, round: [label] is what a screen reader says of it. Its fill fades over
+ * [Motion.HOVER] as it is pressed or disabled, and it sinks to [Motion.PRESSED] over [Motion.PRESS].
+ * A [ButtonKind.Primary] one is filled (Send), a [ButtonKind.Secondary] one sits on a card (Stop).
+ */
+@Composable
+fun IconButton(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    kind: ButtonKind = ButtonKind.Ghost,
+    enabled: Boolean = true,
+    size: Dp = 44.dp,
+) {
+    val palette = LocalPalette.current
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val (fill, pressedFill, ink) = when (kind) {
+        ButtonKind.Primary -> Triple(palette.acc, palette.acc.copy(alpha = 0.82f), palette.onAcc)
+        ButtonKind.Secondary -> Triple(palette.card2, palette.sel, palette.text)
+        ButtonKind.Ghost -> Triple(palette.bg.copy(alpha = 0f), palette.sel, palette.text)
+        ButtonKind.Danger -> Triple(palette.fail, palette.fail.copy(alpha = 0.82f), palette.onFail)
+    }
+    val background by animateColorAsState(if (pressed) pressedFill else fill, Motion.spec(Motion.HOVER), label = "icon button fill")
+    val enabledAlpha by animateFloatAsState(if (enabled) 1f else 0.4f, Motion.spec(Motion.HOVER), label = "icon button enabled")
+    val scale by animateFloatAsState(if (pressed && enabled) Motion.PRESSED else 1f, Motion.spec(Motion.PRESS), label = "icon button size")
+    Box(
+        modifier
+            .size(size)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .alpha(enabledAlpha)
+            .background(background, CircleShape)
+            .semantics { contentDescription = label }
+            .clickable(interactionSource = source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Glyph(icon, ink, size = 20.dp)
+    }
+}
+
+/**
+ * A panel that rises from the bottom over a scrim, over [Motion.PANEL], and goes down again: the
+ * tree of a session, the choice of its mode. [onClose] is its Close button and the scrim's tap.
+ * [tag] names the panel for the tests.
+ */
+@Composable
+fun Sheet(visible: Boolean, title: String, tag: String, onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val palette = LocalPalette.current
+    AnimatedVisibility(visible, enter = fadeIn(Motion.spec(Motion.PANEL)), exit = fadeOut(Motion.spec(Motion.PANEL))) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(palette.scrim)
+                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClose),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            Column(
+                Modifier
+                    .animateEnterExit(
+                        enter = slideInVertically(Motion.spec(Motion.PANEL)) { it },
+                        exit = slideOutVertically(Motion.spec(Motion.PANEL)) { it },
+                    )
+                    .fillMaxWidth()
+                    .heightIn(max = 600.dp)
+                    .background(palette.bg, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
+                    .testTag(tag)
+                    .navigationBarsPadding()
+                    .padding(bottom = Space.Lg),
+            ) {
+                Box(Modifier.fillMaxWidth().padding(top = Space.Sm), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(width = 32.dp, height = 4.dp).background(palette.line2, RoundedCornerShape(2.dp)))
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(start = Space.Xl - Space.Xs, end = Space.Sm),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Label(title, style = Type.Body.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f))
+                    IconButton(Icons.Close, "Close", onClose)
+                }
+                content()
+            }
+        }
+    }
+}
