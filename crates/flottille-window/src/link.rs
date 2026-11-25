@@ -827,6 +827,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.quota"
                 // A session given another model or effort says it on its row.
                 | "agent.options_taken"
+                // Blocked by someone else, or no longer: its mark, its row's place, its banner.
+                | "agent.blocked"
         ),
         _ => false,
     }
@@ -1315,6 +1317,10 @@ mod tests {
         );
         assert!(matters(&event("workspace.created", json!({}))));
         assert!(matters(&event("agent.moved", json!({}))), "the rail");
+        assert!(
+            matters(&event("agent.blocked", json!({}))),
+            "the row's place and mark"
+        );
         assert!(
             matters(&event("workspace.step_done", json!({}))),
             "a card shows the preparation"
