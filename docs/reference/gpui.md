@@ -126,13 +126,15 @@ interactive element for its hover transition. What a test can hold is held: the 
 style is refused in every source of the window (`crates/flottille-window/tests/the_rule.rs`) and
 of the kit (its `tests/instant_hovers.rs`), each helper has its own scenarios (the kit's
 `tests/everything_moves.rs`: a hover fades and stops, a row arrives, goes and slides, a block
-folds, reduced motion jumps, nothing is drawn once it arrived), and the rest is this checklist,
-which each window pull request ticks in its description:
+folds, reduced motion jumps, nothing is drawn once it arrived), the motion gate (below) plays
+pages frame by frame, and the rest is this checklist, which each window pull request ticks in its
+description:
 
 - [ ] every element that is clicked fades its hover (a component, `hoverable` or `selectable`);
 - [ ] every state that changes (selected, chosen, focused, open, enabled) moves, not jumps;
 - [ ] everything that appears, leaves or changes size is an `enter`, a `presence`, a `growing`,
-      an `Item` or a `Fold`, and the gap around it goes with it;
+      an `Item` or a `Fold`, and the gap around it goes with it (the motion gate finds what pops,
+      is cut or jumps on a page it plays: a page the pull request touches has a scenario there);
 - [ ] every list that gains, loses or reorders rows is a `Listing` of `Item`s;
 - [ ] every new page, section or panel enters (staggered), and every overlay rises and fades;
 - [ ] reduced motion jumps (the helpers do it; a `Motion` kept by hand must pass `reduce`);
@@ -141,6 +143,23 @@ which each window pull request ticks in its description:
       counts the frames drawn over ten seconds of the window's clock once the page settled
       (`window.layout_stats().frames`, none) and the animation frames asked (none);
 - [ ] the pull request lists each element it animated, and a capture or a scenario shows one.
+
+**The motion gate** (`crates/flottille/tests/motion_gate/mod.rs`, its scenarios in
+`window_motion_gate.rs`) plays a scenario on the window's clock, a frame of 16 ms at a time, and
+reads at each frame every element with an id and `test_support`: its bounds and whether it is
+drawn (its opacity, or an ancestor's, above 0, and a part of it inside its clip). It fails on what
+a person would notice: a `pop-in` (shown at its size in one frame, with nothing moving it in: not
+itself, a fold above it nor what it holds), a `pop-out` (no longer drawn from one frame to the
+next), a `cut-exit` (removed while drawn, before it folded away or in the middle of its fold), a
+`jump` (moved or resized more than 1 px in one frame, still before and after), a `sibling-jump`
+(a jump in the frame where another element popped) and `never-settles` (still moving, or still
+asking for frames, a second after the scenario). An intended finding is an entry of the
+scenario's allow list (the scenario, the finding, the element, and why); an entry that matches
+nothing fails too. A page a pull request changes gets a scenario there (open it, add a row, fold a
+level, open and close a panel), beside its scenario at rest. What it does not see, and the
+checklist still holds: an opacity between 0 and 1 (GPUI says only whether an element is drawn:
+a fade in place, a cross-fade, a hover), a colour, an element with no `test_support` (seen only
+through the observed elements it moves), and a pointer's hover, which no scenario plays.
 
 ## Rules of the window
 
