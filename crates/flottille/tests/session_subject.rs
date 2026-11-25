@@ -383,7 +383,8 @@ fn a_session_holding_a_ticket_before_the_first_round_shows_its_title_after_it() 
 
 #[test]
 fn an_unset_forge_drops_the_pull_request_from_the_subject() {
-    let user = user();
+    // The scheduler polls the items: what no source declares any more is forgotten there.
+    let user = user().with_fetcher();
     fixture(&user);
     script(
         &user,
@@ -402,7 +403,6 @@ fn an_unset_forge_drops_the_pull_request_from_the_subject() {
         json!({"name": "app", "repositories": [{"path": "api", "forge": null}], "tracker": null}),
     )
     .unwrap();
-    // The scheduler's next tick forgets what no source declares any more.
     user.call("test.advance", json!({"ms": 0})).unwrap();
 
     let subject = subject_once(&user, &id, |s| s["pull_request"].is_null());
