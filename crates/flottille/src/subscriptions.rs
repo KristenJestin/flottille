@@ -349,15 +349,22 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     let (prompted, prompted_at) = last_of("agent.prompted");
     let asked = seq_of("agent.asked") > prompted;
     let reported = !asked && seq_of("agent.reported") > prompted;
-    let plain = !asked && !reported;
+    // What the turn asked of the user: each request is said once, in the turn that made it.
+    let requests: Vec<UserRequest> = waiting_for_the_user(daemon, &session.id)
+        .into_iter()
+        .filter(|request| request.at >= prompted_at)
+        .collect();
+    let plain = !asked && !reported && requests.is_empty();
     let user_spoke = followed_the_user(daemon, &session.id);
     let woken: Vec<Subscription> = followers(daemon, &session.id)
         .into_iter()
         .filter(|s| s.seen["paused"] != true)
+        // A message to the pilot woke it already, but did not say what waits for the user.
         .filter(|s| {
-            s.seen["answered"]
-                .as_u64()
-                .is_none_or(|at| at < prompted_at)
+            !requests.is_empty()
+                || s.seen["answered"]
+                    .as_u64()
+                    .is_none_or(|at| at < prompted_at)
         })
         .collect();
     // A session an agent of another machine leads tells it there, while that agent follows it.
@@ -371,7 +378,13 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
         open.iter()
             .any(|q| q["seq"].as_u64().unwrap_or(0) > prompted)
     });
-    let what = what_of(stop_reason, asked, reported, remote && !pilot_asked);
+    let what = what_of(
+        stop_reason,
+        asked,
+        reported,
+        remote && !pilot_asked,
+        !requests.is_empty(),
+    );
     let last = crate::tree::last_messages_after(daemon, &session.id, prompted)
         .pop()
         .unwrap_or_else(|| NO_MESSAGE.to_owned());
@@ -386,7 +399,11 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
         .filter(|question| question["seq"].as_u64().unwrap_or(0) > prompted)
     {
         let text = secrets::mask(question["question"].as_str().unwrap_or_default(), &env);
-        let said = format!("Its question to you:\n\n{}", cut_said(&text));
+        let said = format!(
+            "Its question to you (#{}):\n\n{}",
+            question["seq"].as_u64().unwrap_or_default(),
+            cut_said(&text)
+        );
         let length = said.chars().count();
         if left > 0 || used + length > QUESTIONS_CHARS {
             left += 1;
@@ -401,10 +418,15 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
             if left == 1 { "" } else { "s" }
         ));
     }
+    let waits = (!requests.is_empty()).then(|| {
+        let lines: Vec<String> = requests.iter().map(|r| format!("- {}", r.said())).collect();
+        format!("{WAITS_FOR_THE_USER}\n{}", lines.join("\n"))
+    });
     let last = user_spoke
         .then(|| USER_SPOKE.to_owned())
         .into_iter()
         .chain(asked)
+        .chain(waits)
         .chain([format!("Its last message:\n\n{}", cut_said(&last))])
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -430,14 +452,159 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     }
 }
 
-/// Why a turn ended, as a wake says it; `to_user` when its question went to the user.
-fn what_of(stop_reason: &str, asked: bool, reported: bool, to_user: bool) -> &'static str {
+/// Why a turn ended, as a wake says it; `to_user` when its question went to the user, `waits`
+/// when the turn made a request that waits for the user.
+fn what_of(
+    stop_reason: &str,
+    asked: bool,
+    reported: bool,
+    to_user: bool,
+    waits: bool,
+) -> &'static str {
     match (asked, reported, to_user) {
         _ if stop_reason == "failed" => "ended a turn: the turn failed.",
         (true, _, false) => "ended a turn: it asked you a question with ask.",
         (true, _, true) => "ended a turn: it asked the user a question with ask.",
         (false, true, _) => "ended a turn: it reported.",
+        (false, false, _) if waits => "ended a turn: it waits for the user.",
         (false, false, _) => "ended a turn.",
+    }
+}
+
+/// What heads the requests of a turn that wait for the user, in a wake.
+const WAITS_FOR_THE_USER: &str = "It waits for the user, who answers it where they are (you \
+    cannot answer it; you are told their answer):";
+
+/// The longest a request is said in, in characters: what it is, not the whole call.
+const REQUEST_CHARS: usize = 300;
+
+/// A request of a session that waits for the user, as its lead reads it.
+pub(crate) struct UserRequest {
+    /// `call` (a call held for approval), `connection` (a connection's write asked) or `vault`
+    /// (a vault entry asked for).
+    kind: &'static str,
+    /// The request's number: a held call's, or the ask's for a vault entry.
+    number: u64,
+    /// When the session asked it, in milliseconds.
+    at: u64,
+    /// What is asked and why, masked and cut: never a secret, an entry is only named.
+    what: String,
+}
+
+impl UserRequest {
+    fn said(&self) -> String {
+        format!("request #{}, {}", self.number, self.what)
+    }
+}
+
+/// The kind of a request held for the user, by the tool it holds.
+pub(crate) fn kind_of(tool: &str) -> &'static str {
+    match tool {
+        "connections" => "connection",
+        _ => "call",
+    }
+}
+
+/// What a request held for the user asks, in a few words: `a call held for approval: fs_read:
+/// <reasons>`, `a connection asked: <what it writes>`.
+pub(crate) fn request_said(request: &approval::Request) -> String {
+    match request.tool.as_str() {
+        "connections" => {
+            let says = match request.says.is_empty() {
+                true => &request.reasons,
+                false => &request.says,
+            };
+            format!("a connection asked: {}", says.join("; "))
+        }
+        tool => format!(
+            "a call held for approval: {tool}: {}",
+            request.reasons.join("; ")
+        ),
+    }
+}
+
+/// The requests of `session` that wait for the user, oldest first: its calls held for them (a
+/// connection's write asked among them), and the vault entries it asked for.
+pub(crate) fn waiting_for_the_user(daemon: &Daemon, session: &str) -> Vec<UserRequest> {
+    let env = std::env::vars_os().collect();
+    let said = |what: String| {
+        let what = secrets::mask(&what, &env);
+        match what.chars().count() > REQUEST_CHARS {
+            true => format!("{}…", what.chars().take(REQUEST_CHARS).collect::<String>()),
+            false => what,
+        }
+    };
+    let mut requests: Vec<UserRequest> = daemon
+        .read(|store| store.pending_requests_of(session))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.held_by == approval::USER)
+        .map(|request| UserRequest {
+            kind: kind_of(&request.tool),
+            number: request.number,
+            at: request.created_at,
+            what: said(request_said(&request)),
+        })
+        .collect();
+    let asks = daemon
+        .read(|store| crate::vault::asked_by(store, session))
+        .unwrap_or_default();
+    requests.extend(asks.into_iter().map(|(number, at, name, why)| UserRequest {
+        kind: "vault",
+        number,
+        at,
+        what: said(format!("a vault entry asked: {name}: {why}")),
+    }));
+    requests.sort_by_key(|request| request.at);
+    requests
+}
+
+/// The kind of the delivery that tells the agents that lead a session how the user answered a
+/// request of it.
+pub const REQUEST_ANSWERED: &str = "session-request-answered";
+
+/// The id of the delivery that says a lead's following its session's request answered.
+///
+/// The kind is in it: a vault ask's number is an event's, a call's the approval counter's, and two
+/// can be equal, so one answer would otherwise be dropped as the other's duplicate.
+fn answered_id(following: &str, kind: &str, number: u64) -> String {
+    format!("{REQUEST_ANSWERED}-{following}-{kind}-{number}")
+}
+
+/// The user answered the request `number`, of `kind` (`call`, `connection` or `vault`), of the
+/// agent `session`, which asked `what`: each agent that leads it is told `the user <how>`, with
+/// what wakes it next; nothing rings it for this.
+pub fn request_answered(
+    daemon: &Daemon,
+    session: &str,
+    kind: &str,
+    number: u64,
+    what: &str,
+    how: &str,
+) {
+    let followers = followers(daemon, session);
+    if followers.is_empty() {
+        return;
+    }
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(session)) else {
+        return;
+    };
+    let env = std::env::vars_os().collect();
+    let body = secrets::mask(
+        &format!(
+            "Session {}: its {kind} request #{number}, {what}, is answered: the user {how}.",
+            crate::tree::named(&agent)
+        ),
+        &env,
+    );
+    for follower in followers {
+        deliveries::queue(
+            daemon,
+            &follower.agent,
+            REQUEST_ANSWERED,
+            Some(answered_id(&follower.id, kind, number)),
+            &body,
+        );
     }
 }
 
@@ -973,7 +1140,18 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             let subscriptions: Vec<Value> = all(daemon)
                 .iter()
                 .filter(|s| ids.as_ref().is_none_or(|ids| ids.contains(&s.agent)))
-                .map(listed)
+                .map(|s| {
+                    let mut listed = listed(s);
+                    // What the session followed waits for the user, which its lead's page says.
+                    if s.source == SESSION {
+                        let session = s.target["session"].as_str().unwrap_or_default();
+                        listed["waits"] = waiting_for_the_user(daemon, session)
+                            .iter()
+                            .map(|r| json!({"kind": r.kind, "number": r.number, "what": r.what}))
+                            .collect();
+                    }
+                    listed
+                })
                 .collect();
             Ok(json!({"subscriptions": subscriptions}))
         }
@@ -1073,29 +1251,51 @@ mod tests {
 }
 
 #[cfg(test)]
+mod answers {
+    use super::answered_id;
+
+    #[test]
+    fn two_requests_of_different_kinds_with_the_same_number_have_two_deliveries() {
+        // A vault ask's number is an event's, a call's the approval counter's: they can be equal.
+        let ids = ["vault", "call", "connection"].map(|kind| answered_id("s", kind, 7));
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+    }
+}
+
+#[cfg(test)]
 mod turn_wakes {
     use super::what_of;
 
     #[test]
     fn a_failed_turn_says_it_failed_not_that_it_said_nothing() {
         assert_eq!(
-            what_of("failed", false, false, false),
+            what_of("failed", false, false, false, false),
             "ended a turn: the turn failed."
         );
         assert_eq!(
-            what_of("failed", true, false, false),
+            what_of("failed", true, false, false, false),
             "ended a turn: the turn failed."
         );
     }
 
     #[test]
     fn a_turn_says_why_it_ended() {
-        assert_eq!(what_of("end_turn", false, false, false), "ended a turn.");
         assert_eq!(
-            what_of("end_turn", false, true, false),
+            what_of("end_turn", false, false, false, false),
+            "ended a turn."
+        );
+        assert_eq!(
+            what_of("end_turn", false, true, false, false),
             "ended a turn: it reported."
         );
-        assert!(what_of("end_turn", true, false, true).contains("asked the user"));
-        assert!(what_of("end_turn", true, false, false).contains("asked you"));
+        assert!(what_of("end_turn", true, false, true, false).contains("asked the user"));
+        assert!(what_of("end_turn", true, false, false, false).contains("asked you"));
+        assert_eq!(
+            what_of("end_turn", false, false, false, true),
+            "ended a turn: it waits for the user."
+        );
     }
 }

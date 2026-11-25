@@ -2722,7 +2722,11 @@ folder named by the project; `ticket #5 of api`, `ticket ABC-1`; `wake: <why>`),
 source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`: `project`,
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
 `expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
-end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+end of its own, and, for a following alone, `waits`: what that session waits for the user, oldest
+first, each `{"kind", "number", "what"}`, `kind` being `call` (a call held for approval),
+`connection` (a connection's write asked) or `vault` (a vault entry asked for, `number` the ask's),
+`what` what it asks in a few words, masked and cut (`a vault entry asked: staging-login: to sign in
+to staging`, the entry named, never a secret), `[]` when nothing of the user's waits), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
 epoch. A subscription with no deadline (one to a pull request or a ticket the agent gave no
 `minutes`, a following) has `expires_at` 9223372036854775807 (`i64::MAX`): it lasts until its
 target ends. `paused` is true for a following paused because its two sessions wrote to each other
@@ -2827,7 +2831,11 @@ when they name none:
 
 `why` is `null` when the provider's agents can run, else a clause after its name that says why
 not and what to do. `warnings` say what may stop its agents that the daemon cannot tell for
-sure: a version other than the one Flottille was checked against, no sign-in it can see.
+sure: a version other than the one Flottille was checked against, no sign-in it can see, and the
+sign-in line of the provider (`Codex's login expired: sign in again (run codex login)`) when its
+agent refused to list its models for no login: it stays while its program, its API keys and its
+sign-in file are those the listing was refused in, and goes once a listing is read (`models`
+stays `null` until then).
 `images` says whether its agents take images in a prompt, as the last of them that started said
 (`null` before one did): the window's composer says "takes no images" for a `false` before a start.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test

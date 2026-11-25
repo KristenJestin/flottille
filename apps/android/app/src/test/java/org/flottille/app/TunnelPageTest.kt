@@ -82,6 +82,7 @@ class TunnelPageTest {
         rule.setContent {
             FlottilleApp(phone = phone, deviceName = "pixel", zone = ZoneOffset.UTC, tunnels = host)
         }
+        rule.onNodeWithTag("tab:sessions").performClick()
         rule.onNodeWithTag("session:server:a1").performClick()
         rule.waitForIdle()
     }

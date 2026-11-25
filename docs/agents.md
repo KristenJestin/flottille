@@ -229,7 +229,11 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   cached, and a `/models` request of the catalogue, not of a model:
   `models-manager/src/manager.rs`) and needs no thread: the daemon starts `codex app-server` bare,
   as for a thread's deletion, sends `initialize`, `account/read` (a Codex not signed in is a
-  failure, as for a session) and `model/list`, and ends it; no thread is started. Claude and
+  failure saying what a session's refused login says, "Codex's login expired: sign in again") and
+  `model/list`, and ends it; no thread is started. A listing refused for no login is said to the
+  user: its sign-in line is one of the provider's `warnings` in `provider.list` (the Providers
+  page says it under the row, the composer under its pickers) while its program, its keys and its
+  sign-in file are those it was refused in, and goes once a listing is read. Claude and
   OpenCode go through their ACP agent started as a session's is, the judge's way
   (`docs/design.md` §7): bare, in Flottille's own empty folder `<state>/models`, no tool and no MCP
   server, `initialize` and one `session/new`, its options kept as a session's are, and no user
@@ -838,7 +842,8 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   the bare one ("Bare mode for Codex", above), and the bare command line.
 - **The session opens** in order: `initialize` (the client `flottille`, with the experimental
   API, which `environments` needs), `initialized`, `account/read` (not signed in, or signed in to a
-  workspace's plan: the open fails, saying why), `model/list`, then `thread/start` for
+  workspace's plan: the open fails, saying why; with no account it carries `data.code`
+  `unauthorized`, "A death", below), `model/list`, then `thread/start` for
   `session/new` or `thread/resume` for `session/resume`. The session id is Codex's thread id; there
   is no `session/load`. A `codex` that ends before fails the open; a `thread/resume` answered "no
   rollout found" fails it with "resource not found" (`-32002`).
@@ -1084,14 +1089,22 @@ quotes the user's words of that prompt (they may never have reached it); the par
 was taken for it is given back, and the parent is told nothing. Each death counts against the
 limit of new starts (below).
 
-A resume or a load that fails is read for what it says (`acp::not_reopened`):
+A resume or a load that fails is read for what it says (`acp::not_reopened`; a first session's
+open is read for its login alone):
 
 - the agent says the session is gone, with ACP's "resource not found" (`-32002`): a new session
   replaces it ("Replacement", below). The Claude bridge answers it when `claude` said "No
   conversation found with session ID" on its error output (passed on to the bridge's), the Codex
   bridge when `thread/resume` answered "no rollout found";
 - its process died: a death, as above;
-- its login is gone (`turn_failures`): said as a turn's is, the session kept;
+- its login is gone (`turn_failures`): said as a turn's is, the session kept. The Codex bridge
+  tags with `unauthorized` an open refused because `account/read` answered no account
+  (`requiresOpenaiAuth`, as `codex` 0.166.0 does with no login), so that the agent says it must
+  sign in again, as for every other refused login; a ChatGPT plan it refuses carries no code and
+  fails the agent;
+- a first session (`session/new`) is read the same way, though never resumed or loaded: a login
+  refused there is said as a turn's is, the agent idle with the line and no session id, its
+  prompt given back, nothing retried until the user writes;
 - anything else (`claude` missing or broken, the network, an error of the service) fails the
   agent with its session kept, to be resumed once the cause is gone. Nothing else ever throws a
   session away.

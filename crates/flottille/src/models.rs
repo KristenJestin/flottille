@@ -35,6 +35,10 @@ const LIMIT: Duration = Duration::from_secs(60);
 /// program, its API keys and whether its sign-in file is there. A failed listing is asked again
 /// only when one of them changes, or the provider is enabled again.
 static TRIED: Mutex<Option<HashMap<&'static str, String>>> = Mutex::new(None);
+/// The line a listing was refused with for a login, by provider, with the state it was refused
+/// in (`state`): said among the provider's warnings while that state is the one there is, gone
+/// once a listing is read or the program, its keys or its sign-in file are not those any more.
+static REFUSED: Mutex<Option<HashMap<&'static str, (String, String)>>> = Mutex::new(None);
 /// The providers a listing is running for.
 static RUNNING: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
 
@@ -89,11 +93,7 @@ pub fn check(daemon: &Arc<Daemon>) {
         }) {
             continue;
         }
-        let state = format!(
-            "{:?}; sign-in file {}",
-            providers::models_version(&check),
-            check.login_present
-        );
+        let state = state(&check);
         {
             let mut tried = TRIED.lock().unwrap();
             let tried = tried.get_or_insert_with(HashMap::new);
@@ -129,7 +129,41 @@ pub fn check(daemon: &Arc<Daemon>) {
     }
 }
 
+/// What a listing is made for: the provider's program, its API keys and whether its sign-in file
+/// is there.
+fn state(check: &Check) -> String {
+    format!(
+        "{:?}; sign-in file {}",
+        providers::models_version(check),
+        check.login_present
+    )
+}
+
+/// The sign-in line a listing of the provider's models was refused with, while the state it was
+/// refused in is the one `check` has.
+pub fn refused(check: &Check) -> Option<String> {
+    let refused = REFUSED.lock().unwrap();
+    let (state_of_refusal, line) = refused.as_ref()?.get(check.provider.name)?;
+    (*state_of_refusal == state(check)).then(|| line.clone())
+}
+
 fn report(daemon: &Daemon, provider: &'static Provider, outcome: Result<usize, String>) {
+    // A refusal for no login is for the user to read; any other outcome takes the line away.
+    let state_read = Settings::load(&daemon.paths)
+        .ok()
+        .map(|settings| state(&Check::of(provider, &settings, Version::Skip)));
+    {
+        let mut refused = REFUSED.lock().unwrap();
+        let refused = refused.get_or_insert_with(HashMap::new);
+        match (&outcome, state_read) {
+            (Err(error), Some(state)) if crate::turn_failures::is_login(error) => {
+                refused.insert(provider.name, (state, error.clone()));
+            }
+            _ => {
+                refused.remove(provider.name);
+            }
+        }
+    }
     let fields = match &outcome {
         Ok(count) => {
             json!({"agent": null, "provider": provider.name, "outcome": "read", "models": count})

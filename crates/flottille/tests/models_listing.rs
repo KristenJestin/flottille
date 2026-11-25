@@ -444,3 +444,107 @@ fn a_default_slot_names_only_the_ready_providers() {
     let gives = review_default(&user, "bugs_model")["gives"].clone();
     assert_eq!(gives.as_object().unwrap().len(), 1, "{gives}");
 }
+
+/// What `codex app-server` answers `account/read` with when no login is there (seen on a real
+/// run, #875). The listing says what a session's login line does, never the bridge's own words.
+#[test]
+fn the_models_of_a_signed_out_codex_say_sign_in() {
+    let user = User::with_fake_codex().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.codex_script(json!({"account": Value::Null}));
+    assert!(user.run(&["developer", "on"]).status.success());
+    assert!(user.run(&["daemon", "stop"]).status.success());
+
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    let log = user.path("state/flottille/developer.log");
+    let mut failure = None;
+    eventually("the failure in the developer log", || {
+        failure = std::fs::read_to_string(&log).ok().and_then(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|l| l["kind"] == "models" && l["outcome"] == "failed")
+        });
+        failure.is_some()
+    });
+
+    let failure = failure.unwrap();
+    assert_eq!(
+        failure["error"], "Codex's login expired: sign in again (run codex login)",
+        "{failure}"
+    );
+    assert!(ids(&listed(&user, "codex")).is_empty());
+}
+
+/// The signed-out line a listing refused for no login says, the one a session's login line says.
+const CODEX_SIGN_IN: &str = "Codex's login expired: sign in again (run codex login)";
+
+fn signed_out_codex() -> User {
+    let user = User::with_fake_codex().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.codex_script(json!({"account": Value::Null}));
+    user
+}
+
+fn warnings_of(provider: &Value) -> Vec<String> {
+    provider["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_models_listing_refused_for_no_login_is_a_warning_of_its_provider() {
+    let user = signed_out_codex();
+
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    eventually("the sign-in line among its warnings", || {
+        warnings_of(&listed(&user, "codex")).contains(&CODEX_SIGN_IN.to_owned())
+    });
+    let codex = listed(&user, "codex");
+    assert_eq!(codex["models"], Value::Null, "{codex}");
+    assert_eq!(codex["ready"], true, "a warning stops nothing: {codex}");
+}
+
+#[test]
+fn the_warning_goes_once_the_models_are_listed() {
+    let user = signed_out_codex();
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    eventually("the sign-in line among its warnings", || {
+        warnings_of(&listed(&user, "codex")).contains(&CODEX_SIGN_IN.to_owned())
+    });
+
+    // Signed in again, and the provider asked again, as turning it off and on does.
+    user.codex_script(json!({}));
+    user.call("provider.disable", json!({"name": "codex"}))
+        .unwrap();
+    user.call("provider.enable", json!({"name": "codex"}))
+        .unwrap();
+    eventually("its models", || !ids(&listed(&user, "codex")).is_empty());
+
+    let codex = listed(&user, "codex");
+    assert!(
+        !warnings_of(&codex).contains(&CODEX_SIGN_IN.to_owned()),
+        "{codex}"
+    );
+}
+
+#[test]
+fn the_warning_goes_once_the_login_is_found_again() {
+    let user = signed_out_codex();
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    eventually("the sign-in line among its warnings", || {
+        warnings_of(&listed(&user, "codex")).contains(&CODEX_SIGN_IN.to_owned())
+    });
+
+    // A login file shows up: the state the refusal was for is not the state there is.
+    let login = user.path("home/.codex/auth.json");
+    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
+    std::fs::write(&login, "{}").unwrap();
+    let codex = listed(&user, "codex");
+    assert!(
+        !warnings_of(&codex).contains(&CODEX_SIGN_IN.to_owned()),
+        "{codex}"
+    );
+}
