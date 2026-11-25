@@ -620,7 +620,7 @@ fn a_login_refused_by_an_agent_that_exits_says_sign_in() {
     events_until(&user, &id, after, "agent.turn_ended");
     // Its process dies; the next one refuses the login on `session/load`, then exits.
     user.fake_script(json!({"resume": false,
-        "open_error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "open_error": "Not logged in · Please run /login",
         "exit_after_open_error": 1,
         "turns": [{"when": "die", "do": [{"die": 0}]}]}));
     let died = user
