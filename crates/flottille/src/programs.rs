@@ -17,7 +17,7 @@ use flottille_core::project::Project;
 use flottille_core::registry::Registry;
 use serde_json::{Value, json};
 
-use crate::forge::{self, Gh, masked};
+use crate::forge::{self, masked};
 
 /// `<program> --version` is given this long.
 const VERSION_TIME: Duration = Duration::from_secs(5);
@@ -210,23 +210,32 @@ enum SignIn {
     Elsewhere(String),
 }
 
-/// Whether the program is signed in to `host`; the sentence of why it could not be said otherwise.
+/// Whether the program is signed in to `host`: no only when its own status says it holds no
+/// login; the sentence of why it could not be said otherwise (#1315).
 async fn signed_in(program: Program, host: &str) -> Result<SignIn, String> {
-    let ran = |result: Result<(bool, String, String), Gh>| match result {
-        Ok((ok, stdout, _)) => Ok((ok, stdout)),
-        Err(Gh::Missing) => Err(format!("{} went missing", program.name())),
-        Err(Gh::Failed(why)) => Err(masked(&why)),
+    let yes_or_no = |auth| match auth {
+        forge::Auth::SignedIn => Ok(SignIn::Yes),
+        forge::Auth::NotSignedIn => Ok(SignIn::No),
+        forge::Auth::Unchecked(why) => Err(why),
     };
-    let yes_or_no = |ok| if ok { SignIn::Yes } else { SignIn::No };
     match program {
-        Program::Gh => ran(forge::gh(&["auth", "status", "--hostname", host]).await)
-            .map(|(ok, _)| yes_or_no(ok)),
-        Program::Bkt => forge::has_bitbucket_context(host).await.map(yes_or_no),
+        Program::Gh => yes_or_no(forge::auth_of(
+            "gh",
+            forge::gh(&["auth", "status", "--hostname", host]).await,
+        )),
+        Program::Bkt => forge::has_bitbucket_context(host)
+            .await
+            .map(|has| match has {
+                true => SignIn::Yes,
+                false => SignIn::No,
+            })
+            .map_err(|why| masked(&why)),
         Program::Acli => {
-            let (ok, stdout) = ran(crate::tickets::acli(&["jira", "auth", "status"]).await)?;
-            if !ok {
-                return Ok(SignIn::No);
-            }
+            let ran = crate::tickets::acli(&["jira", "auth", "status"]).await;
+            let stdout = match &ran {
+                Ok((true, stdout, _)) => stdout.clone(),
+                _ => return yes_or_no(forge::auth_of("acli", ran)),
+            };
             // The tickets' own reading of the `Site:` line, so that both say the same.
             match crate::tickets::signed_in_site(&stdout) {
                 Some(active) if active.eq_ignore_ascii_case(host) => Ok(SignIn::Yes),

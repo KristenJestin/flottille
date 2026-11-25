@@ -21,7 +21,7 @@ use flottille_window::shell::Selection;
 use flottille_window::tree::project_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::seen::{colour, seen};
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, Hsla, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -30,7 +30,7 @@ const WAIT: Duration = Duration::from_secs(60);
 
 /// A user whose agents are the fake agent, Claude enabled and signed in (its login file only
 /// there, never read).
-fn runner() -> User {
+pub fn runner() -> User {
     let user = User::with_fake_agent()
         .with_env("FLOTTILLE_TEST_OFFER_MS", "300")
         .with_env("ANTHROPIC_API_KEY", "")
@@ -55,9 +55,12 @@ fn repository(user: &User, at: &str) -> std::path::PathBuf {
     folder
 }
 
-/// The project `name` of `user`'s machine, its repository at `home/code/<name>`.
-fn project(user: &User, name: &str) {
+/// The project `name` of `user`'s machine, its repository at `home/code/<name>`. Its remote is
+/// the name's, so that projects of one name on two machines are one shared project (#1410).
+pub fn project(user: &User, name: &str) {
     let folder = repository(user, &format!("code/{name}"));
+    let remote = format!("https://git.example/acme/{name}.git");
+    user.git(&folder, &["remote", "add", "origin", &remote]);
     user.call("project.add", json!({"folder": folder, "name": name}))
         .unwrap();
 }
@@ -78,7 +81,7 @@ fn pc_and_server() -> (TestHub, Machine, Machine) {
     (hub, pc, server)
 }
 
-fn window<'a>(
+pub fn window<'a>(
     machine: &Machine,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
@@ -92,13 +95,16 @@ fn window<'a>(
     let (shell, cx) =
         cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
     cx.simulate_resize(size(px(1280.), px(2400.)));
-    until(&shell, cx, "the server is read online", |cx| {
+    // This machine's own read as well: before it, the shell knows of no project here, and a
+    // project the server has too opens on the server (#1421).
+    until(&shell, cx, "both machines read", |cx| {
         shell.read_with(cx, |s, cx| {
-            s.machines()
-                .read(cx)
-                .machines()
-                .and_then(|read| read.machine("server"))
-                .is_some_and(|server| server.online())
+            s.main().read(cx).read()
+                && s.machines()
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.machine("server"))
+                    .is_some_and(|server| server.online())
         })
     });
     settle(&shell, cx);
@@ -106,7 +112,7 @@ fn window<'a>(
 }
 
 /// One step of the window as the platform would run it.
-fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+pub fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
     cx.executor().advance_clock(Duration::from_millis(16));
     cx.run_until_parked();
@@ -114,7 +120,7 @@ fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn until(
+pub fn until(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
     what: &str,
@@ -131,7 +137,7 @@ fn until(
     }
 }
 
-fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+pub fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     for _ in 0..40 {
         step(shell, cx);
     }
@@ -144,13 +150,13 @@ fn click_without_settling(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestCo
     cx.update(|window, cx| window.render_frame(cx));
 }
 
-fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+pub fn click(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(shell, cx);
 }
 
-fn present(cx: &mut VisualTestContext, id: &str) -> bool {
+pub fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     let id = id.to_owned();
     cx.update(|window, _| window.try_find(id).is_some())
 }
@@ -317,18 +323,11 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
     settle(&shell, cx);
-    // Said once, at the top: the machine's name in the path line.
-    assert_eq!(
-        label(cx, "settings-where").as_deref(),
-        Some("server / Settings / Agents")
-    );
+    // Said once, by the chooser: no path line above the page (#1271).
+    assert!(!present(cx, "settings-where"));
 
     // A change of its General tab is the server's, not this machine's.
     click(&shell, "settings-tabs-general", cx);
-    assert_eq!(
-        label(cx, "settings-where").as_deref(),
-        Some("server / Settings / General")
-    );
     assert!(!developer_on(&server.user));
     until(&shell, cx, "the server's developer mode is read", |cx| {
         present(cx, "developer-switch")
@@ -339,12 +338,9 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
     });
     assert!(!developer_on(&pc.user), "this machine's is unchanged");
 
-    // Back on this machine: its own, and no path line.
+    // Back on this machine: its own.
     settings_of(&shell, "here", cx);
-    assert!(
-        !present(cx, "settings-where"),
-        "this machine's page names none"
-    );
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
 }
 
 /// #1248: gh copies its one-time code to the clipboard of the machine it runs on, so the code the
@@ -403,7 +399,11 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
         },
     );
     let theirs = server.user.call("appearance.show", json!({})).unwrap();
-    // Off Omarchy, Flottille's own colours are shown already: the shade is what changes.
+    // Off Omarchy, Flottille's own colours are shown already: the shade is what changes. The
+    // server's Settings read the window's appearance of this machine for themselves.
+    until(&shell, cx, "the appearance is drawn", |cx| {
+        present(cx, "appearance-shade-light")
+    });
     click(&shell, "appearance-shade-light", cx);
     until(&shell, cx, "this machine keeps the appearance", |_| {
         pc.user.call("appearance.show", json!({})).unwrap()["shade"] == "light"
@@ -557,9 +557,13 @@ fn a_project_is_added_on_another_machine_with_its_folder_picked_there(cx: &mut T
         Some(shade_of(&shell, Some("server"), cx))
     );
     click(&shell, "add-project-machine-server", cx);
-    until(&shell, cx, "the server is shown", |cx| {
-        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
+    // The form's machine: the page behind and its machine stay (#1271).
+    until(&shell, cx, "the server is chosen", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.add_project_form().read(cx).machine() == Some("server")
+        })
     });
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
     click(&shell, "add-project-step-next", cx);
     // The folder is picked in the server's folders, opened one after the other, never typed.
     until(&shell, cx, "the server's home is listed", |cx| {
@@ -627,10 +631,7 @@ fn a_project_of_another_machine_opens_its_whole_page(cx: &mut TestAppContext) {
         })
     });
     settle(&shell, cx);
-    assert_eq!(
-        label(cx, "project-where").as_deref(),
-        Some("server / reports")
-    );
+    assert!(!present(cx, "project-where"), "no path line (#1271)");
     // Its whole page: its tabs and its work.
     for id in [
         "project-tabs",
@@ -659,7 +660,9 @@ fn a_project_setting_of_another_machine_is_changed_there(cx: &mut TestAppContext
             .unwrap();
     }
     let (shell, cx) = window(&pc, cx);
-    shell.update(cx, |s, cx| s.choose_machine(Some("server".to_owned()), cx));
+    shell.update_in(cx, |s, window, cx| {
+        s.choose_machine(Some("server".to_owned()), window, cx)
+    });
     until(&shell, cx, "the server is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
@@ -677,9 +680,9 @@ fn a_project_setting_of_another_machine_is_changed_there(cx: &mut TestAppContext
             })
     });
     settle(&shell, cx);
-    assert_eq!(
-        label(cx, "project-settings-where").as_deref(),
-        Some("server / app / Settings")
+    assert!(
+        !present(cx, "project-settings-where"),
+        "no path line (#1271)"
     );
     click(&shell, "project-settings-tabs-features", cx);
     until(&shell, cx, "Specs is a row", |cx| {
@@ -826,8 +829,12 @@ fn a_viewer_s_controls_are_disabled_with_the_reason(cx: &mut TestAppContext) {
     // Reading still works: the tabs are not held.
     click(&shell, "settings-tabs-agents", cx);
     assert_eq!(
-        label(cx, "settings-where").as_deref(),
-        Some("server / Settings / Agents")
+        shell.read_with(cx, |s, cx| s
+            .main()
+            .read(cx)
+            .settings_page()
+            .map(|p| p.read(cx).tab())),
+        Some(0)
     );
 }
 
@@ -848,7 +855,9 @@ fn every_request_of_a_page_goes_to_its_machine_signed(cx: &mut TestAppContext) {
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::ProjectSettings("app".into()), window, cx)
     });
-    settle(&shell, cx);
+    until(&shell, cx, "the server's settings of app are asked", |_| {
+        server.log().contains("project.settings asked by pc")
+    });
     shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
     until(&shell, cx, "the server's folders are asked", |_| {
         server.log().contains("project.folders asked by pc")
@@ -887,6 +896,19 @@ fn open_project(shell: &Entity<Shell>, name: &str, cx: &mut VisualTestContext) {
         })
     });
     settle(shell, cx);
+}
+
+/// The server's page of `app` is drawn: what it shows was read of the server.
+fn server_page_of_app(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    until(shell, cx, "the server's page of app", |cx| {
+        shown(shell, cx).as_deref() == Some("server")
+            && shell.read_with(cx, |s, cx| {
+                s.main()
+                    .read(cx)
+                    .project_page()
+                    .is_some_and(|page| page.read(cx).name() == "app")
+            })
+    });
 }
 
 fn shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
@@ -989,9 +1011,7 @@ fn a_chosen_machine_that_goes_off_says_to_pick_another_or_wait(cx: &mut TestAppC
     });
     click(&shell, "machine-picker", cx);
     click(&shell, "machine-choice-server", cx);
-    until(&shell, cx, "the server is shown", |cx| {
-        shown(&shell, cx).as_deref() == Some("server")
-    });
+    server_page_of_app(&shell, cx);
     settle(&shell, cx);
     assert!(!present(cx, "composer-machine-off"), "online: no notice");
 
@@ -1059,7 +1079,7 @@ fn the_composer_machine_picker_folds_away_when_the_project_is_on_one_machine_onl
 }
 
 #[gpui_kit::test]
-fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppContext) {
+fn leaving_an_off_machine_brings_this_machine_s_own_page_of_the_project(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
     let (shell, cx) = window(&pc, cx);
     open_project(&shell, "app", cx);
@@ -1068,9 +1088,7 @@ fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppCo
     });
     click(&shell, "machine-picker", cx);
     click(&shell, "machine-choice-server", cx);
-    until(&shell, cx, "the server is shown", |cx| {
-        shown(&shell, cx).as_deref() == Some("server")
-    });
+    server_page_of_app(&shell, cx);
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     pc.wait_for("server", "offline");
     until(&shell, cx, "the notice under the composer", |cx| {
@@ -1080,25 +1098,143 @@ fn the_off_machine_notice_folds_away_when_the_machine_is_left(cx: &mut TestAppCo
     let whole = height_of(cx, "composer-machine-off-line").expect("its frame");
     assert!(whole > 10., "{whole}");
 
-    // Leaving the machine folds the notice away, with its words, over several frames.
+    // Leaving the machine brings this machine's own page of the project, a new one that enters
+    // (#1271): the server's page, its composer and its notice wait with the server's pages.
+    let left = shell.read_with(cx, |s, cx| {
+        s.main().read(cx).project_page().cloned().unwrap()
+    });
     click_without_settling(&shell, "machine-picker", cx);
     cx.update(|window, cx| window.click("machine-choice-here".to_owned(), cx));
-    let drawn = std::cell::RefCell::new(Vec::new());
-    until(&shell, cx, "the notice is gone", |cx| {
-        match height_of(cx, "composer-machine-off-line") {
-            Some(height) => {
-                drawn.borrow_mut().push(height);
-                false
-            }
-            None => true,
-        }
+    until(&shell, cx, "this machine's page", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page != &left && page.read(cx).machine().is_none())
+        })
     });
-    let drawn = drawn.into_inner();
-    assert!(
-        drawn
-            .iter()
-            .any(|height| *height > 1. && *height < whole - 1.),
-        "it folds before it is gone: {drawn:?}"
-    );
+    settle(&shell, cx);
     assert!(!present(cx, "composer-machine-off"));
+}
+
+/// What is drawn over the fixed header (the title and the tabs) or over the sentence of another
+/// machine's page: the sentence is read in what scrolls, so that it passes with it, and what
+/// scrolls, cut to its page, never reaches the header.
+fn drawn_over_the_header(cx: &mut VisualTestContext) -> Vec<String> {
+    let in_page =
+        |path: &[gpui_kit::ElementId]| path.iter().any(|id| *id == "settings-page".into());
+    cx.update(|window, _| {
+        let tabs = window.find("settings-tabs").bounds();
+        let page = window.find("settings-page").bounds();
+        let own = window.find("settings-own");
+        let mut over = Vec::new();
+        if !in_page(own.path()) {
+            over.push("the sentence stays fixed above what scrolls".to_owned());
+        }
+        if page.origin.y < tabs.bottom() {
+            over.push(format!(
+                "the page starts at {:?}, the tabs end at {:?}",
+                page.origin.y,
+                tabs.bottom()
+            ));
+        }
+        for element in window.elements() {
+            if !in_page(element.path()) {
+                continue;
+            }
+            let drawn = element.bounds().intersect(&page);
+            if drawn.size.width > px(0.) && drawn.size.height > px(0.) && drawn.intersects(&tabs) {
+                over.push(format!("{:?} is drawn at {drawn:?}", element.path().last()));
+            }
+        }
+        over
+    })
+}
+
+#[gpui_kit::test]
+fn settings_content_never_draws_under_the_fixed_line_while_it_scrolls(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    scroll_clear_of_the_own_line(&shell, cx);
+}
+
+/// A machine this device may only view holds its page (its ink fades, its controls are held): the
+/// held page scrolls clear of the sentence as well.
+#[gpui_kit::test]
+fn settings_content_of_a_viewed_machine_never_draws_under_the_fixed_line(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let server = Machine::of(runner());
+    let pc = Machine::of(runner());
+    pair(&hub, &server, "server", "runner");
+    pair(&hub, &pc, "pc", "viewer");
+    pc.wait_for("server", "online");
+    project(&server.user, "app");
+    let (shell, cx) = window(&pc, cx);
+    scroll_clear_of_the_own_line(&shell, cx);
+}
+
+fn scroll_clear_of_the_own_line(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    settings(shell, "general", cx);
+    settings_of(shell, "server", cx);
+    for shade in ["light", "dark"] {
+        // The window's own shade, set while it is tall enough to reach the control.
+        cx.simulate_resize(size(px(1000.), px(2400.)));
+        click(shell, "settings-tabs-general", cx);
+        settle(shell, cx);
+        // A held page takes no click; its shade stays the first one.
+        if !present(cx, "page-held-veil") {
+            click(shell, &format!("appearance-shade-{shade}"), cx);
+        }
+        // Short, so that every tab scrolls.
+        for width in [1000., 640., 440.] {
+            cx.simulate_resize(size(px(width), px(520.)));
+            let mut scrolled = false;
+            for tab in [
+                "agents",
+                "approvals",
+                "features",
+                "vault",
+                "machines",
+                "general",
+            ] {
+                click(shell, &format!("settings-tabs-{tab}"), cx);
+                settle(shell, cx);
+                let at = bounds_of(cx, "settings-page").expect("the page").center();
+                let before = content_top(cx);
+                for turn in 0..8 {
+                    assert_eq!(
+                        drawn_over_the_header(cx),
+                        Vec::<String>::new(),
+                        "{tab}, {shade}, {width} px wide, after {turn} turns of the wheel"
+                    );
+                    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                        position: at,
+                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
+                        ..Default::default()
+                    });
+                    settle(shell, cx);
+                }
+                scrolled |= content_top(cx) < before;
+            }
+            assert!(scrolled, "the wheel scrolls a tab at {width} px wide");
+        }
+    }
+}
+
+/// Where the first of what the page scrolls is drawn.
+fn content_top(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .path()
+                    .iter()
+                    .any(|id| *id == "settings-page".into())
+            })
+            .filter(|element| element.path().last() != Some(&"settings-page".into()))
+            .map(|element| element.bounds().origin.y)
+            .fold(px(f32::MAX), |least, y| least.min(y))
+    })
 }

@@ -4,7 +4,8 @@
 //! of a list unfolds when it arrives and folds away when it goes, the unread dot fades, a page's
 //! blocks enter one after another, the items of a result enter one after another with their
 //! group, which unfolds, and what left since the last run unfolds at the foot, the status of a run
-//! whose work goes on unfolds when it is read, and every button, row and link fades its hover.
+//! whose work goes on unfolds when it is read, the lines that say which agent made or edited a
+//! routine unfold when they come, and every button, row and link fades its hover.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,16 +21,16 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    Window, div, px,
 };
 use serde_json::{Value, json};
 
 use super::{Item, Routine, RoutineForm, Run, Status, mode_line, mode_said};
 use crate::actions::Command;
-use crate::commands::{perform_later, spaced, stack};
+use crate::commands::{ShellOf, perform_later, spaced, stack};
 use crate::extensions::Then as Extension;
 use crate::session::{MarkdownText, said_at};
-use crate::shell::{Selection, Shell};
+use crate::shell::Selection;
 
 /// What a link of the path line does.
 type Go = Box<dyn Fn(&mut Window, &mut App)>;
@@ -94,7 +95,7 @@ fn now_ms() -> u64 {
 }
 
 pub struct RoutinesTab {
-    shell: WeakEntity<Shell>,
+    shell: ShellOf,
     project: String,
     /// The reads numbered, so that an answer older than one applied is dropped.
     asked: u64,
@@ -124,7 +125,7 @@ pub struct RoutinesTab {
 }
 
 impl RoutinesTab {
-    pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(shell: ShellOf, project: String, cx: &mut Context<Self>) -> Self {
         let form = {
             let (shell, project) = (shell.clone(), project.clone());
             cx.new(|_| RoutineForm::new(shell, project))
@@ -847,6 +848,22 @@ impl RoutinesTab {
             )
         };
         let next = routine.next(now);
+        // An agent's routine says whose it is, and which agent changed it last: the user reads it
+        // as theirs to keep or remove. Either line unfolds when an agent's write brings it in.
+        let routine_id = routine.id.clone();
+        let by = |id: &'static str, label: &'static str, title: Option<String>| {
+            // The routine's own: another routine's page never carries this line's last text
+            // while it folds.
+            let block = ElementId::Name(format!("{id}-{routine_id}-block").into());
+            presence_of(block, title.map(SharedString::from), move |title| {
+                LabelledLine::new(id, Icon::Edit, label, title.clone())
+                    .child(title)
+                    .into_any_element()
+            })
+            .space(LINE_GAP)
+        };
+        let made_by = by("routine-made-by", "Made by", routine.made_by.clone());
+        let edited_by = by("routine-edited-by", "Edited by", routine.edited_by.clone());
         let facts = stack(LINE_GAP)
             .child(fact(
                 "routine-trigger",
@@ -879,7 +896,9 @@ impl RoutinesTab {
                     "new" => "When an item of its list is new".to_owned(),
                     _ => "When it has something to say".to_owned(),
                 },
-            ));
+            ))
+            .child(made_by)
+            .child(edited_by);
         let prompt = div()
             .id("routine-prompt")
             .aria_label(SharedString::from(routine.prompt.clone()))
@@ -1065,7 +1084,7 @@ impl RoutinesTab {
         let mut column = stack(space::MD);
         let mut at = 0;
         for (n, (group, items)) in run.sections().into_iter().enumerate() {
-            let mut rows = div().w_full().flex().flex_col().gap(px(2.));
+            let mut rows = div().w_full().flex().flex_col().gap(space::XS);
             let count = items.len();
             for item in items {
                 rows = rows.child(self.item_row(run.id, item, at, cx));

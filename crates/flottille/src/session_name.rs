@@ -140,7 +140,10 @@ pub fn resolve(
     let found = daemon
         .read(|store| store.agent(&name))
         .map_err(|error| failed(error.to_string()))?;
-    if found.is_some() {
+    // A session the caller follows on another machine, named by its id, is its following here.
+    let followed =
+        || !crate::subscriptions::following(daemon, &grant.agent, Some(&name)).is_empty();
+    if found.is_some() || (tool == "forge" && followed()) {
         args[field] = Value::String(name);
         return Ok(Resolved::Here(args));
     }

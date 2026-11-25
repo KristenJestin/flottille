@@ -287,6 +287,8 @@ fn a_feature_is_a_row_of_features_and_opens_its_page(cx: &mut TestAppContext) {
     until(&shell, cx, "the features are listed", |cx| {
         present(cx, "features-specs")
     });
+    // The rows replace the skeleton with a fade: they are present before they are all shown.
+    settle(cx);
 
     for key in ["specs", "review", "compaction"] {
         assert!(visible(cx, &format!("features-{key}")), "{key}");

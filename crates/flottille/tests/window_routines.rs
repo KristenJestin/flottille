@@ -1102,3 +1102,171 @@ fn the_form_chooses_to_ring_only_when_something_is_new(cx: &mut TestAppContext) 
         .clone();
     assert_eq!(kept["rings"], "new", "{kept}");
 }
+
+#[gpui_kit::test]
+fn a_routine_made_by_an_agent_says_so(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "By hand", LIST_REVIEWS, json!({}));
+    // A session of the user's, in Full, names itself and makes a routine with the tool.
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let titled = mcp.call("session_title", json!({"title": "Plan the mornings"}));
+    assert!(!titled.error, "{}", titled.text);
+    let made = mcp.call(
+        "routine",
+        json!({"action": "create", "name": "Mornings", "prompt": LIST_REVIEWS,
+            "schedule": "weekdays 08:30"}),
+    );
+    assert!(!made.error, "{}", made.text);
+
+    let (shell, cx) = open_routine(&user, "Mornings", cx);
+    until(&shell, cx, "its author shows", |cx| {
+        present(cx, "routine-made-by")
+    });
+    assert_eq!(
+        label(cx, "routine-made-by").as_deref(),
+        Some("Made by Plan the mornings"),
+        "the session's title"
+    );
+    click(cx, "routines-back");
+    let row = "routine-By hand";
+    until(&shell, cx, "the user's own is listed", |cx| {
+        present(cx, row)
+    });
+    click(cx, row);
+    until(&shell, cx, "its page shows", |cx| {
+        present(cx, "routine-header")
+    });
+    settle(cx);
+    assert!(
+        !present(cx, "routine-made-by"),
+        "the user's own says nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn a_routine_an_agent_edited_says_which_session(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Mornings", LIST_REVIEWS, json!({}));
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let titled = mcp.call("session_title", json!({"title": "Tidy the mornings"}));
+    assert!(!titled.error, "{}", titled.text);
+
+    let (shell, cx) = open_routine(&user, "Mornings", cx);
+    settle(cx);
+    assert!(
+        !present(cx, "routine-edited-by"),
+        "the user's own, never edited by an agent"
+    );
+    let edited = mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Mornings", "rings": "never"}),
+    );
+    assert!(!edited.error, "{}", edited.text);
+    until(&shell, cx, "its editor shows", |cx| {
+        present(cx, "routine-edited-by")
+    });
+    assert_eq!(
+        label(cx, "routine-edited-by").as_deref(),
+        Some("Edited by Tidy the mornings"),
+        "the session's title"
+    );
+    assert!(!present(cx, "routine-made-by"), "the user made it");
+}
+
+#[gpui_kit::test]
+fn a_routine_never_shows_the_editor_of_the_one_before(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Mornings", LIST_REVIEWS, json!({}));
+    add(
+        &user,
+        "Evenings",
+        LIST_REVIEWS,
+        json!({"schedule": "every day 18:30"}),
+    );
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let titled = mcp.call("session_title", json!({"title": "Tidy the mornings"}));
+    assert!(!titled.error, "{}", titled.text);
+    let edited = mcp.call(
+        "routine",
+        json!({"action": "edit", "routine": "Mornings", "rings": "never"}),
+    );
+    assert!(!edited.error, "{}", edited.text);
+
+    // The other routine ran twice: a notification of its first run is no longer its last's, and
+    // leads straight to its page, from the page of the edited one, with no list between.
+    run_now(&user, "Evenings");
+    run_now(&user, "Evenings");
+    let (shell, cx) = open_routine(&user, "Mornings", cx);
+    until(&shell, cx, "its editor shows", |cx| {
+        present(cx, "routine-edited-by")
+    });
+    until(&shell, cx, "the other's notifications", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .bell
+                .iter()
+                .filter(|n| n.kind == "routine" && n.label == "Evenings")
+                .count()
+                == 2
+        })
+    });
+    let key = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .bell
+            .iter()
+            .filter(|n| n.kind == "routine" && n.label == "Evenings")
+            .min_by_key(|n| n.id)
+            .unwrap()
+            .key
+            .clone()
+    });
+    shell.update_in(cx, |s, window, cx| s.choose(&key, window, cx));
+    until(&shell, cx, "the other's page shows", |cx| {
+        label(cx, "routine-trigger").is_some_and(|said| said.contains("18:30"))
+    });
+
+    // Not a frame of its page, folding or not, says who edited the other one.
+    for _ in 0..30 {
+        assert_eq!(
+            label(cx, "routine-edited-by").filter(|said| said.contains("Tidy the mornings")),
+            None,
+            "the other routine's editor"
+        );
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+}

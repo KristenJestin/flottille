@@ -68,6 +68,12 @@ pub struct Routine {
     pub delayed: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// The session of the agent that made it (`routine` create, `docs/tools.md`); `None` for the
+    /// user's own.
+    pub made_by: Option<String>,
+    /// The session of the agent that edited it last with the tool `routine`; `None` when no
+    /// agent has.
+    pub edited_by: Option<String>,
 }
 
 impl Routine {
@@ -92,6 +98,8 @@ impl Routine {
             "delayed": self.delayed,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "made_by": self.made_by.as_ref().map(|session| json!({"session": session})),
+            "edited_by": self.edited_by.as_ref().map(|session| json!({"session": session})),
         })
     }
 }

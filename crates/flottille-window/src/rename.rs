@@ -6,12 +6,11 @@ use gpui_design_system::{Button, Field, Modal, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     Context, Entity, Focusable as _, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, WeakEntity, Window, div,
+    Subscription, Window, div,
 };
 
 use crate::actions::Command;
 use crate::commands::{boxed, line_field, perform_later, problem_line};
-use crate::shell::Shell;
 
 /// The dialog's id; its field is `rename-title`, its button `rename-save`.
 pub const RENAME: &str = "rename";
@@ -19,16 +18,22 @@ pub const RENAME: &str = "rename";
 pub const RENAME_LABEL: &str = "Rename…";
 
 pub struct RenameSession {
-    shell: WeakEntity<Shell>,
-    /// The session being renamed, while the dialog is open.
+    shell: crate::commands::ShellOf,
+    /// The session being renamed, while the dialog is open, and the actions of its machine,
+    /// taken as it opened (#1271).
     session: Option<String>,
+    asks: Option<crate::actions::Actions>,
     field: Entity<InputState>,
     error: Option<SharedString>,
     _subscription: Subscription,
 }
 
 impl RenameSession {
-    pub fn new(shell: WeakEntity<Shell>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        shell: crate::commands::ShellOf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let field = line_field("for example Rework the login page", window, cx);
         let subscription = cx.subscribe_in(&field, window, |this, _, event, _, cx| {
             if let InputEvent::PressEnter { .. } = event {
@@ -38,6 +43,7 @@ impl RenameSession {
         Self {
             shell,
             session: None,
+            asks: None,
             field,
             error: None,
             _subscription: subscription,
@@ -57,10 +63,12 @@ impl RenameSession {
         &mut self,
         session: &str,
         title: &str,
+        asks: Option<crate::actions::Actions>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.session = Some(session.to_owned());
+        self.asks = asks;
         self.error = None;
         self.field
             .update(cx, |field, cx| field.set_value(title, window, cx));
@@ -84,7 +92,10 @@ impl RenameSession {
             cx.notify();
             return;
         }
-        perform_later(&self.shell, Command::Rename { session, title }, cx);
+        match &self.asks {
+            Some(asks) => asks.send(Command::Rename { session, title }),
+            None => perform_later(&self.shell, Command::Rename { session, title }, cx),
+        }
         self.close(cx);
     }
 }

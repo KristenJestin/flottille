@@ -50,7 +50,9 @@ the same way, with `branch` (and `base`, as `--base` does): its card says the br
 the branch made. When the project has a branch format (`docs/projects.md`), a branch the workspace
 starts must match it, named or the default, or creation is refused naming the pattern; a branch
 every repository resumes is taken as it is. Creation is refused when the project has a workspace of that
-name, when the folder exists, or when the branch is checked out in a checkout of one of the
+name, when the folder exists, when the daemon cannot make the workspaces folder or write in it
+(`/srv/nowhere/app: permission denied`, checked before any fetch, nothing recorded; the session
+that asked says it), or when the branch is checked out in a checkout of one of the
 repositories, the main one or another worktree (`the branch feature/x is checked out in <folder>
 for web: …`, naming it).
 
@@ -141,7 +143,8 @@ stale cache once based a branch on `main` instead of `develop`: the line is ther
 taken without a fetch is never silent. Only a repository with none of its base branches, on the
 remote or of its own, is refused; when the branch is one chosen (`--base`, the agent's `base`), the
 refusal says so and names the base rule of the repository, the branches to choose from. What a
-pull request of the workspace targets by default is this base.
+pull request of the workspace targets by default is this base. It moves only when the forge says where the pull request goes
+(`docs/forges.md`, "A workspace's base").
 
 With `--offline`, nothing is fetched: the first branch of the rule that has a tracking ref is the
 base, as it is, and its age is said (from git's reflog of the tracking ref; unknown when git kept

@@ -84,6 +84,10 @@ const SIGN_INS: [&str; 7] = [
     "OPENAI_API_KEY",
 ];
 
+/// The marker `User::with_clean_environment` sets: the commands of this user start from an empty
+/// environment.
+const CLEAN_ENVIRONMENT: &str = "FLOTTILLE_TEST_CLEAN_ENVIRONMENT";
+
 /// The file `User::new` writes in the daemon's configuration folder, which no test's own folder
 /// listing counts (`names_in`).
 const HARNESS_FILE: &str = "tool-results.toml";
@@ -207,7 +211,16 @@ impl User {
         let mut user = User {
             dir,
             _runtime: runtime,
-            env: vec![("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs)],
+            // A connection's browser runs in a network of its own, which passt's `pasta` gives a
+            // way out (`docs/vault.md`, "The browser's network"): a test's stands on `true`, which
+            // gives none, so that no test needs passt. A test of the real one names `pasta`.
+            env: vec![
+                ("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs),
+                (
+                    "FLOTTILLE_TEST_PASTA".to_owned(),
+                    program("true").display().to_string(),
+                ),
+            ],
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
         };
@@ -263,6 +276,13 @@ impl User {
         self
     }
 
+    /// This user's daemon, and every command it starts, has the harness's environment alone: none
+    /// of the developer's (forge tokens, compositor sockets, sign-ins), only their `PATH`. A run
+    /// in Full inherits the daemon's environment as it is (`docs/tools.md`).
+    pub fn with_clean_environment(self) -> User {
+        self.with_env(CLEAN_ENVIRONMENT, "1")
+    }
+
     /// This user's daemon keeps the items of its projects up to date (`docs/items.md`): every
     /// other test's daemon does not, so that no round of its own adds calls to the fakes.
     pub fn with_fetcher(self) -> User {
@@ -278,6 +298,32 @@ impl User {
         let dir = user.path("fake");
         user.with_env("FLOTTILLE_AGENT_COMMAND", fake.to_str().unwrap())
             .with_env("FLOTTILLE_FAKE_AGENT_DIR", dir.to_str().unwrap())
+    }
+
+    /// This user with the fake MCP server (`fake_mcp`) as `agent-browser` in its folder `bin`, first in its
+    /// `PATH`: the one program a browser connection's command may name, by its name or by the
+    /// path of the file the daemon's `PATH` finds.
+    pub fn with_fake_agent_browser(self, fake_mcp: &Path) -> User {
+        self.with_agent_browser(fake_mcp)
+    }
+
+    /// This user with `program` as `agent-browser` in its folder `bin`, first in its `PATH`, as
+    /// an install puts the program on the `PATH` a user's daemon starts with: the connection
+    /// names it `agent-browser`, which is the one name the daemon's `PATH` finds there.
+    pub fn with_agent_browser(self, program: &Path) -> User {
+        std::fs::create_dir_all(self.path("bin")).unwrap();
+        std::os::unix::fs::symlink(program, self.path("bin/agent-browser")).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        self.with_env("PATH", &path)
     }
 
     /// A user with three providers, Claude, OpenCode and Codex, the first two enabled, each
@@ -1023,6 +1069,12 @@ fn command_of(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
 
 fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
     let mut command = Command::new(program);
+    if env.iter().any(|(name, _)| name == CLEAN_ENVIRONMENT) {
+        command.env_clear();
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
+    }
     command
         .args(args)
         .env("HOME", dir.join("home"))

@@ -26,7 +26,7 @@ pub const MIN_LIMIT: usize = 4_000;
 pub const MAX_LIMIT: usize = crate::mcp::RESULT_LIMIT;
 /// A line longer than this shows as several, in a cut as in the pages of the whole text, so that
 /// every line of either fits the room a cut keeps for its end.
-const LINE_CHARS: usize = 1_000;
+pub(crate) const LINE_CHARS: usize = 1_000;
 /// What a page of the whole text leaves under the limit for the line that describes it and for
 /// what escaping adds.
 const ABOUT_CHARS: usize = 400;
@@ -252,7 +252,7 @@ pub fn cut_done(daemon: &Daemon, grant: &Grant, tool: &str, text: String) -> (St
 
 /// The beginning and the end of `whole` (about half the limit and an eighth of it, on line
 /// boundaries) with the line that says what was left out and how to read it.
-fn shorten(whole: &str, limit: usize, id: &str) -> Option<(String, Cut)> {
+pub(crate) fn shorten(whole: &str, limit: usize, id: &str) -> Option<(String, Cut)> {
     let chars = whole.chars().count();
     let lines = lines_of(whole);
     let (head_room, tail_room) = (limit / 2, (limit / 8).max(LINE_CHARS + 1));

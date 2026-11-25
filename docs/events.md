@@ -116,6 +116,15 @@ The user chose what a new session starts on, or no choice, through the daemon
 |---|---|
 | `new_session` | `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for the provider's to propose; `null` when none is chosen. |
 
+### `provider.new_session_mode_changed`
+
+The user chose the mode a session the user starts is in, through the daemon
+(`provider.set_new_session_mode`). An edit of `providers.toml` by hand is not announced.
+
+| Field | |
+|---|---|
+| `mode` | `"ask"`, `"auto"` or `"full"`. |
+
 ### `provider.judge_changed`
 
 The user chose the Auto judge, or none, through the daemon (`provider.set_judge`), Flottille picked
@@ -597,6 +606,21 @@ in it, or `workspace.rename_branch`), and the record took it ([`workspaces.md`](
 | `branch` | The branch it is on now. |
 | `was` | The branch recorded before. |
 
+### `workspace.base_changed`
+
+The base of one repository of the workspace moved: its pull request was moved onto another
+branch on the forge by the workspace's own `forge edit`, or its base branch was merged and
+deleted on the forge and the workspace goes where it went ([`forges.md`](forges.md), "A
+workspace's base").
+
+| Field | |
+|---|---|
+| `project`, `workspace` | |
+| `repository` | The repository's path in the project. |
+| `base` | The base now. |
+| `was` | The base recorded before. |
+| `why` | One line, in words. |
+
 ### `workspace.removed`
 
 The workspace's worktrees, folder and record are gone. Its local branches whose work landed are
@@ -698,6 +722,7 @@ An agent was written, before its process starts.
 | `parent` | The agent that launched it, `null` for a root. |
 | `depth` | 0 for a root, its parent's plus one for a child. |
 | `title` | Its task's title, `null` for a root. |
+| `led_by` | The agent that leads it, as `agent.list` says it: `null` for a session no agent leads (a child, the user's own, one handed to the user). |
 
 #### `agent.moved`
 

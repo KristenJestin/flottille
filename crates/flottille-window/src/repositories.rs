@@ -11,13 +11,12 @@
 
 use flottille_core::declared::RepositoryForge;
 use gpui_design_system::{Confirm, Toast, toast};
-use gpui_kit::{App, Context, IntoElement, Render, SharedString, WeakEntity, Window};
+use gpui_kit::{App, Context, IntoElement, Render, SharedString, Window};
 use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::perform_later;
 use crate::project::repository_label;
-use crate::shell::Shell;
 
 /// A repository of the project as the daemon reads its checkout.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -117,7 +116,7 @@ enum Busy {
 }
 
 pub struct ProjectRepositories {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     project: String,
     read: Option<Repositories>,
     /// The repository whose Remove waits for its confirmation.
@@ -135,7 +134,7 @@ pub struct ProjectRepositories {
 }
 
 impl ProjectRepositories {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: crate::commands::ShellOf, project: String) -> Self {
         Self {
             shell,
             project,

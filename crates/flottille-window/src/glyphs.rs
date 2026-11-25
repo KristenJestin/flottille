@@ -8,6 +8,8 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 /// The agents: a network of nodes.
 pub const AGENTS: Icon = Icon::Lucide("network");
+/// What confines the agents' commands.
+pub const SHIELD: Icon = Icon::Lucide("shield-check");
 /// A pull request.
 pub const PULL_REQUEST: Icon = Icon::Lucide("git-pull-request");
 /// A ticket of the tracker.
@@ -58,7 +60,8 @@ gpui_kit::assets::icon_assets!(
         Server,
         Smartphone,
         Tablet,
-        Palette
+        Palette,
+        ShieldCheck
     ]
 );
 
@@ -102,6 +105,7 @@ mod tests {
         let listed = Assets.list("").unwrap();
         for icon in [
             AGENTS,
+            SHIELD,
             PULL_REQUEST,
             TICKET,
             MILESTONE,

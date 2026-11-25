@@ -23,8 +23,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::perform_later;
-use crate::shell::Shell;
+use crate::commands::{ShellOf, perform_later};
 
 /// What the Kinds section says of the three things a kind can do.
 pub const KINDS_SENTENCE: &str = "Ring: a notification of the desktop, or a toast when the \
@@ -201,7 +200,7 @@ pub fn dnd_patch(on: bool, how: usize, now: u64) -> Value {
 /// The view that holds what the daemon said and sends the choices: the Settings tab's, or one
 /// project's.
 pub struct NotificationSettings {
-    shell: WeakEntity<Shell>,
+    shell: ShellOf,
     /// The project whose own levels it sets; every project's defaults when none.
     project: Option<String>,
     shown: Option<Shown>,
@@ -210,7 +209,7 @@ pub struct NotificationSettings {
 }
 
 impl NotificationSettings {
-    pub fn new(shell: WeakEntity<Shell>, project: Option<String>) -> Self {
+    pub fn new(shell: ShellOf, project: Option<String>) -> Self {
         Self {
             shell,
             project,

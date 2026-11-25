@@ -194,6 +194,22 @@ and the 2026 practice around it:
    `tickets`), detailed guidance read on demand (as `skill_read`), or tool search for rarely
    used families.
 
+   **Since #1292, the families an agent rarely calls are read on demand**: `services`, `setup`,
+   `project`, `connections`, `vault`, `agent_launch` and `routine` (#1129) are listed with a short
+   description that keeps what the family is, the rule not to miss and one example, and a schema
+   that keeps every argument's name, type, enum and bound but not its sentence; their whole text
+   (the full description, then each argument's sentence) is their guide, given with the agent's
+   first call of the family or by `{"action": "guide"}` (`docs/tools.md`, "Guides read on
+   demand"). Nothing is shortened: a tool's text moves to the moment it is needed. The families
+   every session uses (`forge`, `tickets`, `run`, the files, the tree's tools) stay whole. A
+   repeated text says it once (`fs_list`, `fs_write` and `fs_edit` name `fs_read`'s
+   `repository`, `session_read` `session_send`'s `project`). **Tool search is not a way out for
+   the agent door**: Claude Code finds a deferred tool through its own `ToolSearch` tool and
+   Codex through its own `tool_search`; bare mode gives the agent no tool but Flottille's
+   (`tools: []` for Claude, `omit_tools_from: ["deferred", "code_mode"]` for Codex), and ACP has no
+   notion of a deferred tool: deferring would hide the tools from an agent that cannot search
+   for them.
+
    Measured with that test, the biggest list is a root's with a forge and a tracker:
 
    | | Tools | Characters |
@@ -202,8 +218,14 @@ and the 2026 practice around it:
    | After #141 (`forge`, `tickets`, `workspace` complete families) | 23 | 25,236 |
    | After #259 (`web`; no other tool shortened: the 29,000 limit of #198 raised to 30,000) | 27 | 29,660 |
    | After #264 (the texts cut from #224 on restored; the two guards) | 27 | 30,866 |
+   | Before #1292 (30 tools; with `routine`, #1289, 62,480: over the guard) | 30 | 59,565 |
+   | After #1292 (five families read on demand, repeats said once; `routine` counted whole) | 30 + 1 | 55,557 + 2,915 = 58,472 |
+   | After #1292, round 3 (`workspace`'s `machine` argument, #1371, +190; `agent_launch` read on demand too; `vault`, with its `propose`, and `routine` whole counted) | 30 + 1 | 58,155 |
+| After #1289, round 6 (`routine` in the list, listed short, read on demand; no longer counted a second time by an allowance; whole it is 58,399) | 31 | 57,291 |
 
-   By role after #264: a root 27 tools and 30,866 characters (about 10,300 tokens at 3 characters
+   By role before #1292: a root 59,565, a child 50,331, a child at the depth limit 41,958; after
+   it 55,557, 47,668 and 39,295 (the size test's count: the definitions as listed, title and
+   annotations included). By role after #264: a root 27 tools and 30,866 characters (about 10,300 tokens at 3 characters
    a token), a child 21 and 23,784, a child at the depth limit 16 and 17,821. The guards leave
    room for 13 more tools and about 29,000 more characters in the biggest list.
 

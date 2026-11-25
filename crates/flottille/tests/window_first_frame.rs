@@ -310,3 +310,57 @@ fn a_daemon_that_does_not_answer_ends_on_the_unreachable_state_not_on_a_skeleton
     assert!(!shown("main-skeleton", cx), "no skeleton pulses for ever");
     assert!(!shown("sidebar-skeleton-0", cx));
 }
+
+#[gpui_kit::test]
+fn the_sidebar_shows_no_skeleton_beside_rows_it_already_has(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let gate = Gate::closed();
+    gate.open();
+    let (shell, cx) = window(&user, &gate, cx);
+    until(&shell, cx, "the projects are shown", |cx| {
+        cx.update(|window, _| window.try_find(project_id("atlas")).is_some())
+    });
+    settle(cx);
+    assert!(!shown("sidebar-skeleton-0", cx));
+
+    // The daemon is waited for again (it restarts, a machine answers late) while its last list
+    // is on screen: the rows stay alone, the skeleton is not laid over them, not even partway.
+    shell
+        .read_with(cx, |shell, _| shell.sidebar().clone())
+        .update(cx, |sidebar, cx| {
+            sidebar.set_loading(true, cx);
+        });
+    for _ in 0..10 {
+        frame(cx);
+        assert!(!shown("sidebar-skeleton-0", cx), "no skeleton beside rows");
+        assert!(shown("project-atlas", cx), "the rows stay");
+    }
+    settle(cx);
+    assert!(!shown("sidebar-skeleton-0", cx));
+    assert!(shown("project-atlas", cx));
+}
+
+#[gpui_kit::test]
+fn the_sidebar_shows_its_skeleton_while_it_has_nothing(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let gate = Gate::closed();
+    let (shell, cx) = window(&user, &gate, cx);
+    for _ in 0..5 {
+        frame(cx);
+    }
+    assert!(shown("sidebar-skeleton-0", cx), "no row: the skeleton");
+    assert!(!shown("project-atlas", cx));
+
+    gate.open();
+    until(&shell, cx, "the projects are shown", |cx| {
+        cx.update(|window, _| window.try_find(project_id("atlas")).is_some())
+    });
+    // It folds away, it does not jump: partway it is still drawn.
+    frame(cx);
+    assert!(shown("sidebar-skeleton-0", cx), "the skeleton is folding");
+    settle(cx);
+    assert!(!shown("sidebar-skeleton-0", cx), "the skeleton went");
+    assert!(shown("project-atlas", cx));
+}

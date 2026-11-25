@@ -26,9 +26,10 @@ use gpui_design_system::{
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement,
+    IntoElement, ParentElement, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
+    px, relative,
 };
 use serde_json::{Value, json};
 
@@ -46,7 +47,6 @@ use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
-use crate::shell::Shell;
 use crate::skills::SkillsSection;
 use crate::tasks::TasksSection;
 use crate::vault::VaultEntry;
@@ -97,14 +97,16 @@ pub const SECTIONS: [(&str, &str); 7] = [
 ];
 
 /// What *Agents may open windows on my screen* says: what a run is given.
-pub const WINDOWS_HINT: &str = "Each run of its agents, a program it builds or starts, gets a \
-     runtime folder of its own holding your session's Wayland socket alone: never the session \
-     bus, the keyring nor your other sockets. Without Wayland it gets X11's display, and with X11 \
-     a program can read the keys you type in other windows and type into them, a terminal's \
-     included. On some Wayland compositors a client can capture the screen and the clipboard, \
-     and on wlroots ones (Hyprland among them) type into other windows too; with X11 a run can \
-     also reach the session's other abstract sockets, a session bus among them. Off, a run gets \
-     no display, though a program that names X11's socket itself may still reach it.";
+pub const WINDOWS_HINT: &str = "In Ask and Auto, each run of its agents, a program it builds or \
+     starts, gets a runtime folder of its own holding your session's Wayland socket alone: never \
+     the session bus, the keyring nor your other sockets. Without Wayland it gets X11's display, \
+     and with X11 a program can read the keys you type in other windows and type into them, a \
+     terminal's included. On some Wayland compositors a client can capture the screen and the \
+     clipboard, and on wlroots ones (Hyprland among them) type into other windows too; with X11 a \
+     run can also reach the session's other abstract sockets, a session bus among them. Off, a \
+     run gets no display, though a program that names X11's socket itself may still reach it. In \
+     Full, this setting changes nothing: a command runs as yours, with your own display, session \
+     bus and keyring.";
 
 /// What the Vault tab says it lists.
 pub const VAULT_SENTENCE: &str = "The secrets this project's agents can use: its own first, then \
@@ -408,7 +410,7 @@ impl Reveal {
 }
 
 pub struct ProjectSettingsPage {
-    shell: WeakEntity<Shell>,
+    shell: crate::commands::ShellOf,
     /// Where it was opened at, when it was.
     revealed: Option<Reveal>,
     /// The tab chosen: the index of its section in [`SECTIONS`]. Kept while the page is open.
@@ -469,6 +471,8 @@ pub struct ProjectSettingsPage {
     /// The confirmation of its removal, which reads what the removal would do.
     removal: Entity<ProjectRemoval>,
     narrow: bool,
+    /// The switch of the machines that have the project is open.
+    machine_menu: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
     /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
@@ -500,7 +504,7 @@ pub struct ProjectSettingsPage {
 
 impl ProjectSettingsPage {
     pub fn new(
-        shell: WeakEntity<Shell>,
+        shell: crate::commands::ShellOf,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -614,6 +618,7 @@ impl ProjectSettingsPage {
             saving: None,
             removal,
             narrow: false,
+            machine_menu: false,
             rules,
             message_checks,
             commit_checks,
@@ -2757,8 +2762,9 @@ impl ProjectSettingsPage {
                                 "no-project-vault",
                                 Icon::Key,
                                 "No entry this project sees yet. Add a secret its agents need, \
-                                 such as a tracker's token: they use it through Flottille's tools \
-                                 and never see it.",
+                                 such as a tracker's token. In Ask and Auto they use it through \
+                                 Flottille's tools without seeing it. In Full, a command they run \
+                                 can read it.",
                             ),
                         )
                         .space(space::MD),
@@ -2921,6 +2927,80 @@ fn unlent_said(why: &str) -> SharedString {
     ))
 }
 
+impl ProjectSettingsPage {
+    /// Whose settings of the project these are, on the title's line (#1266): the machines that
+    /// have it, this one first, each with its state; choosing one shows its settings of the
+    /// project (`Shell::choose_machine`). None while the project is on one machine only.
+    fn machine_chooser(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown = crate::machines::shown_machine(cx);
+        let choices = self
+            .shell
+            .upgrade()
+            .and_then(|shell| {
+                let shell = shell.read(cx);
+                let homes = shell.project_homes(&self.name);
+                let machines = shell.machines().read(cx).machines()?;
+                Some(crate::machines::project_choices(
+                    machines,
+                    &homes,
+                    shown.as_deref(),
+                ))
+            })
+            .unwrap_or_default();
+        let (choices, present) =
+            crate::machines::kept("project-settings-machine-kept", choices, window, cx);
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
+        let toggle = page.clone();
+        let picker = (!choices.is_empty()).then(|| {
+            crate::machines::picker(
+                "project-settings-machine",
+                "project-settings-machine",
+                &choices,
+                chosen,
+                self.machine_menu,
+                move |_, cx| {
+                    toggle
+                        .update(cx, |page, cx| {
+                            page.machine_menu = !page.machine_menu;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+                move |name, window, cx| {
+                    page.update(cx, |page, cx| {
+                        page.machine_menu = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    shell
+                        .update(cx, |shell, cx| shell.choose_machine(name, window, cx))
+                        .ok();
+                },
+            )
+        });
+        let picker = div()
+            .id("project-settings-machine-field")
+            .aria_label("Settings of")
+            .flex_none()
+            .pl(space::LG)
+            .children(picker)
+            .test_support();
+        // It narrows and fades away once the project is on one machine only, and widens in when
+        // another machine comes to have it.
+        crate::machines::narrowing(
+            "project-settings-machine-fold",
+            present,
+            picker.into_any_element(),
+            window,
+            cx,
+        )
+    }
+}
+
 impl Render for ProjectSettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -2943,20 +3023,26 @@ impl Render for ProjectSettingsPage {
                 move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
             )
         };
+        // The switch of the machines that have it sits on the title's line, at the header's
+        // right, as Settings' own does.
+        let title = div()
+            .id("project-settings-header-line")
+            .flex()
+            .items_end()
+            .child(
+                div().flex_1().min_w_0().child(
+                    PageHeader::new("project-settings-header", "Settings")
+                        .crumb(crumb)
+                        .path(SharedString::from(shown_folder(&self.folder)))
+                        .more(self.more.clone()),
+                ),
+            )
+            .children(self.machine_chooser(window, cx))
+            .test_support();
         let header = div()
             .flex()
             .flex_col()
-            .child(crate::machines::where_line(
-                "project-settings-where",
-                &[&self.name, "Settings"],
-                cx,
-            ))
-            .child(
-                PageHeader::new("project-settings-header", "Settings")
-                    .crumb(crumb)
-                    .path(SharedString::from(shown_folder(&self.folder)))
-                    .more(self.more.clone()),
-            )
+            .child(title)
             .child(
                 presence_of(
                     "project-settings-unread-block",

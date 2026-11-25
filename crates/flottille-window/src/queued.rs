@@ -37,6 +37,8 @@ pub const WAITS_COMPACTION_FULL: &str = "Sent when the compaction of the convers
 
 pub struct QueuedMessages {
     shell: WeakEntity<Shell>,
+    /// How it asks its session's machine, given when its session's page is made (#1271).
+    asks: Option<crate::actions::Actions>,
     /// The session's root: the only agent a message waits for.
     session: String,
     messages: Vec<Queued>,
@@ -54,9 +56,16 @@ pub struct QueuedMessages {
 }
 
 impl QueuedMessages {
+    /// Asks through `asks`, its session's machine's actions, whichever machine is shown.
+    pub fn asking(mut self, asks: crate::actions::Actions) -> Self {
+        self.asks = Some(asks);
+        self
+    }
+
     pub fn new(shell: WeakEntity<Shell>, session: String) -> Self {
         Self {
             shell,
+            asks: None,
             session,
             messages: Vec::new(),
             compacting: false,
@@ -167,9 +176,7 @@ impl QueuedMessages {
             return;
         }
         let command = command(self.session.clone(), delivery.to_owned());
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
+        crate::commands::ask(&self.shell, &self.asks, command, cx);
         cx.notify();
     }
 

@@ -6,7 +6,10 @@
 //! "off" is its daemon stopped, then started again on the same folders.
 
 use crate::common;
-use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, release, script};
+use crate::remote_deliveries::{
+    SERVER_SECRET, answered, child_on_server, off, on, prompts_with, release, script,
+    stored_or_prompted, with_server_secret,
+};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pc_and_server, prompted,
     refused, restarted, sent_with, server_user, titled,
@@ -22,7 +25,12 @@ const QUESTION: &str = "Which format first, CSV or JSON?";
 /// A session led by `pc`'s root, started on `server` with `brief`: its id there, and the root's
 /// MCP session.
 /// The root is in `mode`: in Full, its `session_send` is let through without a judge on pc.
-fn led_on_server(pc: &Machine, server: &Machine, brief: &str, mode: &str) -> (String, Mcp) {
+pub(crate) fn led_on_server(
+    pc: &Machine,
+    server: &Machine,
+    brief: &str,
+    mode: &str,
+) -> (String, Mcp) {
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root(mode);
     let answer = launched(
@@ -58,7 +66,7 @@ fn tool_answer(machine: &Machine, text: &str) -> String {
 }
 
 /// Waits until `machine` sees `name` offline.
-fn offline(machine: &Machine, name: &str) {
+pub(crate) fn offline(machine: &Machine, name: &str) {
     eventually(&format!("{name} offline"), || {
         machine.seen(name)["state"] != "online"
     });
@@ -396,6 +404,36 @@ fn no_agent_allows_a_request_across_machines() {
         users_request(&server, second).is_some()
     });
     assert_eq!(users_request(&server, second).unwrap()["state"], "pending");
+}
+
+#[test]
+fn a_deny_reason_from_another_machine_is_masked_with_the_child_s_place() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [
+            {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}
+        ]}]),
+    );
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    with_server_secret(&server, &child);
+    let number = number_in(&tool_answer(&server, "your parent decides"));
+    prompt_with(&pc, &format!("Request #{number}"));
+
+    let denied = mcp.call(
+        "approval_answer",
+        json!({"request_id": number, "machine": "server", "decision": "deny",
+            "why": format!("Never read it: the key is {SERVER_SECRET}")}),
+    );
+
+    done(&denied);
+    prompted(&server, "the key is [masked]");
+    assert_eq!(
+        stored_or_prompted(&server, SERVER_SECRET),
+        0,
+        "{:#?}",
+        server.prompts()
+    );
 }
 
 /// A second child of `pc`'s root on `server`, titled `title`, started with `brief`: its id there.

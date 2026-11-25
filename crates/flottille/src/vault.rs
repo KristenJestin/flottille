@@ -346,7 +346,7 @@ pub async fn call(
         "vault.set" => {
             // Whatever goes wrong is said without the secret the call carried.
             let given = params["secret"].as_str().unwrap_or_default().to_owned();
-            set(&daemon, params).await.map_err(|failure| Failure {
+            set(&daemon, params, None).await.map_err(|failure| Failure {
                 message: masked_of(&failure.message, &given),
                 ..failure
             })
@@ -371,8 +371,35 @@ pub async fn call(
         "vault.ask_dismiss" => {
             let AskDismiss { ask } = serde_json::from_value(params)?;
             let request = open_ask(&daemon, ask)?;
-            answered(&daemon, &request, None);
+            answered(&daemon, &request, Answer::Dismissed);
             Ok(json!({"dismissed": request.to_json()}))
+        }
+        "vault.ask_accept" => {
+            let AskDismiss { ask } = serde_json::from_value(params)?;
+            let request = open_ask(&daemon, ask)?;
+            let Some(edit) = request.edit.as_ref().and_then(Value::as_object) else {
+                return Err(Failure::refused(format!(
+                    "the request #{ask} asks for a new entry: it is answered by saving that \
+                     entry, from its form"
+                )));
+            };
+            // The entry as it is now, each field the agent proposed changed: the user's own Save
+            // of it, its checks included, its secret kept. An entry removed meanwhile has no
+            // secret to keep, and Save refuses to make it anew.
+            let mut params = json!({"name": request.name});
+            if let Some(entry) = daemon
+                .read(|store| store.vault_entries())?
+                .into_iter()
+                .find(|entry| entry.name == request.name)
+            {
+                params = json!({"name": entry.name, "description": entry.description,
+                    "url": entry.url, "username": entry.username, "project": entry.project,
+                    "for": entry.bound});
+            }
+            for (field, change) in edit {
+                params[field.as_str()] = change["after"].clone();
+            }
+            set(&daemon, params, Some(ask)).await
         }
         "vault.remove" => {
             let Remove { name, confirmed } = serde_json::from_value(params)?;
@@ -432,7 +459,13 @@ pub async fn call(
     }
 }
 
-async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Failure> {
+/// Save of an entry: the user's form, `flottille vault set` and `edit`, or the Accept of the
+/// agent's proposal `accepting`, which is answered as accepted.
+async fn set(
+    daemon: &std::sync::Arc<Daemon>,
+    params: Value,
+    accepting: Option<u64>,
+) -> Result<Value, Failure> {
     if !params["secret"].is_string() && !params["secret"].is_null() {
         return Err(Failure::new("invalid-params", "the secret is a text"));
     }
@@ -459,6 +492,16 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
     let _writing = writing(&asked.name).await;
+    // Accept read the entry before this lock: a save in between answered the proposal, and what
+    // Accept read is not the entry any more. It writes nothing over that save.
+    if let Some(number) = accepting {
+        open_ask(daemon, number).map_err(|_| {
+            Failure::refused(format!(
+                "the request #{number} was answered meanwhile (the entry was saved): nothing \
+                 is changed"
+            ))
+        })?;
+    }
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -549,7 +592,11 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     // However it was set, from the form its request opened or another way, what asked is told:
     // the agents whose project sees it.
     for request in open.iter().filter(|r| entry.name == r.name) {
-        answered(daemon, request, Some(&entry));
+        let answer = match accepting == Some(request.number) {
+            true => Answer::Accepted(&entry),
+            false => Answer::Set(&entry),
+        };
+        answered(daemon, request, answer);
     }
     Ok(entry.to_json())
 }
@@ -653,6 +700,7 @@ async fn from_file(
         daemon,
         json!({"name": name, "secret": *text, "for": bound,
             "description": format!("The file {path} of the project {project}, which its setup copies")}),
+        None,
     )
     .await
     .map_err(|failure| Failure {
@@ -922,7 +970,7 @@ pub async fn receive(
         .map(|state| state.open)
         .unwrap_or_default();
     for request in open.iter().filter(|r| entry.name == r.name) {
-        answered(daemon, request, Some(&entry));
+        answered(daemon, request, Answer::Set(&entry));
     }
     Ok(())
 }
@@ -1237,6 +1285,9 @@ struct Ask {
     takes_username: bool,
     /// The agents whose ask joined it while it was open, with their projects.
     joined: Vec<(String, String)>,
+    /// An agent's proposed edit of an entry that exists, instead of a new one: each field changed
+    /// to its `before` and `after` (`docs/vault.md`, "Proposing an edit of an entry").
+    edit: Option<Value>,
 }
 
 impl Ask {
@@ -1245,7 +1296,7 @@ impl Ask {
             "name": self.name, "why": self.why, "description": self.description,
             "url": self.url, "host": self.host, "username": self.username, "for": self.bound,
             "every": self.every, "connection": self.connection,
-            "takes_username": self.takes_username,
+            "takes_username": self.takes_username, "edit": self.edit,
             "joined": self.joined.iter().map(|(agent, _)| agent).collect::<Vec<_>>()})
     }
 }
@@ -1253,6 +1304,12 @@ impl Ask {
 /// The requests still open, as their events say.
 struct Asks {
     open: Vec<Ask>,
+}
+
+/// The agents whose ask for a vault entry waits for the user (`vault.asks`): each session of
+/// theirs needs the user, as the window says it.
+pub(crate) fn asking(store: &Store) -> flottille_core::Result<Vec<String>> {
+    Ok(asks(store)?.open.into_iter().map(|ask| ask.agent).collect())
 }
 
 fn asks(store: &Store) -> flottille_core::Result<Asks> {
@@ -1282,6 +1339,7 @@ fn asks(store: &Store) -> flottille_core::Result<Asks> {
                 connection: given(data, "connection"),
                 takes_username: data["takes_username"] == true,
                 joined: Vec::new(),
+                edit: data.get("edit").filter(|edit| edit.is_object()).cloned(),
             }),
             "vault.ask_joined" => {
                 if let Some(ask) = state.open.iter_mut().find(|a| data["ask"] == a.number) {
@@ -1309,11 +1367,23 @@ fn open_ask(daemon: &Daemon, number: u64) -> Result<Ask, Failure> {
         })
 }
 
-/// The request is answered, with the entry `set` or dismissed: its card folds away, and each agent
-/// that asked is told what the user did, never the secret; of an entry set, only the agents whose
-/// project sees it.
-fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, set: Option<&Entry>) {
-    let outcome = if set.is_some() { "set" } else { "dismissed" };
+/// How the user answered a request.
+enum Answer<'a> {
+    /// The entry was saved, from the request's form or any other way.
+    Set(&'a Entry),
+    /// The proposed edit was applied as it was, from the card's Accept.
+    Accepted(&'a Entry),
+    Dismissed,
+}
+
+/// The request is answered: its card folds away, and each agent that asked is told what the user
+/// did, never the secret; of an entry set, only the agents whose project sees it.
+fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, answer: Answer) {
+    let (outcome, set) = match answer {
+        Answer::Set(entry) => ("set", Some(entry)),
+        Answer::Accepted(entry) => ("accepted", Some(entry)),
+        Answer::Dismissed => ("dismissed", None),
+    };
     let data = json!({"agent": request.agent, "ask": request.number, "project": request.project,
         "name": request.name, "outcome": outcome});
     let written = daemon.write(|store| {
@@ -1327,14 +1397,25 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, set: Option<&Entry>)
         );
         return;
     }
-    let body = match set {
-        Some(_) => format!(
-            "the user set the vault entry `{}`: give its name to the tool that needs it",
-            request.name
+    let name = &request.name;
+    let body = match (outcome, request.edit.is_some()) {
+        ("set", false) => {
+            format!(
+                "the user set the vault entry `{name}`: give its name to the tool that needs it"
+            )
+        }
+        (_, false) => format!("the user dismissed the request for the vault entry `{name}`"),
+        ("accepted", true) => format!(
+            "the user accepted your proposed edit of the vault entry `{name}`: vault list says \
+             what it holds now"
         ),
-        None => format!(
-            "the user dismissed the request for the vault entry `{}`",
-            request.name
+        ("set", true) => format!(
+            "the user saved the vault entry `{name}` from its form after your proposed edit, \
+             changed or not: vault list says what it holds now"
+        ),
+        (_, true) => format!(
+            "the user dismissed your proposed edit of the vault entry `{name}`: nothing of it \
+             changed"
         ),
     };
     let asked = std::iter::once((&request.agent, &request.project)).chain(
@@ -1465,6 +1546,8 @@ struct Asked {
     bound: Option<String>,
     project: Option<String>,
     connection: Option<String>,
+    /// propose: what the entry is for, as agents read it.
+    description: Option<String>,
 }
 
 /// `vault`: what the agent's project sees of the vault, metadata only. No action gives a secret.
@@ -1473,15 +1556,17 @@ pub fn tool(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
         Ok(asked) => asked,
         Err(refused) => return refused,
     };
-    if asked.action == "ask" {
-        return ask(daemon, grant, asked);
-    }
-    if asked.action != "list" {
-        return Outcome::Refused(
-            "refused: vault lists the entries, or asks the user to add one; a secret is never \
-             shown: give an entry's name to the tool that needs it"
-                .into(),
-        );
+    match asked.action.as_str() {
+        "ask" => return ask(daemon, grant, asked),
+        "propose" => return propose(daemon, grant, asked),
+        "list" => {}
+        _ => {
+            return Outcome::Refused(
+                "refused: vault lists the entries, asks the user to add one, or proposes an edit \
+                 of one; a secret is never shown: give an entry's name to the tool that needs it"
+                    .into(),
+            );
+        }
     }
     let entries = match daemon.read(|store| store.vault_entries()) {
         Ok(entries) => entries,
@@ -1525,6 +1610,12 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
             "refused: ask needs name, the new entry's, and why, what you need it for".into(),
         );
     };
+    if asked.description.is_some() {
+        return Outcome::Refused(
+            "refused: ask takes no description: what the entry is for is the user's to write"
+                .into(),
+        );
+    }
     if !valid_name(&name) {
         return Outcome::Refused(format!(
             "refused: an entry's name is letters, digits, . _ and -, starting with a letter or a \
@@ -1544,7 +1635,7 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
         return Outcome::Refused(if entry.seen_by(&project.name) {
             format!(
                 "refused: the vault already has the entry {name}: use it (vault list says what \
-                 it is for), or ask for another name"
+                 it is for), propose an edit of it, or ask for another name"
             )
         } else {
             format!("refused: the name {name} is taken in the vault: ask under another name")
@@ -1662,7 +1753,10 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
         let open = state.open.iter().find(|ask| ask.name == name);
         // Another project's request is not joined, nor described: its entry would not be this
         // project's.
-        if open.is_some_and(|open| !open.every && open.project != project.name) {
+        // Nor is a proposed edit of an entry removed meanwhile: it is no request for a new one.
+        if open.is_some_and(|open| {
+            open.edit.is_some() || (!open.every && open.project != project.name)
+        }) {
             return Ok((None, None));
         }
         let (event, joined) = match open {
@@ -1706,6 +1800,179 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
              prefilled with what you gave. Nothing waits: continue with what does not need it; a delivery says when \
              the user sets it or dismisses it. You never see the secret: once set, give its name \
              to the tool that needs it."
+        )),
+    }
+}
+
+/// The fields of an entry a proposal may change, in the order the card says them.
+const PROPOSED: [&str; 5] = ["url", "username", "description", "project", "for"];
+
+/// `vault {action: "propose"}`: an edit of an entry the agent's project sees, its metadata only,
+/// held for the user in every mode, Full included, and answered at once. The card says each field
+/// changed as before → after; Accept is the user's own Save of it (`vault.ask_accept`), Edit opens
+/// the entry's form with it, Dismiss changes nothing. A text left empty clears its field.
+fn propose(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
+    let trimmed = |text: Option<String>| text.map(|text| text.trim().to_owned());
+    let (Some(name), Some(why)) = (
+        trimmed(asked.name).filter(|t| !t.is_empty()),
+        trimmed(asked.why).filter(|t| !t.is_empty()),
+    ) else {
+        return Outcome::Refused(
+            "refused: propose needs name, the entry's, and why, what is wrong with it".into(),
+        );
+    };
+    if asked.connection.is_some() {
+        return Outcome::Refused(
+            "refused: propose changes url, username, description, project and for; connection \
+             is for asking a new entry"
+                .into(),
+        );
+    }
+    let project = match crate::projects::load_project(daemon, &grant.place.project) {
+        Ok(project) => project,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
+    let entries = match daemon.read(|store| store.vault_entries()) {
+        Ok(entries) => entries,
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    // Another project's entry is not described to this one: it is no entry for it.
+    let Some(entry) = entries
+        .into_iter()
+        .find(|entry| entry.name == name && entry.seen_by(&project.name))
+    else {
+        return Outcome::Refused(format!(
+            "refused: the vault has no entry {name}: vault list says the entries; to add one, \
+             ask for it"
+        ));
+    };
+    let masked = |text: String| crate::mcp::masked(&text, &grant.place);
+    // A text given is the field's new value, an empty one clears it.
+    let text =
+        |given: Option<String>| trimmed(given).map(|t| Some(masked(t)).filter(|t| !t.is_empty()));
+    let mut after = entry.clone();
+    if let Some(url) = text(asked.url) {
+        after.url = url;
+    }
+    if let Some(username) = text(asked.username) {
+        after.username = username;
+    }
+    if let Some(description) = text(asked.description) {
+        after.description = description;
+    }
+    match trimmed(asked.project).as_deref() {
+        None => {}
+        Some("this") => after.project = Some(project.name.clone()),
+        Some("every") => after.project = None,
+        Some(other) => {
+            return Outcome::Refused(format!("refused: project is this or every, not {other}"));
+        }
+    }
+    match trimmed(asked.bound).as_deref() {
+        None => {}
+        Some("worklog") => after.bound = Some(uses::worklog(&project.name)),
+        Some(bound)
+            if bound.starts_with("connection:") && crate::extensions::bound_possible(bound) =>
+        {
+            match crate::extensions::bound_exists(daemon, bound) {
+                Ok(true) => after.bound = Some(bound.to_owned()),
+                Ok(false) => {
+                    return Outcome::Refused(format!(
+                        "refused: there is no connection {}: for names one the user declared",
+                        &bound["connection:".len()..]
+                    ));
+                }
+                Err(why) => return Outcome::Failed(why),
+            }
+        }
+        Some(bound) => {
+            return Outcome::Refused(format!(
+                "refused: for is worklog (this project's) or connection:<name>, not {bound}"
+            ));
+        }
+    }
+    // An entry keeps its one use: the tool never says which it is, so the refusal does not.
+    if entry.bound.is_some() && after.bound != entry.bound {
+        return Outcome::Refused(format!(
+            "refused: the vault entry {name} is bound to one use already: a proposal cannot \
+             bind it to another"
+        ));
+    }
+    if after
+        .bound
+        .as_deref()
+        .is_some_and(|bound| bound.starts_with("worklog:"))
+        && after.project.is_none()
+    {
+        return Outcome::Refused(
+            "refused: an entry for this project's worklog is this project's alone".into(),
+        );
+    }
+    let fields = |of: &Entry| {
+        [
+            of.url.clone(),
+            of.username.clone(),
+            of.description.clone(),
+            of.project.clone(),
+            of.bound.clone(),
+        ]
+    };
+    let mut edit = serde_json::Map::new();
+    for ((field, before), now) in PROPOSED.iter().zip(fields(&entry)).zip(fields(&after)) {
+        if before != now {
+            edit.insert((*field).to_owned(), json!({"before": before, "after": now}));
+        }
+    }
+    if edit.is_empty() {
+        return Outcome::Refused(format!(
+            "refused: the proposal changes nothing of the vault entry {name}: give the fields to \
+             change (url, username, description, project, for)"
+        ));
+    }
+    // A new address is read as an ask reads it: the card says the host the secret would go to,
+    // and never one in clear. The user's Save checks it again at Accept.
+    let host = match after.url.as_deref().filter(|_| edit.contains_key("url")) {
+        None => None,
+        Some(url) => match (in_clear(url), crate::extensions::site_of(url)) {
+            (Some(host), _) => {
+                return Outcome::Refused(format!(
+                    "refused: {url} is plain http to {host}, another machine: a secret would \
+                     travel in clear; propose its https address"
+                ));
+            }
+            (None, None) => {
+                return Outcome::Refused(format!("refused: {}", no_web_address(url)));
+            }
+            (None, Some(host)) => Some(host),
+        },
+    };
+    let why = masked(why);
+    let written = daemon.write(|store| {
+        // One request a name: a second proposal would hide what the first one said.
+        if asks(store)?.open.iter().any(|open| open.name == name) {
+            return Ok((false, None));
+        }
+        let event = store.append_agent_event(
+            &grant.agent,
+            "vault.asked",
+            json!({"agent": grant.agent, "project": project.name, "name": name, "why": why,
+                "description": after.description, "url": after.url, "host": host,
+                "username": after.username, "for": after.bound, "every": after.project.is_none(),
+                "connection": null, "takes_username": false, "edit": edit}),
+            false,
+        )?;
+        Ok((true, Some(event)))
+    });
+    match written {
+        Err(error) => Outcome::Failed(error.to_string()),
+        Ok(false) => Outcome::Refused(format!(
+            "refused: a proposal for the vault entry {name} already waits for the user: a \
+             delivery says how they answer it; propose again after"
+        )),
+        Ok(true) => Outcome::Done(format!(
+            "Your proposed edit of the vault entry {name} is held for the user, who accepts, edits \
+             or dismisses it; nothing changes before. Nothing waits: continue with what does not \
+             need it; a delivery says how they answered. A proposal never touches the secret."
         )),
     }
 }
@@ -1864,6 +2131,108 @@ mod tests {
                 "k3pt-s3cret-value"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn accepting_a_proposal_keeps_the_secret_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "example-dev-login", "secret": "r3alm-l0gin-passw0rd",
+                "url": "https://id.example.invalid/realms/dev/"}),
+        )
+        .await);
+        // An agent's proposal, as the tool writes it.
+        let proposed = daemon
+            .write(|store| {
+                store.create_agent(
+                    &crate::daemon::tests::an_agent("a1"),
+                    ("agent.created", json!({})),
+                )?;
+                let event = store.append_agent_event(
+                    "a1",
+                    "vault.asked",
+                    json!({"agent": "a1", "project": "app", "name": "example-dev-login",
+                        "why": "the root shows no form", "every": true,
+                        "url": "https://id.example.invalid/realms/dev/account",
+                        "edit": {"url": {"before": "https://id.example.invalid/realms/dev/",
+                            "after": "https://id.example.invalid/realms/dev/account"}}}),
+                    false,
+                )?;
+                Ok((event.seq, event))
+            })
+            .unwrap();
+        // The keyring refuses every store: an Accept that wrote the secret again would fail.
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            "backend = \"memory\"\nfail_stores = 1000\n",
+        )
+        .unwrap();
+        ok(call(daemon.clone(), "vault.ask_accept", json!({"ask": proposed})).await);
+        assert_eq!(
+            listed(&daemon).await[0].url.as_deref(),
+            Some("https://id.example.invalid/realms/dev/account")
+        );
+        // The same item, the same secret.
+        assert_eq!(
+            secret(&daemon, "any", "worklog:any", "example-dev-login")
+                .await
+                .unwrap(),
+            "r3alm-l0gin-passw0rd"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accept_read_before_the_user_s_save_writes_nothing_over_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "example-dev-login", "secret": "r3alm-l0gin-passw0rd",
+                "url": "https://id.example.invalid/realms/dev/"}),
+        )
+        .await);
+        let proposed = daemon
+            .write(|store| {
+                store.create_agent(
+                    &crate::daemon::tests::an_agent("a1"),
+                    ("agent.created", json!({})),
+                )?;
+                let event = store.append_agent_event(
+                    "a1",
+                    "vault.asked",
+                    json!({"agent": "a1", "project": "app", "name": "example-dev-login",
+                        "why": "the root shows no form", "every": true,
+                        "url": "https://id.example.invalid/realms/dev/account",
+                        "edit": {"url": {"before": "https://id.example.invalid/realms/dev/",
+                            "after": "https://id.example.invalid/realms/dev/account"}}}),
+                    false,
+                )?;
+                Ok((event.seq, event))
+            })
+            .unwrap();
+        // What Accept read of the entry before the user saved it, the proposal applied.
+        let read_before = json!({"name": "example-dev-login",
+            "url": "https://id.example.invalid/realms/dev/account"});
+        // The user saves the entry first (from the card's Edit): that answers the proposal.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "example-dev-login", "url": "https://id.example.invalid/realms/dev/login"}),
+        )
+        .await);
+        let accepted = set(&daemon, read_before, Some(proposed)).await;
+        assert!(
+            accepted.is_err(),
+            "the accept was written over the user's save"
+        );
+        assert_eq!(
+            listed(&daemon).await[0].url.as_deref(),
+            Some("https://id.example.invalid/realms/dev/login")
+        );
     }
 
     #[tokio::test]

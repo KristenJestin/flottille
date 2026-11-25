@@ -225,6 +225,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.from_file` | drive |
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
+| `vault.ask_accept` | drive |
 | `remote.machines` | read |
 | `remote.members` | read |
 | `remote.launches` | read |
@@ -235,6 +236,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.close` | local |
 | `remote.settings` | local |
 | `remote.configure` | local |
+| `client.presence` | local |
 | `tunnel.open` | drive |
 | `tunnel.list` | local |
 | `tunnel.close` | local |
@@ -346,6 +348,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `provider.disable` | drive |
 | `provider.set_judge` | drive |
 | `provider.set_new_session` | drive |
+| `provider.set_new_session_mode` | drive |
 | `provider.judge_noticed` | drive |
 | `signin.list` | read |
 | `signin.start` | drive |
@@ -368,6 +371,7 @@ No parameters. The result:
     "landlock_abi": 6,
     "private_mounts": true,
     "ssh_lent": true,
+    "browser_network": true,
     "warnings": []
   }
 }
@@ -382,7 +386,9 @@ that failed (`docs/agents.md`).
 `sandbox` is what confines the daemon's commands (`docs/vault.md`, "The runtime folder"):
 Landlock's ABI (0 without it), whether they start in their private mount namespace, whether the
 user's SSH agent is lent to a push the gate lets through (`ssh_lent`: false when what its `ssh`
-reads could be written by a confined command, the reason then among the warnings), and a sentence
+reads could be written by a confined command, the reason then among the warnings), whether a
+connection's browser can run in a network of its own (`browser_network`, `docs/vault.md`, "The
+browser's network"), and a sentence
 for each gap, which `flottille doctor` adds to its warnings.
 
 ### `daemon.stop`
@@ -439,6 +445,9 @@ Parameters that do not fit a method are answered `invalid-params`.
 No parameters. The result is `{"projects": [...], "errors": [...]}`: the projects by name, and the
 files that cannot be used, each `{"name", "file", "message"}` (`file` is `projects/<name>.toml`, the
 message starts with the key at fault). A file with an error does not hide the other projects.
+It also holds `unconfigured`: the projects with no file at all that the store still holds live
+sessions or workspaces of, each `{"name", "sessions", "workspaces"}` (the sessions are every agent
+not ended, a child whose root ended included). `project.remove` removes them as any project ("Removing a project", `docs/projects.md`).
 
 #### `project.show`
 
@@ -516,6 +525,11 @@ The result says what was done:
  "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
  "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
 ```
+
+A project whose file was gone when the removal began has no file to remove, and one that came
+back during the wait (put back by hand, or by `project.add`) is kept with its file: the result is
+then `{"removed": null, "project_kept": "…", "stopped", "workspaces"}`, what was asked of the agents,
+runs and workspaces done.
 
 `branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
 touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
@@ -1287,6 +1301,10 @@ agent does.
   configuration or data folder, the home folder itself, or a default without `<project>`), the
   reason first; a project's refusal is `invalid-config` and names `workspaces_root`. Nothing is
   written then.
+- A folder the daemon cannot make or write as its own user is `refused` (the default's, for each
+  project it would give, and a project's own), saying why: `/srv/nowhere/app: permission denied`.
+  It is found by making a probe folder there and removing it, never by reading permissions, and
+  the folder is never kept.
 
 Only the workspaces made afterwards follow a change; none is moved. `workspaces_folder.set` emits
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
@@ -1319,14 +1337,18 @@ that follows over a link reads none of them. A draft is the user's own words: no
 log holds one, and no agent is ever given one. `draft.*` is answered by a task of its own, its
 pictures decoded and written off the runtime's threads.
 
-- `draft.get {kind, target}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
+- `draft.get {kind, target, machine?}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
   "data"}]}}` (the pictures in base64): `kind` is `session` (`target` is the agent's id, a
   session's composer) or `project` (`target` is the project's name, the first message of a new
   session). `not-found` when the agent or the project does not exist, when the session was
   forgotten (it ended and cannot be resumed, or its kept week is over) or its project is gone:
   such a composer has no draft, and the window says nothing of it. `invalid-params` for another
-  `kind`.
-- `draft.set {kind, target, text, images?}` keeps the draft, in place of the one there was, and
+  `kind`. `machine` names the machine the session or the project is of, when it is not this
+  one's (a window that shows another machine's pages): such a draft is kept by this daemon, under
+  that machine's name, and never sent to it; this daemon knows nothing of the session or the
+  project there, so it checks nothing of them (no `not-found`), and a draft of this machine's own
+  (no `machine`) is never the same as one of another machine's of the same name.
+- `draft.set {kind, target, machine?, text, images?}` keeps the draft, in place of the one there was, and
   answers `{"kept"}`. `images` replaces the pictures (the composer's limits hold: 20, 5 MiB each,
   png, jpeg, gif or webp); left out, those the draft has stay. A draft with no text beyond
   blanks and no picture is forgotten (`{"kept": false}`), which is how emptying a composer is
@@ -1335,14 +1357,31 @@ pictures decoded and written off the runtime's threads.
   and this one does not are removed once it commits. The same `not-found` as `draft.get` for a
   session forgotten or a project gone: a write that comes late (a pending wait, the close of a
   window) never brings a draft back.
-- `draft.clear {kind, target}` forgets the draft and its pictures; a session or a project that is
+- `draft.clear {kind, target, machine?}` forgets the draft and its pictures; a session or a project that is
   gone is forgotten all the same.
-- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>"]}`: which composers hold
-  one, never what.
+- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>",
+  "machine:<machine>:session:<agent>"]}`: which composers hold one, never what.
 - `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
   window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
   "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
-  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded).
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded). Beside
+  them, `"starts": {<project>: <machine>}`: the machine the user chose a shared project's sessions
+  start on, this machine by its own name (#1266; `docs/design.md` §10, the project page). The user's
+  arrangement of the projects (#1229) is under its own key, `arrangement`, which only an
+  arrangement writes (a fold or a lead never does, so a window that only folds a project cannot
+  erase what another made): `{"order": [<name>], "groups": [{"id", "name", "open", "projects":
+  [<name>]}]}`, `order` the names of the projects outside any group in the order the user put
+  them, `groups` in order, each with the projects it holds. A project neither names is at the end
+  of the list, outside any group; a name that is no project now (a project of a machine that is
+  not reached) is not drawn and keeps its place for when it is back. A window reads it when it
+  opens, and at each change it reads it again (`window.get`), applies the change to that copy and
+  writes the whole (`window.set`), so that a group another window made meanwhile is not erased
+  (two windows writing at the very same instant can still lose one change: the read and the write
+  are two requests); a window asks one change at a time, the next once the previous is answered
+  (kept or refused), so that its changes are applied in the order the user made them, also when one
+  has to be asked again after a lost connection; the
+  answer is what the window shows from then on. A window that makes no change does not see
+  another's until it is opened again (there is no event for it yet).
 - `window.set {key, value}` keeps one key (`null` forgets it) and answers `{}`.
 
 The pictures of a draft are files of the daemon's state folder (`drafts/`, mode 0700, one folder by
@@ -1396,14 +1435,22 @@ plain `http` to another machine is refused, and so is an entry an open request w
 The requests agents made for an entry (`docs/vault.md`, "Asking the user for an entry"):
 
 - `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
-  "url", "host", "username", "for", "every", "takes_username", "joined"}]}`, the open requests,
+  "url", "host", "username", "for", "every", "takes_username", "edit", "joined"}]}`, the open requests,
   oldest first; `ask` is the number of its `vault.asked` event, `project` the asking agent's,
   `every` whether the entry is every project's, `description`, `url`, `username` and `for` what
   prefills the form of a new entry (`null` when not given), `host` where the secret goes as the
   daemon read `url`, `joined` the agents whose ask joined it. The
-  entry is set with `vault.set`, which answers the open requests for its name.
+  entry is set with `vault.set`, which answers the open requests for its name. An agent's
+  proposed edit of an entry that exists (`docs/vault.md`, "Proposing an edit of an entry") is one
+  of them, its `edit` each field changed (`url`, `username`, `description`, `project`, `for`) to
+  `{"before", "after"}`, and the other fields the entry as the proposal leaves it; `edit` is
+  `null` for a new entry.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
   `the user dismissed the request …`; `not-found` when no such request is open.
+- `vault.ask_accept {ask}` applies a proposed edit as `vault.set` would save the entry with it,
+  its secret kept and every check of that Save made (a refusal leaves the request open), answers
+  the entry as `vault.set` does, and hands the agent `the user accepted your proposed edit …`;
+  refused for a request of a new entry.
 
 ### The remote methods
 
@@ -1415,12 +1462,22 @@ not start, `unavailable`, with the reason. No method answers a private key. Ever
 the hub: nothing listens, and no method takes or answers an address of a machine (the direct link
 was removed on 2026-11-21).
 
-- `remote.settings` (local) answers `{"on"}`: whether remote is on.
-- `remote.configure {on?}` (local) turns it on or off and answers `remote.settings`'. It writes
-  `daemon.toml` itself, every other key and comment kept, and takes the change without a restart:
-  the link starts or stops. A file that is not TOML is `refused` and left as it was. A `listen`
-  given is not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing
-  with the hub and the keys; turned on again, the same hub.
+- `remote.settings` (local) answers `{"on", "notify"}`: whether remote is on, and when the phone
+  is told (`docs/remote.md`, "Notifications"): `away`, the default, or `always`.
+- `remote.configure {on?, notify?}` (local) turns it on or off, sets when the phone is told
+  (`away` or `always`; anything else is `invalid-params`), and answers `remote.settings`'. It
+  writes `daemon.toml` itself (`[remote] on`, `[remote] notify`), every other key and comment kept,
+  and takes the change without a restart: the link starts or stops; `notify` is read each time a
+  phone may be told. A file that is not TOML is `refused` and left as it was. A `listen` given is
+  not read (`docs/remote.md`, "Identity and keys"). Turning remote off keeps the pairing with the
+  hub and the keys; turned on again, the same hub.
+- `client.presence {focused, input?}` (local) is what a client says of the user: whether it is in
+  front of them (the window focused), and `input: true` when they just gave it an input (a key, a
+  click, the wheel). The daemon stamps the input with its clock, keeps it, and tells the hub
+  (`{active, last_input}`, seconds since 1970), which tells the runners; it answers `{}`. The
+  window says it when its focus changes and at an input, every 20 seconds at most. With remote off
+  it is answered and kept nowhere. A runner tells the phone only when no client of the user had an
+  input in the last 2 minutes (`docs/remote.md`, "Notifications").
 
 - `remote.machines` answers `{"this": {"name", "key", "fingerprint"}, "machines": [{"name",
   "key", "fingerprint", "state", "since", "reason", "reached"}]}`: this machine's member name
@@ -1494,8 +1551,17 @@ was removed on 2026-11-21).
   projects are the same one when their `remotes` are equal and not empty. A machine whose list
   came before projects were listed says `null` for them. A session is `{"id", "title", "project", "state",
   "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
-  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  `pilot` the session of the agent that leads it on that machine, or `null`;
+  `pilot_elsewhere` `{"machine", "agent"}` the agent of another machine that leads it, that
+  machine's name and the agent's id there, as the session's machine said it (`pilots`), or
+  `null`: said only of a session of that machine's own list and only naming a member machine
+  other than it, and the window puts the row under that agent's only when that machine lists it,
+  never under a session of this machine (`docs/remote.md`, "One list of every machine"); never its
   conversation. The event `remote.sessions {name}` says that a machine's list changed.
+  Between machines of two builds: `sessions` keeps its closed shape (a field a machine of before
+  does not know makes it refuse the whole list), what is new beside it travels as a message of its
+  own (`projects`, `pilots`) that a machine of before refuses alone, and a machine that receives
+  none of them draws the list as before.
 - `remote.close {request}` keeps the user's close of a session of another machine: `request` is
   `agent.stop {agent}` for that machine, signed by the client with the device key as any request
   for another machine. This machine stores it before it sends it, sends it once that machine is
@@ -2170,7 +2236,10 @@ that started a root for the user (`null` for a root the user started, and for a 
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
 starts"), `detached_from` the agent the user detached it from (`agent.detach`; `launched_by` is
-then `null`), `reported_at` when it reported,
+then `null`), `launched_from` (in `agent.show`, `agent.list` and the tree) the agent of another
+machine that started it here, `{"machine", "agent", "kind"}`, `null` for any other: with `kind`
+`child` it is that agent's child, at its depth plus one though it has no parent here, and only that
+agent writes to it (`docs/remote.md`, "A tree across machines"), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
@@ -2184,10 +2253,11 @@ Each method answers `not-found` when the agent does not exist.
 `{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?, "texts"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
 `{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
-§7.1), `auto` when left out: it is the root's before its first message is given, so that the
-first turn's calls already follow it. Only the user's door names it: `agent.start` is answered on
-the user's socket alone (a client an agent started is refused), and no tool of an agent, nor the
-pilot door's `agent_start`, takes a mode. `invalid-params` for another mode, and nothing is
+§7.1), the default mode of new sessions when left out (Auto unless set, `provider.set_new_session_mode`):
+it is the root's before its first message is given, so that the first turn's calls already
+follow it. Only the user's door names it: `agent.start` is answered on the user's socket alone (a
+client an agent started is refused), and no tool of an agent, nor the pilot door's `agent_start`,
+takes a mode; the pilot door starts its session in `auto`, whatever the default. `invalid-params` for another mode, and nothing is
 started. `images` is as in `agent.send`, and goes with the first message; with
 images, the message may be empty (pictures alone are a first message). They are judged and stored
 before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
@@ -2413,9 +2483,14 @@ whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `us
 `{"agent"}`. Reads, changing nothing, what ending the session of `agent` ends besides it: the
 sessions it leads and theirs in turn, in its project and in others, those that have not ended
 (`docs/tools.md`, "The pilot ends"). Answers `{"agent", "sessions": [{"id", "title", "project",
-"workspace", "state", "losses"}]}`, `workspace` `null` in the project's folder, `state` what its
+"workspace", "state", "losses", "machine"?}]}`, `workspace` `null` in the project's folder, `state` what its
 workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
-`unpushed` or `unknown`), `losses` each as a sentence. The window reads it for its confirmation.
+`unpushed` or `unknown`), `losses` each as a sentence. A session it leads on another machine,
+which ends there with it, is listed too, with `machine` its name, `project` its project there and
+`state` and `losses` as that machine reads them, asked there and awaited 3 seconds at most:
+`state` `unknown` and `losses` `["unknown (on <machine>)"]` when it is off, does not answer in
+time or is a machine of before (`docs/remote.md`, "A tree across machines"). The window reads
+it for its confirmation, each session on another machine said with its machine.
 
 #### `agent.detach`
 
@@ -2435,8 +2510,8 @@ agent started (a root of the user's, a child) and for one already detached. Ther
 call to judge and every base call passes without a request, and what the gate refuses stays
 refused. A tree has one mode, its root's: a
 child named switches its root, and every agent of the tree reads the root's mode at each call
-(an agent's `gate_mode` is its root's). A new session starts in `auto` unless the user's `agent.start`
-names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
+(an agent's `gate_mode` is its root's). A new session starts in the default mode of new sessions (Auto
+unless set) unless the user's `agent.start` names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
 (no tool of an agent names one); the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
 `agent.gate_mode_changed` for the root (`docs/events.md`).
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
@@ -2468,7 +2543,7 @@ does it with `agent_send` (`docs/tools.md`).
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued", "extensions"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `launched_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
@@ -2752,7 +2827,9 @@ chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the pro
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
 there is none. `new_session` is what the user chose for new sessions to start on
 (`provider.set_new_session`), `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for
-the provider's to propose, or `null` when none is chosen. `not-found` when the project
+the provider's to propose, or `null` when none is chosen. `new_session_mode` is the mode a session
+the user starts is in (`provider.set_new_session_mode`): `"ask"`, `"auto"` or `"full"`, `"auto"`
+when the user chose none. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
@@ -2785,6 +2862,19 @@ removes it, keeping the rest of the file as `provider.enable` keeps it, and answ
 `provider.new_session_changed` (`docs/events.md`). `not-found` when there is no provider of that
 name; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches it: no
 tool of an agent chooses it.
+
+### `provider.set_new_session_mode`
+
+`{"mode"}`, `"ask"`, `"auto"` or `"full"`. Chooses the mode a session the user starts is in
+(`agent.start`, when it names none: the window's composer always names one, which it shows before
+the first message; `flottille agent start --mode` names its own). The daemon writes
+`new_session_mode` in `providers.toml`, or removes it for `"auto"`, which is what a file that says
+nothing means, keeping the rest of the file as `provider.enable` keeps it, and answers
+`{"new_session_mode"}`, as `provider.list` gives it. A session an agent starts, and a child, are not
+affected: they keep the rules of `docs/design.md` §7.1. When this changes the file it emits
+`provider.new_session_mode_changed` (`docs/events.md`). `invalid-params` when the word is none of
+the three; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches
+it: no tool of an agent chooses it.
 
 ### `provider.set_judge`
 
@@ -2831,13 +2921,21 @@ reaches them. A method that names no program Flottille signs in is `not-found`.
 
 #### `signin.list`
 
-`{}`. Every program, the agents first in the providers' order, then the forges and trackers, those
-the registered projects use first: `{"programs": [{"program", "title", "kind", "host", "found",
-"path", "version", "signed_in", "account", "can_sign_in", "line", "sign_out_line", "running"}]}`.
+`{"checked"?, "program"?}`. Every program, the agents first in the providers' order, then the
+forges and trackers (`gh`, `acli`, `bkt`, `glab`), always in that order, whatever the registered
+projects use: `{"programs": [{"program", "title", "kind", "host", "found", "path", "version",
+"signed_in", "account", "problem", "checking", "can_sign_in", "line", "sign_out_line",
+"running"}]}`. With `"checked": false` no check runs: each row says what is known without one
+(`found`, `host`, `can_sign_in`, `running`) and `"checking": true`, and the caller asks each
+check alone with `"program"`, which answers that one row, checked (`checking` false). The window
+does so, so that a row says it is being checked until its own result arrives, and no row waits for
+another. `problem` is why a forge's or a tracker's check could not be made: the command line's first
+error line, masked, or `no answer in N s` (`signed_in` is `null` then, and a sign-in is never
+offered: `docs/forges.md`, "The programs it needs"), else `null`.
 `kind` is `agent` or `forge`; `host` the one a forge program is checked for (the first a project
 names, else `github.com`, `gitlab.com` or `bitbucket.org`; the Jira site for `acli`, `null` when no
 project names one), `null` for an agent. `signed_in` is what the program's own status says
-(`null` when it is not installed or could not say), `account` the account's name it says (`gh`'s
+(`null` when it is not installed or could not say, `problem` saying why for the forges), `account` the account's name it says (`gh`'s
 login, Claude's email), masked to its first letter and its domain's (`o***`, `s***@e***`), else
 `null`. `can_sign_in` is `true` when Flottille can run its
 sign-in here; `line` is the line to type in a terminal on that machine when it cannot
@@ -3063,7 +3161,7 @@ session of the routine's project, at its time or when its event comes. A routine
  "schedule": "weekdays 08:30", "event": null, "zone": "Europe/Paris", "mode": "read_only",
  "rings": "something", "paused": false, "missed_hours": 12,
  "next_at": 1795000200000, "delayed": null, "created_at": 1794900000000,
- "updated_at": 1794900000000}
+ "updated_at": 1794900000000, "made_by": null, "edited_by": null}
 ```
 
 - `schedule`: days and an hour, never a cron line: `every day 07:00` (`daily 07:00`),
@@ -3102,6 +3200,16 @@ session of the routine's project, at its time or when its event comes. A routine
   otherwise.
 - `missed_hours`: a run missed while the daemon was off runs once at its next start when it was
   due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
+- `made_by`: the session whose agent made it with the tool `routine` (`docs/tools.md`,
+  "Routines"), `{"session", "title"}`, its title as it is now (null while it has none); null for
+  one the user made. Set when it is made, never changed: an edit, the user's or an agent's, keeps
+  it. The user edits and removes such a routine as any other. A run of such a routine starts no
+  higher than that session's mode at the time of the run: `auto` runs in Ask while it is in Ask
+  (an ended session's last mode; Ask when it is gone), and the run's `mode` says the one it got.
+- `edited_by`: the session whose agent edited it last with the tool `routine`, as `made_by`
+  is given; null while no agent has. The user's own edits leave it as it is.
+- `name`: unique across projects; one shaped as a routine's id (twelve hexadecimal digits) is
+  refused, since `routine` takes an id or a name.
 
 A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
 "outcome", "summary", "why", "trigger", "opened", "items", "left", "body"}`. `session` is its root session (null for a skipped run), kept once it

@@ -21,6 +21,24 @@ pub fn on(paths: &Paths) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the phones are told even while the user is at a client (`[remote] notify =
+/// "always"`); by default they are told only while the user is away (`"away"`).
+pub fn notify_always(paths: &Paths) -> bool {
+    notify(paths) == "always"
+}
+
+/// What `daemon.toml` says of the phones' notifications: `always` or `away`, the default.
+pub fn notify(paths: &Paths) -> &'static str {
+    let said = std::fs::read_to_string(paths.config.join("daemon.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|document| Some(document.get("remote")?.get("notify")?.as_str()? == "always"));
+    match said {
+        Some(true) => "always",
+        _ => "away",
+    }
+}
+
 /// Whether `daemon.toml` still holds `[remote] listen`, which the direct link removed on
 /// 2026-11-21 read: the key is left in the user's file, and no longer read.
 pub fn says_listen(paths: &Paths) -> bool {
