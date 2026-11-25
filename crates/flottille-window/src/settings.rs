@@ -2856,24 +2856,24 @@ impl Render for SettingsPage {
 /// hub: the line unfolds and folds away with it.
 fn machine_only(part: &str, hub: bool, section: AnyElement, cx: &gpui_kit::App) -> AnyElement {
     let p = palette(cx);
-    let line = div()
-        .id(ElementId::Name(format!("settings-only-{part}").into()))
-        .aria_label(MACHINE_ONLY_LINE)
-        .text_size(px(12.5))
-        .text_color(p.mute)
-        .child(MACHINE_ONLY_LINE)
-        .test_support();
+    // Its gap to the section is inside it, so that it folds away with it.
+    let line = div().pb(space::SM).child(
+        div()
+            .id(ElementId::Name(format!("settings-only-{part}").into()))
+            .aria_label(MACHINE_ONLY_LINE)
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .child(MACHINE_ONLY_LINE)
+            .test_support(),
+    );
     div()
         .flex()
         .flex_col()
-        .child(
-            presence(
-                ElementId::Name(format!("settings-only-{part}-block").into()),
-                hub,
-                line,
-            )
-            .gap(space::SM),
-        )
+        .child(presence(
+            ElementId::Name(format!("settings-only-{part}-block").into()),
+            hub,
+            line,
+        ))
         .child(section)
         .into_any_element()
 }

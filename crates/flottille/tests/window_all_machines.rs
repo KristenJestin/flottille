@@ -8,7 +8,7 @@
 //! test on 127.0.0.1. No window opens on a screen; the people are invented.
 
 use crate::remote::{Machine, NoKeyring, pc_and_server_on};
-use crate::window_any_machine::{click, present, runner, settle, until, window};
+use crate::window_any_machine::{click, present, runner, settle, step, until, window};
 
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
@@ -23,7 +23,6 @@ use flottille_window::Shell;
 use flottille_window::about::{AboutEditor, SHARED_LINE, USE_ALL};
 use flottille_window::link::Sign;
 use flottille_window::settings::MACHINE_ONLY_LINE;
-use gpui_design_system::seen::seen;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 use serde_json::{Value, json};
@@ -242,21 +241,39 @@ fn a_field_changed_on_a_machine_is_its_own_until_it_uses_all_machines_value(
     );
     assert_eq!(label(cx, "about-name-own-reset").as_deref(), Some(USE_ALL));
     assert_eq!(about(&server)["own"], json!(["name"]));
-    assert_eq!(seen("about-name-own-block"), Some(1.0));
     // Only the field changed is the server's own.
     assert!(!present(cx, "about-pronouns-own-set"));
+    let marked = top(cx, "about-pronouns-label").expect("the next field");
 
-    click(&shell, "about-name-own-reset", cx);
-    eventually("the server dropped its own name", || {
-        about(&server)["own"] == json!([])
-    });
-    // The line folds away, fading as it goes, then is gone.
-    until(&shell, cx, "the mark starts to fold", |_| {
-        seen("about-name-own-block").is_some_and(|shown| shown < 1.0)
-    });
-    until(&shell, cx, "the mark is gone", |cx| {
-        !present(cx, "about-name-own-set")
-    });
+    cx.update(|window, cx| window.click("about-name-own-reset".to_owned(), cx));
+    // The line folds away with its gap: the next field comes up over several frames, not at once.
+    let mut tops = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while present(cx, "about-name-own-set") {
+        assert!(Instant::now() < deadline, "the mark never went");
+        step(&shell, cx);
+        tops.extend(top(cx, "about-pronouns-label"));
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    settle(&shell, cx);
+    let folded = top(cx, "about-pronouns-label").expect("the next field");
+    assert!(folded < marked, "{folded} < {marked}");
+    assert!(
+        tops.iter().any(|at| *at < marked && *at > folded),
+        "no frame between {marked} and {folded}: {tops:?}"
+    );
+    assert_eq!(about(&server)["own"], json!([]));
+    assert_eq!(about(&server)["name"], about(&server)["all"]["name"]);
+}
+
+/// Where the element `id` is drawn, from the top.
+fn top(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .map(|found| f32::from(found.bounds().origin.y))
+    })
 }
 
 #[gpui_kit::test]

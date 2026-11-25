@@ -421,11 +421,9 @@ impl AboutEditor {
         &self,
         key: &'static str,
         field: impl IntoElement,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> SetHere {
         let editor = cx.entity().downgrade();
-        let _ = window;
         SetHere::new(
             gpui_kit::ElementId::Name(format!("about-{key}-own").into()),
             field,
@@ -525,9 +523,9 @@ impl Render for AboutEditor {
         let follows = !self.on_all
             && self.hub
             && self.shown.as_ref().is_some_and(|shown| shown.all.is_some());
-        let name = self.own_field("name", name, window, cx);
-        let pronouns = self.own_field("pronouns", pronouns, window, cx);
-        let notes = self.own_field("notes", notes, window, cx);
+        let name = self.own_field("name", name, cx);
+        let pronouns = self.own_field("pronouns", pronouns, cx);
+        let notes = self.own_field("notes", notes, cx);
         Section::new("about", "About you")
             .sentence(SENTENCE)
             .child(
