@@ -1,6 +1,6 @@
 //! The rail's Exceptions section: the rules of the gate the user lifted for the session's tree at
 //! its agents' ask (`docs/design.md` §7.3), the root's and each sub-agent's, each with what it lets
-//! do, the agent's reason, who holds it when it is not the root, since when, and a Withdraw that
+//! do, the branch or pull request it covers, the agent's reason, who holds it when it is not the root, since when, and a Withdraw that
 //! the daemon carries out (`exception.withdraw`). Nothing is drawn while there is none; a row
 //! unfolds when an exception is given and folds away when it ends, withdrawn or with its session.
 
@@ -29,6 +29,8 @@ pub struct ExceptionRow {
     /// The agent's reason, as the user read it on the card.
     pub why: String,
     pub granted_at: u64,
+    /// What it covers, as the daemon gives it (`{"repository"?, "branch"?, "pull"?, "head"?}`).
+    pub scope: Value,
 }
 
 impl ExceptionRow {
@@ -40,6 +42,28 @@ impl ExceptionRow {
             rule: text("rule"),
             why: text("why"),
             granted_at: value["granted_at"].as_u64().unwrap_or(0),
+            scope: value["scope"].clone(),
+        }
+    }
+
+    /// What it covers, in words: `for the branch app/w`, `for pull request #12 of app/login at
+    /// 1111111`; `forge-state` has no scope, and says so.
+    pub fn covers(&self) -> String {
+        let scope = &self.scope;
+        let branch = scope["branch"].as_str().unwrap_or_default();
+        let repository = scope["repository"]
+            .as_str()
+            .filter(|r| *r != "." && !r.is_empty());
+        let of = repository.map_or(String::new(), |repository| format!(" of {repository}"));
+        match (scope["pull"].as_u64(), branch) {
+            (Some(pull), branch) => {
+                let at = scope["head"].as_str().map_or(String::new(), |head| {
+                    format!(" at {}", head.chars().take(7).collect::<String>())
+                });
+                format!("for pull request #{pull} of {branch}{at}")
+            }
+            (None, "") => "for any issue or pull request: no scope".to_owned(),
+            (None, branch) => format!("for the branch {branch}{of}"),
         }
     }
 
@@ -116,6 +140,7 @@ impl ExceptionList {
             })
         };
         let said = row.said();
+        let covers = row.covers();
         let why = row.why.clone();
         let since = row.since();
         let line = |part: &str, text: String, size: f32| {
@@ -162,6 +187,7 @@ impl ExceptionList {
                             .child(SharedString::from(said))
                             .test_support(),
                     )
+                    .child(line("covers", covers, 12.))
                     .child(line("why", why, 12.))
                     .when(row.session != self.root, |held| {
                         held.child(line("holder", row.holder(), 11.5))
