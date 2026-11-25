@@ -98,6 +98,14 @@ pub fn check(name: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Ok(());
     }
+    // A value of all machines is sealed for every machine and read into their sessions: a
+    // secret in it (a vault entry's value, a token) would reach machines whose vault cannot mask
+    // it. Checked here, so the machine that receives a copy refuses it too.
+    if flottille_core::secrets::mask(value, &Default::default()) != value {
+        return Err(format!(
+            "{name} holds a secret: keep secrets in the vault and name the entry instead"
+        ));
+    }
     let words = |wanted: &[&str]| {
         wanted
             .contains(&value)
