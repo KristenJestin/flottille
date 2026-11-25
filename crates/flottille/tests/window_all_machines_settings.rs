@@ -352,6 +352,8 @@ fn the_limits_of_tool_results_are_shared_and_a_machine_may_keep_its_own(
     );
     assert!(!present(cx, "tool-results-unchanged-own-set"));
     assert_eq!(show(&pc, "tool_results.show", json!({}))["limit"], 16_000);
+    // Once the mark has unfolded, the way back is where it is clicked.
+    settle(&shell, cx);
     click(&shell, "tool-results-limit-own-reset", cx);
     eventually("the server follows all machines again", || {
         show(&server, "tool_results.show", json!({}))["limit"] == 16_000
@@ -390,6 +392,8 @@ fn the_shade_is_shared_and_a_machine_may_keep_its_own(cx: &mut gpui_kit::TestApp
         show(&server, "appearance.show", json!({}))["shade"],
         "light"
     );
+    // Once the mark has unfolded, the way back is where it is clicked.
+    settle(&shell, cx);
     click(&shell, "appearance-shade-own-reset", cx);
     eventually("this machine follows all machines again", || {
         show(&pc, "appearance.show", json!({}))["shade"] == "light"
@@ -432,9 +436,12 @@ fn specs_the_subscriptions_and_review_are_shared_and_overridden_by_a_machine(
         present(cx, "features-specs")
     });
     click(&shell, "features-specs", cx);
+    // Its settings are drawn while the part is on.
+    click(&shell, "specs-switch", cx);
     until(&shell, cx, "the server's page follows all machines", |cx| {
         present(cx, "specs-settings-shared")
     });
+    settle(&shell, cx);
     click(&shell, "specs-setting-mode-internal", cx);
     until(&shell, cx, "the mode is the server's own", |cx| {
         present(cx, "specs-setting-mode-own-set")
@@ -443,6 +450,8 @@ fn specs_the_subscriptions_and_review_are_shared_and_overridden_by_a_machine(
         label(cx, "specs-setting-mode-own-set").as_deref(),
         Some("Changed on server")
     );
+    // Once the mark has unfolded, the way back is where it is clicked.
+    settle(&shell, cx);
     click(&shell, "specs-setting-mode-own-reset", cx);
     eventually("the server follows all machines again", || {
         let listed = show(&server, "extension.list", json!({}));
