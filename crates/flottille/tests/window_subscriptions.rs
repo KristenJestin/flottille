@@ -966,7 +966,8 @@ fn a_following_says_what_its_session_waits_for_you_and_folds_it_away_once_answer
     )
     .unwrap();
     user.fake_script(json!({"turns": [
-        {"when": "Sign in to staging.", "do": [
+        // Once: the session's turn on the user's answer asks nothing again.
+        {"when": "Sign in to staging.", "times": 1, "do": [
             {"mcp": {"tool": "vault", "arguments": {"action": "ask", "name": "staging-login",
                 "why": "to sign in to staging"}}},
             {"say": "Waiting for the vault entry."}]}
