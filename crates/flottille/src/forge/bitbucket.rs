@@ -1896,7 +1896,11 @@ pub(super) async fn write(
                 ));
             };
             let number = pull.id.to_string();
-            if asked.waive.is_none() {
+            // Bitbucket has no bypass of its own: an exception lifts Flottille's refusal for the
+            // pull request it is for, and the forge's merge checks still answer.
+            let held = asked.excepted.covers(path, branch, pull.id);
+            let reading = asked.excepted.reads();
+            if asked.waive.is_none() || held || reading {
                 let checks = match checks_of(forge, context, &number).await {
                     Ok(checks) => checks,
                     Err(why) => return Outcome::Failed(why),
@@ -1917,7 +1921,38 @@ pub(super) async fn write(
                     }
                     _ => None,
                 };
-                if let Some(blocks) = blocks(&checks, decision(&reviewers), starting.as_deref()) {
+                let blocked = blocks(&checks, decision(&reviewers), starting.as_deref());
+                if reading {
+                    return super::MergeRead {
+                        repository: path.to_owned(),
+                        slug: slug.to_string(),
+                        branch: branch.to_owned(),
+                        base: base.to_owned(),
+                        number: pull.id,
+                        head: pull.head_commit.clone(),
+                        blocks: blocked,
+                        bypass: false,
+                    }
+                    .said();
+                }
+                let covered = held
+                    && asked
+                        .excepted
+                        .as_read(pull.head_commit.as_deref(), blocked.as_deref());
+                if let Some(blocks) = &blocked
+                    && held
+                    && !covered
+                    && asked.waive.is_none()
+                {
+                    let slug = slug.to_string();
+                    return Outcome::Refused(
+                        asked.excepted.changed(&number, branch, &slug, blocks),
+                    );
+                }
+                if let Some(blocks) = blocked
+                    && !covered
+                    && asked.waive.is_none()
+                {
                     return Outcome::Refused(format!(
                         "refused: the pull request #{number} of {branch} in {slug} is not \
                          merged: {blocks}; wait for its checks, or have it waived by the user \
