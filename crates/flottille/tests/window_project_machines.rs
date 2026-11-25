@@ -1340,6 +1340,19 @@ fn colour_of(id: &str) -> Option<gpui_kit::Hsla> {
     gpui_design_system::seen::colour(gpui_kit::ElementId::Name(id.to_owned().into()))
 }
 
+/// Whether two colours are the same, but for the rounding of a tint at rest.
+fn same_colour(a: Option<gpui_kit::Hsla>, b: Option<gpui_kit::Hsla>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            (a.h - b.h).abs() < 1e-3
+                && (a.s - b.s).abs() < 1e-3
+                && (a.l - b.l).abs() < 1e-3
+                && (a.a - b.a).abs() < 1e-3
+        }
+        _ => false,
+    }
+}
+
 /// The id of the part `part` of the element `id` (`machine-mark-server` → `machine-mark-server-online`).
 fn part_of(id: gpui_kit::ElementId, part: &str) -> String {
     format!("{id}-{part}")
@@ -1483,10 +1496,8 @@ fn each_machine_s_mark_says_its_state_by_its_badge(cx: &mut TestAppContext) {
         Some("server · online")
     );
     let server_ink = shade_of(&shell, "server", cx);
-    assert_eq!(
-        colour_of(&part_of(project_mark_id("app", "server"), "icon")),
-        Some(server_ink)
-    );
+    let drawn = colour_of(&part_of(project_mark_id("app", "server"), "icon"));
+    assert!(same_colour(drawn, Some(server_ink)), "{drawn:?}");
 
     // The group's heading: the same mark, and no words after the name.
     switch_grouping(&shell, cx);
@@ -1540,14 +1551,18 @@ fn the_machines_marks_keep_their_colour_whichever_machine_is_in_front(cx: &mut T
     settle(&shell, cx);
     let icon = part_of(project_mark_id("app", "server"), "icon");
     let before = colour_of(&icon);
-    assert_eq!(before, Some(shade_of(&shell, "server", cx)));
+    assert!(
+        same_colour(before, Some(shade_of(&shell, "server", cx))),
+        "{before:?}"
+    );
 
     cx.update(|window, cx| window.click(session_id(&row), cx));
     until(&shell, cx, "the server's session is open", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
     });
     settle(&shell, cx);
-    assert_eq!(colour_of(&icon), before);
+    let after = colour_of(&icon);
+    assert!(same_colour(after, before), "{after:?} after {before:?}");
 }
 
 /// What the sidebar shows, top to bottom: each project and its sessions, each with its place.

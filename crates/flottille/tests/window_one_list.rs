@@ -302,10 +302,10 @@ fn a_session_of_another_machine_shows_its_icon_not_its_name(cx: &mut TestAppCont
         label(cx, session_machine_id(&row)).as_deref(),
         Some("server · online")
     );
-    // The line holds the mark alone: no room for the name.
-    let width =
-        cx.update(|window, _| f32::from(window.find(session_machine_id(&row)).bounds().size.width));
-    assert!(width < 20., "the line is {width} px wide");
+    // The line holds the mark alone (12 px and the room of its badge), its name in its words.
+    let icon = gpui_kit::ElementId::Name(format!("session-machine-icon-{row}").into());
+    let width = cx.update(|window, _| f32::from(window.find(icon).bounds().size.width));
+    assert!(width < 20., "the mark is {width} px wide");
 
     // Off: the icon greyed under a hollow ring, the tooltip saying since when.
     off(&server);
