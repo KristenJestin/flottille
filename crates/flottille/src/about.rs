@@ -399,3 +399,18 @@ mod tests {
         assert_eq!(cuts.len(), 1, "{cuts:?}");
     }
 }
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn about_you_holding_a_token_is_refused_and_never_received() {
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let notes = format!("Push with {token}.");
+        let refused = check("what every agent should know", &notes, LIMIT).unwrap_err();
+        assert!(refused.contains("secret"), "{refused}");
+        assert!(received("notes", &notes).is_none());
+        assert!(received("notes", "I review on Fridays.").is_some());
+    }
+}
