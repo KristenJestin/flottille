@@ -288,3 +288,38 @@ fn the_effort_picked_for_another_model_reaches_the_session(cx: &mut TestAppConte
         .position(|s| *s == ("effort".into(), "max".into()));
     assert!(model.is_some() && model < effort, "{set:?}");
 }
+
+/// What the composer's line under its pickers says of its provider, `None` while it says nothing.
+fn provider_warning(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find("composer-provider-warning")
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn the_picker_says_its_provider_needs_signing_in(cx: &mut TestAppContext) {
+    // A Codex signed out answers the daemon's listing of its models with the sign-in line.
+    let user = User::with_fake_codex().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.codex_script(json!({"account": serde_json::Value::Null}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/atlas");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "atlas\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "atlas"}))
+        .unwrap();
+
+    let (shell, cx) = atlas(&user, cx);
+    until(&shell, cx, "the sign-in line is said", |cx| {
+        provider_warning(cx)
+            .is_some_and(|said| said.contains("Codex's login expired: sign in again"))
+    });
+    settle(cx);
+    // The picker still names its provider: the line is what says why it has no model.
+    assert!(said(cx).contains("Codex"), "{}", said(cx));
+    assert!(provider_warning(cx).unwrap().contains("run codex login"));
+}

@@ -2377,6 +2377,27 @@ impl SettingsPage {
             },
         )
         .space(space::SM);
+        // What may stop its agents that the daemon cannot tell for sure, once, under its line:
+        // not where the sign-in command is already said.
+        let warning = presence_of(
+            format!("provider-warning-{}-block", provider.name),
+            (!provider.needs_sign_in() && !provider.warnings.is_empty())
+                .then(|| SharedString::from(provider.warnings.join(" · "))),
+            {
+                let id = format!("provider-warning-{}", provider.name);
+                move |warnings| {
+                    div()
+                        .id(ElementId::Name(id.clone().into()))
+                        .aria_label(warnings.clone())
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .child(warnings)
+                        .test_support()
+                        .into_any_element()
+                }
+            },
+        )
+        .space(space::SM);
         let install = presence_of(
             format!("provider-install-{}-block", provider.name),
             provider
@@ -2426,6 +2447,7 @@ impl SettingsPage {
             )
             .child(state.mt(space::SM))
             .child(sign_in)
+            .child(warning)
             .child(install)
             .child(controls.mt(space::SM))
             .into_any_element()
