@@ -1445,6 +1445,56 @@ fn the_answers_while_the_lead_s_machine_is_off_wait_there_as_one_message() {
 }
 
 #[test]
+fn an_answer_waiting_for_the_lead_s_machine_is_not_lost_when_what_waits_there_is_full() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    with_vault(&server);
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            vault_ask("staging-login"), vault_ask("billing-login"),
+            {"say": "Waiting for the vault entries."}]}]),
+    );
+    let (_, root, _, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "a vault entry asked: billing-login");
+    let numbers: Vec<u64> = vault_asks(&server)
+        .iter()
+        .map(|ask| ask["ask"].as_u64().unwrap())
+        .collect();
+    assert_eq!(numbers.len(), 2, "{numbers:?}");
+    off(&pc);
+    eventually("pc offline", || server.seen("pc")["state"] != "online");
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": numbers[0]}))
+        .unwrap();
+    a_while();
+
+    // As many messages wait for the pc as may: the next answer replaces the one waiting.
+    let full = server.user.path("kept-full");
+    std::fs::write(&full, "").unwrap();
+    server
+        .user
+        .call("vault.ask_dismiss", json!({"ask": numbers[1]}))
+        .unwrap();
+    eventually("the full outbox played", || !full.exists());
+    on(&pc);
+
+    eventually("the lead there is told", || {
+        !delivered_there(&pc, &root, ANSWERED).is_empty()
+    });
+    a_while();
+    let told = delivered_there(&pc, &root, ANSWERED);
+    assert_eq!(told.len(), 1, "{told:?}");
+    for number in &numbers {
+        assert!(
+            told[0].contains(&format!("request #{number},")),
+            "{number}: {}",
+            told[0]
+        );
+    }
+}
+
+#[test]
 fn a_child_s_request_of_a_session_led_from_another_machine_is_said_and_answered_there() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     with_vault(&server);

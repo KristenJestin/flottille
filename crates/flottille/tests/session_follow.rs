@@ -1756,3 +1756,89 @@ fn an_ask_a_led_session_and_its_child_both_joined_waits_once() {
     assert_eq!(delivered(&user, &lead, ANSWERED).len(), 1);
     drop(session);
 }
+
+/// A followed session in Ask whose second turn makes `count` calls held for the user, each
+/// reading a file of its own: the lead's id and the requests' numbers, oldest first.
+fn many_held(user: &User, count: usize) -> (String, Vec<u64>) {
+    let mut calls: Vec<Value> = (0..count)
+        .map(|i| call("fs_read", json!({"path": format!(".env.{i}")})))
+        .collect();
+    calls.push(json!({"say": "Waiting for the user's approvals."}));
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Read them all.", "do": calls}
+    ]}));
+    let (lead, _, session, _) = followed(user, "Fix the login.");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Read them all."}),
+    )
+    .unwrap();
+    eventually("the second wake", || wakes(user, &lead).len() == 2);
+    let mut numbers: Vec<u64> = held_for_the_user(user, &session)
+        .iter()
+        .map(|request| request["number"].as_u64().unwrap())
+        .collect();
+    numbers.sort_unstable();
+    assert_eq!(numbers.len(), count, "{numbers:?}");
+    (lead, numbers)
+}
+
+#[test]
+fn a_request_followed_by_more_than_64_others_before_a_wake_is_said_in_it() {
+    let user = User::with_fake_agent();
+    let (lead, numbers) = many_held(&user, 70);
+
+    assert_eq!(wakes_saying(&user, &lead, numbers[0]).len(), 1);
+}
+
+#[test]
+fn the_requests_past_4000_characters_in_a_wake_are_counted() {
+    let user = User::with_fake_agent();
+    let (lead, numbers) = many_held(&user, 70);
+
+    let woken = wakes(&user, &lead).remove(0);
+    let listed = numbers
+        .iter()
+        .filter(|number| woken.contains(&format!("request #{number},")))
+        .count();
+    assert!(listed < numbers.len(), "every request listed: {woken}");
+    let more = format!(
+        "[{} more requests; session_read reads them]",
+        numbers.len() - listed
+    );
+    assert!(woken.contains(&more), "{more}: {woken}");
+}
+
+#[test]
+fn an_ask_a_child_made_and_its_session_joined_later_is_said_once() {
+    let user = User::with_fake_agent();
+    let (lead, session, _, number) = asked_by_a_child(&user, false);
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+    eventually("a wake says the child's ask", || {
+        !wakes_saying(&user, &lead, number).is_empty()
+    });
+    user.fake_script(json!({"turns": [
+        {"when": "Join the ask.", "do": [vault_ask(), {"say": "Joined."}]}
+    ]}));
+    let before = wakes(&user, &lead).len();
+
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Join the ask."}),
+    )
+    .unwrap();
+
+    eventually("the next wake", || wakes(&user, &lead).len() > before);
+    assert!(
+        vault_asks(&user)[0]["joined"]
+            .as_array()
+            .is_some_and(|joined| !joined.is_empty()),
+        "{:?}",
+        vault_asks(&user)
+    );
+    assert_eq!(wakes_saying(&user, &lead, number).len(), 1);
+}
