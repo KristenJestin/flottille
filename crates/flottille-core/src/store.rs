@@ -1034,15 +1034,19 @@ const MIGRATIONS: &[&str] = &[
         why        TEXT NOT NULL,
         request    INTEGER NOT NULL,
         granted_at INTEGER NOT NULL,
-        -- What it covers (`approval::Scope`): '' and NULL where the rule names none.
-        repository TEXT NOT NULL,
-        branch     TEXT NOT NULL,
-        pull       INTEGER,
-        -- A merge's: the head commit and what blocked it, as the card said.
-        head       TEXT,
-        blocks     TEXT,
         PRIMARY KEY (agent, rule)
     ) STRICT;
+",
+    "
+    -- What an exception covers (`approval::Scope`): '' and NULL where the rule names none, and
+    -- for a merge the head commit and what blocked it, as the card said. Added after the table,
+    -- which a pre-release made without them: an exception it granted covers no repository,
+    -- branch nor pull request, so no push nor merge.
+    ALTER TABLE session_exceptions ADD COLUMN repository TEXT NOT NULL DEFAULT '';
+    ALTER TABLE session_exceptions ADD COLUMN branch     TEXT NOT NULL DEFAULT '';
+    ALTER TABLE session_exceptions ADD COLUMN pull       INTEGER;
+    ALTER TABLE session_exceptions ADD COLUMN head       TEXT;
+    ALTER TABLE session_exceptions ADD COLUMN blocks     TEXT;
 ",
 ];
 
