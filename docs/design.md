@@ -1069,8 +1069,10 @@ could do the same by hand on the forge:
 - `merge-blocked`: a merge of the workspace's pull request whose required checks fail or whose
   branch protection blocks it (`forge merge`): that pull request merged past Flottille's refusal,
   with GitHub's protection bypassed (`gh pr merge --admin`, the rights of the user's own `gh`)
-  only while something blocks it; Bitbucket has no bypass, and its merge checks still answer. A
-  merge nothing blocks needs none, and the ask is refused;
+  only while something blocks it, and only at the head commit the card said
+  (`--match-head-commit`); Bitbucket has no bypass, and its merge checks still answer. A merge
+  nothing blocks needs none, and the ask is refused; so is one whose head commit the forge did
+  not say, until it does;
 - `forge-state`: closing, reopening or relabelling an issue or a pull request (`forge` and
   `tickets` `close`, `reopen`, `edit` of labels alone), then harmless. A close or a reopen with a
   comment is not one: the comment's text is judged as before, whatever the session holds.
