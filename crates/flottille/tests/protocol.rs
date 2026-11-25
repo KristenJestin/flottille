@@ -86,6 +86,15 @@ fn every_method_the_sources_name_is_catalogued() {
         "about.name",
         "about.pronouns",
         "about.notes",
+        "sessions.end_inactive_days",
+        "sessions.resume_at_reset",
+        "review.spec_model",
+        "review.bugs_model",
+        "review.standards_model",
+        "review.security_model",
+        "review.verifier_model",
+        // The agents' own settings file, beside the `settings.` methods.
+        "settings.json",
         // A git setting a push the gate let through keeps of the repository's (`push_folder`).
         "remote.pushdefault",
     ];
