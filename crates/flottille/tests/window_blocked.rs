@@ -355,7 +355,12 @@ fn a_blocked_session_comes_back_on_top_of_its_project_by_itself(cx: &mut TestApp
     });
     cx.update(|window, cx| window.click(blocked_id(), cx));
     settle(cx);
-    let full = frame_height(&shell, &id, IN_GROUP, cx).expect("its row in the group");
+    assert!(
+        frame_height(&shell, &id, IN_GROUP, cx).is_some(),
+        "its row in the group"
+    );
+    // A row of its project is two lines high, the group's one.
+    let full = frame_height(&shell, &other, IN_PROJECT, cx).expect("the other row");
 
     maya_reviews(&user, &id);
     until(&shell, cx, "the row back in its project", |cx| {
