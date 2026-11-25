@@ -39,7 +39,8 @@ class AppIconTest {
 
     @Test
     fun the_launcher_icon_is_adaptive_with_a_themed_layer() {
-        val icon = context.packageManager.getApplicationIcon(context.packageName)
+        // Robolectric's PackageManager hands no icon back: the resource the manifest names is loaded.
+        val icon = context.getDrawable(application.icon)!!
         assertTrue("an adaptive icon, got ${icon::class.java.name}", icon is AdaptiveIconDrawable)
         icon as AdaptiveIconDrawable
         assertNotNull("the mark in the foreground", icon.foreground)
