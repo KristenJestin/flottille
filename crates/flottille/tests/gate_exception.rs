@@ -497,7 +497,7 @@ fn two_failing_pulls() -> Value {
     let pull = |number: u64, branch: &str| {
         json!({"number": number, "title": branch, "state": "OPEN", "isDraft": false,
             "baseRefName": "main", "isCrossRepository": false,
-            "headRefOid": format!("{number}").repeat(20),
+            "headRefOid": if number == 12 { READ_HEAD.to_owned() } else { "13".repeat(20) },
             "url": format!("https://github.com/acme/app/pull/{number}"),
             "reviewDecision": "APPROVED",
             "statusCheckRollup": [{"__typename": "CheckRun", "name": "secrets",
