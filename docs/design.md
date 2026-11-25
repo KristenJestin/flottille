@@ -363,10 +363,12 @@ An agent that pilots a session (`agent_launch` with `kind: led`) is woken, betwe
 `session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
 the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
-and that still wait, whole, and the requests of that turn that wait for the user (a call held, a
-connection asked, a vault entry asked for), each with its number and what it asks: the pilot is
-told, the user answers, and how they answered is queued for the pilot's next wake
-(`session-request-answered`, `docs/tools.md`, "Following a session"). It is a following, a subscription that has no end of its own (§5.6,
+and that still wait, whole, and the requests that wait for the user and no wake said yet (a call
+held, a connection asked, a vault entry asked for), its own and those its children forwarded to
+the user or asked them for, each with its number, what it asks and who asked: the pilot is
+told, the user answers, and how they answered is queued for the pilot's next wake, here or on
+another machine (`session-request-answered`, `docs/tools.md`, "Following a session"). It is a
+following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
 without the user pause it. A session led by a pilot is part of its job: **it ends with
 its pilot** (`docs/tools.md`, "The pilot ends"). A led session the user wants to keep is
@@ -1870,8 +1872,8 @@ nothing built, in [`extensions.md`](extensions.md).
 - A request a led session makes of the user (a call held, a connection, a vault entry) is told to
   its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
   turn that made it, not in a wake of its own (a wake costs the pilot a turn, and the turn's end
-  comes anyway), and the user's answer waits for the pilot's next wake. A pilot on another
-  machine hears the request in its wake, not yet the user's answer.
+  comes anyway), and the user's answer waits for the pilot's next wake. A request the session's
+  children forward while it is at rest is said in the wake of its next turn (#1470).
 
 - An agent's proposed edit of a vault entry (`docs/vault.md`, "Proposing an edit of an entry"):
   a second one for the entry while one waits is refused rather than joined (it would hide what

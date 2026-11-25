@@ -567,6 +567,51 @@ fn a_delivery_named_after_an_extension_other_than_review_is_refused() {
 }
 
 #[test]
+fn the_user_s_answer_to_a_request_over_a_child_s_launch_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let parent = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = server.stand_in();
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![MachineMessage::Deliver(Box::new(Deliver {
+            id: format!("session-request-answered-{launch}-1"),
+            launch: launch.clone(),
+            agent: parent.clone(),
+            kind: "session-request-answered".into(),
+            body: format!("Session {child}: its call request #3, a call held, is answered."),
+            urgency: "between-turns".into(),
+            ended: false,
+        }))],
+    );
+
+    let refused = answers[0].clone().unwrap_err();
+    assert!(
+        refused.contains("taken for a led session only"),
+        "{refused}"
+    );
+    let stored = Store::open_read_only(&pc.user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_deliveries(&parent, 64)
+        .unwrap();
+    assert!(
+        stored
+            .iter()
+            .all(|delivery| delivery.kind != "session-request-answered"),
+        "{stored:?}"
+    );
+}
+
+#[test]
 fn a_call_from_a_third_machine_for_a_launch_it_did_not_make_is_refused() {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let laptop = Machine::of(server_user(None));

@@ -1440,7 +1440,14 @@ As built (#818):
 - A led session's pilot of another machine answers with `session_send`, as here: the message is
   stored under an id naming the pilot (`session-<pilot>-<launch>-<call>`), which answers the
   questions asked of it, even while it still waits there, queued, the session busy. It is woken at the turn's end (`session-turn-ended`, `it asked you a
-  question`), its questions said whole.
+  question`), its questions said whole, and the requests of the session and of its children that
+  wait for the user there. When that user answers one, the pilot is told, once, as a pilot of the
+  same machine is (`session-request-answered`, queued there, ringing nobody: `docs/tools.md`,
+  "Following a session", #1470): each is a message of its own while that machine is linked;
+  while it is off, one message of the launch waits for it at a time, the latest listing every
+  answer not sent yet (the newest that fit, when they do not all fit), replacing the one waiting
+  in the same write, so that it is kept even when as many messages wait as may. Only a `led`
+  launch takes one.
 - When the pilot's machine links again, each led session it leads here sends it one
   `session-meanwhile` delivery: each question it asked the user while that machine was off, with
   the user's answer or `not answered yet`; kept, ordered and sent once as every delivery

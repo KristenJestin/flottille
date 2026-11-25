@@ -42,7 +42,7 @@ const CALLED: [&str; 6] = [
 ];
 
 /// The kinds of delivery a session on another machine sends the agent that started it.
-const KINDS: [&str; 12] = [
+const KINDS: [&str; 13] = [
     "child-report",
     "child-question",
     "child-asks",
@@ -55,6 +55,7 @@ const KINDS: [&str; 12] = [
     "session-turn-ended",
     DETACHED,
     crate::tree::LED_INTEGRATED,
+    crate::subscriptions::REQUEST_ANSWERED,
 ];
 
 /// The kind of the delivery that tells a pilot of another machine the user detached the session
@@ -523,6 +524,72 @@ pub(crate) fn tell(
     true
 }
 
+/// Tells the agent of another machine that leads `agent` how the user answered a request here,
+/// `line`: while that machine is off, one message per launch waits for it, the latest listing every
+/// answer not sent yet (each once, the newest that fit), so that answers given meanwhile never fill
+/// what may wait there and push out a report. While it is linked, each answer is a message of its
+/// own: one waiting may be on its way already.
+pub(crate) fn tell_answered(daemon: &Arc<Daemon>, agent: &str, kind: &str, line: &str) {
+    let Some(launch) = launch_here(daemon, agent) else {
+        return;
+    };
+    if launch.kind != "led" {
+        return;
+    }
+    let prefix = format!("{kind}-{}-", launch.launch);
+    let waiting = match linked_now(daemon, &launch.machine) {
+        true => Vec::new(),
+        false => daemon
+            .read(|store| store.outgoing(Some(&launch.machine)))
+            .unwrap_or_default(),
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut replacing = Vec::new();
+    for old in waiting
+        .into_iter()
+        .filter(|old| old.id.starts_with(&prefix))
+    {
+        if let Ok(MachineMessage::Deliver(told)) =
+            serde_json::from_value::<MachineMessage>(old.message)
+        {
+            lines.extend(told.body.lines().map(str::to_owned));
+        }
+        replacing.push(old.id);
+    }
+    lines.push(line.to_owned());
+    let mut listed = std::collections::HashSet::new();
+    lines.retain(|told| listed.insert(told.clone()));
+    // The newest answers, when all of them would not fit.
+    while lines.len() > 1 && lines.iter().map(|l| l.chars().count() + 1).sum::<usize>() > LONGEST {
+        lines.remove(0);
+    }
+    let id = format!(
+        "{prefix}{}",
+        flottille_core::agent::new_id().unwrap_or_default()
+    );
+    kept_replacing(
+        daemon,
+        &launch,
+        Some(id),
+        kind,
+        &lines.join("\n"),
+        approval::BETWEEN_TURNS,
+        false,
+        false,
+        &replacing,
+    );
+}
+
+/// Whether the machine of key `machine` is linked to this one now.
+fn linked_now(daemon: &Daemon, machine: &str) -> bool {
+    let (Ok(remote), Some(key)) = (crate::link::remote_of(daemon), key_of(machine)) else {
+        return false;
+    };
+    remote
+        .name_of(&key)
+        .is_some_and(|name| remote.link_to(&name).is_ok())
+}
+
 /// Tells the agent of another machine that leads `agent` that a turn of it ended with nothing to
 /// ask or report: kept as a delivery of `kind`, but one per launch, the latest replacing the one
 /// still waiting for that machine, so that the turns of a session that runs while its pilot's
@@ -634,6 +701,23 @@ fn kept_for_caller(
     back: bool,
     ended: bool,
 ) {
+    kept_replacing(daemon, launch, id, kind, body, urgency, back, ended, &[]);
+}
+
+/// As [`kept_for_caller`], the messages `replacing` forgotten in the same write, which then counts
+/// against nothing: a message that replaces others never fills what waits.
+#[allow(clippy::too_many_arguments)]
+fn kept_replacing(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    id: Option<String>,
+    kind: &str,
+    body: &str,
+    urgency: &str,
+    back: bool,
+    ended: bool,
+    replacing: &[String],
+) {
     let id = id.unwrap_or_else(|| {
         format!(
             "{kind}-{}",
@@ -665,7 +749,7 @@ fn kept_for_caller(
         true => Err(format!(
             "a delivery to another machine is {LONGEST} characters at most, this one {length}"
         )),
-        false => keep(
+        false => keep_replacing(
             daemon,
             &launch.machine,
             &launch.launch,
@@ -674,6 +758,7 @@ fn kept_for_caller(
             &message,
             back,
             answer,
+            replacing,
         ),
     };
     if let Err(why) = kept {
@@ -727,6 +812,33 @@ fn keep(
     back: bool,
     beyond: bool,
 ) -> Result<(), String> {
+    keep_replacing(
+        daemon,
+        machine,
+        launch,
+        name,
+        id,
+        message,
+        back,
+        beyond,
+        &[],
+    )
+}
+
+/// As [`keep`], the messages `replacing` forgotten in the same write; never refused when it
+/// replaces one, as a close is (`keep_close`).
+#[allow(clippy::too_many_arguments)]
+fn keep_replacing(
+    daemon: &Arc<Daemon>,
+    machine: &str,
+    launch: &str,
+    name: &str,
+    id: String,
+    message: &MachineMessage,
+    back: bool,
+    beyond: bool,
+    replacing: &[String],
+) -> Result<(), String> {
     let outgoing = outgoing(machine, launch, name, id, message, back);
     let waiting = daemon
         .read(|store| store.outgoing(Some(machine)))
@@ -738,11 +850,16 @@ fn keep(
     } else {
         MOST_KEPT
     };
-    if waiting >= most {
+    if replacing.is_empty() && waiting >= most {
         return Err(format!("{most} messages wait for {name} already"));
     }
     daemon
-        .write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None)))
+        .write(|store| {
+            for id in replacing {
+                store.forget_outgoing(id)?;
+            }
+            store.keep_outgoing(&outgoing).map(|()| ((), None))
+        })
         .map_err(|error| format!("it cannot be kept: {error}"))?;
     send_kept(daemon, machine);
     Ok(())
@@ -1141,6 +1258,14 @@ fn delivered(
         )
         .into());
     }
+    // The user's answer to a request is told a pilot, never the starter of a child.
+    if deliver.kind == crate::subscriptions::REQUEST_ANSWERED && launch.kind != "led" {
+        return Err(format!(
+            "a {} is taken for a led session only",
+            crate::subscriptions::REQUEST_ANSWERED
+        )
+        .into());
+    }
     if ![approval::URGENT, approval::BETWEEN_TURNS].contains(&deliver.urgency.as_str()) {
         return Err(format!("there is no urgency {:?}", deliver.urgency).into());
     }
@@ -1180,14 +1305,18 @@ fn delivered(
         )
     })?;
     let body = delivered_body(daemon, &agent, &deliver.body);
-    deliveries::deliver(
-        daemon,
-        &deliver.agent,
-        &deliver.kind,
-        Some(id),
-        &body,
-        &deliver.urgency,
-    )
+    // The user's answer there rings no one, as here: it is read with what wakes the lead next.
+    match deliver.kind == crate::subscriptions::REQUEST_ANSWERED {
+        true => deliveries::queue(daemon, &deliver.agent, &deliver.kind, Some(id), &body),
+        false => deliveries::deliver(
+            daemon,
+            &deliver.agent,
+            &deliver.kind,
+            Some(id),
+            &body,
+            &deliver.urgency,
+        ),
+    }
     .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
     if decided {
         let state = match deliver.ended {
