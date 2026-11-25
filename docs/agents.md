@@ -373,9 +373,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   provider says its login is gone (`crates/flottille/src/turn_failures.rs`, one recogniser per
   provider). The bridges pass the provider's code as the error's `data.code`, which is what is
   read: Claude's `authentication_failed` or `oauth_org_not_allowed` (its words, `Please run
-  /login`…, only when it gave no code), Codex's `unauthorized` (never its text: a number in it
-  means nothing). A service unreachable, overloaded or failing never fails a prompt: the bridges
-  end that turn `end_turn` with a `sessionFailure`, and the session goes on. A login gone ends
+  /login`…, only when it gave no code), Codex's `unauthorized`, or the 401 its request got
+  (`httpStatusCode` 401 in its error's kind, as `httpConnectionFailed` when no login is there at
+  all), never its text: a number in it means nothing. A service unreachable, overloaded or failing
+  never fails a prompt: the bridges end that turn `end_turn` with a `sessionFailure`, and the session goes on. A login gone ends
   the turn `failed`: what it was sent is given back (`delivery.given_back`, queued again), the
   session stays, its process is let go as after an idle release (`agent.released`, reason
   `failed`), and the agent is idle with a `state_reason` that says what to do (`Claude's login
@@ -862,7 +863,8 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
   after a `sessionFailure` of severity `error` with its message, category `limit` for
   `usageLimitExceeded` and `rateLimitExceeded`, `service` otherwise; only a signed-out Codex
-  (`unauthorized`) fails the prompt, with `data.code` `unauthorized` ("A failed turn", above).
+  (`unauthorized`, or a 401 as its kind's `httpStatusCode`) fails the prompt, with `data.code`
+  `unauthorized` ("A failed turn", above).
 - **A cancel** (`session/cancel`) is a `turn/interrupt`.
 - **The model** is an option (`model`) whose values are the models `model/list` gave, hidden ones
   left out, the thread's own first set; **the effort** an option (`effort`, category
