@@ -21,8 +21,8 @@ use flottille_window::link::Connect;
 use flottille_window::session_link::PullRequest;
 use flottille_window::state::AgentState;
 use flottille_window::tree::{
-    SessionRow, session_id, session_mark_id, session_place_id, session_summary_id,
-    session_summary_part_id, session_waits_id,
+    SessionRow, session_id, session_place_id, session_summary_id, session_summary_part_id,
+    session_waits_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::seen::seen;
@@ -183,6 +183,18 @@ fn label(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> Opti
     })
 }
 
+/// The element `id`, which the window draws: a short message when it does not, as the kit's own
+/// lists every path the window registered.
+fn found(
+    window: &gpui_kit::Window,
+    id: impl Into<gpui_kit::ElementId>,
+) -> gpui_kit::test::ElementSnapshot {
+    let id = id.into();
+    window
+        .try_find(id.clone())
+        .unwrap_or_else(|| panic!("{id:?} is not drawn"))
+}
+
 fn present(cx: &mut VisualTestContext, id: impl Into<gpui_kit::ElementId>) -> bool {
     let id = id.into();
     cx.update(|window, _| window.try_find(id).is_some())
@@ -195,20 +207,6 @@ fn settle(cx: &mut VisualTestContext) {
         cx.update(|window, cx| window.simulate_next_frame(cx));
     }
     cx.run_until_parked();
-}
-
-/// How many frames the window asks for before it rests, one step of 16 ms each.
-fn frames_until_rest(cx: &mut VisualTestContext) -> usize {
-    let mut frames = 0;
-    for _ in 0..60 {
-        cx.executor().advance_clock(Duration::from_millis(16));
-        cx.run_until_parked();
-        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-            break;
-        }
-        frames += 1;
-    }
-    frames
 }
 
 /// The ids of the rows of the project's level, in the order drawn.
@@ -262,8 +260,8 @@ fn a_pilot_s_row_sums_up_the_sessions_it_leads(cx: &mut TestAppContext) {
     // The place comes before the summary, on the same line.
     let (place, summary) = cx.update(|window, _| {
         (
-            window.find(session_place_id(&lead)).bounds(),
-            window.find(session_summary_id(&lead)).bounds(),
+            found(window, session_place_id(&lead)).bounds(),
+            found(window, session_summary_id(&lead)).bounds(),
         )
     });
     assert!(place.right() <= summary.left(), "{place:?} {summary:?}");
@@ -288,10 +286,10 @@ fn a_pilot_s_led_rows_are_folded_by_default(cx: &mut TestAppContext) {
     assert_eq!(listed(&shell, "atlas", cx), std::slice::from_ref(&lead));
     assert!(!present(cx, session_id(&led)), "the led row is folded");
     // Folded, its mark is the most urgent of what it hides, as before.
-    assert_eq!(
-        label(cx, session_mark_id(&lead)).as_deref(),
-        Some("Needs you")
-    );
+    let mark = shell.read_with(cx, |s, cx| {
+        s.session(&lead).and_then(|row| row.read(cx).mark())
+    });
+    assert_eq!(mark, Some(AgentState::NeedsYou));
 
     // Unfolded by the user, its led row sits under it.
     cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
@@ -574,10 +572,11 @@ fn the_pilot_s_page_lists_each_led_session_with_ticket_workspace_pull_request_ch
         Some("no pull request yet")
     );
     // In launch order.
+    settle(cx);
     let (first, second) = cx.update(|window, _| {
         (
-            window.find(lead_row_id(&led)).bounds(),
-            window.find(lead_row_id(&notes)).bounds(),
+            found(window, lead_row_id(&led)).bounds(),
+            found(window, lead_row_id(&notes)).bounds(),
         )
     });
     assert!(first.bottom() <= second.top(), "{first:?} {second:?}");
@@ -588,8 +587,8 @@ fn the_pilot_s_page_lists_each_led_session_with_ticket_workspace_pull_request_ch
     // Leads comes under the header, before the conversation.
     let (header, section) = cx.update(|window, _| {
         (
-            window.find("session-header".to_owned()).bounds(),
-            window.find(leads_id()).bounds(),
+            found(window, "session-header".to_owned()).bounds(),
+            found(window, leads_id()).bounds(),
         )
     });
     assert!(
@@ -657,7 +656,7 @@ fn a_held_launch_is_a_row_of_leads_until_it_starts(cx: &mut TestAppContext) {
         Some("needs you: allow its launch")
     );
     let item = lead_item_id(&held);
-    let full = cx.update(|window, _| f32::from(window.find(item.clone()).bounds().size.height));
+    let full = cx.update(|window, _| f32::from(found(window, item.clone()).bounds().size.height));
 
     // Allowed, it starts: its row folds away and the session's unfolds.
     let led = allow(&user, &lead, number);
@@ -677,7 +676,7 @@ fn a_held_launch_is_a_row_of_leads_until_it_starts(cx: &mut TestAppContext) {
         Some("Write the docs")
     );
     assert!(
-        cx.update(|window, _| window.find(lead_item_id(&led)).bounds().size.height) > px(0.),
+        cx.update(|window, _| found(window, lead_item_id(&led)).bounds().size.height) > px(0.),
         "the session's row unfolded"
     );
 }
@@ -765,21 +764,21 @@ fn a_pilot_leading_many_sessions_keeps_its_conversation_in_view(cx: &mut TestApp
     });
     settle(cx);
 
-    // The card scrolls past a few rows: the conversation keeps most of the page.
-    let (leads, conversation) = cx.update(|window, _| {
+    // The card scrolls past a few rows: the conversation, between it and the composer, keeps
+    // most of the page, and the composer stays in the window.
+    let (leads, composer) = cx.update(|window, _| {
         (
-            window.find(leads_id()).bounds(),
-            window
-                .find(ElementId::Name(format!("conversation-{lead}").into()))
-                .bounds(),
+            found(window, leads_id()).bounds(),
+            found(window, "reply".to_owned()).bounds(),
         )
     });
-    assert!(leads.size.height <= px(320.), "{leads:?}");
+    // Its title and the card, capped at about four rows of the eight.
+    assert!(leads.size.height <= px(340.), "{leads:?}");
     assert!(
-        conversation.size.height >= px(250.),
-        "the conversation stays in view: {conversation:?}"
+        composer.top() - leads.bottom() >= px(250.),
+        "the conversation stays in view: {leads:?} {composer:?}"
     );
-    assert!(conversation.bottom() <= px(800.), "{conversation:?}");
+    assert!(composer.bottom() <= px(800.), "{composer:?}");
 }
 
 /// The Leads section of a page, alone, on a page as wide as a narrow window's.

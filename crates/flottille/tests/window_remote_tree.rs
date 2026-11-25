@@ -1824,14 +1824,30 @@ fn a_pilot_of_another_machine_keeps_its_leads_as_the_window_polls(cx: &mut TestA
         present(cx, lead_row_id(&led))
     });
 
-    // Each poll reads server's list again: the page's Leads stays as it was.
-    for _ in 0..4 {
-        std::thread::sleep(Duration::from_millis(500));
-        settle(&shell, cx);
-        assert!(
-            present(cx, lead_row_id(&led)),
-            "the led session's row of Leads stays"
-        );
+    // Something changes on this machine: the window reads its sessions again.
+    pc.user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    // Each poll reads the lists again: the page's Leads keeps its row, at every step.
+    let rows = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .map_or(0, |page| page.read(cx).led().len())
+        })
+    };
+    // It never folds away to come back either: at rest, nothing moves.
+    quiet(&shell, cx);
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(50));
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 1, "the led session's row of Leads stays");
+        assert_eq!(asked, 0, "nothing moves on the page at rest");
     }
     assert_eq!(label(cx, leads_id()).as_deref(), Some("Leads 1"));
 }
