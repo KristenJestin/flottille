@@ -517,8 +517,10 @@ fn the_warning_goes_once_the_models_are_listed() {
 
     // Signed in again, and the provider asked again, as turning it off and on does.
     user.codex_script(json!({}));
-    assert!(user.run(&["provider", "disable", "codex"]).status.success());
-    assert!(user.run(&["provider", "enable", "codex"]).status.success());
+    user.call("provider.disable", json!({"name": "codex"}))
+        .unwrap();
+    user.call("provider.enable", json!({"name": "codex"}))
+        .unwrap();
     eventually("its models", || !ids(&listed(&user, "codex")).is_empty());
 
     let codex = listed(&user, "codex");
