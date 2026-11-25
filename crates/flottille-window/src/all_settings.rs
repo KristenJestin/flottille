@@ -62,9 +62,9 @@ fn model_label(name: &str) -> &'static str {
         "compactor" => "Compaction model",
         "review.spec_model" => "Review: the spec",
         "review.bugs_model" => "Review: bugs",
-        "review.standards_model" => "Review: standards",
+        "review.standards_model" => "Review: project rules",
         "review.security_model" => "Review: security",
-        _ => "Review: the verifier",
+        _ => "Review: checking the findings",
     }
 }
 
@@ -752,7 +752,7 @@ impl AllSettings {
             .connections
             .clone()
             .unwrap_or_else(|| shown.shared_connections());
-        let mut card = card.gap(px(0.));
+        let mut card = card;
         let drawn: Vec<_> = self
             .rows
             .rows()
@@ -783,7 +783,7 @@ impl AllSettings {
                 .ok();
             });
             let id = ElementId::Name(format!("all-connection-{}-row", connection.name).into());
-            card = card.child(Item::new(id, placement, div().py(space::XS).child(switch)));
+            card = card.child(Item::new(id, placement, switch).gap(space::MD));
         }
         let none = EmptyLine::new("all-connections-none", Icon::Lucide("plug"), NO_CONNECTION);
         div()

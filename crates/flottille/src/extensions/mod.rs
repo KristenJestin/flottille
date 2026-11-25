@@ -1272,7 +1272,7 @@ pub fn on(daemon: &Daemon, extension: &Extension) -> Result<(), Failure> {
 
 pub use connections::{
     SHARED as SHARED_CONNECTIONS, drop_own as drop_own_connection,
-    overrides as connection_overrides, shared_changed as shared_connections_changed,
+    overrides as overridden_connections, shared_changed as shared_connections_changed,
     shared_check as shared_connections, shared_names as shared_connection_names,
 };
 

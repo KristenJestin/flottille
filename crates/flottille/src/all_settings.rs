@@ -128,7 +128,7 @@ fn own(daemon: &Daemon, all: &BTreeMap<String, String>) -> Result<Vec<String>, F
             updates::SHARED => updates::own_check(paths).map_err(invalid)?.is_some(),
             CONNECTIONS => {
                 own.extend(
-                    extensions::connection_overrides(paths)
+                    extensions::overridden_connections(paths)
                         .map_err(invalid)?
                         .into_iter()
                         .map(|connection| format!("{CONNECTIONS}.{connection}")),
