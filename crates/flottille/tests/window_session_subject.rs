@@ -278,10 +278,11 @@ fn a_renamed_session_s_key_fades_to_the_new_one(cx: &mut TestAppContext) {
     let (id, shell, cx) = about_five(&user, cx);
     user.call("agent.rename", json!({"agent": id, "title": "Login work"}))
         .unwrap();
-    until(&shell, cx, "the key beside", |cx| {
-        label(cx, session_key_beside_id(&id)).as_deref() == Some("#5")
+    until(&shell, cx, "the row says the user's title", |cx| {
+        label(cx, session_id(&id)).as_deref() == Some("Login work")
     });
     settle(cx);
+    assert_eq!(label(cx, session_key_beside_id(&id)).as_deref(), Some("#5"));
     assert_eq!(pending_frames(cx), 0, "at rest before");
 
     link(&user, "#6");
@@ -325,6 +326,7 @@ fn a_free_session_says_it_holds_nothing(cx: &mut TestAppContext) {
 
 /// The ink the session row's title was last drawn in.
 fn title_ink(cx: &mut VisualTestContext, session: &str) -> gpui_kit::Hsla {
+    cx.update(|window, cx| window.simulate_next_frame(cx));
     gpui_design_system::seen::colour(gpui_kit::ElementId::Name(
         format!("{}-title", session_id(session)).into(),
     ))
