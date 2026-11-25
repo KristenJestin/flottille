@@ -2815,3 +2815,60 @@ fn the_window_draws_no_frame_at_rest_on_settings_of_all_machines(cx: &mut TestAp
         "All machines: (frames drawn, frames asked)"
     );
 }
+
+/// #1461: the other tabs that hold a shared setting, on this machine (rules of its own, their
+/// edge and mark drawn) and on All machines, each at rest once settled.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_shared_tabs(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = crate::remote::pc_and_server(User::new());
+    pc.user
+        .call("rules.set", json!({"text": "Rules of this machine alone."}))
+        .unwrap();
+    let env = Environment {
+        os_release: pc.user.path("os-release"),
+        state_home: pc.user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let connect: flottille_window::link::Connect = Arc::new(pc.user.connector());
+    let device = Some(flottille_window::device::Device::in_folder(pc.folder()));
+    let (shell, cx) =
+        cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    until(&shell, cx, "the server is read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| server.online())
+        })
+    });
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-agents", cx));
+    until(&shell, cx, "the rules are this machine's own", |cx| {
+        cx.update(|window, _| window.try_find("rules-own-set").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "a machine's Agents: (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("settings-machine", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("settings-machine-all", cx));
+    settle(&shell, cx);
+    for tab in ["agents", "approvals", "features", "general"] {
+        cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
+        settle(&shell, cx);
+        assert_eq!(
+            frames_at_rest(&shell, cx),
+            (0, 0),
+            "All machines, {tab}: (frames drawn, frames asked)"
+        );
+    }
+}
