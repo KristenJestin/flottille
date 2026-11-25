@@ -1863,7 +1863,8 @@ window is closed.
   the reports of a root session ring and the rest stays in the centre. **Quiet hours** (a range
   that may cross midnight, and the days it holds on) and **Do not disturb** (until turned off, for
   an hour, or until tomorrow morning) silence every ring, never the centre: what came meanwhile is
-  there, and the first ring after says `N new while quiet`. The phone's push (`docs/remote.md`,
+  there, and the first ring after says `N new while quiet` (counted in the store, kept across a
+  restart of the daemon). The phone's push (`docs/remote.md`,
   "Notifications") reads the same: what does not ring here is not told to the phone. The choices
   are in `notifications.toml`
   of the configuration folder, read at every ring, so a file edited by hand is followed; no tool of

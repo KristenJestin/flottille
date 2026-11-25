@@ -3114,7 +3114,11 @@ holds only what a project sets itself, which wins over `kinds`. `muted` is `true
 hours and while Do not disturb holds: nothing rings, everything goes to the centre. A file that
 cannot be read (a syntax error, a request set to `off`) answers `invalid-config` with the file and
 the key, and the daemon follows the defaults until it is fixed; its log says why, once for each
-reason. A project's own levels are `[projects.<name>.kinds]` in the file.
+reason. A project's own levels are `[projects.<name>.kinds]` in the file; `project.remove` takes them out.
+The project is its name (there is no rename), so a project whose file is renamed by hand is a new
+one, and its old levels stay under the old name until it is removed or the file is edited. What
+the quiet hours or Do not disturb held (the `N` of `N new while quiet`) is kept in the store, so
+the daemon restarting forgets none of it.
 
 ### `notifications.set_settings`
 
