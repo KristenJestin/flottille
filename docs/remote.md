@@ -1958,9 +1958,9 @@ never told, and with no session to the hub nothing is told and nothing is kept f
 
 A user with four machines fills the same settings four times. The hub keeps **settings for all
 machines**: every machine uses them, each machine can **override any one** of them, and go back to
-the value of all machines (decided 2026-11-25, #1330). Built for About you first (#1330, part 1);
-the guidance files and the rest of "Shared, personal" (#1330's inventory), then the settings a
-machine often overrides, follow in their own issues.
+the value of all machines (decided 2026-11-25, #1330). Built for About you first (#1330, part 1),
+then for the settings a machine often overrides (#1462, below); the guidance files and the rest of
+"Shared, personal" (#1330's inventory) follow in their own issue.
 
 - **Three levels**, read in this order: the project's value (where one exists) → **the machine's
   own** → **all machines'** → the default, as `extensions::value()` reads project → global →
@@ -2012,8 +2012,8 @@ machine often overrides, follow in their own issues.
   `controller` or a `runner` ("Roles"); a viewer's change is refused by the machine it is asked of,
   by the hub when its machine seals it, and by every machine that opens it.
 - **Secrets never go there**: no vault value, no OAuth token, no key, no project `[variables]`.
-  `about.share` takes the three fields of About you and nothing else; a setting that names a vault
-  entry will name it, the entry staying the machine's.
+  `about.share` takes the three fields of About you and nothing else, `settings.share` the settings
+  below by their names; a connection that names a vault entry is not shared.
 - **Without a hub** (remote off, or this machine paired with no other runner), Settings is as it
   was: About you is the machine's own, and `about.show` says `all: null`.
 - **What a hub that misbehaves can do**: read nothing and change nothing (each copy is sealed and
@@ -2023,10 +2023,49 @@ machine often overrides, follow in their own issues.
   `shared` is a field it does not know): moving back to an older hub means dropping `shared` from
   its `hub.json` first.
 
+### The settings a machine often overrides
+
+The same mechanism carries them (`settings.share`, `docs/protocol.md`, "The settings of all
+machines"), each a value of its own name, read by the setting's own loader under the machine's own
+choice:
+
+| Setting | Value | A machine's own |
+|---|---|---|
+| New sessions' provider, model and effort | `new_session` | `[new_session]` of `providers.toml` |
+| The Auto judge's model | `judge` | `[judge]`, or `judge = "none"` |
+| The compaction model | `compactor` | `compactor` of `compaction.toml` |
+| Review's models | `review.<pass>_model` | `<pass>_model` under `[review]` of `extensions.toml`, and a project's |
+| Sessions | `sessions.end_inactive_days`, `sessions.resume_at_reset` | the key of `sessions.toml`, each on its own |
+| The workspaces folder, a `~/…` template | `workspaces_folder` | `place` of `workspaces.toml`, and a project's `workspaces_root` |
+| The check for updates | `update.check` | `check` of `updates.toml` |
+| `https://` connections | `connections` | a declaration of the same name in `extensions.toml` |
+
+- **A judge or compactor Flottille picked is no choice of the user's**: all machines' value applies
+  over it, and none is picked while all machines say one.
+- **What a machine lacks is ignored there, and said**: a provider that is not ready, a model it
+  does not offer. A new session starts on what the provider proposes, the judge and the compactor
+  are the machine's own pick, a review's pass follows its rule; `settings.shared` says why
+  (`ignored`), and the machine's page says it above the section.
+- **A connection shares its declaration only**: its address, sentence, limits, left-out projects,
+  client id and whether it is on. One that names a vault entry, runs a program or is reached in
+  clear is not shared. **Each machine signs in for itself**: no token, no vault value and no
+  sign-in ever travels, and what each action may do (judged, asked, off) and what was reviewed stay
+  each machine's. Taken away from all machines, it leaves each machine as a removed one does.
+- **The check for updates is shared, the channel is not**; a desktop theme's colours stay the
+  machine's.
+
 **In the window** (decided 2026-11-25 on the prototype): Settings' picker "Settings of", on the
 title's line of the page's header, which stays in place while the sections scroll, lists **All
-machines** first, then each machine. All machines shows the sections every machine may share (About
-you, for now) on General; a change there is signed with the device key and saved for all machines.
+machines** first, then each machine. All machines shows the sections every machine may share on
+General: About you, New sessions, Models (the judge's, the compactor's and Review's), Sessions,
+Workspaces folder, Updates and Connections (a switch for each of this machine's `https://`
+connections that names no vault entry). A change there is signed with the device key and saved for
+all machines, each section by its own Save, drawn once something differs; a model is chosen from
+this machine's providers, or `Each machine's own`. A section a machine changed is marked under it,
+`Changed on server` with **Use all machines' value** (on a machine's page: New sessions, Sessions,
+the judge, the compaction, Review, Connections, the workspaces folder, and on this machine's
+Version), a value it ignores is said above it, and Appearance and Version say what stays the
+machine's.
 On a machine, About you says once `The values of all machines, unless changed here.`; a field
 changed there is that machine's own: its edge takes the colour of what waits (`wait`), and one line
 under it says `Changed on server` with **Use all machines' value**, which drops it. A section that
@@ -2082,8 +2121,9 @@ on a real phone, by hand, and reported.
   state folder. Code it runs can sign what this device's role allows, a switch to Full among
   them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
   do not hold against code run in Full, which can sign a new one at any time.
-- **Configuration is synced for About you only** ("Settings for all machines"): the rest of the
-  settings follow in their own issues, and a project is registered by hand on each machine.
+- **Configuration is synced for About you and the settings a machine often overrides only**
+  ("Settings for all machines"): the rest of the settings follow in their own issues, and a project
+  is registered by hand on each machine.
 - **No session moves** between machines; no conversation travels.
 - **Files other than pictures** do not travel yet; submodules and Git LFS objects are not sent by a
   launch.
@@ -2096,15 +2136,26 @@ on a real phone, by hand, and reported.
   Ed25519 key is turned into its X25519 form to open what is sealed for it (as libsodium and age
   do), rather than a key of its own for it, which the member list would have to sign and send. The
   use of one key for both is studied (eprint 2021/509) and found sound for this.
+- **A connection that names a vault entry is not shared** (#1462), rather than shared without the
+  entry's place, which would reach the server without what it needs, or with the entry's name, a
+  machine's own.
+- **All machines' `https://` connections are one value** (#1462), a list: sharing or taking one
+  away is a change of the whole list, and the latest change wins.
+- **A choice this machine made stays its own** (#1462), even the same as all machines': it is
+  marked, and Use all machines' value drops it. Turning resuming off writes it in
+  `sessions.toml`, which before left the key out.
+- **The workspaces folder shared is only a `~/…` template** (#1462): `data` and `beside` stay each
+  machine's choice.
 - **About you's field written empty on a machine follows all machines again** (#1330): there is no
   way to say "nothing on this machine" while all machines say something; Use all machines' value
   writes the field empty.
 - **All machines is offered while the picker is** (#1330): with another runner in the list; with
   this machine alone, Settings is as it was.
 - **A section is said "This machine only." when nothing of it will be shared** (#1330's "Never"):
-  Providers, Forges, Vault, the folder of travelled projects, Developer mode and Check. Appearance,
-  the workspaces folder and Version hold settings that will be shared (the shade, a `~/…` folder,
-  the check for updates) beside the machine's own, and say nothing yet.
+  Providers, Forges, Vault, the folder of travelled projects, Developer mode and Check. Appearance
+  and Version say what stays the machine's (#1462: the desktop theme's colours, the update
+  channel); the workspaces folder and Version hold a setting all machines may share (a `~/…`
+  folder, the check for updates), marked once the machine chooses its own.
 - **A machine's state this machine cannot vouch for is the dashed ring** (#1249): the badge of a
   machine's mark follows the state the hub's list gives it (`online`, `offline`, `needs an
   update`); any other one is drawn as not known, the dashed ring. A hub that cannot be reached

@@ -183,6 +183,17 @@ pub enum Command {
     AboutShare {
         fields: Vec<(String, String)>,
     },
+    /// The values of all machines this machine follows (`settings.shared`), and the connections
+    /// they may share (`connection.list`).
+    AllSettingsRead,
+    /// Saves values of all machines by name (`settings.share`), signed with this device's key.
+    AllSettingsShare {
+        values: Vec<(String, String)>,
+    },
+    /// Drops the machine's own values: they follow all machines again (`settings.use_all`).
+    AllSettingsUseAll {
+        names: Vec<String>,
+    },
     /// The developer mode (`developer.show`).
     DeveloperRead,
     /// Switches the developer mode (`developer.set`).
@@ -1197,6 +1208,12 @@ pub enum Outcome {
         project: String,
         name: String,
         read: Result<SkillInfo, String>,
+    },
+    /// The values of all machines as the daemon says them, after a read (`written` none), a save
+    /// (`true`) or the way back to all machines' value (`false`).
+    AllSettings {
+        written: Option<bool>,
+        shown: Result<crate::all_settings::Shown, String>,
     },
     /// What the user says of themselves as the daemon says it, after a read (`written` false) or a
     /// save or a reset.
@@ -2766,6 +2783,50 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                     .map(|shown| crate::about::Shown::of(&shown)),
             }
         }
+        Command::AllSettingsRead => Outcome::AllSettings {
+            written: None,
+            shown: all_settings_shown(
+                connect,
+                answer(ask_alone(
+                    connect,
+                    "settings.shared",
+                    json!({}),
+                    bounds.quick,
+                )),
+                bounds.quick,
+            ),
+        },
+        Command::AllSettingsShare { values } => {
+            let values: serde_json::Map<String, Value> = values
+                .into_iter()
+                .map(|(name, text)| (name, Value::String(text)))
+                .collect();
+            Outcome::AllSettings {
+                written: Some(true),
+                shown: signed_by_device(
+                    connect,
+                    sign,
+                    None,
+                    "settings.share",
+                    json!({"values": values}),
+                    bounds.quick,
+                )
+                .map(|shown| crate::all_settings::Shown::of(&shown, &Value::Null)),
+            }
+        }
+        Command::AllSettingsUseAll { names } => Outcome::AllSettings {
+            written: Some(false),
+            shown: all_settings_shown(
+                connect,
+                answer(ask_alone(
+                    connect,
+                    "settings.use_all",
+                    json!({"names": names}),
+                    bounds.quick,
+                )),
+                bounds.quick,
+            ),
+        },
         Command::DeveloperRead | Command::DeveloperSet { .. } => {
             let (method, params, written) = match command {
                 Command::DeveloperSet { log } => ("developer.set", json!({"log": log}), true),
@@ -4186,6 +4247,18 @@ pub fn appearance_of(shown: &Value) -> Result<gpui_design_system::Appearance, St
 }
 
 /// The daemon's answer, or its sentence (or the window's) when there is none.
+/// What `settings.*` said, with the connections the machine lists, none when they cannot be read.
+fn all_settings_shown(
+    connect: &Connect,
+    shared: Result<Value, String>,
+    bound: std::time::Duration,
+) -> Result<crate::all_settings::Shown, String> {
+    let shared = shared?;
+    let connections =
+        answer(ask_alone(connect, "connection.list", json!({}), bound)).unwrap_or_default();
+    Ok(crate::all_settings::Shown::of(&shared, &connections))
+}
+
 fn answer(asked: Result<Result<Value, String>, String>) -> Result<Value, String> {
     match asked {
         Ok(answer) => answer,

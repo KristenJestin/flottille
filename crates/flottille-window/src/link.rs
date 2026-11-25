@@ -92,6 +92,8 @@ pub enum Update {
     WhatsNewShown(Value),
     /// What the user says of themselves changed, from any client: the settings page reads it again.
     AboutChanged,
+    /// What all machines hold, or what the machine holds itself, may have changed.
+    SharedChanged,
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
     /// An agent filed a finding, or one was marked filed: the settings page lists them again.
@@ -636,6 +638,8 @@ fn extensions_of(event: &Event) -> bool {
 /// it offers and the efforts of the one a session has.
 fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.")
+        // All machines' judge and new session are what `provider.list` says too.
+        || event.name == "settings.shared_changed"
         || event.name == "agent.started"
         || event.name == "agent.options_taken"
 }
@@ -668,6 +672,11 @@ fn settings_changed(event: &Event) -> Option<Update> {
             project: text("project"),
         },
         "about.changed" => Update::AboutChanged,
+        "settings.shared_changed"
+        | "provider.new_session_changed"
+        | "provider.judge_changed"
+        | "extension.changed"
+        | "connection.changed" => Update::SharedChanged,
         "developer.changed" => Update::DeveloperChanged,
         "developer.reported" => Update::FindingsChanged,
         "workspaces_folder.changed" => Update::WorkspacesFolderChanged {

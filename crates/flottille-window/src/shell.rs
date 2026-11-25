@@ -529,6 +529,7 @@ fn of_this_machine_s_pages(update: &Update) -> bool {
             | Update::Providers(..)
             | Update::TextChanged { .. }
             | Update::AboutChanged
+            | Update::SharedChanged
             | Update::DeveloperChanged
             | Update::FindingsChanged
             | Update::ToolResultsChanged
@@ -576,7 +577,10 @@ fn settings_of(
         cx.new(|_| ConnectionsSection::new(asks.clone(), vault.clone(), modals.clone()));
     let filing = cx.new(|cx| crate::findings::Filing::new(asks.clone(), window, cx));
     let check = cx.new(|_| crate::check::CheckSection::new(asks.clone()));
+    let all_settings = cx.new(|_| crate::all_settings::AllSettings::new(asks.clone()));
     let settings = cx.new(|cx| {
+        // Its blocks' marks and the sections of All machines follow what it read.
+        cx.observe(&all_settings, |_, _, cx| cx.notify()).detach();
         // A provider's row draws its sign-in from the section: it follows the section's list.
         cx.observe(&sign_in, |_, _, cx| cx.notify()).detach();
         SettingsPage::new(
@@ -594,6 +598,7 @@ fn settings_of(
             sign_in.clone(),
             filing,
             check,
+            all_settings,
         )
         .of_machine(machine.map(str::to_owned))
     });
@@ -3603,13 +3608,21 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::AboutChanged => self.actions.send(Command::AboutRead),
+            Update::SharedChanged => self.actions.send(Command::AllSettingsRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::FindingsChanged => self.actions.send(Command::FindingsRead),
             Update::UpdateShown(shown) => self.update_shown(&shown, cx),
             Update::WhatsNewShown(shown) => self.whats_new_shown(&shown, cx),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
-            Update::CompactionChanged => self.actions.send(Command::CompactionRead),
-            Update::SessionsChanged => self.actions.send(Command::SessionsRead),
+            // A machine's own setting changed: whether it follows all machines is read too.
+            Update::CompactionChanged => {
+                self.actions.send(Command::CompactionRead);
+                self.actions.send(Command::AllSettingsRead);
+            }
+            Update::SessionsChanged => {
+                self.actions.send(Command::SessionsRead);
+                self.actions.send(Command::AllSettingsRead);
+            }
             Update::VaultChanged => self.actions.send(Command::Vault),
             Update::ProgramSignIn {
                 program,
@@ -3636,6 +3649,9 @@ impl Shell {
                 self.actions.send(Command::WorkspacesFolderRead {
                     project: project.clone(),
                 });
+                if project.is_none() {
+                    self.actions.send(Command::AllSettingsRead);
+                }
                 if let Some(open) = self
                     .project_settings
                     .as_ref()
@@ -4371,6 +4387,12 @@ impl Shell {
                 }
                 self.version
                     .update(cx, |section, cx| section.answered(method, answer, cx));
+            }
+            Outcome::AllSettings { written, shown } => {
+                let section = self.settings.read(cx).all_settings().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(shown, written, window, cx)
+                });
             }
             Outcome::About { written, shown } => {
                 let editor = self.settings.read(cx).about().clone();
@@ -5244,6 +5266,7 @@ impl Shell {
     fn read_settings(&mut self) {
         self.actions.send(Command::RulesRead { project: None });
         self.actions.send(Command::AboutRead);
+        self.actions.send(Command::AllSettingsRead);
         self.actions.send(Command::JudgeRead);
         self.actions.send(Command::CompactionRead);
         self.actions.send(Command::DeveloperRead);
