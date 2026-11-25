@@ -1,6 +1,6 @@
 //! The sentences of a request's card, said the same in the window and on the phone: the daemon's
 //! reasons as sentences, who asked and who forwarded, what the judge said, and why a base request
-//! always comes back. One text for every client of a machine, so that two never say different
+//! always comes back; and the line that says what woke an agent. One text for every client of a machine, so that two never say different
 //! things of the same request.
 
 /// Why a base card comes back whatever the mode, said on it.
@@ -72,5 +72,76 @@ pub fn judged(by: &str, verdict: &str, reason: &str) -> String {
     match verdict {
         "failed" => format!("The judge ({by}) could not decide: {reason}"),
         _ => format!("The judge ({by}) asks you: {reason}"),
+    }
+}
+
+/// The line that says what woke the agent, from the text of a `subscription` delivery
+/// (`subscriptions.rs` of the daemon), the same in the window and on the phone: `checks of #12 ended, 1 failed`, `the timer: <why>`.
+pub fn woken_by(body: &str) -> String {
+    if let Some(rest) = body.strip_prefix("Woken by the timer: ") {
+        return format!("the timer: {}", rest.lines().next().unwrap_or_default());
+    }
+    let number = |text: &str| {
+        let rest = &text[text.find("pull request #")? + "pull request #".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        (!digits.is_empty()).then(|| format!("#{digits}"))
+    };
+    let pull = number(body).unwrap_or_else(|| "the pull request".into());
+    // A deadline the agent gave: `Nothing came in 5 min: your subscription to checks of …`.
+    let deadline = |rest: &str| {
+        let minutes = rest.split(" min").next().unwrap_or_default().to_owned();
+        let events = rest
+            .split_once("your subscription to ")
+            .and_then(|(_, rest)| rest.split(" of ").next())
+            .unwrap_or_default()
+            .to_owned();
+        (minutes, events)
+    };
+    if let Some(rest) = body.strip_prefix("Nothing came in ") {
+        let (minutes, events) = deadline(rest);
+        return format!("nothing came for the {events} of {pull} after {minutes} min");
+    }
+    if let Some(rest) = body.strip_prefix("Its deadline, ") {
+        let (minutes, events) = deadline(rest);
+        return format!("the deadline for the {events} of {pull} passed after {minutes} min");
+    }
+    if let Some(rest) = body.strip_prefix("Your subscription to ") {
+        let events = rest.split(" of pull request").next().unwrap_or_default();
+        let minutes = rest
+            .split_once("ended after ")
+            .and_then(|(_, rest)| rest.split_once(" min"))
+            .map_or_else(String::new, |(minutes, _)| format!(" after {minutes} min"));
+        return format!("nothing came for the {events} of {pull}{minutes}");
+    }
+    let mut said: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let one = if let Some(rest) = line.strip_prefix("The checks ended: ") {
+            let failed = rest
+                .trim_end_matches('.')
+                .split(", ")
+                .find_map(|part| part.strip_suffix(" failed"))
+                .filter(|count| *count != "0");
+            match failed {
+                Some(count) => format!("checks of {pull} ended, {count} failed"),
+                None => format!("checks of {pull} ended, all passed"),
+            }
+        } else if let Some(rest) = line.strip_prefix("A review by ") {
+            let who = rest.split([',', ':']).next().unwrap_or_default();
+            format!("review of {pull} by {who}")
+        } else if let Some(rest) = line.strip_prefix("A comment by ") {
+            let who = rest.split(':').next().unwrap_or_default();
+            format!("comment on {pull} by {who}")
+        } else if line.starts_with("The pull request #") && line.contains(" was ") {
+            let state = line.rsplit(" was ").next().unwrap_or_default();
+            format!("{pull} {}", state.split(':').next().unwrap_or_default())
+        } else {
+            continue;
+        };
+        said.push(one);
+    }
+    match said.is_empty() {
+        true => format!("news of {pull}"),
+        false => said.join("; "),
     }
 }
