@@ -2538,14 +2538,19 @@ on a real phone, by hand, and reported.
   or broken by hand, leaves the last one read whole in use (said once in the log).
 - Two machines that dial each other at once each hold two links: both keep the one the machine of
   the lower key dialled, and close the other (`linked already`). The other is let go, not cut
-  (#1491): it sends nothing more, what comes on it is turned away unserved with `linked already`,
-  what is under way on it either way is finished, and it closes once nothing is (a second at the
-  soonest, ten at the latest). A request sent on it goes on the link kept instead, once, waiting
-  ten seconds at most for it, only when it is known not to have been served: it was never written
-  whole on the link let go, or the other machine turned it away as `linked already`. One whose
-  link was cut after it was written (a machine of before, or the ten seconds past) may have been
-  served: it is not sent again, and fails as today. A link lost for any other reason (the machine
-  left the hub, was removed) says so as before.
+  (#1491): it sends nothing more, and is still read, whether it was linked first or second: what
+  comes on it is turned away unserved (its answer stream reset, which a machine of before reads
+  as a lost link, not a refusal). A request and its one answer under way on it either way are
+  finished; it closes once none is (a second at the soonest, ten at the latest), cutting an answer
+  given frame by frame (a client's request, a git fetch) or a tunnel's connection. A request sent
+  on it goes on the link kept instead, once, waiting ten seconds at most for it, only when it is
+  known not to have been served: it was never written whole on the link let go, or the other
+  machine turned it away; a tool call can so take ten seconds more before it is answered, or said
+  as a machine that cannot be reached now. A message kept for the other machine (the outbox) that
+  meets it stays kept, and goes on the link kept. One whose link was cut after it was written (a
+  machine of before, or the ten seconds past) may have been served: it is not sent again, and
+  fails as today. A link lost for any other reason (the machine left the hub, was removed) says
+  so as before.
 - The version handshake is the first stream of a link: the dialler sends its hello, the other
   answers its own, and each chooses or refuses by itself; the dialler closes a refused link. A
   link that hears nothing for 15 seconds is lost (each side says something every 5).
