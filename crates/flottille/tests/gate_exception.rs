@@ -371,6 +371,7 @@ fn an_action_that_can_never_be_asked_for_is_refused_with_no_ask() {
 fn failing_pull() -> Value {
     json!({"pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login", "state": "OPEN",
         "isDraft": false, "baseRefName": "main", "isCrossRepository": false,
+        "headRefOid": READ_HEAD,
         "url": "https://github.com/acme/app/pull/12", "reviewDecision": "APPROVED",
         "statusCheckRollup": [{"__typename": "CheckRun", "name": "secrets",
             "status": "COMPLETED", "conclusion": "FAILURE"}]}}}})
@@ -403,6 +404,10 @@ fn on_github(user: &User) {
         &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
     );
 }
+
+/// The merge of #12 past its protection, bound to the head the user read.
+const ADMIN_12: &str = "pr merge 12 -R github.com/acme/app --squash --admin --match-head-commit \
+                        1111111111111111111111111111111111111111";
 
 /// The `gh pr merge` lines the fake `gh` was run with.
 fn merges(user: &User) -> Vec<String> {
@@ -450,18 +455,12 @@ fn a_merge_past_failing_checks_asked_for_and_accepted_bypasses_the_protection_fo
     );
     let done = answer(&user, asked, "approval.approve");
     assert!(done.contains("was merged"), "{done}");
-    assert_eq!(
-        merges(&user),
-        ["pr merge 12 -R github.com/acme/app --squash --admin"]
-    );
+    assert_eq!(merges(&user), [ADMIN_12]);
     assert_eq!(exceptions(&user, &agent), ["merge-blocked"]);
 
     // The next merge of that pull request is no longer stopped by its checks.
     passed(&user, &mcp.call("forge", merge));
-    assert_eq!(
-        merges(&user)[1],
-        "pr merge 12 -R github.com/acme/app --squash --admin"
-    );
+    assert_eq!(merges(&user)[1], ADMIN_12);
     assert!(requests(&user).is_empty(), "a request was made");
 }
 
@@ -498,6 +497,7 @@ fn two_failing_pulls() -> Value {
     let pull = |number: u64, branch: &str| {
         json!({"number": number, "title": branch, "state": "OPEN", "isDraft": false,
             "baseRefName": "main", "isCrossRepository": false,
+            "headRefOid": format!("{number}").repeat(20),
             "url": format!("https://github.com/acme/app/pull/{number}"),
             "reviewDecision": "APPROVED",
             "statusCheckRollup": [{"__typename": "CheckRun", "name": "secrets",
@@ -532,10 +532,7 @@ fn an_exception_for_one_pull_request_never_merges_another() {
         json!({"action": "merge", "repository": ".", "exception": WHY}),
     ));
     answer(&user, asked, "approval.approve");
-    assert_eq!(
-        merges(&user),
-        ["pr merge 12 -R github.com/acme/app --squash --admin"]
-    );
+    assert_eq!(merges(&user), [ADMIN_12]);
 
     // The workspace switches to another branch, whose pull request is #13.
     let folder = user.path("data/flottille/workspaces/app/login");
@@ -630,10 +627,7 @@ fn the_ask_of_a_merge_says_the_pull_request_and_what_blocks_it_from_flottille_s_
         "{reasons:?}"
     );
     answer(&user, asked, "approval.approve");
-    assert_eq!(
-        merges(&user),
-        ["pr merge 12 -R github.com/acme/app --squash --admin"]
-    );
+    assert_eq!(merges(&user), [ADMIN_12]);
 }
 
 #[test]
@@ -859,7 +853,8 @@ fn a_second_ask_for_the_same_rule_replaces_the_held_exception_once_allowed() {
     assert!(done.contains("was merged"), "{done}");
     assert_eq!(
         merges(&user)[1],
-        "pr merge 13 -R github.com/acme/app --squash --admin"
+        "pr merge 13 -R github.com/acme/app --squash --admin --match-head-commit \
+         1313131313131313131313131313131313131313"
     );
     let listed = user
         .call("exception.list", json!({"session": agent}))
@@ -918,4 +913,124 @@ fn a_forced_push_left_to_the_remote_s_push_setting_is_never_asked_as_an_exceptio
 
     refused_with_no_ask(&user, &answer);
     assert!(answer.text.contains("refs/heads/"), "{}", answer.text);
+}
+
+#[test]
+fn a_merge_exception_is_never_asked_for_a_pull_request_whose_head_could_not_be_read() {
+    let user = User::with_fake_agent().with_fake_gh().with_allowing_judge();
+    on_github(&user);
+    // `gh pr view` answers what Flottille cannot read: no head, nothing verified.
+    let mut unread = failing_pull();
+    unread["view_omits"] = json!({"acme/app": ["number"]});
+    user.gh_script(unread);
+    let (_, mcp) = root(&user, "login");
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "merge", "repository": ".", "exception": WHY}),
+    );
+
+    refused_with_no_ask(&user, &answer);
+    assert!(
+        answer.text.contains("head commit") && answer.text.contains("ask again"),
+        "{}",
+        answer.text
+    );
+    assert!(merges(&user).is_empty());
+}
+
+/// The project `app` on Bitbucket Cloud (`acme/app`), its ready workspace `login` pushed.
+fn on_bitbucket(user: &User) {
+    let folder = app(user);
+    user.git(
+        &folder,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@bitbucket.org:acme/app.git",
+        ],
+    );
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let repositories: Vec<Value> = settings["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| json!({"path": r["path"], "forge": r["proposal"]}))
+        .collect();
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": repositories}),
+    )
+    .unwrap();
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(made["state"], "ready", "{made}");
+    user.git(
+        &user.path("data/flottille/workspaces/app/login"),
+        &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
+    );
+}
+
+/// Bitbucket Cloud's pull request #12 of `app/login` into `main` at `head` (none when the list
+/// omits it), its check `build` failing.
+fn bitbucket_at(head: Option<&str>) -> Value {
+    let mut source = json!({"branch": {"name": "app/login"},
+        "repository": {"full_name": "acme/app"}});
+    if let Some(head) = head {
+        source["commit"] = json!({"hash": head});
+    }
+    json!({
+        "pulls": {"acme/app": [{"id": 12, "title": "Login", "state": "OPEN", "source": source,
+            "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
+            "links": {"html": {"href": "https://bitbucket.org/acme/app/pull-requests/12"}}}]},
+        "checks": {"acme/app": {"12": [{"state": "FAILED", "name": "build"}]}},
+        "api": {"/repositories/acme/app/pullrequests/12": {"id": 12, "participants": []}}})
+}
+
+/// The `bkt pr merge` calls the fake `bkt` was run with.
+fn bkt_merges(user: &User) -> usize {
+    user.bkt_received()
+        .iter()
+        .filter(|call| call["args"][0] == "pr" && call["args"][1] == "merge")
+        .count()
+}
+
+#[test]
+fn a_bitbucket_merge_exception_is_bound_to_the_head_the_user_read() {
+    let user = User::with_fake_agent()
+        .with_fake_bkt()
+        .with_allowing_judge();
+    on_bitbucket(&user);
+    let (agent, mcp) = root(&user, "login");
+    let ask = json!({"action": "merge", "repository": ".", "exception": WHY});
+
+    // The list says no head: there is nothing to bind the exception to, so it is never asked.
+    user.bkt_script(bitbucket_at(None));
+    let unread = mcp.call("forge", ask.clone());
+    refused_with_no_ask(&user, &unread);
+    assert!(unread.text.contains("head commit"), "{}", unread.text);
+
+    // At a head it reads, the card says it, and the merge the user allows is done.
+    user.bkt_script(bitbucket_at(Some(READ_HEAD)));
+    let asked = held(&mcp.call("forge", ask));
+    let card = reasons_of(&user, asked)[0].clone();
+    assert!(card.contains("1111111"), "{card}");
+    let done = answer(&user, asked, "approval.approve");
+    assert!(done.contains("was merged"), "{done}");
+    assert_eq!(exceptions(&user, &agent), ["merge-blocked"]);
+    assert_eq!(bkt_merges(&user), 1);
+
+    // A commit pushed since: the exception no longer covers it.
+    user.bkt_script(bitbucket_at(Some(NEW_HEAD)));
+    let merged = mcp.call("forge", json!({"action": "merge", "repository": "."}));
+    assert!(merged.error, "{}", merged.text);
+    assert!(merged.text.contains("changed since"), "{}", merged.text);
+    assert_eq!(bkt_merges(&user), 1);
 }

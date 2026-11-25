@@ -6925,6 +6925,58 @@ mod tests {
     }
 
     #[test]
+    fn a_store_of_the_alpha_with_exceptions_of_no_scope_migrates_and_grants_one() {
+        // `session_exceptions` as the pre-release v0.4.1-alpha.feat-1220-one-off-exception.37
+        // made it, its last migration.
+        const RELEASED: &str = "
+    CREATE TABLE session_exceptions (
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        rule       TEXT NOT NULL,
+        why        TEXT NOT NULL,
+        request    INTEGER NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (agent, rule)
+    ) STRICT;
+";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE session_exceptions"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.execute_batch(RELEASED).unwrap();
+        old.pragma_update(None, "user_version", previous + 1)
+            .unwrap();
+        drop(old);
+
+        let mut store = Store::open(&path).unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let scope = Scope {
+            repository: ".".into(),
+            branch: "app/login".into(),
+            pull: Some(12),
+            head: Some("1111111111111111111111111111111111111111".into()),
+            blocks: Some("its checks fail (secrets)".into()),
+        };
+        let (granted, _) = store
+            .grant_exception(&agent.id, "merge-blocked", "a check refuses it", 4, &scope)
+            .unwrap();
+
+        assert!(granted.is_some());
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let listed = store.exceptions_of(&agent.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].scope, scope);
+    }
+
+    #[test]
     fn an_exception_lasts_while_its_session_does_and_is_its_own() {
         let mut store = Store::open_in_memory().unwrap();
         let agent = an_agent();
