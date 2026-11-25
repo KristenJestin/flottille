@@ -952,3 +952,76 @@ fn a_paused_following_says_so_in_the_rail_and_resume_resumes_it(cx: &mut TestApp
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn a_following_says_what_its_session_waits_for_you_and_folds_it_away_once_answered(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    script(&user, pull());
+    user.fake_script(json!({"turns": [
+        {"when": "Sign in to staging.", "do": [
+            {"mcp": {"tool": "vault", "arguments": {"action": "ask", "name": "staging-login",
+                "why": "to sign in to staging"}}},
+            {"say": "Waiting for the vault entry."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    user.call("agent.mode", json!({"agent": lead, "mode": "full"}))
+        .unwrap();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"title": "Staging", "brief": "Sign in to staging.", "kind": "led"}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+
+    until(
+        &shell,
+        cx,
+        "the rail says what the session waits for",
+        |cx| {
+            rows(&page, cx)
+                .iter()
+                .any(|row| row.following && present(cx, &format!("subscription-waits-{}", row.id)))
+        },
+    );
+    settle(cx);
+    let id = rows(&page, cx)[0].id.clone();
+    let number = user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        label(cx, &format!("subscription-waits-{id}")).unwrap(),
+        format!(
+            "Waits for you: request #{number}, a vault entry asked: staging-login: to sign in to staging"
+        )
+    );
+
+    user.call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    until(&shell, cx, "the wait is over", |cx| {
+        rows(&page, cx)
+            .iter()
+            .all(|row| !present(cx, &format!("subscription-waits-{}", row.id)))
+    });
+    rest(&shell, cx);
+    assert!(
+        !present(cx, &format!("subscription-waits-{id}")),
+        "the line folded away"
+    );
+    eventually("the agents at rest", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["state"] != "working" && a["state"] != "starting")
+    });
+    rest(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
