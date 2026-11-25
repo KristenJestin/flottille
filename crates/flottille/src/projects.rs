@@ -570,6 +570,7 @@ async fn remove_marked(
     drop(projects);
     let sessions: Vec<String> = all.iter().map(|agent| agent.id.clone()).collect();
     crate::drafts::forget_project(daemon, name, &sessions);
+    crate::notification_settings::forget_project(daemon, name);
     emit(daemon, "project.removed", json!({"name": name}))?;
     Ok(json!({
         "removed": name,
