@@ -586,11 +586,7 @@ fn the_rules_at_their_limit_of_four_byte_characters_fit_a_sealed_copy() {
 #[test]
 fn a_hub_keeps_every_name_of_all_machines_and_the_next_ones() {
     // The settings of part 2 and part 3 together are more than the 32 of before.
-    assert!(
-        flottille_link::MOST_VALUES >= 64,
-        "{}",
-        flottille_link::MOST_VALUES
-    );
+    const { assert!(flottille_link::MOST_VALUES >= 64) };
 }
 
 #[test]
