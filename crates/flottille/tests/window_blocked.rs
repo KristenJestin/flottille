@@ -245,14 +245,34 @@ fn label(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> Option<String> 
     })
 }
 
-/// The height of the frame a row of the tree is drawn in, `None` when it is not drawn.
-fn frame_height(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+/// Where a row is drawn: in its project's level, or in the "Blocked by others" group.
+const IN_PROJECT: &str = "fold-project-atlas";
+const IN_GROUP: &str = "blocked-sessions";
+
+/// The height of the frame a row of the tree is drawn in within `scope`, `None` when it is not
+/// drawn there.
+fn frame_height(
+    shell: &Entity<Shell>,
+    id: &str,
+    scope: &'static str,
+    cx: &mut VisualTestContext,
+) -> Option<f32> {
     let row = shell.read_with(cx, |s, _| s.session(id).map(|row| row.entity_id()))?;
     let frame = gpui_kit::ElementId::Name(format!("tree-row-{}", row.as_u64()).into());
     cx.update(|window, _| {
         window
+            .within(scope)
             .try_find(frame)
             .map(|found| f32::from(found.bounds().size.height))
+    })
+}
+
+/// How high the "Blocked by others" group's fold is drawn: none while it is folded.
+fn group_height(cx: &mut VisualTestContext) -> f32 {
+    cx.update(|window, _| {
+        window
+            .try_find(gpui_kit::ElementId::Name("fold-blocked".into()))
+            .map_or(0., |found| f32::from(found.bounds().size.height))
     })
 }
 
@@ -267,7 +287,7 @@ fn a_blocked_root_leaves_its_project_for_the_blocked_group(cx: &mut TestAppConte
         label(cx, session_id(&id)).is_some() && label(cx, session_id(&other)).is_some()
     });
     settle(cx);
-    let full = frame_height(&shell, &id, cx).expect("its row");
+    let full = frame_height(&shell, &id, IN_PROJECT, cx).expect("its row");
 
     wait_for_maya(&user, &id, &mcp);
     until(&shell, cx, "the row leaves its project", |cx| {
@@ -278,13 +298,19 @@ fn a_blocked_root_leaves_its_project_for_the_blocked_group(cx: &mut TestAppConte
     assert_eq!(listed(&shell, cx), [other.clone()]);
     assert_eq!(blocked(&shell, cx), [id.clone()]);
     after(cx, Duration::from_millis(70));
-    let folding = frame_height(&shell, &id, cx).expect("still drawn while it folds away");
+    let folding =
+        frame_height(&shell, &id, IN_PROJECT, cx).expect("still drawn while it folds away");
     assert!(
         folding > 0. && folding < full,
         "it folds away: {folding} of {full}"
     );
     settle(cx);
-    assert_eq!(frame_height(&shell, &id, cx), None, "the group is folded");
+    assert_eq!(
+        frame_height(&shell, &id, IN_PROJECT, cx),
+        None,
+        "gone from its project"
+    );
+    assert!(group_height(cx) < 1., "the group is folded");
     let mark = shell.read_with(cx, |s, cx| s.session(&id).unwrap().read(cx).mark());
     assert_eq!(mark, Some(AgentState::Blocked));
 }
@@ -304,16 +330,13 @@ fn the_blocked_group_says_who_and_is_folded_by_default(cx: &mut TestAppContext) 
     assert_eq!(label(cx, blocked_who_id()).as_deref(), Some("1 · Maya"));
     let open = shell.read_with(cx, |s, cx| s.blocked().unwrap().read(cx).is_open());
     assert!(!open, "folded by default");
-    assert_eq!(
-        frame_height(&shell, &id, cx),
-        None,
-        "its row is folded away"
-    );
+    assert!(group_height(cx) < 1., "its row is folded away");
 
     // Unfolded, the daemon keeps it with the sidebar's folds.
     cx.update(|window, cx| window.click(blocked_id(), cx));
     settle(cx);
-    assert!(frame_height(&shell, &id, cx).is_some_and(|h| h > 0.));
+    assert!(group_height(cx) > 1., "unfolded");
+    assert!(frame_height(&shell, &id, IN_GROUP, cx).is_some_and(|h| h > 0.));
     eventually("the fold kept", || {
         user.call("window.get", json!({})).unwrap()["state"]["sidebar"]["blocked"] == true
     });
@@ -332,7 +355,7 @@ fn a_blocked_session_comes_back_on_top_of_its_project_by_itself(cx: &mut TestApp
     });
     cx.update(|window, cx| window.click(blocked_id(), cx));
     settle(cx);
-    let full = frame_height(&shell, &id, cx).expect("its row in the group");
+    let full = frame_height(&shell, &id, IN_GROUP, cx).expect("its row in the group");
 
     maya_reviews(&user, &id);
     until(&shell, cx, "the row back in its project", |cx| {
@@ -342,13 +365,13 @@ fn a_blocked_session_comes_back_on_top_of_its_project_by_itself(cx: &mut TestApp
     // On top: it had the last exchange, its turn the review woke.
     assert_eq!(listed(&shell, cx), [id.clone(), other.clone()]);
     after(cx, Duration::from_millis(70));
-    let arriving = frame_height(&shell, &id, cx).expect("drawn as it arrives");
+    let arriving = frame_height(&shell, &id, IN_PROJECT, cx).expect("drawn as it arrives");
     assert!(
         arriving > 0. && arriving < full,
         "it unfolds on top of its project: {arriving} of {full}"
     );
     settle(cx);
-    assert_eq!(frame_height(&shell, &id, cx), Some(full));
+    assert_eq!(frame_height(&shell, &id, IN_PROJECT, cx), Some(full));
     assert!(blocked(&shell, cx).is_empty());
 }
 
@@ -464,4 +487,64 @@ fn a_blocked_session_s_page_says_who_and_since_when(cx: &mut TestAppContext) {
             "Waits for Maya: review of #12, since {at}. It comes back by itself when they answer."
         )
     );
+}
+
+/// One step of the window as the platform runs it; how many animation frames were asked.
+fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> usize {
+    shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    cx.executor().advance_clock(by);
+    cx.run_until_parked();
+    let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    asked
+}
+
+/// Runs the window until it asked for no animation frame over a second of its clock and two of
+/// real time, as `window_at_rest.rs` does.
+fn quiet(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    const STEP: Duration = Duration::from_millis(16);
+    let began = Instant::now();
+    let mut last_asked = began;
+    let mut still = Duration::ZERO;
+    while still < Duration::from_secs(1) || last_asked.elapsed() < Duration::from_secs(2) {
+        assert!(began.elapsed() < Duration::from_secs(60), "never at rest");
+        if step(shell, STEP, cx) == 0 {
+            still += STEP;
+        } else {
+            still = Duration::ZERO;
+            last_asked = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_blocked_session_s_page_and_its_group(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user);
+    let (id, mcp) = start(&user, "open the docs pull request");
+    wait_for_maya(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the group", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
+    cx.update(|window, cx| window.click(blocked_id(), cx));
+    quiet(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the banner", |cx| {
+        label(cx, "session-blocked".into()).is_some()
+    });
+    quiet(&shell, cx);
+
+    cx.update(|window, _| window.reset_layout_stats());
+    let mut asked = 0;
+    let mut gone = Duration::ZERO;
+    while gone < Duration::from_secs(10) {
+        asked += step(&shell, Duration::from_millis(16), cx);
+        gone += Duration::from_millis(16);
+    }
+    let drawn = cx.update(|window, _| window.layout_stats().frames);
+    assert_eq!((drawn, asked), (0, 0), "(frames drawn, frames asked)");
 }
