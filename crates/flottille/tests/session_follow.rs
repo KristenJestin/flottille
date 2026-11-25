@@ -860,15 +860,39 @@ fn held_for_the_user(user: &User, agent: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The deliveries of `kind` stored for `agent`, newest first, with their state.
-fn delivered_with_state(user: &User, agent: &str, kind: &str) -> Vec<(String, String)> {
+/// The deliveries of `kind` stored for `agent`, newest first: their body and their id.
+fn delivered_with_id(user: &User, agent: &str, kind: &str) -> Vec<(String, String)> {
     store(user)
         .last_deliveries(agent, 64)
         .unwrap()
         .into_iter()
         .filter(|delivery| delivery.kind == kind)
-        .map(|delivery| (delivery.body, delivery.state))
+        .map(|delivery| (delivery.body, delivery.id))
         .collect()
+}
+
+/// The delivery `id` rings nobody: it waits, queued, for what wakes `agent` next, and is played
+/// in that prompt beside it, never alone. The session told of the answer plays a turn, whose end
+/// wakes the lead: that wake takes it.
+fn taken_with_the_next_wake(user: &User, agent: &str, id: &str) {
+    let delivery = store(user).delivery(id).unwrap().unwrap();
+    assert_eq!(delivery.urgency, "between-turns", "{}", delivery.body);
+    eventually("the next wake takes it", || {
+        store(user).delivery(id).unwrap().unwrap().state == "sent"
+    });
+    let prompts = store(user)
+        .last_agent_events(agent, "agent.prompted", 64)
+        .unwrap();
+    let with = prompts
+        .iter()
+        .find(|prompt| {
+            prompt.data["deliveries"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|i| i == id))
+        })
+        .unwrap_or_else(|| panic!("no prompt took {id}"));
+    let ids = with.data["deliveries"].as_array().unwrap();
+    assert!(ids.len() > 1, "played alone: {ids:?}");
 }
 
 /// The kind of the delivery that tells a lead how the user answered its led session's request.
@@ -1063,15 +1087,15 @@ fn the_lead_is_told_on_its_next_wake_when_the_user_dismisses_the_vault_entry() {
     ]}));
     let (lead, _, _, _) = followed(&user, "Fix the login.");
     let number = vault_asks(&user)[0]["ask"].as_u64().unwrap();
-    let lead_turns = turns(&user, &lead);
 
+    eventually("the lead took its first wake", || turns(&user, &lead) == 2);
     user.call("vault.ask_dismiss", json!({"ask": number}))
         .unwrap();
 
     eventually("the lead is told", || {
         !delivered(&user, &lead, ANSWERED).is_empty()
     });
-    let (body, state) = delivered_with_state(&user, &lead, ANSWERED).remove(0);
+    let (body, id) = delivered_with_id(&user, &lead, ANSWERED).remove(0);
     for word in [
         "\"Login\"",
         &format!("request #{number}"),
@@ -1080,10 +1104,7 @@ fn the_lead_is_told_on_its_next_wake_when_the_user_dismisses_the_vault_entry() {
     ] {
         assert!(body.contains(word), "{word}: {body}");
     }
-    // Queued for its next wake: it does not ring the lead.
-    settle();
-    assert_eq!(state, "queued", "{body}");
-    assert_eq!(turns(&user, &lead), lead_turns);
+    taken_with_the_next_wake(&user, &lead, &id);
 }
 
 #[test]
@@ -1105,17 +1126,18 @@ fn the_lead_is_told_on_its_next_wake_when_the_user_denies_a_held_call() {
         .as_u64()
         .unwrap();
 
+    eventually("the lead took its first wake", || turns(&user, &lead) == 2);
     user.call("approval.deny", json!({"number": number}))
         .unwrap();
 
     eventually("the lead is told", || {
         !delivered(&user, &lead, ANSWERED).is_empty()
     });
-    let (body, state) = delivered_with_state(&user, &lead, ANSWERED).remove(0);
+    let (body, id) = delivered_with_id(&user, &lead, ANSWERED).remove(0);
     for word in ["\"Login\"", &format!("request #{number}"), "denied"] {
         assert!(body.contains(word), "{word}: {body}");
     }
-    assert_eq!(state, "queued", "{body}");
+    taken_with_the_next_wake(&user, &lead, &id);
 }
 
 #[test]
