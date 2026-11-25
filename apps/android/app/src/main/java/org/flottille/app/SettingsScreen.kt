@@ -79,7 +79,10 @@ fun SettingsScreen(view: PhoneView, onBack: () -> Unit, onRemove: () -> Unit, ba
                     Label("Role: ${view.role}", style = Type.Label, color = palette.mute)
                 }
             }
-XX, style = Type.Heading, color = palette.mute)
+            Entrance(1) { Notifications(kept, background) }
+            Entrance(2) {
+                Column(verticalArrangement = Arrangement.spacedBy(Space.Sm)) {
+                    Label("Devices of your hub", style = Type.Heading, color = palette.mute)
                     view.members.forEach { member ->
                         Row(
                             Modifier
