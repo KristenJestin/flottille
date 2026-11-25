@@ -319,6 +319,23 @@ struct Session {
     created: u64,
     /// The agent that leads it (`led_by`), of the same machine.
     led_by: Option<String>,
+    subject: Option<SubjectView>,
+    /// The user named it (`titled_by`).
+    renamed: bool,
+}
+
+/// A line's `subject` as the daemon gives it; none while it is `null`.
+fn subject_view(subject: &Value) -> Option<SubjectView> {
+    let kind = subject["kind"].as_str()?;
+    let key = subject["key"].as_str();
+    Some(SubjectView {
+        kind: kind.to_owned(),
+        key: key
+            .filter(|_| kind != "free")
+            .unwrap_or_default()
+            .to_owned(),
+        line: words::subject_line(kind, subject["title"].as_str(), key),
+    })
 }
 
 /// The tunnels that ended kept in `tunnels_ended`, the newest.
@@ -501,6 +518,8 @@ impl View {
                     last,
                     created: agent["created_at"].as_u64().unwrap_or(last),
                     led_by: agent["led_by"].as_str().map(str::to_owned),
+                    subject: subject_view(&agent["subject"]),
+                    renamed: agent["titled_by"] == "user",
                 },
             );
         }
@@ -661,8 +680,18 @@ impl View {
                         last: at,
                         created: at,
                         led_by: data["led_by"].as_str().map(str::to_owned),
+                        subject: None,
+                        renamed: false,
                     },
                 );
+            }
+            // Only an update that says the subject changes it: others say other things.
+            "agent.updated" => {
+                if let Some(subject) = data.get("subject")
+                    && let Some(session) = self.sessions.get_mut(&key)
+                {
+                    session.subject = subject_view(subject);
+                }
             }
             "agent.detached" => {
                 if let Some(session) = self.sessions.get_mut(&key) {
@@ -672,6 +701,8 @@ impl View {
             "agent.titled" => {
                 if let Some(session) = self.sessions.get_mut(&key) {
                     session.title = text(&data["title"]);
+                    // The store keeps a title of the user's over the agent's: none follows it.
+                    session.renamed = data["by"] == "user";
                 }
                 if let Some((_, title)) = self.children.get_mut(&key) {
                     *title = text(&data["title"]);
@@ -910,8 +941,8 @@ impl View {
                         .as_deref()
                         .map(|lead| self.root_of(machine, lead))
                         .unwrap_or_default(),
-                    subject: None,
-                    renamed: false,
+                    subject: session.subject.clone(),
+                    renamed: session.renamed,
                 });
         }
         let projects = projects

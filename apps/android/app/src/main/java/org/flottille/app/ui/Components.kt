@@ -192,9 +192,9 @@ fun Unfold(animated: Boolean, modifier: Modifier = Modifier, content: @Composabl
 
 /** A small tag, such as the machine a session runs on. */
 @Composable
-fun Tag(text: String, modifier: Modifier = Modifier) {
+fun Tag(text: String, modifier: Modifier = Modifier, vertical: Dp = 2.dp) {
     val palette = LocalPalette.current
-    Box(modifier.background(palette.card2, RoundedCornerShape(6.dp)).padding(horizontal = Space.Sm, vertical = 2.dp)) {
+    Box(modifier.background(palette.card2, RoundedCornerShape(6.dp)).padding(horizontal = Space.Sm, vertical = vertical)) {
         Label(text, style = Type.Small, color = palette.mute)
     }
 }
