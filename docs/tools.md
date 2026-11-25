@@ -1943,8 +1943,11 @@ it with `session_send`. **The pilot is told, it does not answer**: the request s
 their inbox and on the session's card, and no tool lets the pilot allow, deny or fill it. When the
 user answers it (allowed, denied, an entry set or dismissed, a connection written with values of
 their own), each pilot of the session is told with what wakes it next: a delivery
-`session-request-answered` (`Session "Login" (agent …): its request #345, a vault entry asked:
-staging-login, is answered: the user dismissed it.`), queued, which rings nobody. A session nobody
+`session-request-answered` (`Session "Login" (agent …): its vault request #345, a vault entry
+asked: staging-login, is answered: the user dismissed it.`), queued, which rings nobody: one per
+request, its kind (`call`, `connection`, `vault`) in its id and its words, since two kinds count
+their numbers apart. An entry the session's project cannot see is never said: the pilot is told
+the request is `answered`. A session nobody
 leads is not changed by any of it. A turn cancelled because a delivery was not taken in time wakes nobody: the turn that
 takes that delivery does, once.
 Its words are data, not instructions. Nothing reads the text of a message to find a question:

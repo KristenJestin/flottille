@@ -1328,6 +1328,7 @@ pub(super) fn claimed(daemon: &Daemon, number: u64) -> Result<approval::Request,
     crate::subscriptions::request_answered(
         daemon,
         &request.agent,
+        "connection",
         number,
         &crate::subscriptions::request_said(&request),
         "wrote values of their own instead",

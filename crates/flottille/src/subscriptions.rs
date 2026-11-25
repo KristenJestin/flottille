@@ -497,6 +497,14 @@ impl UserRequest {
     }
 }
 
+/// The kind of a request held for the user, by the tool it holds.
+pub(crate) fn kind_of(tool: &str) -> &'static str {
+    match tool {
+        "connections" => "connection",
+        _ => "call",
+    }
+}
+
 /// What a request held for the user asks, in a few words: `a call held for approval: fs_read:
 /// <reasons>`, `a connection asked: <what it writes>`.
 pub(crate) fn request_said(request: &approval::Request) -> String {
@@ -532,10 +540,7 @@ pub(crate) fn waiting_for_the_user(daemon: &Daemon, session: &str) -> Vec<UserRe
         .into_iter()
         .filter(|request| request.held_by == approval::USER)
         .map(|request| UserRequest {
-            kind: match request.tool.as_str() {
-                "connections" => "connection",
-                _ => "call",
-            },
+            kind: kind_of(&request.tool),
             number: request.number,
             at: request.created_at,
             what: said(request_said(&request)),
@@ -558,9 +563,25 @@ pub(crate) fn waiting_for_the_user(daemon: &Daemon, session: &str) -> Vec<UserRe
 /// request of it.
 pub const REQUEST_ANSWERED: &str = "session-request-answered";
 
-/// The user answered the request `number` of the agent `session`, which asked `what`: each agent
-/// that leads it is told `the user <how>`, with what wakes it next; nothing rings it for this.
-pub fn request_answered(daemon: &Daemon, session: &str, number: u64, what: &str, how: &str) {
+/// The id of the delivery that says a lead's following its session's request answered.
+///
+/// The kind is in it: a vault ask's number is an event's, a call's the approval counter's, and two
+/// can be equal, so one answer would otherwise be dropped as the other's duplicate.
+fn answered_id(following: &str, kind: &str, number: u64) -> String {
+    format!("{REQUEST_ANSWERED}-{following}-{kind}-{number}")
+}
+
+/// The user answered the request `number`, of `kind` (`call`, `connection` or `vault`), of the
+/// agent `session`, which asked `what`: each agent that leads it is told `the user <how>`, with
+/// what wakes it next; nothing rings it for this.
+pub fn request_answered(
+    daemon: &Daemon,
+    session: &str,
+    kind: &str,
+    number: u64,
+    what: &str,
+    how: &str,
+) {
     let followers = followers(daemon, session);
     if followers.is_empty() {
         return;
@@ -571,7 +592,7 @@ pub fn request_answered(daemon: &Daemon, session: &str, number: u64, what: &str,
     let env = std::env::vars_os().collect();
     let body = secrets::mask(
         &format!(
-            "Session {}: its request #{number}, {what}, is answered: the user {how}.",
+            "Session {}: its {kind} request #{number}, {what}, is answered: the user {how}.",
             crate::tree::named(&agent)
         ),
         &env,
@@ -581,7 +602,7 @@ pub fn request_answered(daemon: &Daemon, session: &str, number: u64, what: &str,
             daemon,
             &follower.agent,
             REQUEST_ANSWERED,
-            Some(format!("{REQUEST_ANSWERED}-{}-{number}", follower.id)),
+            Some(answered_id(&follower.id, kind, number)),
             &body,
         );
     }
@@ -1226,6 +1247,21 @@ mod tests {
         let mut review = comment("alice", false, false);
         review.kind = "review";
         assert!(!matches(&anyone, &review));
+    }
+}
+
+#[cfg(test)]
+mod answers {
+    use super::answered_id;
+
+    #[test]
+    fn two_requests_of_different_kinds_with_the_same_number_have_two_deliveries() {
+        // A vault ask's number is an event's, a call's the approval counter's: they can be equal.
+        let ids = ["vault", "call", "connection"].map(|kind| answered_id("s", kind, 7));
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
     }
 }
 

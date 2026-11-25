@@ -335,6 +335,7 @@ async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: 
     crate::subscriptions::request_answered(
         daemon,
         &request.agent,
+        crate::subscriptions::kind_of(&request.tool),
         number,
         &crate::subscriptions::request_said(&request),
         match decision {

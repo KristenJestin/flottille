@@ -581,6 +581,22 @@ const COMMANDS_EVERY: Duration = Duration::from_secs(1);
 /// breaks sooner (a request that keeps failing) waits longer each time.
 const HEALTHY: Duration = Duration::from_secs(10);
 
+/// Whether the event is a request of a session a following follows, asked or answered: it
+/// changes what the following says the session waits for (#1305). An ask answered names the
+/// sessions that joined it, which wait on it as the one that asked.
+fn request_of_a_followed(name: &str, data: &Value, followed: &HashSet<String>) -> bool {
+    let of = |agent: &Value| agent.as_str().is_some_and(|agent| followed.contains(agent));
+    (name.starts_with("approval.")
+        || matches!(
+            name,
+            "vault.asked" | "vault.ask_answered" | "vault.ask_joined"
+        ))
+        && (of(&data["agent"])
+            || data["joined"]
+                .as_array()
+                .is_some_and(|joined| joined.iter().any(of)))
+}
+
 /// Starts the link of the session of `root`, showing the last `pages` pages of `shown`'s
 /// conversation.
 pub fn spawn(
@@ -815,13 +831,7 @@ impl Link {
             }
             // A request of a session the tree follows, asked or answered, changes what its
             // following says the session waits for (#1305).
-            if followed.contains(agent)
-                && (name.starts_with("approval.")
-                    || matches!(
-                        name,
-                        "vault.asked" | "vault.ask_answered" | "vault.ask_joined"
-                    ))
-            {
+            if request_of_a_followed(name, data, &followed) {
                 stale.subscriptions = true;
                 stale.since.get_or_insert_with(Instant::now);
             }
@@ -1116,5 +1126,29 @@ impl Link {
             self.send(SessionUpdate::PlaceTicket(read));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ask_answered_touches_the_following_of_a_session_that_only_joined_it() {
+        let followed = HashSet::from(["led".to_owned()]);
+        let answered = json!({"agent": "asker", "ask": 7, "joined": ["led"]});
+        assert!(request_of_a_followed(
+            "vault.ask_answered",
+            &answered,
+            &followed
+        ));
+        let elsewhere = json!({"agent": "asker", "ask": 7, "joined": ["other"]});
+        assert!(!request_of_a_followed(
+            "vault.ask_answered",
+            &elsewhere,
+            &followed
+        ));
+        let own = json!({"agent": "led", "ask": 7});
+        assert!(request_of_a_followed("vault.ask_answered", &own, &followed));
     }
 }
