@@ -501,7 +501,8 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                 )
             };
             let slot = value.as_object().ok_or_else(refuse)?;
-            if !slot["provider"].is_string()
+            // `get`: a map indexed at a key it lacks panics.
+            if !slot.get("provider").is_some_and(Value::is_string)
                 || slot.iter().any(|(key, value)| {
                     !["provider", "model", "effort"].contains(&key.as_str()) || !value.is_string()
                 })
