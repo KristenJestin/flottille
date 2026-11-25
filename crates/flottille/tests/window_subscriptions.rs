@@ -1085,6 +1085,9 @@ fn a_child_asks_below_a_followed_session<'a>(
         {"when": "Fix the login.", "do": [{"say": "Ready."}]}
     ]}));
     let (lead, mcp) = lead(user);
+    // Nothing is judged for the lead: its launch starts the session at once.
+    user.call("agent.mode", json!({"agent": lead, "mode": "full"}))
+        .unwrap();
     let (shell, cx) = open_session(user, &lead, cx);
     let page = session_page(&shell, cx);
     let (session, second) = launch(user, &mcp, "Login", "Fix the login.", "led");
