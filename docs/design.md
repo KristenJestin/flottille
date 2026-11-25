@@ -1423,7 +1423,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   agent should know** (free text, at most 8,000 characters, its placeholder invented examples), each
   labelled and marked optional; Reset forgets all three, Save unfolds beside it once a field changed,
   and a save or a reset is a toast ("About you saved · Agents started from now on read it."); the
-  section enters with the page. Then **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
+  section enters with the page. With a hub, About you is also Settings of **All machines**, whose
+  values every machine uses unless it changes a field (`remote.md`, "Settings for all machines"). Then **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
   Flottille **Shade**, Light or Dark, unfolding under it, each a segmented choice; off an Omarchy
   desktop the Omarchy choice is shown disabled, its tooltip saying why. Then **Workspaces folder**
   ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In

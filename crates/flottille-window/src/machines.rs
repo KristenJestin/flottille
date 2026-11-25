@@ -1359,12 +1359,52 @@ pub fn picker(
     on_toggle: impl Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
     on_choose: impl Fn(Option<String>, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 ) -> gpui_kit::AnyElement {
-    use gpui_design_system::{Dropdown, MenuItem};
+    picker_of(
+        id, entries, choices, chosen, None, open, on_toggle, on_choose,
+    )
+}
+
+/// The entry of Settings' picker before the machines: the values every machine uses
+/// (`docs/remote.md`, "Settings for all machines"), whether it is chosen, and what choosing it
+/// does.
+pub struct AllMachines {
+    pub chosen: bool,
+    pub on_choose: Box<dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static>,
+}
+
+/// What the picker says of All machines, under its name.
+pub const ALL_MACHINES_DETAIL: &str = "What every machine uses, unless it changes it";
+
+/// [`picker`], All machines first when `all` is given: chosen, it is what the picker shows, and no
+/// machine is checked.
+#[allow(clippy::too_many_arguments)]
+pub fn picker_of(
+    id: &'static str,
+    entries: &'static str,
+    choices: &[Choice],
+    chosen: usize,
+    all: Option<AllMachines>,
+    open: bool,
+    on_toggle: impl Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+    on_choose: impl Fn(Option<String>, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+) -> gpui_kit::AnyElement {
+    use gpui_design_system::{Dropdown, Icon, MenuItem};
     use gpui_kit::{IntoElement as _, div};
     let current = choices.get(chosen).or(choices.first());
     let Some(current) = current else {
         return div().into_any_element();
     };
+    let on_all = all.as_ref().is_some_and(|all| all.chosen);
+    let chosen = if on_all { usize::MAX } else { chosen };
+    let first = all.map(|all| {
+        let on_choose = all.on_choose;
+        MenuItem::new(format!("{entries}-all"), "All machines")
+            .leading(Icon::Lucide("network"))
+            .detail(ALL_MACHINES_DETAIL)
+            .selected(all.chosen)
+            .checked(all.chosen)
+            .on_click(move |window, cx| on_choose(window, cx))
+    });
     let on_choose = std::rc::Rc::new(on_choose);
     let items = choices.iter().enumerate().map(|(at, choice)| {
         let item = MenuItem::new(format!("{entries}-{}", choice.key()), choice.title.clone())
@@ -1385,12 +1425,16 @@ pub fn picker(
             }
         }
     });
-    Dropdown::new(id, current.title.clone())
-        .leading(crate::glyphs::device(&current.icon))
-        .tint(shade(&current.colour))
+    let dropdown = match on_all {
+        true => Dropdown::new(id, "All machines").leading(Icon::Lucide("network")),
+        false => Dropdown::new(id, current.title.clone())
+            .leading(crate::glyphs::device(&current.icon))
+            .tint(shade(&current.colour)),
+    };
+    dropdown
         .open(open)
         .on_toggle(on_toggle)
-        .items(items)
+        .items(first.into_iter().chain(items))
         .into_any_element()
 }
 

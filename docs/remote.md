@@ -28,7 +28,8 @@ connection shared the same way (#833), the window's machines, in Settings, Machi
 (#814), one list of the sessions of every machine in the window, with the close of a session
 of a machine that is off kept until it is back (#1150, its points 1 to 3), and the pictures and
 videos a session showed, sent to any device (#1165), and the runner's and the hub's side of the
-phone's notifications, with the window's presence and **Notify the phone** (#827). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
+phone's notifications, with the window's presence and **Notify the phone** (#827), and About you for all machines, kept by
+the hub sealed end to end ("Settings for all machines", #1330). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
 what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
@@ -1919,6 +1920,68 @@ never told, and with no session to the hub nothing is told and nothing is kept f
   The client's side listens on that very port of `127.0.0.1` or refuses (the redirect names it).
   What `tunnel.open {run}` may reach is unchanged.
 
+## Settings for all machines
+
+A user with four machines fills the same settings four times. The hub keeps **settings for all
+machines**: every machine uses them, each machine can **override any one** of them, and go back to
+the value of all machines (decided 2026-11-25, #1330). Built for About you first (#1330, part 1);
+the guidance files and the rest of "Shared, personal" (#1330's inventory), then the settings a
+machine often overrides, follow in their own issues.
+
+- **Three levels**, read in this order: the project's value (where one exists) → **the machine's
+  own** → **all machines'** → the default, as `extensions::value()` reads project → global →
+  default. About you has no project level: a field written on a machine (`about.toml`) is that
+  machine's own; one not written there is all machines' value; neither is nothing.
+- **What is shared is the user's change, signed.** The user's device signs it, as any request it
+  makes (`about.share`, "Requests from another machine's clients"), for its own machine, whose
+  daemon checks it as it checks a request (member, signature, time, nonce, role). That machine then
+  **seals** the signed request for every machine of the member list (`crates/flottille-link/src/shared.rs`):
+  a random key encrypts it (ChaCha20-Poly1305), and that key is encrypted for each machine's key,
+  by X25519 between a key made for this seal alone and the machine's Ed25519 key turned into its
+  X25519 form, through HKDF-SHA256; the value's name and time are outside, bound to what is
+  encrypted, and the machine signs the whole with its machine key. One sealed copy a value
+  (`about.name`, `about.pronouns`, `about.notes`), so that two changes of different values do not
+  undo each other.
+- **The hub keeps them without reading them**: the latest copy of each name (`hub.json`, `shared`),
+  from a member's machine whose role is a runner's or a controller's, its signature checked, 40 KiB
+  at most a copy and 32 values at most. It sends them whole to each session that asks for them
+  (`{"ask": {"kind": "shared"}}`), then again at each change (`{"shared": [...]}`); a hub of before
+  says nothing of them in its welcome, and a machine asks it nothing. What the hub sees of them:
+  their names, their times, which machines they are sealed for, and their size.
+- **Each machine checks each copy itself**: it opens it with its machine key, then checks the
+  user's request inside as its own (a member's device, not a viewer's, the method `about.share`,
+  the value and the time the copy says), whichever machine sealed it and whatever the hub says.
+  Neither the request's five minutes nor its nonce is checked again: a machine off for a week takes
+  the latest copy when it is back, and an older copy never replaces a newer one. **The latest of
+  two changes wins**, by the time the device signed it (then by its signature, so that every
+  machine keeps the same one).
+- **Each machine keeps the last copy it checked**, `remote/shared.json` (600), the user's signed
+  requests themselves: with the hub out of reach its agents read what it last checked, and a change
+  made meanwhile waits on the machine where it was made, given to the hub at the next session. A
+  change reaches every machine at once, a machine that was off at its connect. A machine paired
+  since a value was sealed is given it: a machine that finds the hub's copy sealed for fewer
+  machines than the list has seals it again for all of them, the user's request unchanged.
+- **Who may change them**: a device allowed to change another machine's settings today, a
+  `controller` or a `runner` ("Roles"); a viewer's change is refused by the machine it is asked of,
+  by the hub when its machine seals it, and by every machine that opens it.
+- **Secrets never go there**: no vault value, no OAuth token, no key, no project `[variables]`.
+  `about.share` takes the three fields of About you and nothing else; a setting that names a vault
+  entry will name it, the entry staying the machine's.
+- **Without a hub** (remote off, or this machine paired with no other runner), Settings is as it
+  was: About you is the machine's own, and `about.show` says `all: null`.
+
+**In the window** (decided 2026-11-25 on the prototype): Settings' picker "Settings of", on the
+title's line of the page's header, which stays in place while the sections scroll, lists **All
+machines** first, then each machine. All machines shows the sections every machine may share (About
+you, for now) on General; a change there is signed with the device key and saved for all machines.
+On a machine, About you says once `The values of all machines, unless changed here.`; a field
+changed there is that machine's own: its edge takes the colour of what waits (`wait`), and one line
+under it says `Changed on server` with **Use all machines' value**, which drops it. A section that
+belongs to the machine alone (Providers, Forges, Vault, the folder of travelled projects, Developer
+mode, Check) says `This machine only.` above it. Each of these moves: the line and the mark unfold
+and fold with their gaps, the edge fades over `PANEL`, the way back fades on hover, and All
+machines' page enters staggered as another machine's does.
+
 ## The repository
 
 One monorepo. The crates and folders this milestone adds:
@@ -1966,7 +2029,8 @@ on a real phone, by hand, and reported.
   state folder. Code it runs can sign what this device's role allows, a switch to Full among
   them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
   do not hold against code run in Full, which can sign a new one at any time.
-- **Configuration is not synced**: a project is registered by hand on each machine.
+- **Configuration is synced for About you only** ("Settings for all machines"): the rest of the
+  settings follow in their own issues, and a project is registered by hand on each machine.
 - **No session moves** between machines; no conversation travels.
 - **Files other than pictures** do not travel yet; submodules and Git LFS objects are not sent by a
   launch.
@@ -1974,6 +2038,20 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **Settings for all machines are sealed to the machines' own keys** (#1330): each machine's
+  Ed25519 key is turned into its X25519 form to open what is sealed for it (as libsodium and age
+  do), rather than a key of its own for it, which the member list would have to sign and send. The
+  use of one key for both is studied (eprint 2021/509) and found sound for this.
+- **About you's field written empty on a machine follows all machines again** (#1330): there is no
+  way to say "nothing on this machine" while all machines say something; Use all machines' value
+  writes the field empty.
+- **All machines is offered while the picker is** (#1330): with another runner in the list; with
+  this machine alone, Settings is as it was.
+- **A section is said "This machine only." when nothing of it will be shared** (#1330's "Never"):
+  Providers, Forges, Vault, the folder of travelled projects, Developer mode and Check. Appearance,
+  the workspaces folder and Version hold settings that will be shared (the shade, a `~/…` folder,
+  the check for updates) beside the machine's own, and say nothing yet.
 
 - **The window reads the device key at its start once the user has another runner** (#1280): the
   bell follows every machine, so its links need the key before any page of another machine is

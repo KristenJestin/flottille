@@ -172,10 +172,16 @@ pub enum Command {
     ReadProviders,
     /// What the user says of themselves, which every agent reads (`about.show`).
     AboutRead,
-    /// Saves what the user says of themselves (name, how to refer to them, notes), or with no
-    /// text forgets it (`about.set`, `about.reset`).
+    /// Saves what the user says of themselves, the fields given by key (`name`, `pronouns`,
+    /// `notes`; one given empty follows all machines' value again), or with none forgets it
+    /// (`about.set`, `about.reset`).
     AboutWrite {
-        text: Option<(String, String, String)>,
+        fields: Option<Vec<(String, String)>>,
+    },
+    /// Saves the fields given as the values of all machines (`about.share`), signed with this
+    /// device's key.
+    AboutShare {
+        fields: Vec<(String, String)>,
     },
     /// The developer mode (`developer.show`).
     DeveloperRead,
@@ -2715,12 +2721,17 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             shown: answer(ask_alone(connect, "about.show", json!({}), bounds.quick))
                 .map(|shown| crate::about::Shown::of(&shown)),
         },
-        Command::AboutWrite { text } => {
-            let asked = match &text {
-                Some((name, pronouns, notes)) => ask_alone(
+        Command::AboutWrite { fields } => {
+            let asked = match fields {
+                Some(fields) => ask_alone(
                     connect,
                     "about.set",
-                    json!({"name": name, "pronouns": pronouns, "notes": notes}),
+                    Value::Object(
+                        fields
+                            .into_iter()
+                            .map(|(key, text)| (key, Value::String(text)))
+                            .collect(),
+                    ),
                     bounds.quick,
                 ),
                 None => ask_alone(connect, "about.reset", json!({}), bounds.quick),
@@ -2728,6 +2739,19 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             Outcome::About {
                 written: true,
                 shown: answer(asked).map(|shown| crate::about::Shown::of(&shown)),
+            }
+        }
+        Command::AboutShare { fields } => {
+            let params = Value::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, text)| (key, Value::String(text)))
+                    .collect(),
+            );
+            Outcome::About {
+                written: true,
+                shown: signed_by_device(connect, sign, None, "about.share", params, bounds.quick)
+                    .map(|shown| crate::about::Shown::of(&shown)),
             }
         }
         Command::DeveloperRead | Command::DeveloperSet { .. } => {

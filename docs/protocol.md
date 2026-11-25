@@ -710,16 +710,29 @@ which every agent reads (`docs/design.md` §8, "Instructions"): `about.toml` in 
 configuration folder, with the keys `name` (what agents call the user), `pronouns` (how to refer to
 them, one line) and `notes` (anything every agent should know). Each is optional.
 
-- `about.show {}` answers `{"name", "pronouns", "notes", "limit", "cut"}`: the three texts (`""`
-  for one not written), the notes' limit (8,000 characters) and why a text edited by hand past a
-  limit is cut for the agents (`null` when none is). `invalid-config` for a file that is not TOML.
-- `about.set {name?, pronouns?, notes?}` writes the fields given, keeps the others, clears one given
-  empty, and answers as `about.show`. `refused` above 8,000 characters for the notes, above 100 for
+- `about.show {}` answers `{"name", "pronouns", "notes", "own", "all", "limit", "cut"}`: the three
+  texts agents read (`""` for one said nowhere), the fields this machine holds itself (`own`, their
+  keys: written in `about.toml`), the values of all machines (`all`, `{"name", "pronouns",
+  "notes"}`, `null` while this machine has no hub: `docs/remote.md`, "Settings for all machines"),
+  the notes' limit (8,000 characters) and why a text past a limit is cut for the agents (`null`
+  when none is). A field this machine holds is what agents read; one it does not hold is all
+  machines' value. `invalid-config` for a file that is not TOML.
+- `about.set {name?, pronouns?, notes?}` writes the fields given as this machine's own, keeps the
+  others, clears one given empty (with a hub, it then follows all machines' value again), and
+  answers as `about.show`. `refused` above 8,000 characters for the notes, above 100 for
   a name or `pronouns`, and for a name or `pronouns` on more than one line. What the user wrote
   around the keys by hand is kept.
-- `about.reset {}` removes the file, and answers as `about.show`.
+- `about.reset {}` removes the file, and answers as `about.show`: with a hub, every field follows
+  all machines again.
+- `about.share {name?, pronouns?, notes?}` sets the values of all machines, the fields given, as
+  `about.set` checks them; one given empty is cleared for all machines. Only as a request signed
+  by the user's device (`docs/remote.md`, "Requests from another machine's clients"), by a member
+  that is no viewer, on a machine that has a hub; else `refused`. The daemon keeps it, seals it for
+  every machine and gives it to the hub, at once or at its next session to it. Answers as
+  `about.show`.
 
-A change emits `about.changed {}`. No tool of an agent reads or writes them: they are in its
+A change emits `about.changed {}`, and so does a value of all machines this machine takes from the
+hub. No tool of an agent reads or writes them: they are in its
 instructions.
 
 ### The judge methods
