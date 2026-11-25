@@ -391,12 +391,14 @@ impl VaultSection {
 
     /// "New entry": the dialog, empty.
     pub fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.fill(None, window, cx);
+        self.fill(None, false, window, cx);
     }
 
     /// "New entry", the dialog on `prefill` (its name, metadata, project and use) with the secret
     /// to type: what a project's Tracker or Vault tab, or an agent's request, already knows of it.
-    /// `why` is an agent's reason, said under what it is for. It opens over the page shown.
+    /// `why` is an agent's reason, said under what it is for. It opens over the page shown. A
+    /// name the vault already holds is the entry's own form, its secret left empty to keep it:
+    /// the entry was made since the place that opens this was drawn.
     pub fn add_prefilled(
         &mut self,
         prefill: &VaultEntry,
@@ -404,8 +406,7 @@ impl VaultSection {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fill(Some(prefill), window, cx);
-        self.form = Form::Editing(None);
+        self.fill(Some(prefill), false, window, cx);
         self.bound = prefill.bound.clone();
         self.why = why;
     }
@@ -449,7 +450,7 @@ impl VaultSection {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fill(Some(entry), window, cx);
+        self.fill(Some(entry), true, window, cx);
         self.bound = entry.bound.clone();
         self.why = Some(why);
         self.host = host.zip(entry.url.clone());
@@ -496,11 +497,32 @@ impl VaultSection {
             .find(|entry| entry.name == name)
             .cloned();
         if let Some(entry) = entry {
-            self.fill(Some(&entry), window, cx);
+            self.fill(Some(&entry), true, window, cx);
         }
     }
 
-    fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the dialog on `entry`: the entry's own form (Edit, its secret left empty to keep it)
+    /// when it `exists`, or when the vault lists an entry of that name; a new entry otherwise.
+    /// Here alone is decided whether a form edits, so that no place opens one that asks again
+    /// for the secret of an entry that has one.
+    fn fill(
+        &mut self,
+        entry: Option<&VaultEntry>,
+        exists: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = entry
+            .filter(|entry| {
+                exists
+                    || (!entry.name.is_empty()
+                        && self
+                            .listed
+                            .iter()
+                            .flatten()
+                            .any(|listed| listed.name == entry.name))
+            })
+            .map(|entry| entry.name.clone());
         self.request_back = None;
         self.every_project = false;
         self.bound = None;
@@ -535,7 +557,7 @@ impl VaultSection {
         self.project = entry
             .filter(|entry| !entry.every_project_only)
             .and_then(|entry| entry.project.clone());
-        self.form = Form::Editing(entry.map(|entry| entry.name.clone()));
+        self.form = Form::Editing(editing);
         self.form_error = None;
         self.saving = false;
         let focus = if entry.is_some_and(|entry| !entry.name.is_empty()) {
