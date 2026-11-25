@@ -5,7 +5,10 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -52,7 +55,7 @@ class NeedsYouTest {
         }
     }
 
-    private fun request(machine: String, number: Long, agent: String, call: String, at: Long = 0) =
+    private fun request(machine: String, number: Long, agent: String, call: String, at: Long = 0, session: String = agent, child: String = "") =
         Request(
             machine = machine,
             number = number,
@@ -67,6 +70,8 @@ class NeedsYouTest {
             source = "asked by the conversation · #$number",
             says = emptyList(),
             at = at,
+            session = session,
+            child = child,
         )
 
     private fun ask(machine: String, agent: String, asked: Long, question: String, at: Long = 0) =
@@ -177,6 +182,115 @@ class NeedsYouTest {
         start(phone)
 
         assertEquals(listOf("needs:request:server:5", "needs:ask:laptop:7", "needs:request:server:4"), cards())
+    }
+
+    /** A button of the card [card], whose own tag ([tag]) another machine's card may have too. */
+    private fun inCard(card: String, tag: String) = rule.onNode(hasTestTag(tag) and hasAnyAncestor(hasTestTag(card)))
+
+    @Test
+    fun what_waits_on_two_machines_is_ordered_by_when_it_came() {
+        // Neither the machine's name nor the numbers (a request's and an ask's are two counters)
+        // say which came first: the time each came does.
+        val phone = FakePhone(
+            joined(
+                requests = listOf(request("server", 9, "a1", "cargo build", at = 100), request("laptop", 2, "b1", "git push", at = 300)),
+                asks = listOf(ask("laptop", "b1", 50, "Ship it tonight?", at = 200), ask("server", "a1", 1, "Squash first?", at = 400)),
+            ),
+        )
+        start(phone)
+
+        assertEquals(
+            listOf("needs:ask:server:1", "needs:request:laptop:2", "needs:ask:laptop:50", "needs:request:server:9"),
+            cards(),
+        )
+    }
+
+    @Test
+    fun a_child_s_request_is_under_its_session() {
+        val phone = FakePhone(
+            joined(requests = listOf(request("server", 4, "c7", "cargo test", session = "a1", child = "Check the tests"))),
+        )
+        start(phone)
+
+        // Headed by its session, as on the session page, and the child that asked said.
+        val card = rule.onNodeWithTag("needs:request:server:4")
+        card.assertTextContains("Fix the build", substring = true)
+        card.assertTextContains("Check the tests", substring = true)
+        rule.onNodeWithText("cargo test", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("server" to "a1"), opened)
+    }
+
+    @Test
+    fun the_same_number_on_two_machines_is_two_cards() {
+        val phone = FakePhone(
+            joined(requests = listOf(request("server", 4, "a1", "cargo build", at = 100), request("laptop", 4, "b1", "git push", at = 200))),
+        )
+        start(phone)
+
+        assertEquals(listOf("needs:request:laptop:4", "needs:request:server:4"), cards())
+        // Allow on the laptop's reaches the laptop alone.
+        inCard("needs:request:laptop:4", "allow:4").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(Triple("laptop", 4L, true)), phone.allowed)
+        inCard("needs:request:server:4", "deny:4").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(Triple("laptop", 4L, true), Triple("server", 4L, false)), phone.allowed)
+    }
+
+    @Test
+    fun a_request_answered_elsewhere_while_tapping_says_so_and_folds() {
+        val phone = FakePhone(joined(requests = listOf(request("server", 4, "a1", "cargo build"))))
+        phone.refusals["answer"] = "request #4 is decided already"
+        phone.gone += "answer"
+        start(phone)
+        rule.waitForIdle()
+        rule.mainClock.autoAdvance = false
+
+        rule.onNodeWithTag("allow:4").performClick()
+        rule.mainClock.advanceTimeBy(300)
+        rule.onNodeWithTag("needs:request:server:4").assertTextContains("request #4 is decided already", substring = true)
+        rule.mainClock.advanceTimeBy(6_000)
+        rule.onNodeWithTag("needs:request:server:4").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_card_that_folds_answers_nothing() {
+        val phone = FakePhone(joined(requests = listOf(request("server", 4, "a1", "cargo build"), request("server", 5, "a1", "git push", at = 1))))
+        start(phone)
+        rule.waitForIdle()
+        rule.mainClock.autoAdvance = false
+
+        // Answered in the window: while its card folds, its buttons are off.
+        phone.state.value = phone.state.value.copy(requests = listOf(request("server", 5, "a1", "git push", at = 1)))
+        rule.mainClock.advanceTimeByFrame()
+        rule.mainClock.advanceTimeBy(40)
+        inCard("needs:request:server:4", "allow:4").assertIsNotEnabled()
+        inCard("needs:request:server:4", "deny:4").assertIsNotEnabled()
+    }
+
+    @Test
+    fun the_line_of_nothing_waits_fades_in_and_out() {
+        val phone = FakePhone(joined())
+        start(phone)
+        rule.waitForIdle()
+        rule.mainClock.autoAdvance = false
+
+        // Something comes: the line fades out while the card comes, not at once.
+        phone.state.value = phone.state.value.copy(requests = listOf(request("server", 4, "a1", "cargo build")))
+        rule.mainClock.advanceTimeByFrame()
+        rule.mainClock.advanceTimeBy(40)
+        rule.onNodeWithTag("needs-you-empty").assertExists()
+        rule.mainClock.advanceTimeBy(1_000)
+        rule.onNodeWithTag("needs-you-empty").assertDoesNotExist()
+
+        // It is answered: the card folds away, then the line fades in.
+        phone.state.value = phone.state.value.copy(requests = emptyList())
+        rule.mainClock.advanceTimeByFrame()
+        rule.mainClock.advanceTimeBy(40)
+        rule.onNodeWithTag("needs:request:server:4").assertExists()
+        rule.mainClock.advanceTimeBy(2_000)
+        rule.onNodeWithTag("needs-you-empty").assertIsDisplayed()
     }
 
     @Test
