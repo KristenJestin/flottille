@@ -57,6 +57,11 @@ fn code(line: &str) -> &str {
 /// `.when_some(..)` kept: a pointer set there is the element's. What a `.child(..)` holds is
 /// another element's.
 fn flat(text: &str) -> String {
+    flatten(text, true)
+}
+
+/// `flat`, with the option to drop the `.when(..)` groups too.
+fn flatten(text: &str, keep_when: bool) -> String {
     let mut out = String::new();
     let mut depth = 0usize;
     // The depth a kept `.when(..)` group opened at, while inside it.
@@ -64,7 +69,8 @@ fn flat(text: &str) -> String {
     for c in text.chars() {
         match c {
             '(' | '[' | '{' => {
-                if kept.is_none()
+                if keep_when
+                    && kept.is_none()
                     && depth == 0
                     && (out.ends_with(".when") || out.ends_with(".when_some"))
                 {
@@ -139,7 +145,9 @@ fn chain(lines: &[&str], at: usize, column: usize) -> String {
 /// a click is told apart so: a mouse handler is GPUI's own, wired on whatever element the chain
 /// starts with (a bare `flex_col()` or a variable too), so `uncursored` takes it as drawn here.
 fn drawn_here(chain: &str) -> bool {
-    let chain = flat(chain);
+    // What a `.when(..)` hands to a kit component (a `div()` as its leading) is that component's
+    // child: only what starts the chain tells who it is.
+    let chain = flatten(chain, false);
     ["div()", ".id()", "text_region()", "Stateful"]
         .iter()
         .any(|mark| chain.contains(mark))
