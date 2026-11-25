@@ -523,6 +523,12 @@ async fn me_of(daemon: &Daemon, found: &forge::Forge) -> Option<String> {
     me
 }
 
+/// Whom the forges said the user is, each forge's: what tells the user apart from the others a
+/// pull request or a ticket names (`blocked`).
+pub(crate) fn me_names(daemon: &Daemon) -> Vec<String> {
+    daemon.items.me.lock().unwrap().values().cloned().collect()
+}
+
 /// Whether `item` was opened by, or is assigned to, `me`.
 fn mine_of(item: &Item, me: &str) -> bool {
     item.author.as_deref() == Some(me) || item.assignees.iter().any(|a| a == me)

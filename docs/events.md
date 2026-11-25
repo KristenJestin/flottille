@@ -1139,6 +1139,17 @@ notifications follow it.
 | `title` | Masked. |
 | `by` | `agent` or `user`. |
 
+#### `agent.blocked`
+
+Whether the session is blocked by someone else changed (`docs/design.md` §10, "Blocked by
+others"): it came to rest with a subscription that waits on a person, or what it waited for came,
+or it took a turn. Derived from the items the daemon keeps, never asked of the forge.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `blocked` | What its line of the tree says now (`agent.tree`, `blocked`): `{"by", "why", "since"}`, or `null`. |
+
 #### `agent.detached`
 
 The user detached a session from the agent that started it (`agent.detach`): `launched_by` is
