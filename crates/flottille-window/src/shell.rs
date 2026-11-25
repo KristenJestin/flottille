@@ -127,6 +127,9 @@ enum Start {
         page: Option<String>,
         machines: Vec<String>,
     },
+    /// This machine lacks the project and none of the row's machines is there to start it: it
+    /// starts nowhere else, whatever another machine's project is called (#1439).
+    Nowhere { machines: Vec<String> },
 }
 
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
@@ -1593,15 +1596,35 @@ impl Shell {
         }
     }
 
-    /// The machine whose list names `project` while this machine has no such project.
-    fn machine_of_project(&self, project: &str, cx: &App) -> Option<String> {
+    /// The online machine among the homes of the row `row`, while this machine has no such
+    /// project (#1439): a project of that name on a machine the row does not mark is another
+    /// project, and is never reached from it.
+    fn machine_of_project(&self, row: &str, cx: &App) -> Option<String> {
         let machines = self.machines.read(cx).machines()?;
-        machines
-            .lists
-            .machines
+        self.snapshot
+            .projects
             .iter()
-            .find(|(_, listed)| listed.iter().any(|s| s.project == project))
-            .map(|(name, _)| name.clone())
+            .find(|project| project.name == row)?
+            .homes
+            .iter()
+            .find(|home| !home.here && machines.machine(&home.machine).is_some_and(|m| m.online()))
+            .map(|home| home.machine.clone())
+    }
+
+    /// The names of the machines the row `row` marks, in its order.
+    fn homes_of(&self, row: &str) -> Vec<String> {
+        self.snapshot
+            .projects
+            .iter()
+            .find(|project| project.name == row)
+            .map(|project| {
+                project
+                    .homes
+                    .iter()
+                    .map(|home| home.machine.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The name the machine `machine` (`None`: this one) has the project of the projects' row
@@ -1650,16 +1673,22 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The name that machine has the page's project by; `None` when the row does not mark it.
         let there = |project: &str| {
             let row = self.row_of(self.front.as_deref(), project);
             self.name_on(&row, name.as_deref())
-                .unwrap_or_else(|| project.to_owned())
         };
         let selection = match &self.selected {
             Some(Selection::Settings) | None => Selection::Settings,
-            // A project's page or settings: that machine's of the same project, by its name there.
-            Some(Selection::Project(project)) => Selection::Project(there(project)),
-            Some(Selection::ProjectSettings(project)) => Selection::ProjectSettings(there(project)),
+            // A project's page or settings: that machine's of the same project, by its name
+            // there. A machine the row does not mark shows its Settings: a project of the same
+            // name there is another project (#1439).
+            Some(Selection::Project(project)) => there(project)
+                .map(Selection::Project)
+                .unwrap_or(Selection::Settings),
+            Some(Selection::ProjectSettings(project)) => there(project)
+                .map(Selection::ProjectSettings)
+                .unwrap_or(Selection::Settings),
             // Another page: that machine's page of it.
             Some(selected) => selected.clone(),
         };
@@ -1720,7 +1749,12 @@ impl Shell {
             .collect();
         match others.as_slice() {
             [] if here => Start::On(None),
-            [] => Start::On(self.machine_of_project(project, cx)),
+            [] => match (self.machine_of_project(project, cx), self.homes_of(project)) {
+                (Some(machine), _) => Start::On(Some(machine)),
+                // A row that marks no machine is this one's alone.
+                (None, homes) if homes.is_empty() => Start::On(None),
+                (None, machines) => Start::Nowhere { machines },
+            },
             [one] => Start::On(Some(one.clone())),
             // What the user answered when it was asked, while that machine still can.
             several => match self.starts.get(project) {
@@ -1761,6 +1795,8 @@ impl Shell {
             Selection::Project(project) => match self.start_on(project, cx) {
                 Start::On(machine) => machine,
                 Start::Ask { page, .. } => page,
+                // Nothing opens: `open` says so.
+                Start::Nowhere { .. } => None,
             },
             Selection::ProjectSettings(_) | Selection::Spec { .. } | Selection::Settings => {
                 self.front.clone()
@@ -5041,7 +5077,7 @@ impl Shell {
                 "Choose where it runs: {}.",
                 crate::machines::said_or(&machines)
             )),
-            Start::On(_) => None,
+            Start::On(_) | Start::Nowhere { .. } => None,
         };
         if let Some(composer) = self.composer_of(&name).cloned() {
             let (providers, last) = (&self.providers, self.last_pick.as_ref());
@@ -6496,6 +6532,13 @@ impl Shell {
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         // A machine still reading its key gives way: this page is the one asked last.
         self.choosing = None;
+        // A project no machine of its row can start is said so, and nothing opens (#1439).
+        if let Selection::Project(row) = &selection
+            && let Start::Nowhere { machines } = self.start_on(row, cx)
+        {
+            self.say_nowhere(row, &machines, cx);
+            return;
+        }
         // A page of another machine is that machine's, its pages brought in front.
         let machine = self.machine_of(&selection, cx);
         // A project's row opens that machine's page of the same project, by its name there.
@@ -6512,6 +6555,26 @@ impl Shell {
         }
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.set_bell(false, cx);
+    }
+
+    /// Says that none of the machines of the row `row` can start its project: each with its
+    /// state. Nothing else starts it.
+    fn say_nowhere(&self, row: &str, machines: &[String], cx: &mut Context<Self>) {
+        let read = self.machines.read(cx).machines();
+        let states: Vec<String> = machines
+            .iter()
+            .map(|name| match read.and_then(|read| read.machine(name)) {
+                Some(machine) => format!("{name} is {}", machine.state_words()),
+                None => format!("{name} is not known"),
+            })
+            .collect();
+        gpui_design_system::toast(
+            gpui_design_system::Toast::failure(format!("{row} cannot be started")).detail(format!(
+                "None of its machines can run it: {}.",
+                states.join(", ")
+            )),
+            cx,
+        );
     }
 
     fn select(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
