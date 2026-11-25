@@ -240,8 +240,8 @@ pub struct NoticeView {
     /// row could not be read.
     pub title: String,
     pub excerpt: String,
-    /// For a request: the newest request of the session's tree that waits for the user, what Allow
-    /// and Deny answer; 0 when none waits (answered, or not listed yet).
+    /// For a request: the request of the session's tree that waits for the user, what Allow and
+    /// Deny answer; 0 when none waits (answered, not listed yet) or when several do.
     pub request: u64,
 }
 
@@ -498,16 +498,17 @@ impl View {
         }
     }
 
-    /// The newest request of the session `session` of `machine`'s tree that waits for the user.
+    /// The request of the session `session` of `machine`'s tree that waits for the user, when it
+    /// is the only one: a notice names its session, not its request, and Allow on a notification
+    /// must never answer another request than the one it says.
     fn waiting_in(&self, machine: &str, session: &str) -> u64 {
-        self.requests
-            .iter()
-            .filter(|((of, _), held)| {
-                of == machine && self.root_of(machine, &held.agent) == session
-            })
-            .map(|(_, held)| held.number)
-            .max()
-            .unwrap_or_default()
+        let mut waiting = self.requests.iter().filter(|((of, _), held)| {
+            of == machine && self.root_of(machine, &held.agent) == session
+        });
+        match (waiting.next(), waiting.next()) {
+            (Some((_, held)), None) => held.number,
+            _ => 0,
+        }
     }
 
     /// What a runner listed when it linked: its agents (`agent.list`) and the requests that wait

@@ -3252,13 +3252,9 @@ async fn a_request_held(place: &Place) -> Arc<Core> {
     let (phone, _taken) = place.linked().await;
     place.runner.emit(
         "approval.requested",
-        json!({"number": 6, "agent": "c1", "tool": "command", "held_by": "user"}),
-    );
-    place.runner.emit(
-        "approval.requested",
         json!({"number": 7, "agent": "c1", "tool": "command", "held_by": "user"}),
     );
-    until(&phone, "the requests held", |view| view.requests.len() == 2).await;
+    until(&phone, "the request held", |view| view.requests.len() == 1).await;
     phone
 }
 
@@ -3286,7 +3282,7 @@ async fn a_request_notice_is_in_the_view_with_the_request_to_answer() {
     assert_eq!(notice.session, "a1");
     assert_eq!(notice.title, "Request #7 waits for you");
     assert_eq!(notice.excerpt, "Run make");
-    // The newest request of the session's tree that waits: what Allow and Deny answer.
+    // The request of the session's tree that waits: what Allow and Deny answer.
     assert_eq!(notice.request, 7);
     // The row was read from the runner, after the one before it.
     let listed = place.runner.taken("notifications.list");
@@ -3294,6 +3290,16 @@ async fn a_request_notice_is_in_the_view_with_the_request_to_answer() {
         serde_json::from_str::<Value>(listed[0].0["signed"]["params"].as_str().unwrap()).unwrap(),
         json!({"after": 11, "limit": 1})
     );
+    // Another request of the tree waits too: which one the notice is about is not known, so it
+    // answers none (its notification only opens the session).
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 8, "agent": "a1", "tool": "command", "held_by": "user"}),
+    );
+    until(&phone, "the notice answering none", |view| {
+        view.requests.len() == 2 && view.notices[0].request == 0
+    })
+    .await;
     place.served.stop().await;
 }
 
