@@ -57,6 +57,11 @@ fn code(line: &str) -> &str {
 /// `.when_some(..)` kept: a pointer set there is the element's. What a `.child(..)` holds is
 /// another element's.
 fn flat(text: &str) -> String {
+    flatten(text, true)
+}
+
+/// `flat`, with the option to drop the `.when(..)` groups too.
+fn flatten(text: &str, keep_when: bool) -> String {
     let mut out = String::new();
     let mut depth = 0usize;
     // The depth a kept `.when(..)` group opened at, while inside it.
@@ -64,7 +69,8 @@ fn flat(text: &str) -> String {
     for c in text.chars() {
         match c {
             '(' | '[' | '{' => {
-                if kept.is_none()
+                if keep_when
+                    && kept.is_none()
                     && depth == 0
                     && (out.ends_with(".when") || out.ends_with(".when_some"))
                 {
@@ -139,7 +145,9 @@ fn chain(lines: &[&str], at: usize, column: usize) -> String {
 /// a click is told apart so: a mouse handler is GPUI's own, wired on whatever element the chain
 /// starts with (a bare `flex_col()` or a variable too), so `uncursored` takes it as drawn here.
 fn drawn_here(chain: &str) -> bool {
-    let chain = flat(chain);
+    // What a `.when(..)` hands to a kit component (a `div()` as its leading) is that component's
+    // child: only what starts the chain tells who it is.
+    let chain = flatten(chain, false);
     ["div()", ".id()", "text_region()", "Stateful"]
         .iter()
         .any(|mark| chain.contains(mark))
@@ -272,6 +280,16 @@ fn a_pointer_with_its_click_a_kits_component_and_a_swallowed_click_are_not() {
     assert!(without_a_cursor("src/a.rs", swallowed).is_empty());
     let text = "text_region(id).on_mouse_down(MouseButton::Left, f)";
     assert!(without_a_cursor("src/a.rs", text).is_empty());
+}
+
+/// A `div()` handed to a kit component from inside a `.when(..)` is that component's child, not
+/// the element the click is wired on (the project row of the sidebar, #1471).
+#[test]
+fn a_div_inside_a_when_of_a_kits_row_does_not_make_it_drawn_here() {
+    let row = "let row = TreeLevel::Project\n    .row(id, title)\n    .when(!holds, |row| {\n        row.leading(div().flex_none())\n    })\n    .on_click(f);";
+    assert!(without_a_cursor("src/a.rs", row).is_empty());
+    let by_hand = "let row = div()\n    .id(\"row\")\n    .when(!holds, |row| row.child(x))\n    .on_click(f);";
+    assert_eq!(without_a_cursor("src/a.rs", by_hand).len(), 1);
 }
 
 #[test]

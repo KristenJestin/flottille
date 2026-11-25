@@ -444,3 +444,33 @@ fn a_default_slot_names_only_the_ready_providers() {
     let gives = review_default(&user, "bugs_model")["gives"].clone();
     assert_eq!(gives.as_object().unwrap().len(), 1, "{gives}");
 }
+
+/// What `codex app-server` answers `account/read` with when no login is there (seen on a real
+/// run, #875). The listing says what a session's login line does, never the bridge's own words.
+#[test]
+fn the_models_of_a_signed_out_codex_say_sign_in() {
+    let user = User::with_fake_codex().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.codex_script(json!({"account": Value::Null}));
+    assert!(user.run(&["developer", "on"]).status.success());
+    assert!(user.run(&["daemon", "stop"]).status.success());
+
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    let log = user.path("state/flottille/developer.log");
+    let mut failure = None;
+    eventually("the failure in the developer log", || {
+        failure = std::fs::read_to_string(&log).ok().and_then(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|l| l["kind"] == "models" && l["outcome"] == "failed")
+        });
+        failure.is_some()
+    });
+
+    let failure = failure.unwrap();
+    assert_eq!(
+        failure["error"], "Codex's login expired: sign in again (run codex login)",
+        "{failure}"
+    );
+    assert!(ids(&listed(&user, "codex")).is_empty());
+}
