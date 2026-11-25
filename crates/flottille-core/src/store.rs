@@ -3173,7 +3173,7 @@ impl Store {
         let exception = transaction
             .query_row(
                 "DELETE FROM session_exceptions WHERE agent = ?1 AND rule = ?2 \
-                 RETURNING rule, why, request, granted_at, repository, branch, pull",
+                 RETURNING rule, why, request, granted_at, repository, branch, pull, head, blocks",
                 params![agent, rule],
                 |row| exception_row(agent, row),
             )
