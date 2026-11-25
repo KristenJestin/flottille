@@ -4002,6 +4002,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.subscription_answered(refused, cx));
                 }
             }
+            Outcome::ExceptionWithdrawn { session, refused } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.exception_answered(refused, cx));
+                }
+            }
             Outcome::LeaveWithdrawn { session, refused } => {
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session

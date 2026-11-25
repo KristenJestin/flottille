@@ -17,6 +17,8 @@ mod window_at_rest;
 mod window_commands;
 #[path = "../window_compaction.rs"]
 mod window_compaction;
+#[path = "../window_exceptions.rs"]
+mod window_exceptions;
 #[path = "../window_expired_login.rs"]
 mod window_expired_login;
 #[path = "../window_items.rs"]

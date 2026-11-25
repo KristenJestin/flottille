@@ -1597,6 +1597,7 @@ fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> Verdict
                          always asked: a third party's server acts with the user's rights, and \
                          what this action does is not something the judge can read"
                     )],
+                    base: 1,
                     class: Class::Base,
                     kind: approval::Kind::Call,
                 }),
@@ -1605,6 +1606,7 @@ fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> Verdict
                         "it calls {action} of the connection {name}, a third party's MCP server: \
                          every call of it is judged unless the user marked the action as passing"
                     )],
+                    base: 0,
                     class: Class::Judge,
                     kind: approval::Kind::Call,
                 }),

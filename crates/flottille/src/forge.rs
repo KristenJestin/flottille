@@ -1311,6 +1311,10 @@ pub(crate) struct ForgeCall {
     /// merge: why the user lets a pull request whose checks or review block it be merged; the
     /// gate held the call for them.
     waive: Option<String>,
+    /// merge: what an exception of the session's does to it (`exceptions.rs`). Never an argument
+    /// of the agent's.
+    #[serde(skip)]
+    excepted: Excepted,
     /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
     method: Option<String>,
     /// merge by squash: the squashed commit's message, its subject on the first line; the gate
@@ -1352,6 +1356,107 @@ pub(crate) struct ForgeCall {
     thread: Option<threads::ThreadId>,
     /// resolve: `true` resolves the thread, `false` opens it again.
     resolved: Option<bool>,
+}
+
+/// What an exception of the session's does to a merge (`exceptions.rs`).
+#[derive(Debug, Default)]
+pub(crate) enum Excepted {
+    #[default]
+    No,
+    /// The card of an ask is being made: what would be merged and what blocks it are read and
+    /// told (`MergeRead`), and nothing is merged.
+    Read,
+    /// The session holds the exception for the pull request of this scope: that one alone is
+    /// merged past what blocks it, while its head and what blocks it are what the user read.
+    Holds(flottille_core::approval::Scope),
+}
+
+impl Excepted {
+    /// Whether the pull request `number` of `branch` in the repository `path` is the one the
+    /// session's exception is for.
+    fn covers(&self, path: &str, branch: &str, number: u64) -> bool {
+        matches!(self, Excepted::Holds(scope)
+            if scope.repository == path && scope.branch == branch && scope.pull == Some(number))
+    }
+
+    /// Whether the pull request the exception is for is, at `head` and blocked by `blocks`, what
+    /// the user read on the card: a commit pushed or a blocker come since are not covered.
+    /// A head neither side knows covers nothing: it would cover any commit.
+    fn as_read(&self, head: Option<&str>, blocks: Option<&str>) -> bool {
+        matches!((self, head), (Excepted::Holds(scope), Some(head))
+            if scope.head.as_deref() == Some(head) && scope.blocks.as_deref() == blocks)
+    }
+
+    /// The refusal of a merge of the pull request the exception was for, which changed since the
+    /// user allowed it.
+    fn changed(&self, number: &str, branch: &str, slug: &str, blocks: &str) -> String {
+        let Excepted::Holds(scope) = self else {
+            return String::new();
+        };
+        let head = scope
+            .head
+            .as_deref()
+            .map_or("an unknown head".to_owned(), |head| {
+                head.chars().take(7).collect()
+            });
+        let then = scope.blocks.as_deref().unwrap_or("nothing");
+        format!(
+            "refused: the pull request #{number} of {branch} in {slug} is not merged: {blocks}; \
+             the session's exception covers it as the user read it, at {head} while {then}, and \
+             it changed since: ask again with exception if it should still be merged past it, \
+             or wait for its checks"
+        )
+    }
+
+    fn reads(&self) -> bool {
+        matches!(self, Excepted::Read)
+    }
+}
+
+/// The pull request a merge would merge and what blocks it, as Flottille read it on the forge:
+/// what the card of an exception's ask says.
+#[derive(Debug, serde::Serialize, Deserialize)]
+pub struct MergeRead {
+    /// The repository's path in the project.
+    pub repository: String,
+    pub slug: String,
+    pub branch: String,
+    pub base: String,
+    pub number: u64,
+    /// Its head commit, when the forge said it.
+    pub head: Option<String>,
+    /// What blocks it; none when nothing does.
+    pub blocks: Option<String>,
+    /// The forge bypasses its branch protection for the user (`gh pr merge --admin`); Bitbucket
+    /// has no such bypass, and its own merge checks still answer.
+    pub bypass: bool,
+}
+
+impl MergeRead {
+    fn said(&self) -> Outcome {
+        Outcome::Done(serde_json::to_string(self).unwrap_or_default())
+    }
+}
+
+/// What a merge of `args` would merge and what blocks it, read on the forge, nothing merged.
+pub async fn merge_read(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    args: &Value,
+) -> Result<MergeRead, String> {
+    let mut asked: ForgeCall = match arguments("forge", args.clone()) {
+        Ok(asked) => asked,
+        Err(Outcome::Done(why) | Outcome::Refused(why) | Outcome::Invalid(why))
+        | Err(Outcome::Failed(why) | Outcome::Held(why)) => return Err(why),
+    };
+    asked.excepted = Excepted::Read;
+    match forge_write(daemon, place, asked).await {
+        Outcome::Done(said) => serde_json::from_str(&said).map_err(|error| error.to_string()),
+        Outcome::Refused(why)
+        | Outcome::Invalid(why)
+        | Outcome::Failed(why)
+        | Outcome::Held(why) => Err(why),
+    }
 }
 
 impl ForgeCall {
@@ -1637,6 +1742,12 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             }
         }
         ("merge" | "checks", _) => {
+            let mut asked = asked;
+            if asked.action == "merge"
+                && let Some(held) = crate::exceptions::merge_held(daemon, agent)
+            {
+                asked.excepted = Excepted::Holds(held);
+            }
             let written = forge_write(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
@@ -3736,19 +3847,64 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
                      its base is merged"
                 ));
             };
+            // The session's exception is for one pull request: any other is merged as before.
+            let held = asked.excepted.covers(&checkout.path, branch, number);
+            let reading = asked.excepted.reads();
+            let number_said = number;
             let number = number.to_string();
-            if asked.waive.is_none() {
+            let mut bypass = false;
+            // The head the user read: a commit pushed between that read and the merge is not
+            // merged past the protection.
+            let mut bound: Option<String> = None;
+            if asked.waive.is_none() || held || reading {
                 let viewed =
                     match gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS]).await {
                         Ok(viewed) => viewed,
                         Err(why) => return Outcome::Failed(why),
                     };
                 // A pull request that cannot be read is one nothing verified.
-                let blocked = match Pull::of(&viewed) {
-                    Some(pull) => pull.blocks(),
-                    None => Some("it could not be read, so nothing verified it".to_owned()),
+                let (blocked, head) = match Pull::of(&viewed) {
+                    Some(pull) => (pull.blocks(), pull.head_commit),
+                    None => (
+                        Some("it could not be read, so nothing verified it".to_owned()),
+                        None,
+                    ),
                 };
-                if let Some(blocks) = blocked {
+                if reading {
+                    return MergeRead {
+                        repository: checkout.path.clone(),
+                        slug: slug.to_string(),
+                        branch: branch.to_owned(),
+                        base: base.clone(),
+                        number: number_said,
+                        head,
+                        blocks: blocked,
+                        bypass: true,
+                    }
+                    .said();
+                }
+                let covered = held && asked.excepted.as_read(head.as_deref(), blocked.as_deref());
+                // Bypassed only where a block refuses it: a merge nothing blocks is a plain one.
+                bypass = covered && blocked.is_some();
+                if bypass {
+                    bound = head;
+                }
+                if let Some(blocks) = &blocked
+                    && held
+                    && !covered
+                    && asked.waive.is_none()
+                {
+                    return Outcome::Refused(asked.excepted.changed(
+                        &number,
+                        branch,
+                        &slug.to_string(),
+                        blocks,
+                    ));
+                }
+                if let Some(blocks) = blocked
+                    && !covered
+                    && asked.waive.is_none()
+                {
                     return Outcome::Refused(format!(
                         "refused: the pull request #{number} of {branch} in {slug} is not \
                          merged: {blocks}; wait for its checks, or have it waived by the user \
@@ -3770,6 +3926,13 @@ async fn forge_write(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> O
             // checkout, which a workspace may be using.
             if matches!(kept, Branch::Delete) {
                 args.push("--delete-branch");
+            }
+            // What the user could do by hand on the forge, they let this session do.
+            if bypass {
+                args.push("--admin");
+            }
+            if let Some(head) = &bound {
+                args.extend(["--match-head-commit", head]);
             }
             let message = asked.message.as_deref().map(squash_message);
             if let Some((subject, body)) = &message {

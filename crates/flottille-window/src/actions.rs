@@ -726,6 +726,13 @@ pub enum Command {
         writer: String,
         leave_session: String,
     },
+    /// Takes back the exception of `rule` that `agent`, the session's root or one of its
+    /// sub-agents, holds.
+    WithdrawException {
+        session: String,
+        agent: String,
+        rule: String,
+    },
     /// Marks notifications of the centre read (`notifications.read`): the window follows the
     /// daemon's `notifications.changed`, not this command's answer.
     ReadNotifications(Reading),
@@ -1528,6 +1535,11 @@ pub enum Outcome {
     },
     /// A leave was withdrawn as asked, or the daemon refused with why.
     LeaveWithdrawn {
+        session: String,
+        refused: Option<String>,
+    },
+    /// An exception was withdrawn as asked, or the daemon refused with why.
+    ExceptionWithdrawn {
         session: String,
         refused: Option<String>,
     },
@@ -4082,6 +4094,22 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::LeaveWithdrawn { session, refused }
+        }
+        Command::WithdrawException {
+            session,
+            agent,
+            rule,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "exception.withdraw",
+                json!({"session": agent, "rule": rule}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ExceptionWithdrawn { session, refused }
         }
         Command::ReadNotifications(reading) => {
             let answer = ask_alone(
