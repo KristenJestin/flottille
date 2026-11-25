@@ -3113,7 +3113,8 @@ morning). `do_not_disturb.on` is `true` while it holds: until turned off, or unt
 holds only what a project sets itself, which wins over `kinds`. `muted` is `true` inside the quiet
 hours and while Do not disturb holds: nothing rings, everything goes to the centre. A file that
 cannot be read (a syntax error, a request set to `off`) answers `invalid-config` with the file and
-the key, and the daemon follows the defaults until it is fixed.
+the key, and the daemon follows the defaults until it is fixed; its log says why, once for each
+reason. A project's own levels are `[projects.<name>.kinds]` in the file.
 
 ### `notifications.set_settings`
 
