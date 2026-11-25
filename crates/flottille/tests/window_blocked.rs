@@ -14,7 +14,9 @@ use common::mcp::{Mcp, server_of};
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::state::AgentState;
-use flottille_window::tree::{blocked_id, blocked_who_id, session_id, session_key_id};
+use flottille_window::tree::{
+    blocked_id, blocked_who_id, session_id, session_key_id, session_place_id, session_waits_id,
+};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -654,6 +656,96 @@ fn a_blocked_row_says_what_its_session_is_about(cx: &mut TestAppContext) {
             .and_then(|found| found.label().map(str::to_owned))
     });
     assert_eq!(key.as_deref(), Some("#5"));
+}
+
+#[gpui_kit::test]
+fn a_blocked_row_says_who_it_waits_for_on_its_second_line(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let (other, _) = start(&user, "write the readme");
+    let (id, mcp) = start(&user, "open the docs pull request");
+    // A row of its project is two lines high: the group's row keeps that height.
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the other row", |cx| {
+        label(cx, session_id(&other)).is_some()
+    });
+    settle(cx);
+    let two_lines = frame_height(&shell, &other, IN_PROJECT, cx).expect("the other row");
+
+    wait_for_maya(&user, &id, &mcp);
+    until(&shell, cx, "the group", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
+    cx.update(|window, cx| window.click(blocked_id(), cx));
+    settle(cx);
+
+    // Line 2 says who and why, the project stays in the row's meta as a scoped row says it.
+    let says = cx.update(|window, _| {
+        window
+            .within(IN_GROUP)
+            .try_find(session_waits_id(&id))
+            .and_then(|found| found.label().map(str::to_owned))
+    });
+    assert_eq!(says.as_deref(), Some("waits for Maya · review of #12"));
+    let scope = shell.read_with(cx, |s, cx| {
+        s.session(&id).unwrap().read(cx).scope().map(str::to_owned)
+    });
+    assert_eq!(scope.as_deref(), Some("atlas"));
+    assert_eq!(frame_height(&shell, &id, IN_GROUP, cx), Some(two_lines));
+}
+
+#[gpui_kit::test]
+fn its_second_line_comes_back_when_it_is_no_longer_blocked(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let (id, mcp) = start(&user, "open the docs pull request");
+    wait_for_maya(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the group", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
+    cx.update(|window, cx| window.click(blocked_id(), cx));
+    settle(cx);
+    assert!(
+        label(cx, session_waits_id(&id)).is_some(),
+        "it says who it waits for in the group"
+    );
+
+    maya_reviews(&user, &id);
+    until(&shell, cx, "the row back in its project", |cx| {
+        listed(&shell, cx).contains(&id)
+    });
+
+    // Its usual line 2 is back, the words of the wait gone, and the row no longer says its
+    // project: its second line is not the group's.
+    let mut frames = 0;
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            break;
+        }
+        frames += 1;
+    }
+    assert!(frames >= 4, "the line changes over a few frames: {frames}");
+    let within = |scope: &'static str, id: gpui_kit::ElementId, cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .within(scope)
+                .try_find(id)
+                .map(|found| found.label().map(str::to_owned))
+        })
+    };
+    assert_eq!(
+        within(IN_PROJECT, session_place_id(&id), cx),
+        Some(Some("main".to_owned())),
+        "its place, as every row of its project says it"
+    );
+    assert_eq!(within(IN_PROJECT, session_waits_id(&id), cx), None);
+    let scope = shell.read_with(cx, |s, cx| {
+        s.session(&id).unwrap().read(cx).scope().map(str::to_owned)
+    });
+    assert_eq!(scope, None);
 }
 
 /// One step of the window as the platform runs it; how many animation frames were asked.
