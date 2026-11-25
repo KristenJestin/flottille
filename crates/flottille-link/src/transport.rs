@@ -50,6 +50,22 @@ const SERVER_NAME: &str = "flottille";
 const MOST_INCOMING: usize = 32;
 const INCOMING_BUFFERED: u64 = 1 << 20;
 
+/// Why a request went unanswered, and whether its frame may have reached the other side.
+pub(crate) enum Unanswered {
+    /// The connection was gone before the whole frame was written: the other side never read it.
+    Unsent(Failure),
+    /// Gone after the frame was written: the other side may have served it.
+    Sent(Failure),
+}
+
+impl Unanswered {
+    pub(crate) fn failure(self) -> Failure {
+        match self {
+            Unanswered::Unsent(failure) | Unanswered::Sent(failure) => failure,
+        }
+    }
+}
+
 /// Why the transport failed: the other side closed with a reason of its own, or the connection
 /// was lost or never made.
 pub(crate) enum Failure {
@@ -465,12 +481,22 @@ impl Conn {
         data.downcast::<HandshakeData>().ok()?.protocol
     }
 
-    /// Sends `frame` on a stream of its own, and reads the other side's answer on it.
-    pub(crate) async fn request(&self, frame: &[u8], limit: usize) -> Result<Vec<u8>, Failure> {
-        let (mut send, mut recv) = self.0.open_bi().await.map_err(failure)?;
-        send.write_all(frame).await.map_err(write_failure)?;
+    /// Sends `frame` on a stream of its own, and reads the other side's answer on it. A failure
+    /// says whether the frame may have reached the other side: the other side serves a frame
+    /// only once it read it to its end, which it never sees before `finish`.
+    pub(crate) async fn request(&self, frame: &[u8], limit: usize) -> Result<Vec<u8>, Unanswered> {
+        let (mut send, mut recv) = self
+            .0
+            .open_bi()
+            .await
+            .map_err(|error| Unanswered::Unsent(failure(error)))?;
+        send.write_all(frame)
+            .await
+            .map_err(|error| Unanswered::Unsent(write_failure(error)))?;
         let _ = send.finish();
-        recv.read_to_end(limit).await.map_err(read_failure)
+        recv.read_to_end(limit)
+            .await
+            .map_err(|error| Unanswered::Sent(read_failure(error)))
     }
 
     /// Sends `frame` on a stream of its own, and gives the stream the other side answers on, read

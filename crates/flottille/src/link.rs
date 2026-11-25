@@ -43,6 +43,8 @@ const NOT_TRUSTED: &str = "refused: this machine's key is not one of the user's"
 const GONE_FROM_HUB: &str = "it is no longer connected to the hub";
 /// What closes the second link two machines that dialled each other at once made.
 const LINKED_ALREADY: &str = "linked already";
+/// How long a request whose link was let go for another waits for the link kept.
+const WAIT_KEPT: Duration = Duration::from_secs(10);
 /// How long a key refused is not said again in the log.
 const SAID_AGAIN: Duration = Duration::from_secs(60);
 /// The most keys refused said in the log within `SAID_AGAIN`: a key costs a stranger nothing, so
@@ -184,6 +186,8 @@ pub struct Remote {
     offered: tokio::sync::watch::Sender<Option<Capabilities>>,
     /// Asks `keep_offering` to look at what this machine offers now: a link was made.
     offer_now: tokio::sync::Notify,
+    /// Wakes the requests that wait for the link kept to a machine (`Remote::send`).
+    relinked: tokio::sync::Notify,
     /// This machine's live root sessions, light, while its member is a runner; none otherwise.
     /// Each link sends it when made and whenever it changes, as `offered`.
     sessions: tokio::sync::watch::Sender<Option<flottille_link::SessionList>>,
@@ -209,6 +213,19 @@ pub struct Remote {
     /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
     /// off, or the link made again somewhere else.
     halt: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+/// Whether `error` says a message was not served because its link was let go for another to the
+/// same machine (`LINKED_ALREADY`): by this side, or by the other, which turned it away.
+fn unserved_for_another(error: &LinkError) -> bool {
+    match error {
+        LinkError::NotSent {
+            reason: Some(reason),
+            ..
+        } => reason == LINKED_ALREADY,
+        LinkError::Declined { reason, .. } => reason == LINKED_ALREADY,
+        _ => false,
+    }
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials, every link
@@ -362,6 +379,7 @@ impl Remote {
             daemon: std::sync::OnceLock::new(),
             offered: tokio::sync::watch::Sender::new(None),
             offer_now: tokio::sync::Notify::new(),
+            relinked: tokio::sync::Notify::new(),
             sessions: tokio::sync::watch::Sender::new(None),
             projects: tokio::sync::watch::Sender::new(None),
             pilots: tokio::sync::watch::Sender::new(None),
@@ -662,19 +680,22 @@ impl Remote {
                     "flottille daemon: linked to {name} twice; kept the link dialled by {}",
                     dialler.fingerprint()
                 );
+                // The other is let go, not cut: what is under way on it is finished, what comes
+                // is turned away unserved, and goes on the link kept (`Remote::send`).
                 if !keep_new {
-                    link.close(LINKED_ALREADY);
+                    link.retire(LINKED_ALREADY);
                     return;
                 }
-                old.close(LINKED_ALREADY);
+                old.retire(LINKED_ALREADY);
             } else if let Some((_, old, _)) = &seen.link {
                 // A link of the same way again: the old one is gone and not noticed yet.
-                old.close(LINKED_ALREADY);
+                old.retire(LINKED_ALREADY);
             }
             seen.set(PeerState::Online, None);
             seen.link = Some((generation, link.clone(), dialled));
             seen.wait = ROUND;
         }
+        self.relinked.notify_waiters();
         eprintln!(
             "flottille daemon: linked to {name} (protocol {})",
             link.protocol()
@@ -2119,9 +2140,44 @@ impl Remote {
         }
     }
 
-    /// Sends `message` on `link`, a machine link this machine holds.
+    /// Sends `message` on `link`, a machine link this machine holds. When the two machines
+    /// dialled each other at once and `link` is the one let go (`linked`), the message goes on
+    /// the link kept, once, if it is known not to have been served: it was never written whole
+    /// on `link`, or the other machine turned it away unserved as "linked already". One that may
+    /// have been served (its link cut once it was written, by a machine of before) is not sent
+    /// again, and its failure is said as any other.
     pub(crate) async fn send(&self, link: &Link, message: &Message) -> Result<Value, LinkError> {
-        link.send(message).await
+        let failed = match link.send(message).await {
+            Err(failed) if unserved_for_another(&failed) => failed,
+            sent => return sent,
+        };
+        match self.kept_instead_of(link).await {
+            Some(kept) => kept.send(message).await,
+            None => Err(failed),
+        }
+    }
+
+    /// The link to `link`'s machine kept instead of it: waited for `WAIT_KEPT` at most, since the
+    /// other machine may have chosen before this one had both links.
+    async fn kept_instead_of(&self, link: &Link) -> Option<Link> {
+        let until = tokio::time::Instant::now() + WAIT_KEPT;
+        loop {
+            let relinked = self.relinked.notified();
+            tokio::pin!(relinked);
+            relinked.as_mut().enable();
+            let kept = self
+                .seen
+                .lock()
+                .unwrap()
+                .get(link.peer().as_bytes())
+                .and_then(|seen| seen.link.as_ref())
+                .map(|(_, kept, _)| kept.clone())
+                .filter(|kept| !kept.same(link));
+            if kept.is_some() {
+                return kept;
+            }
+            tokio::time::timeout_at(until, relinked).await.ok()?;
+        }
     }
 
     /// The machine link to the machine named `machine`, and its key.
@@ -2494,15 +2550,16 @@ impl Remote {
 /// Sends the vault entry the user shared, `share`, to their machine `machine`, a runner, which
 /// checks the user's signature it carries and keeps it: what it answered, or why it is refused.
 pub(crate) async fn share(daemon: &Daemon, machine: &str, share: Share) -> Result<(), String> {
-    let link = runner_link(daemon, machine, "a vault entry")?;
-    link.send(&Message::Machine(MachineMessage::Share(share)))
+    let (remote, link) = runner_link(daemon, machine, "a vault entry")?;
+    remote
+        .send(&link, &Message::Machine(MachineMessage::Share(share)))
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
 /// The machine link to the user's runner `machine`, which `what` is shared with.
-fn runner_link(daemon: &Daemon, machine: &str, what: &str) -> Result<Link, String> {
+fn runner_link(daemon: &Daemon, machine: &str, what: &str) -> Result<(Arc<Remote>, Link), String> {
     let remote = remote_of(daemon).map_err(|failure| failure.message)?;
     let (members, _) = remote.listed()?;
     let Some(peer) = remote
@@ -2524,7 +2581,8 @@ fn runner_link(daemon: &Daemon, machine: &str, what: &str) -> Result<Link, Strin
             "{machine} runs no agent: {what} is shared with a runner"
         ));
     }
-    remote.machine_link(&peer)
+    let link = remote.machine_link(&peer)?;
+    Ok((remote, link))
 }
 
 /// Sends the connection the user shared, `share`, to their machine `machine`, a runner, which
@@ -2534,8 +2592,12 @@ pub(crate) async fn share_connection(
     machine: &str,
     share: ConnectionShare,
 ) -> Result<(), String> {
-    let link = runner_link(daemon, machine, "a connection")?;
-    link.send(&Message::Machine(MachineMessage::ShareConnection(share)))
+    let (remote, link) = runner_link(daemon, machine, "a connection")?;
+    remote
+        .send(
+            &link,
+            &Message::Machine(MachineMessage::ShareConnection(share)),
+        )
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())

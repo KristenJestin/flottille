@@ -11,13 +11,16 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::transport::{Conn, Failure, Frames, Inbound, Raw, RelaySocket, Reply, Transport};
+use crate::transport::{
+    Conn, Failure, Frames, Inbound, Raw, RelaySocket, Reply, Transport, Unanswered,
+};
 use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 
 /// The longest frame a link takes. Bigger transfers (a git bundle) will have streams of their
@@ -36,6 +39,9 @@ const HANDSHAKES: usize = 256;
 const HANDSHAKES_FROM_ONE: usize = 2;
 /// The most of them from one IPv6 /48.
 const HANDSHAKES_FROM_SITE: usize = 8;
+/// How long a link let go (`Link::retire`) still answers: what the other side sent on it before
+/// it let it go too reaches this side within it, and is served or turned away, never lost.
+const GRACE: Duration = Duration::from_secs(1);
 /// The codes a side closes a link with.
 const CLOSE_REFUSED: u32 = 1;
 const CLOSE_NEEDS_UPDATE: u32 = 2;
@@ -427,6 +433,12 @@ pub enum LinkError {
         reason: String,
     },
     Closed(String),
+    /// The link was gone before the message was written whole: the other side never read it.
+    /// `reason` is why the link was closed, by either side, when one was said.
+    NotSent {
+        said: String,
+        reason: Option<String>,
+    },
 }
 
 impl LinkError {
@@ -457,6 +469,7 @@ impl fmt::Display for LinkError {
             LinkError::NeedsUpdate(refusal) => refusal.fmt(f),
             LinkError::Declined { peer, reason } => write!(f, "{peer} refused: {reason}"),
             LinkError::Closed(why) => f.write_str(why),
+            LinkError::NotSent { said, .. } => f.write_str(said),
         }
     }
 }
@@ -794,7 +807,12 @@ async fn dialler_handshake(
     name: &str,
 ) -> Result<Link, LinkError> {
     let sent = serde_json::to_vec(ours).expect("a hello is JSON");
-    let answered = tokio::time::timeout(WAIT, conn.request(&sent, FRAME_LIMIT)).await;
+    let answered = tokio::time::timeout(WAIT, async {
+        conn.request(&sent, FRAME_LIMIT)
+            .await
+            .map_err(Unanswered::failure)
+    })
+    .await;
     let theirs = match answered {
         Err(_) => {
             conn.close(CLOSE_DONE, "no hello");
@@ -828,6 +846,7 @@ async fn dialler_handshake(
             traffic,
             protocol,
             theirs,
+            ended: Arc::default(),
         }),
         Err(refusal) => {
             conn.close(CLOSE_NEEDS_UPDATE, "refused: no protocol in common");
@@ -882,6 +901,7 @@ impl Accepting {
                 traffic: self.traffic,
                 protocol,
                 theirs,
+                ended: Arc::default(),
             }),
             Err(refusal) => {
                 // The other side reads this hello, refuses too, and closes.
@@ -901,6 +921,38 @@ pub struct Link {
     traffic: Traffic,
     protocol: u32,
     theirs: Hello,
+    /// How this side ends it, shared by its clones.
+    ended: Arc<Ended>,
+}
+
+/// How this side ends a link: why, and what is under way on it meanwhile.
+#[derive(Default)]
+struct Ended {
+    /// Why this side closed the link, or lets it go.
+    why: std::sync::OnceLock<String>,
+    /// Let go (`Link::retire`): it sends nothing more, and turns away what comes.
+    retiring: AtomicBool,
+    /// The messages under way on it, sent and served.
+    busy: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+/// A message under way on a link, while it is held.
+struct Busy(Arc<Ended>);
+
+impl Busy {
+    fn on(ended: &Arc<Ended>) -> Busy {
+        ended.busy.fetch_add(1, Ordering::SeqCst);
+        Busy(ended.clone())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if self.0.busy.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
 }
 
 impl Link {
@@ -930,11 +982,30 @@ impl Link {
     /// to have checked what it sends.
     #[doc(hidden)]
     pub async fn send_raw(&self, frame: &[u8]) -> Result<Value, LinkError> {
+        let _busy = Busy::on(&self.ended);
+        if let Some(why) = self.retiring() {
+            return Err(LinkError::NotSent {
+                said: format!("the link to {} was let go: {why}", self.name),
+                reason: Some(why),
+            });
+        }
         let bytes = self
             .conn
             .request(frame, FRAME_LIMIT)
             .await
-            .map_err(|failure| self.lost(failure))?;
+            .map_err(|unanswered| match unanswered {
+                Unanswered::Unsent(failure) => {
+                    let reason = match &failure {
+                        Failure::Closed(reason) => Some(reason.clone()),
+                        Failure::Lost(_) => self.ended.why.get().cloned(),
+                    };
+                    LinkError::NotSent {
+                        said: self.lost(failure).to_string(),
+                        reason,
+                    }
+                }
+                Unanswered::Sent(failure) => self.lost(failure),
+            })?;
         match serde_json::from_slice::<Answered>(&bytes) {
             Ok(Answered::Ok(value)) => Ok(value),
             Ok(Answered::Refused(reason)) => Err(LinkError::Declined {
@@ -972,11 +1043,21 @@ impl Link {
                 Inbound::Frame(bytes, reply) => {
                     // A frame may carry a vault entry's secret (`share`): wiped once it is read.
                     let bytes = Zeroizing::new(bytes);
+                    // Let go: what comes is turned away unserved, which its sender is told.
+                    if let Some(why) = self.retiring() {
+                        let busy = Busy::on(&self.ended);
+                        tokio::spawn(async move {
+                            reply.send_owned(answer(Err(why))).await;
+                            drop(busy);
+                        });
+                        continue;
+                    }
                     match self.judge(&bytes) {
                         Ok(message) => {
                             return Some(Received {
                                 message,
                                 reply: Replying::Frame(reply),
+                                _busy: Busy::on(&self.ended),
                             });
                         }
                         Err(reason) => reply.send(&answer(Err(reason))).await,
@@ -988,6 +1069,7 @@ impl Link {
                         return Some(Received {
                             message: Message::Client(serde_json::json!({"tunnel": id})),
                             reply: Replying::Tunnel(id, raw),
+                            _busy: Busy::on(&self.ended),
                         });
                     }
                     _ => raw.refuse(),
@@ -1027,12 +1109,53 @@ impl Link {
 
     /// Closes the link, telling the other side why.
     pub fn close(&self, reason: &str) {
+        let _ = self.ended.why.set(reason.to_owned());
         self.conn.close(CLOSE_DONE, reason);
     }
 
-    /// Lets the link go, as `close` does.
+    /// Lets the link go for another to the same machine: it sends nothing more, and what comes on
+    /// it is turned away with `reason`, unserved; what is under way either way is finished. It
+    /// closes with `reason` once nothing is, `GRACE` at the soonest and `WAIT` at the latest.
+    /// Within a Tokio runtime.
     pub fn retire(&self, reason: &str) {
-        self.close(reason);
+        if self.ended.why.set(reason.to_owned()).is_err() {
+            return;
+        }
+        self.ended.retiring.store(true, Ordering::SeqCst);
+        let (conn, ended, reason) = (self.conn.clone(), self.ended.clone(), reason.to_owned());
+        tokio::spawn(async move {
+            let settled = async {
+                tokio::time::sleep(GRACE).await;
+                loop {
+                    let idle = ended.idle.notified();
+                    tokio::pin!(idle);
+                    idle.as_mut().enable();
+                    if ended.busy.load(Ordering::SeqCst) == 0 {
+                        break;
+                    }
+                    idle.await;
+                }
+            };
+            tokio::select! {
+                _ = tokio::time::timeout(WAIT, settled) => {}
+                _ = conn.closed() => {}
+            }
+            conn.close(CLOSE_DONE, &reason);
+        });
+    }
+
+    /// Why this link was let go (`retire`), while it is.
+    fn retiring(&self) -> Option<String> {
+        self.ended
+            .retiring
+            .load(Ordering::SeqCst)
+            .then(|| self.ended.why.get().cloned())
+            .flatten()
+    }
+
+    /// Whether `other` is this very link.
+    pub fn same(&self, other: &Link) -> bool {
+        Arc::ptr_eq(&self.ended, &other.ended)
     }
 
     /// Waits until the link is gone; why, in a sentence.
@@ -1137,6 +1260,8 @@ impl Streamed {
 pub struct Received {
     message: Message,
     reply: Replying,
+    /// Held until it is answered: a link let go is not closed under it.
+    _busy: Busy,
 }
 
 /// Where a message is answered: on the stream it came on, or, for a tunnel's connection, that
@@ -1169,6 +1294,7 @@ impl Received {
             reply => Err(Box::new(Received {
                 message: self.message,
                 reply,
+                _busy: self._busy,
             })),
         }
     }
@@ -1186,7 +1312,11 @@ impl Received {
         match self.reply {
             Replying::Frame(reply) => {
                 let bytes = answer(answered);
-                tokio::spawn(reply.send_owned(bytes));
+                let busy = self._busy;
+                tokio::spawn(async move {
+                    reply.send_owned(bytes).await;
+                    drop(busy);
+                });
             }
             // A connection of a tunnel has no answer to give: it is closed.
             Replying::Tunnel(_, raw) => raw.refuse(),
