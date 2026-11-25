@@ -475,6 +475,57 @@ pub struct Session {
     /// Its root is a child an agent of another machine launched here, that agent by name
     /// (`agent b1 of pc`): only that agent writes to it, never the user.
     pub child_of: Option<String>,
+    /// At rest, it waits on a person, as the daemon derives it (`blocked`); `None` otherwise.
+    pub blocked: Option<Blocked>,
+}
+
+/// Whom a session blocked by someone else waits on, what for and since when.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blocked {
+    /// The people, by the names the forge or the tracker gives them.
+    pub by: Vec<String>,
+    /// What for: `review of #123`, `ticket SHOP-12`.
+    pub why: String,
+    /// Since when, in milliseconds since the Unix epoch.
+    pub since: u64,
+}
+
+impl Blocked {
+    fn of(value: &Value) -> Option<Blocked> {
+        let by: Vec<String> = value["by"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        (!by.is_empty()).then(|| Blocked {
+            by,
+            why: value["why"].as_str().unwrap_or_default().to_owned(),
+            since: value["since"].as_u64().unwrap_or_default(),
+        })
+    }
+
+    /// Who, as a row's line says them: `Maya`, `Maya and Noor`, `Maya, Noor and Sam`.
+    pub fn who(&self) -> String {
+        match self.by.as_slice() {
+            [] => String::new(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+
+    /// The row's second line: `waits for Maya · review of #123`.
+    pub fn line(&self) -> String {
+        format!("waits for {} · {}", self.who(), self.why)
+    }
+}
+
+impl Session {
+    /// It leaves its project's list for the "Blocked by others" group: a root no agent leads,
+    /// blocked by someone else. A led one stays under its pilot, which speaks for it.
+    pub fn blocked_apart(&self) -> bool {
+        self.blocked.is_some() && self.pilot.is_none()
+    }
 }
 
 /// A session on another machine, as its row under its pilot shows it.
@@ -1161,18 +1212,23 @@ impl Snapshot {
                 let quota = (agent["state"] == "idle")
                     .then(|| crate::session_link::Quota::of(&agent["quota"]))
                     .flatten();
+                // At rest, it waits on a person (`blocked`, as the daemon derives it).
+                let blocked = Blocked::of(&agent["blocked"]).filter(|_| !ended(agent));
                 let mark = if ended(agent) {
                     None
                 } else if needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
+                } else if blocked.is_some() {
+                    Some(AgentState::Blocked)
                 } else if waiting.contains(id.as_str()) || quota.is_some() {
                     Some(AgentState::Waiting)
                 } else {
                     None
                 };
                 let waits = match mark {
+                    Some(AgentState::Blocked) if let Some(blocked) = &blocked => blocked.line(),
                     Some(AgentState::Waiting) if let Some(quota) = quota => {
                         crate::session::out_of_quota_line(quota.reset_at)
                     }
@@ -1188,6 +1244,9 @@ impl Snapshot {
                         "Compacting".to_owned()
                     }
                     Some(AgentState::Running) => "Running".to_owned(),
+                    Some(AgentState::Blocked) if let Some(blocked) = &blocked => {
+                        format!("Blocked by {}: {}", blocked.who(), blocked.why)
+                    }
                     Some(AgentState::Waiting) if let Some(quota) = quota => {
                         crate::session::out_of_quota(quota.reset_at)
                     }
@@ -1239,6 +1298,7 @@ impl Snapshot {
                     elsewhere: None,
                     tag: None,
                     child_of: child_of(agent),
+                    blocked: blocked.filter(|_| mark == Some(AgentState::Blocked)),
                     id,
                 }
             })
@@ -1381,7 +1441,22 @@ impl Snapshot {
         self.live_sessions_of(project)
             .into_iter()
             .filter(|session| !twin || self.is_here(session) == gone)
+            .filter(|session| !session.blocked_apart())
             .collect()
+    }
+
+    /// The roots blocked by someone else, whatever their project and their machine, the most
+    /// recently blocked first, as "Ended" holds its rows: the "Blocked by others" group's.
+    pub fn blocked_sessions(&self) -> Vec<&Session> {
+        let mut blocked: Vec<&Session> = self
+            .sessions
+            .iter()
+            .chain(&self.elsewhere)
+            .filter(|s| !s.ended && s.blocked_apart())
+            .collect();
+        let since = |s: &Session| s.blocked.as_ref().map_or(0, |b| b.since);
+        blocked.sort_by(|a, b| since(b).cmp(&since(a)).then(a.id.cmp(&b.id)));
+        blocked
     }
 
     /// The sessions that ended, whatever their project and their machine, the most recent end
@@ -1422,6 +1497,7 @@ impl Snapshot {
                 }),
                 tag: Some(machine.to_owned()),
                 child_of: None,
+                blocked: None,
                 ..session.clone()
             })
             .collect()
@@ -1499,6 +1575,7 @@ impl Snapshot {
                 }),
                 tag: None,
                 child_of: None,
+                blocked: None,
             });
         }
         self.elsewhere = added;
@@ -1631,6 +1708,7 @@ impl Snapshot {
                     }),
                     tag: machine.map(str::to_owned),
                     child_of: None,
+                    blocked: None,
                 });
                 if !self
                     .projects

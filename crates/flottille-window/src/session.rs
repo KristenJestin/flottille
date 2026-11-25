@@ -246,6 +246,17 @@ pub fn said_at_offset(ms: u64, offset: i64) -> String {
     )
 }
 
+/// What the banner of a session blocked by someone else says: `Waits for Maya: review of #123,
+/// since 14:02. It comes back by itself when they answer.`
+pub fn blocked_banner(blocked: &crate::model::Blocked) -> String {
+    format!(
+        "Waits for {}: {}, since {}. It comes back by itself when they answer.",
+        blocked.who(),
+        blocked.why,
+        clock(blocked.since)
+    )
+}
+
 /// How far east of UTC the machine's clock was at `ms`, in seconds.
 fn local_offset(ms: u64) -> i64 {
     let time = (ms / 1000) as libc::time_t;
@@ -295,6 +306,9 @@ pub struct SessionPage {
     opened: Opened,
     follow: Follow,
     layout: Layout,
+    /// It waits on a person, at rest (`blocked`): the banner above its composer says who, what
+    /// and since when.
+    blocked: Option<crate::model::Blocked>,
     /// The session's state, as the shell's tree draws it.
     status: Entity<Status>,
     /// The agent whose conversation is shown: the root, or a sub-agent read.
@@ -513,6 +527,7 @@ impl SessionPage {
             _run_drawer,
             _reply,
             opened,
+            blocked: None,
         };
         page.relink();
         page.sync_pending(cx);
@@ -1009,6 +1024,18 @@ impl SessionPage {
         };
         let session = self.opened.id.clone();
         self.perform(Command::Detach { session, from }, cx);
+    }
+
+    /// Whom it waits on, as the daemon derives it now: the banner unfolds, changes or folds away.
+    pub fn set_blocked(&mut self, blocked: Option<crate::model::Blocked>, cx: &mut Context<Self>) {
+        if self.blocked != blocked {
+            self.blocked = blocked;
+            cx.notify();
+        }
+    }
+
+    pub fn blocked(&self) -> Option<&crate::model::Blocked> {
+        self.blocked.as_ref()
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -2391,6 +2418,38 @@ impl Render for SessionPage {
                                     reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
                                 }),
                         )
+                        .into_any_element()
+                },
+            ))
+            // Blocked by someone else: who, what for, since when, and that it comes back by
+            // itself. It unfolds and fades in, and folds away once the person answered.
+            .child(presence_of(
+                "session-blocked-line",
+                self.blocked
+                    .as_ref()
+                    .filter(|_| root)
+                    .map(|blocked| SharedString::from(blocked_banner(blocked))),
+                move |said| {
+                    div()
+                        .id("session-blocked")
+                        .mb(space::SM)
+                        .px(space::MD)
+                        .py(space::SM)
+                        .rounded(gpui_design_system::theme::radius::LIST_ROW)
+                        .bg(p.away_bg)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.text)
+                        .aria_label(said.clone())
+                        .child(
+                            gpui_design_system::icon(crate::glyphs::PERSON)
+                                .size(px(13.))
+                                .text_color(p.away),
+                        )
+                        .child(div().min_w_0().child(said))
+                        .test_support()
                         .into_any_element()
                 },
             ))
