@@ -44,6 +44,10 @@ pub struct Notification {
     /// Whether it waits for the user's answer (`NEEDS_YOU`): said by the daemon, so that no
     /// client keeps its own list of kinds.
     pub needs_you: bool,
+    /// For a request's row, the number of the request it is about (its `source`): what a client
+    /// answers from the row, never another request of the same session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<u64>,
 }
 
 /// A notification about to be kept: the store gives its id.

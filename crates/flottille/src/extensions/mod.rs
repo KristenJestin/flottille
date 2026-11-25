@@ -1126,6 +1126,7 @@ fn verdict(
         reasons: vec![format!(
             "it calls {name} {action}, an action of an extension's tool not declared harmless"
         )],
+        base: 0,
         class: crate::gate::Class::Judge,
         kind: approval::Kind::Call,
     })

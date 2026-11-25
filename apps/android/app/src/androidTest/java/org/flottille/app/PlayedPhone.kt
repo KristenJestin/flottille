@@ -16,6 +16,9 @@ import org.flottille.core.Reply
 import org.flottille.core.Tunnel
 import org.flottille.core.TunnelEnd
 
+/** An answer the played core took, and how many held its connection when it took it. */
+data class Answered(val machine: String, val number: Long, val allow: Boolean, val holds: Int)
+
 /** What the real core listens on: `127.0.0.1`, never another address. */
 val IPV4_LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
 
@@ -65,6 +68,9 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
     val opened = java.util.Collections.synchronizedList(mutableListOf<Triple<String, String?, String>>())
     val closed = java.util.Collections.synchronizedList(mutableListOf<String>())
 
+    /** Each Allow or Deny: the machine, the request, the answer, and the connection's holds then. */
+    val answers = java.util.Collections.synchronizedList(mutableListOf<Answered>())
+
     @Volatile
     var holds = 0
     private val listeners = mutableMapOf<String, ServerSocket>()
@@ -90,7 +96,9 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
 
     override suspend fun answerAsk(machine: String, agent: String, asked: Long, replies: List<Reply>) = Unit
 
-    override suspend fun answer(machine: String, number: Long, allow: Boolean) = Unit
+    override suspend fun answer(machine: String, number: Long, allow: Boolean) {
+        answers += Answered(machine, number, allow, holds)
+    }
 
     override suspend fun setMode(machine: String, agent: String, mode: String) = Unit
 

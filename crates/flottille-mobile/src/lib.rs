@@ -26,8 +26,8 @@ pub use mobile::{Batch, Core, Event, Listener, Picture, Reply};
 pub use panic::{PANIC_FILE, keep_panics, last_panic};
 pub use tunnel::{Opened, TunnelEnd, TunnelView};
 pub use view::{
-    AskOption, AskQuestion, AskView, ChildView, ConversationView, Entry, MachineView, MemberView,
-    ProjectView, RequestView, RunView, SessionView, ViewState,
+    AskOption, AskQuestion, AskView, ChildView, ConversationView, DismissedView, Entry,
+    MachineView, MemberView, NoticeView, ProjectView, RequestView, RunView, SessionView, ViewState,
 };
 
 /// Why the core could not do what it was asked: a sentence for the user.

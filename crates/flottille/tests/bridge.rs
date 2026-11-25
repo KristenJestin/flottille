@@ -1052,7 +1052,7 @@ fn a_provider_error_ends_the_turn_with_a_failure_and_only_a_sign_in_error_fails_
     let user = User::with_fake_claude();
     user.claude_script(json!({"turns": [
         {"when": "broken", "do": [], "error": "API Error: 500 the provider failed"},
-        {"when": "signed", "do": [], "error": "Invalid API key · Please run /login"}
+        {"when": "signed", "do": [], "error": "Not logged in · Please run /login"}
     ]}));
     let mut bridge = Bridge::start(&user);
     let session = bridge.open(&user, &[]);
@@ -1079,7 +1079,7 @@ fn a_sign_in_error_s_code_goes_with_the_failed_prompt() {
     user.claude_script(json!({"turns": [
         {"when": "expired", "do": [], "error": "Something odd happened",
             "error_kind": "authentication_failed"},
-        {"when": "signed", "do": [], "error": "Invalid API key · Please run /login"}
+        {"when": "signed", "do": [], "error": "Not logged in · Please run /login"}
     ]}));
     let mut bridge = Bridge::start(&user);
     let session = bridge.open(&user, &[]);
@@ -1092,6 +1092,26 @@ fn a_sign_in_error_s_code_goes_with_the_failed_prompt() {
     assert_eq!(expired["data"]["code"], "authentication_failed");
     // Recognised by its words alone: no code to pass.
     assert!(signed.unwrap_err()["data"].is_null());
+}
+
+/// What `claude` 2.1.325 really ends a turn with when no login is there (seen on a real run in an
+/// empty home, #875): the kind `authentication_failed` on the message and these words, while its
+/// `initialize` and the opening of the session succeed.
+#[test]
+fn a_claude_with_no_login_fails_the_prompt_with_its_kind_and_its_real_words() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [
+        {"when": "signed", "do": [], "error": "Not logged in · Please run /login",
+            "error_kind": "authentication_failed"}
+    ]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (signed, _) = bridge.prompt(&session, "signed out");
+
+    let signed = signed.unwrap_err();
+    assert_eq!(signed["message"], "Not logged in · Please run /login");
+    assert_eq!(signed["data"]["code"], "authentication_failed");
 }
 
 #[test]

@@ -35,7 +35,8 @@ const INTERNAL: i64 = -32603;
 /// ACP's "resource not found": the session asked for is gone, and only then does the daemon give
 /// the agent a new one (`docs/agents.md`, "A death").
 const GONE: i64 = -32002;
-/// What `codex` answers a `thread/resume` of a thread it has no rollout of.
+/// What `codex` answers a `thread/resume` of a thread it has no rollout of (seen on a real run of
+/// 0.166.0, #875: error -32600, `no rollout found for thread id <uuid>`).
 const NO_ROLLOUT: &str = "no rollout found";
 
 /// The items of a bare turn: the prompt, the replies and thoughts, the calls of Flottille's
@@ -695,8 +696,13 @@ impl Bridge {
                     .to_owned();
                 let info = &error["codexErrorInfo"];
                 // Signed out: the agent cannot go on until the user signs in again.
-                // Tagged: the daemon reads the code, never the text.
-                if info == "unauthorized" {
+                // Tagged: the daemon reads the code, never the text. With no login at all,
+                // Codex 0.166.0 ends the turn with the 401 its request got, as the connection's
+                // failure (`httpConnectionFailed`), not as `unauthorized`.
+                let refused = info
+                    .as_object()
+                    .is_some_and(|kinds| kinds.values().any(|kind| kind["httpStatusCode"] == 401));
+                if info == "unauthorized" || refused {
                     return self
                         .send(
                             json!({"jsonrpc": "2.0", "id": turn.id, "error": {"code": INTERNAL,

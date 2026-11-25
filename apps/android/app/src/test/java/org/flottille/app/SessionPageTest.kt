@@ -6,13 +6,19 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -184,7 +190,7 @@ class SessionPageTest {
         rule.onNodeWithText("Earlier messages").assertDoesNotExist()
 
         // Leaving the page ends the follow: it is live only while it is on screen.
-        rule.onNodeWithText("Back").performClick()
+        rule.onNodeWithContentDescription("Back").performClick()
         rule.waitForIdle()
         assertEquals(1, phone.unfollows)
     }
@@ -212,7 +218,7 @@ class SessionPageTest {
 
         // Nothing is sent while there is nothing to send.
         rule.onNodeWithTag("send").assertIsNotEnabled()
-        rule.onNodeWithText("Gallery").performClick()
+        rule.onNodeWithContentDescription("Gallery").performClick()
         rule.onNodeWithTag("attached:0").assertIsDisplayed()
         rule.onNodeWithTag("composer").performTextInput("look at this")
         rule.onNodeWithTag("send").assertIsEnabled()
@@ -228,7 +234,7 @@ class SessionPageTest {
 
         // The camera adds a picture the same way.
         pictures.camera = Picture("image/jpeg", byteArrayOf(9), "photo.jpg")
-        rule.onNodeWithText("Camera").performClick()
+        rule.onNodeWithContentDescription("Camera").performClick()
         rule.onNodeWithTag("attached:0").assertIsDisplayed()
         rule.onNodeWithTag("send").performClick()
         rule.waitForIdle()
@@ -244,7 +250,7 @@ class SessionPageTest {
         )
         start(phone)
         open()
-        rule.onNodeWithText("Gallery").performClick()
+        rule.onNodeWithContentDescription("Gallery").performClick()
         // Said as a toast, and nothing joined the composer.
         rule.onNodeWithTag("toast").assertIsDisplayed()
         rule.onNodeWithTag("attached:0").assertDoesNotExist()
@@ -415,8 +421,7 @@ class SessionPageTest {
         val phone = phone(page(mode = "auto"))
         start(phone)
         open()
-        rule.onNodeWithTag("mode:full").performClick()
-        rule.waitForIdle()
+        chooseMode("full")
         // The one confirmation dialog, and nothing sent while it is open.
         rule.onNodeWithText("Switch to Full mode?").assertIsDisplayed()
         assertTrue(phone.modes.isEmpty())
@@ -425,14 +430,12 @@ class SessionPageTest {
         rule.onNodeWithText("Switch to Full mode?").assertDoesNotExist()
         assertTrue(phone.modes.isEmpty())
         // Confirmed, it is sent.
-        rule.onNodeWithTag("mode:full").performClick()
-        rule.waitForIdle()
+        chooseMode("full")
         rule.onNodeWithText("Switch to Full").performClick()
         rule.waitForIdle()
         assertEquals(listOf(Triple("server", "a1", "full")), phone.modes)
         // Ask and Auto need no confirmation.
-        rule.onNodeWithTag("mode:ask").performClick()
-        rule.waitForIdle()
+        chooseMode("ask")
         assertEquals(Triple("server", "a1", "ask"), phone.modes.last())
     }
 
@@ -460,13 +463,194 @@ class SessionPageTest {
         pictures.refused = "huge.png is over 5 MiB"
         start(phone)
         open()
-        rule.onNodeWithText("Gallery").performClick()
+        rule.onNodeWithContentDescription("Gallery").performClick()
         rule.onNodeWithText("huge.png is over 5 MiB").assertIsDisplayed()
     }
 
-    /** The node tagged [tag] holds [text] somewhere inside it: a card is a few texts, not one. */
+    /** Opens the one mode control and chooses [mode] in its sheet. */
+    private fun chooseMode(mode: String) {
+        rule.onNodeWithTag("mode").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("mode:$mode").performClick()
+        rule.waitForIdle()
+    }
+
+    /** Whether the node tagged [tag] is on screen: a line scrolled away is not, or no longer composed. */
+    private fun shown(tag: String): Boolean =
+        try {
+            rule.onNodeWithTag(tag).assertIsDisplayed()
+            true
+        } catch (gone: AssertionError) {
+            false
+        }
+
+    private fun long(): Conversation = page(entries = (1L..40L).map { Entry(it, if (it % 2 == 1L) "user" else "agent", "Message number $it of a long conversation") })
+
+    @Test
+    fun the_conversation_follows_its_last_message() {
+        val phone = phone(long())
+        start(phone)
+        open()
+        // It opens on its end...
+        assertTrue("the last message is in sight", shown("entry:40"))
+        assertTrue(!shown("entry:1"))
+        // ...and follows each one that arrives.
+        update(phone) { it.copy(entries = it.entries + Entry(41, "agent", "A new message")) }
+        rule.waitForIdle()
+        assertTrue("the new message is in sight", shown("entry:41"))
+        update(phone) { it.copy(entries = it.entries + Entry(42, "agent", "And another")) }
+        rule.waitForIdle()
+        assertTrue(shown("entry:42"))
+        rule.onNodeWithTag("new-messages").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_conversation_scrolled_up_is_not_moved() {
+        val phone = phone(long())
+        start(phone)
+        open()
+        repeat(3) { rule.onNodeWithTag("conversation").performTouchInput { swipeDown() } }
+        rule.waitForIdle()
+        assertTrue("scrolled up", !shown("entry:40"))
+
+        // What arrives does not move the page: an affordance says it and brings the user down.
+        update(phone) { it.copy(entries = it.entries + Entry(41, "agent", "A new message")) }
+        rule.waitForIdle()
+        assertTrue(!shown("entry:41"))
+        assertTrue(!shown("entry:40"))
+        rule.onNodeWithTag("new-messages").assertIsDisplayed()
+        rule.onNodeWithTag("new-messages").performClick()
+        rule.waitForIdle()
+        assertTrue(shown("entry:41"))
+        rule.onNodeWithTag("new-messages").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_subscription_s_news_is_a_folded_block_not_a_message() {
+        val news = "News of the pull request #12 of app:\nThe checks ended: 3 passed, 1 failed.\nSubscribe again to hear of the next run."
+        val phone = phone(
+            page(
+                entries = listOf(
+                    Entry(1, "user", "Fix the login"),
+                    Entry(2, "agent", "On it."),
+                    Entry(3, "delivery", news, delivery = "woken by", summary = "checks of #12 ended, 1 failed"),
+                ),
+            ),
+        )
+        start(phone)
+        open()
+        // One line saying what it is, never the user's bubble, never the raw text.
+        assertHas("delivery:3", "woken by")
+        assertHas("delivery:3", "checks of #12 ended, 1 failed")
+        rule.onNodeWithTag("entry:3").assertDoesNotExist()
+        rule.onNodeWithText("Subscribe again", substring = true).assertDoesNotExist()
+        // A tap unfolds what the forge said, another folds it away.
+        rule.onNodeWithTag("delivery:3").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Subscribe again", substring = true).assertIsDisplayed()
+        rule.onNodeWithTag("delivery:3").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Subscribe again", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun the_tree_opens_in_a_panel() {
+        val phone = phone(
+            page(
+                children = listOf(
+                    Child("c1", "Check the tests", "running cargo test", "worker", 1),
+                    Child("c2", "Read the docs", "ended: it reported", "worker", 2),
+                ),
+            ),
+        )
+        start(phone)
+        open()
+        // Not under the conversation: the page is the conversation's.
+        rule.onNodeWithTag("child:c1").assertDoesNotExist()
+        rule.onNodeWithTag("tree").assertDoesNotExist()
+        // From the top bar, a panel with the tree, read only.
+        rule.onNodeWithContentDescription("Agents").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("tree").assertIsDisplayed()
+        // The pilot first, then its children; the ended ones folded until asked for.
+        assertHas("tree-pilot", "Fix the login")
+        assertHas("child:c1", "running cargo test")
+        rule.onNodeWithTag("child:c2").assertDoesNotExist()
+        assertHas("tree-ended", "Ended")
+        rule.onNodeWithTag("tree-ended").performClick()
+        rule.waitForIdle()
+        assertHas("child:c2", "ended: it reported")
+        rule.onNodeWithContentDescription("Close").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("tree").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_mode_is_one_control() {
+        val phone = phone(page(mode = "auto"))
+        start(phone)
+        open()
+        // One control says the mode; its three choices are not on the page.
+        assertHas("mode", "Auto")
+        for (mode in listOf("ask", "auto", "full")) rule.onNodeWithTag("mode:$mode").assertDoesNotExist()
+        // A tap opens them, the chosen one marked; a choice changes it and closes them.
+        rule.onNodeWithTag("mode").performClick()
+        rule.waitForIdle()
+        for (mode in listOf("ask", "auto", "full")) rule.onNodeWithTag("mode:$mode").assertIsDisplayed()
+        rule.onNodeWithTag("mode:ask").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(Triple("server", "a1", "ask")), phone.modes)
+        rule.onNodeWithTag("mode:ask").assertDoesNotExist()
+    }
+
+    @Test
+    fun the_composer_s_buttons_are_icons_with_labels() {
+        val phone = phone(page(working = true))
+        start(phone)
+        open()
+        // Icons, no words drawn; each says what it does to a screen reader.
+        for (label in listOf("Back", "Gallery", "Camera", "Stop")) {
+            rule.onNode(hasContentDescription(label) and hasClickAction()).assertIsDisplayed()
+            rule.onNodeWithText(label).assertDoesNotExist()
+        }
+        rule.onNodeWithTag("composer").performTextInput("and the tests")
+        rule.waitForIdle()
+        rule.onNode(hasContentDescription("Send") and hasClickAction()).assertIsDisplayed()
+        rule.onNodeWithText("Send").assertDoesNotExist()
+    }
+
+    @Test
+    fun an_answered_request_folds_into_a_one_line_record() {
+        val phone = phone(requests = listOf(request(4, "git push --force-with-lease origin login"), request(5, "rm -rf build")))
+        start(phone)
+        open()
+        // Inline in the conversation, where it was asked, with Allow and Deny.
+        rule.onNode(hasTestTag("request:4") and hasAnyAncestor(hasTestTag("conversation"))).assertExists()
+        rule.onNodeWithTag("allow:4").performClick()
+        rule.onNodeWithTag("deny:5").performClick()
+        rule.waitForIdle()
+        phone.state.value = phone.state.value.copy(requests = emptyList())
+        rule.mainClock.advanceTimeBy(1_000)
+        // Answered, it is one line saying what was asked and what the user said.
+        rule.onNodeWithTag("request:4").assertDoesNotExist()
+        assertHas("request-record:4", "git push --force-with-lease origin login")
+        assertHas("request-record:4", "Allowed")
+        assertHas("request-record:5", "Denied")
+    }
+
+    @Test
+    fun the_mode_chip_is_in_the_top_bar() {
+        val phone = phone(page(mode = "full"))
+        start(phone)
+        open()
+        rule.onNode(hasTestTag("mode") and hasAnyAncestor(hasTestTag("top-bar"))).assertExists()
+        rule.onNode(hasTestTag("mode") and hasAnyAncestor(hasTestTag("composer-bar"))).assertDoesNotExist()
+        assertHas("mode", "Full")
+    }
+
+    /** The node tagged [tag] holds [text], itself or somewhere inside it: a card is a few texts, a control merges its own. */
     private fun assertHas(tag: String, text: String) {
-        rule.onNode(hasTestTag(tag) and hasAnyDescendant(hasText(text, substring = true))).assertExists()
+        rule.onNode(hasTestTag(tag) and (hasText(text, substring = true) or hasAnyDescendant(hasText(text, substring = true)))).assertExists()
     }
 
     private fun fill(tag: String) = rule.onNodeWithTag(tag).fetchSemanticsNode().config.getOrNull(FillColour)
@@ -477,23 +661,21 @@ class SessionPageTest {
         start(phone)
         open()
 
-        // Three choices; the chosen one's fill moves, and Full's is the alarm colour.
-        rule.onNodeWithTag("mode:auto").assertIsDisplayed()
-        rule.onNodeWithTag("mode:ask").assertIsDisplayed()
-        rule.onNodeWithTag("mode:full").assertIsDisplayed()
-        rule.onNodeWithTag("mode:full").performClick()
-        rule.waitForIdle()
+        // The one control says the mode; once in Full, its fill moves to the alarm colour.
+        assertTrue(fill("mode") != Palette.Dark.failBg)
+        chooseMode("full")
         rule.onNodeWithText("Switch to Full").performClick()
         rule.waitForIdle()
         assertEquals(listOf(Triple("server", "a1", "full")), phone.modes)
         update(phone) { it.copy(mode = "full") }
         rule.mainClock.advanceTimeBy(1_000)
-        assertEquals(Palette.Dark.fail, fill("mode:full"))
-        assertTrue(fill("mode:auto") != Palette.Dark.fail)
+        assertEquals(Palette.Dark.failBg, fill("mode"))
+        assertHas("mode", "Full")
 
         update(phone) { it.copy(mode = "ask") }
         rule.mainClock.advanceTimeBy(1_000)
-        assertTrue(fill("mode:full") != Palette.Dark.fail)
+        assertTrue(fill("mode") != Palette.Dark.failBg)
+        assertHas("mode", "Ask")
     }
 
     @Test
@@ -527,7 +709,9 @@ class SessionPageTest {
         rule.onNodeWithTag("composer").assertDoesNotExist()
         rule.onNodeWithTag("send").assertDoesNotExist()
         rule.onNodeWithTag("stop").assertDoesNotExist()
-        rule.onNodeWithTag("mode:full").assertDoesNotExist()
+        rule.onNodeWithTag("mode").assertDoesNotExist()
+        rule.onNodeWithContentDescription("Agents").performClick()
+        rule.waitForIdle()
         assertHas("child:c1", "running cargo test")
     }
 
@@ -568,8 +752,9 @@ class SessionPageTest {
         for (tag in listOf("composer", "send", "stop", "allow:4", "deny:4", "ask-answer", "mode:full", "mode:ask", "option:0:Yes")) {
             rule.onNodeWithTag(tag).assertDoesNotExist()
         }
-        rule.onNodeWithText("Gallery").assertDoesNotExist()
-        rule.onNodeWithText("Camera").assertDoesNotExist()
+        rule.onNodeWithContentDescription("Gallery").assertDoesNotExist()
+        rule.onNodeWithContentDescription("Camera").assertDoesNotExist()
+        rule.onNodeWithTag("mode").assertDoesNotExist()
         rule.onNodeWithText("View only").assertIsDisplayed()
     }
 

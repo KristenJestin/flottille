@@ -473,3 +473,174 @@ fn a_refused_save_keeps_the_secret_typed(cx: &mut TestAppContext) {
         "the field lets go of the secret once it is saved"
     );
 }
+
+/// What every place that opens the form for an entry that exists must show and do: its title
+/// says Edit, its secret field is empty with the hint, and Save with the secret left empty saves
+/// the metadata (`vault.set` without a secret, which the daemon answers by keeping the one the
+/// keyring holds, #961) and shows no error.
+fn assert_keeps_the_secret_left_empty(
+    shell: &Entity<Shell>,
+    section: &Entity<VaultSection>,
+    user: &User,
+    cx: &mut VisualTestContext,
+) {
+    settle(cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_title()).as_deref(),
+        Some("Edit jira"),
+        "the form says it edits the entry"
+    );
+    assert_eq!(
+        label_of("vault-secret-field-hint", cx).as_deref(),
+        Some("Leave empty to keep the current secret")
+    );
+    assert_eq!(label_of("save-vault-entry", cx).as_deref(), Some("Save"));
+    assert_eq!(
+        section.read_with(cx, |s, cx| s
+            .secret_field()
+            .unwrap()
+            .read(cx)
+            .value()
+            .to_string()),
+        "",
+        "a secret is never shown"
+    );
+    type_in(section, VaultSection::description_field, "Logs time", cx);
+    click("save-vault-entry", cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_error().map(str::to_owned)),
+        None,
+        "an empty secret on an entry that exists is no error"
+    );
+    until(shell, cx, "the entry is saved", |cx| {
+        toasts(shell, cx).contains(&"Entry jira saved".to_owned())
+    });
+    let entries = listed(user);
+    assert_eq!(entries.as_array().unwrap().len(), 1);
+    assert_eq!(entries[0]["description"], "Logs time");
+    assert!(!section.read_with(cx, |s, _| s.is_open()));
+}
+
+fn jira(user: &User) {
+    user.call(
+        "vault.set",
+        json!({"name": "jira", "secret": SECRET, "description": "Logs time on Jira"}),
+    )
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn an_agents_request_for_an_entry_that_exists_edits_it_and_keeps_its_secret(
+    cx: &mut TestAppContext,
+) {
+    let user = User::new();
+    jira(&user);
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    // The card's "New entry", the entry made since the agent asked.
+    let asked = flottille_window::vault::VaultEntry {
+        name: "jira".into(),
+        description: Some("Logs time on Jira".into()),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_asked_vault_entry(asked, "to log time".into(), None, None, window, cx)
+    });
+    assert_keeps_the_secret_left_empty(&shell, &section, &user, cx);
+}
+
+#[gpui_kit::test]
+fn a_new_entry_form_prefilled_with_an_entry_that_exists_edits_it_and_keeps_its_secret(
+    cx: &mut TestAppContext,
+) {
+    let user = User::new();
+    jira(&user);
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    // A project's Tracker or Vault tab prefills what it knows, a name included.
+    let known = flottille_window::vault::VaultEntry {
+        name: "jira".into(),
+        description: Some("Logs time on Jira".into()),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_vault_entry(&known, None, window, cx)
+    });
+    assert_keeps_the_secret_left_empty(&shell, &section, &user, cx);
+}
+
+#[gpui_kit::test]
+fn a_connection_request_s_new_entry_for_an_entry_that_exists_edits_it_and_keeps_its_secret(
+    cx: &mut TestAppContext,
+) {
+    let user = User::new();
+    jira(&user);
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    // "New entry…" on a request that names an entry made since it was written.
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_vault_entry_for_request(7, None, "jira", None, window, cx)
+    });
+    assert_keeps_the_secret_left_empty(&shell, &section, &user, cx);
+}
+
+#[gpui_kit::test]
+fn an_agents_proposed_edit_keeps_the_secret_left_empty(cx: &mut TestAppContext) {
+    let user = User::new();
+    jira(&user);
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    let proposed = flottille_window::vault::VaultEntry {
+        name: "jira".into(),
+        description: Some("Logs time on Jira".into()),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.edit_proposed_vault_entry(proposed, "to log time".into(), None, window, cx)
+    });
+    assert_keeps_the_secret_left_empty(&shell, &section, &user, cx);
+}
+
+#[gpui_kit::test]
+fn the_settings_row_keeps_the_secret_left_empty(cx: &mut TestAppContext) {
+    let user = User::new();
+    jira(&user);
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    click("vault-jira", cx);
+    assert_keeps_the_secret_left_empty(&shell, &section, &user, cx);
+}
+
+#[gpui_kit::test]
+fn a_new_entry_still_needs_its_secret_after_a_save_attempt_only(cx: &mut TestAppContext) {
+    let user = User::new();
+    jira(&user);
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    // A name the vault does not hold: a new entry, whichever place opened it.
+    let asked = flottille_window::vault::VaultEntry {
+        name: "tracker-token".into(),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_asked_vault_entry(asked, "to read".into(), None, None, window, cx)
+    });
+    settle(cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_title()).as_deref(),
+        Some("New entry")
+    );
+    assert_eq!(label_of("save-vault-entry", cx).as_deref(), Some("Add"));
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_error().map(str::to_owned)),
+        None
+    );
+    click("save-vault-entry", cx);
+    assert_eq!(
+        section
+            .read_with(cx, |s, _| s.form_error().map(str::to_owned))
+            .as_deref(),
+        Some("An entry needs a name and a secret.")
+    );
+    assert_eq!(listed(&user).as_array().unwrap().len(), 1);
+}

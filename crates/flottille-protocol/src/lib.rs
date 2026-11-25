@@ -3,6 +3,7 @@
 
 pub mod address;
 mod catalogue;
+pub mod prompt;
 pub mod words;
 
 use std::collections::BTreeMap;

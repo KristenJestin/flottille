@@ -1370,6 +1370,25 @@ are judged as a write is, never asked again for the pair.
 
 The user took it back (`leave.withdraw`): the writer's next message to that session asks again.
 
+### The events of an exception
+
+An exception a session holds (`docs/design.md` §7.3): a rule of the gate the user lifted for that
+session alone. Each has `agent`, the session's id, `rule` (`force-push`, `merge-blocked`,
+`forge-state`), `why`, the agent's reason, masked, `request`, the number of the request it was
+given in, `granted_at`, and `scope`, what it covers (`exception.list`). They are in the
+session's history. An exception also goes, with no
+event of its own, when the session ends: `agent.ended` (or `agent.failed`) says it.
+
+#### `exception.granted`
+
+The user allowed a call asked with `exception`: the rule no longer stops that session, and its
+next calls are classed without it. One the session held for that rule is replaced, with no
+`exception.withdrawn`: this event's `scope` is what it covers now.
+
+#### `exception.withdrawn`
+
+The user took it back (`exception.withdraw`): the rule stops the session again.
+
 ### The events of a service
 
 The services of the machine (`docs/projects.md`, "Services"). Their runs also emit the events of a

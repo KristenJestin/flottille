@@ -942,8 +942,8 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   would close it, and any row it still finds in no walk from a root it draws as a root, so a lying
   `pilots` never hides, moves or duplicates a row. A row whose line gains its machine's mark, once
   its pilot's list comes, fades from one line to the other.
-- **A machine that is off.** Its sessions stay in the list, greyed, with `server offline since
-  22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
+- **A machine that is off.** Its sessions stay in the list, greyed, their machine's mark under a
+  hollow ring saying `server · offline since 22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
   machine's list for this: each live root session's title, project, state and last exchange, never
   its conversation, the copy replaced whenever that machine lists again, kept across a restart.
   A machine lists only the sessions of the projects it knows (the window of that machine shows
@@ -1582,8 +1582,8 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   real core by an instrumentation test on the emulator (`app/src/androidTest`); the Rust side by
   `crates/flottille-mobile/tests`. A real phone proves what none of those can: the camera reading a
   QR, and how it feels.
-- **Not here**: Needs you, the foreground service and the notifications (#826's followers);
-  closing a session of an offline machine (#1157's kept close).
+- **Not here**: Needs you (#1443); closing a session of an offline machine (#1157's kept close).
+  The foreground service and the notifications are #828's ("Notifications", "Built (#828)").
 
 **The session page, as built (#826).** Tapping a session opens `SessionPage`; its one entry point is
 a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity` reads the extras
@@ -1602,6 +1602,14 @@ recreated.
   unfolds them; a message that arrives unfolds and fades in, what the page held when it opened is
   simply there. A picture sent in a message is read back (`agent.image`) and shown above its words,
   a placeholder fading into it.
+  **It follows its end** (#1442): it opens on its last message and keeps it in sight as messages
+  arrive and unfold, until the user drags it up; then nothing moves it, and **New messages** says
+  what arrived below and brings them down. **A delivery is drawn as the window draws it**: the
+  core splits a prompt into its deliveries (`flottille_protocol::prompt`, the daemon's own markers)
+  and only the user's words (a root's brief included) are the user's bubble; any other delivery
+  is one line, what it is and what it says (`woken by` and the window's own sentence for a
+  subscription's news, `report` and `Report from <child>`, `message` and who wrote), its body
+  folded under it until a tap. What replays the conversation after a compaction is left out.
 - **Writing**: the composer sends text and pictures (`send`: `agent.send` with `images`). Pictures
   come from the gallery (the system's photo picker, no storage permission), the camera (it writes one
   shot into a file of the app's cache that a `FileProvider` gives the camera app alone, then the
@@ -1635,11 +1643,20 @@ recreated.
   dialog. An answer the machine refuses because the request is decided already or gone (or the ask
   is answered) is said on the card, which then folds; any other refusal (a link that ended, a time
   out) is a toast and the card stays, to answer again.
-- **Controls**: the mode as three choices (Ask, Auto, Full; Full's fill is the alarm colour; **Full
-  asks for a confirmation on the phone**, the one confirmation dialog, since one tap in a pocket
-  must not give the agents the run of the machine), Stop
-  in Send's place while a turn runs and there is nothing to send (`agent.cancel`: the agent
-  stays), and the session's tree read only. **A child's page has no composer**, no mode and no
+- **Controls** (#1442, design B brought up to date): the top bar holds an icon Back, the title
+  and where the session runs, the **mode's chip** (its name, in the warning colour in Full; a tap
+  opens a panel with the three modes as radio rows and what each lets the agents do; a choice
+  applies and closes it, **Full asks for a confirmation on the phone** first, the one confirmation
+  dialog, since one tap in a pocket must not give the agents the run of the machine) and the
+  **tree's icon**, with an amber dot while an agent under the session waits for the user: it
+  opens the tree as a panel from the bottom, read only, the pilot first, then its children and
+  grandchildren with what each does, the ended ones folded under one line. A **request is in
+  the conversation**, where it was asked, with Allow and Deny; answered from the phone, it folds
+  into one line (`Request #4 · <call>`, `Allowed` or `Denied`). The questions stay docked above
+  the composer. The composer is one row of icons, Gallery, Camera, the field, Send, each with its
+  label for a screen reader; Stop takes Send's place while a turn runs and there is nothing to
+  send (`agent.cancel`: the agent stays); a line above says the session works and what waits for
+  the user. **A child's page has no composer**, no mode and no
   Stop; an ended session says it has ended in place of the composer.
 - **A `viewer` reads only**: the page draws no composer, no pictures buttons, no answer (the
   ask card is read, its options are text), no Allow or Deny, no mode, no Stop, and says `View only`.
@@ -1651,7 +1668,13 @@ recreated.
   picture names, and the tree; a request carries the call line, its kind and class (`base`), what it
   says, the judge's sentence, every reason and forward, who asked and the warning; an ask carries each question with its options.
 - **Motion**, each with the kit's durations: a message or a tree row unfolds and fades in
-  (`ENTER`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
+  (`ENTER`); the list follows the growing end, **New messages** rises and fades in and out, a
+  delivery's body unfolds with its chevron turning (`PANEL`), the panels of the tree and of the
+  mode rise over their scrim and go down (`PANEL`), their rows come in staggered, the chosen mode's
+  radio fills, the mode's chip moves to the alarm colour and cross-fades its name, an answered
+  request folds away and its line unfolds, the tree's dot and its ended agents fade and unfold, the
+  composer's status line unfolds and its spinner turns, every
+  icon button fades and sinks when pressed (`HOVER`, `PRESS`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
   request cards dock, slide into place and fade away (`animateItem`); a question slides in from
   the side of the move, the dots and the option rows move their fill and ring (`PANEL`), the field
   of "Something else…" and the note unfold and fold; a refusal comes in on its card; the mode's
@@ -1717,6 +1740,45 @@ never told, and with no session to the hub nothing is told and nothing is kept f
 - **The setting**: `[remote] notify = "away" | "always"` in `daemon.toml`, `remote.settings` and
   `remote.configure {notify}` (`docs/protocol.md`), and Settings, Machines, **Phone**: **Notify the
   phone**, **When I am away** or **Always**.
+
+**Built (#828), the phone's side.** The app keeps the connection while the phone is paired; the
+core reads what each notice is about and the app draws it.
+
+- **The core**: a notice of a runner of the list (found by its machine key; any other is dropped)
+  waits for the link to that runner, 20 seconds at most (the phone it woke may still be linking),
+  and reads its row back (`notifications.list {"after": n - 1, "limit": 1}`): the title and the
+  excerpt are the runner's own words. The view state gains `notices` (what was told and is not
+  dismissed, the newest 32) and `dismissed` (the notices dismissed since the core started, the
+  newest 32). A request's notice carries `request`, the request its row names (`notifications.list`,
+  `request`), fixed when the notice is read: what Allow and Deny answer, and nothing else, however
+  many requests of its session wait or come after. It is 0 when the row could not be read.
+- **The service**: `HubService`, a foreground service (`specialUse`), started once the phone joined
+  (by the app when it is on screen, at boot and after an update by `StartReceiver`, and by an
+  answer from a notification), started again by Android when it is killed (`START_STICKY`), ended
+  when the phone is removed from the list. It holds the core's connection (`keepConnected`) and its
+  notification, on a channel of the lowest importance (silent, which the user may hide), says
+  **Flottille is connected**, or **Not connected to your hub** with why while the core dials again.
+- **The notifications**: on a channel of their own (high importance), one per notice, tagged with
+  its machine and numbered with the runner's number, drawn once for the life of the process (a
+  notice swiped away or tapped is not drawn again), removed once dismissed. Its title is the row's,
+  its text the machine and the excerpt; it is private on the lock screen, which shows the title and
+  the machine, never the excerpt. A tap opens its session through the app's own `OpenSession` (#826);
+  a request has **Allow** and **Deny** (**Deny** only for a proposal to write a connection, as the
+  window; neither on a `viewer`, nor while its `request` is 0), each asking for the phone's unlock
+  before it is sent (`setAuthenticationRequired`): a phone left on a table answers nothing.
+- **Allow and Deny** go to `AnswerReceiver`, not exported: with the app killed, the process starts
+  for it, the service comes back, the receiver holds the connection, waits for the machine to be
+  linked and answers, both within 8 seconds (the ten Android gives), signed by the core as any
+  answer. Answered, or decided already elsewhere, the notification goes; refused otherwise, or the
+  machine not reached, it says why (`Not answered: …`) and opens the session.
+- **Settings, Notifications**: what keeps the phone reachable, said once: **This phone stays
+  connected to your hub…** when Android lets the app notify and exempted it from battery
+  optimisation; otherwise what is missing, each with its way: **Allow notifications** (the system's
+  page of the app's notifications) and **Keep it awake** (the system's question to exempt it). The
+  app asks for the notifications' permission once it joined.
+- **Tested** on the emulator against a played core (`NotificationsOnThePhoneTest`, one test per
+  scenario of the issue), the core against a hub and a runner on loopback (`mobile_core`). Not
+  proved by them: a whole night in Doze on a real phone, and its battery (#823).
 
 ## Tunnels
 
@@ -1953,6 +2015,13 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **A machine's state this machine cannot vouch for is the dashed ring** (#1249): the badge of a
+  machine's mark follows the state the hub's list gives it (`online`, `offline`, `needs an
+  update`); any other one is drawn as not known, the dashed ring. A hub that cannot be reached
+  does not turn the last states read into unknown ones: they stay as last read, as the words did.
+- **The badge's cut-out takes the sidebar's colour** (#1249): a hovered or chosen row keeps it,
+  the mark not following the row's fill.
 
 - **The window reads the device key at its start once the user has another runner** (#1280): the
   bell follows every machine, so its links need the key before any page of another machine is
@@ -2978,12 +3047,32 @@ on a real phone, by hand, and reported.
   there (a project made again for a branch of another root): the caller's daemon sends the removal
   for the first of its launches holding that name, and the machine there removes that launch's
   alone. Naming which, by its session, is a follow-up if the case is met.
+- **The session page on the phone** (#1442): the mode's chip is drawn only where the mode may be
+  changed (not on a child's page, a viewer's or an ended session's); choosing the mode already
+  chosen sends nothing; Full keeps its confirmation, which the extended design left open. The
+  tree's icon is always in the top bar (the pilot is a row of its own). A request answered on
+  another device leaves no record on the phone: the phone knows only the answers it gave. A
+  request sits after the line that was the conversation's last when it came. The composer's field
+  says `Write to the agent` until something is written (its label for a screen reader is
+  `Message`). A delivery the core does not know by name is one line of its kind and its first
+  words, as the window's notice. The machine's mark of #1249 is not drawn yet: the phone has no
+  machine colour to draw it with; the subtitle names the machine.
 - **The phone's Sessions tab keeps its own folds** (#1441): what a project, a pilot or "Ended" was
   left as is kept in the app's storage, not in the window's state on a machine (`window.get`), so
   the phone and the window fold apart. A session whose pilot runs on another machine, or works in
   another project, is a row of its own in its project rather than under that pilot. "Ended" is one
   group pinned below every machine, its rows newest ended first by their last exchange (the view
   has no `ended_at`).
+
+- **The phone's notifications** (#828): a request's notification answers the request its row names
+  (`notifications.list` gives it), not the one its session holds now. Allow and Deny need the phone
+  unlocked, and the lock screen shows no excerpt (open question 3): the safe default, which a
+  controller's rights may relax later. A notice is drawn once for the life of the app's process: one the
+  user swiped away does not come back, and after the process was killed only the dismissals of
+  that run of the core remove what an earlier one drew. The app checks for its join every two
+  seconds while it is on screen and not joined, then starts the service. The small icon is the
+  system's sync icon, the one the tunnels' service shows, until the app's own icon (#1456, on `dev`)
+  reaches this line.
 
 ## Open questions
 
@@ -2992,7 +3081,8 @@ on a real phone, by hand, and reported.
 2. **A headless server's keyring**: sharing vault entries needs one; whether Flottille offers a
    keyring of its own there, or the user installs a Secret Service.
 3. **A controller's rights**: whether a `controller` may switch a tree to Full, or answer a base
-   request, without the phone's unlock (biometrics), or whether those need a runner's client.
+   request, without the phone's unlock (biometrics), or whether those need a runner's client. Until
+   it is decided, Allow and Deny on a notification ask for the phone's unlock (#828).
 4. **A led session on another machine starting its own led sessions** there: today a chain is base
    (`tools.md`, "No chain without the user"); whether a session the user sent away for the night
    gets more.
