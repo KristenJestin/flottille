@@ -812,14 +812,10 @@ impl Bridge {
             Waiting::Account(opening) => {
                 let account = &result["account"];
                 if account.is_null() && result["requiresOpenaiAuth"] == true {
+                    // Tagged as a turn's login gone is: the daemon reads the code, never the text.
+                    let why = format!("Codex is not signed in: {}", codex::PROVIDER.sign_in);
                     return self
-                        .refuse_open(
-                            opening.id,
-                            (
-                                INTERNAL,
-                                format!("Codex is not signed in: {}", codex::PROVIDER.sign_in),
-                            ),
-                        )
+                        .refuse_open_with(opening.id, (INTERNAL, why), Some("unauthorized"))
                         .await;
                 }
                 if let Some(why) = codex::refused_account(account) {
@@ -905,12 +901,22 @@ impl Bridge {
 
     /// The session does not open: `codex` goes, and the bridge waits for the next.
     async fn refuse_open(&mut self, id: Value, why: Failure) {
+        self.refuse_open_with(id, why, None).await;
+    }
+
+    /// `refuse_open`, the error carrying the provider's `code` when it has one.
+    async fn refuse_open_with(&mut self, id: Value, (code, message): Failure, tag: Option<&str>) {
         self.from_codex = None;
         self.waiting.clear();
         if let Some(mut codex) = self.codex.take() {
             let _ = codex.child.kill().await;
         }
-        self.fail(id, why).await;
+        let mut error = json!({"code": code, "message": message});
+        if let Some(tag) = tag {
+            error["data"] = json!({"code": tag});
+        }
+        self.send(json!({"jsonrpc": "2.0", "id": id, "error": error}))
+            .await;
     }
 }
 
