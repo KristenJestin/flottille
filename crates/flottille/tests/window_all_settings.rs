@@ -166,6 +166,10 @@ fn a_value_chosen_on_all_machines_reaches_every_machine(cx: &mut TestAppContext)
     eventually("the server starts new sessions on Claude", || {
         call(&server, "provider.list")["new_session"]["provider"] == "claude"
     });
+    // The window takes the answer before the next choice: its controls wait for it.
+    until(&shell, cx, "the Save folds away", |cx| {
+        !present(cx, "all-new-sessions-save")
+    });
 
     click(&shell, "all-judge-model", cx);
     click(&shell, "all-judge-model-none", cx);
