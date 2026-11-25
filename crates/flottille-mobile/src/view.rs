@@ -989,6 +989,124 @@ mod tests {
         assert_eq!(listed, vec!["a1"]);
     }
 
+    fn prompted(seq: u64, data: Value) -> Value {
+        serde_json::json!({"name": "agent.prompted", "seq": seq, "data": data})
+    }
+
+    #[test]
+    fn a_subscription_s_news_is_a_folded_block_not_a_message() {
+        let news = "The checks ended: 3 passed, 1 failed.\nSubscribe again.";
+        let events = [
+            prompted(
+                1,
+                serde_json::json!({"text": "[flottille:user]\nFix the login"}),
+            ),
+            prompted(
+                2,
+                serde_json::json!({"text": format!("[flottille:subscription]\nNews of the pull request #12 of app:\n{news}")}),
+            ),
+        ];
+        let shown = entries(events.iter(), false, &[]);
+        let drawn: Vec<(&str, &str, &str, &str)> = shown
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind.as_str(),
+                    entry.delivery.as_str(),
+                    entry.summary.as_str(),
+                    entry.text.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("user", "", "", "Fix the login"),
+                (
+                    "delivery",
+                    "woken by",
+                    "checks of #12 ended, 1 failed",
+                    format!("News of the pull request #12 of app:\n{news}").as_str()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_delivery_is_never_the_user_s_message_and_a_replay_is_not_shown() {
+        let child = ChildView {
+            agent: "0123456789ab".into(),
+            title: "docs-pass".into(),
+            doing: "ended: it reported".into(),
+            role: String::new(),
+            depth: 1,
+        };
+        let events = [
+            prompted(
+                1,
+                serde_json::json!({"text": "[flottille:user]\nadd the page\n\n[flottille:resume]\nS",
+                    "deliveries": ["brief-a1-0-replay", "resume-a1-0-replay"]}),
+            ),
+            prompted(
+                2,
+                serde_json::json!({"text": "[flottille:child-report]\nYour child \"docs-pass\" (agent 0123456789ab) reported:\n\nDone.\n\n[flottille:user]\nThanks",
+                    "images": ["a-0.png"]}),
+            ),
+            prompted(
+                3,
+                serde_json::json!({"text": "[flottille:session]\n\"Lead\" (agent 0123456789ac) wrote to this session:\n\nThe tests pass now."}),
+            ),
+        ];
+        let shown = entries(events.iter(), false, std::slice::from_ref(&child));
+        let drawn: Vec<(u64, &str, &str, &str)> = shown
+            .iter()
+            .map(|entry| {
+                (
+                    entry.seq,
+                    entry.kind.as_str(),
+                    entry.delivery.as_str(),
+                    entry.summary.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (2, "delivery", "report", "Report from docs-pass"),
+                (2, "user", "", ""),
+                (
+                    3,
+                    "delivery",
+                    "message",
+                    "\"Lead\" (agent 0123456789ac) wrote to this session"
+                ),
+            ]
+        );
+        assert_eq!(shown[1].text, "Thanks");
+        assert_eq!(shown[1].images, ["a-0.png"]);
+        assert!(shown[0].images.is_empty());
+        assert_eq!(
+            shown[0].text,
+            "Your child \"docs-pass\" (agent 0123456789ab) reported:\n\nDone."
+        );
+        assert_eq!(shown[2].text, "The tests pass now.");
+
+        // A child's brief comes from its parent: a block of its own, never the user's words.
+        let brief = [prompted(
+            4,
+            serde_json::json!({"text": "[flottille:brief]\nFix the timer"}),
+        )];
+        let shown = entries(brief.iter(), true, &[]);
+        assert_eq!(
+            (
+                shown[0].kind.as_str(),
+                shown[0].delivery.as_str(),
+                shown[0].summary.as_str()
+            ),
+            ("delivery", "brief", "Fix the timer")
+        );
+    }
+
     #[test]
     fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {
         let (owner, phone) = (DeviceKey::make().unwrap(), DeviceKey::make().unwrap());
