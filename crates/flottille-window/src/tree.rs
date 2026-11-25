@@ -1524,24 +1524,17 @@ const CHEVRON: f32 = 12.;
 /// What a row says of a project whose settings file is gone.
 const MISSING: &str = "settings file missing";
 
-/// How far a mark's badge hangs out of its icon, right and bottom, as a share of its side (the
-/// kit's `MachineMark`): the room left for it beside the next element.
-const BADGE_HANG: f32 = 0.24;
-
 /// A machine's mark (the kit's `MachineMark`): its icon in its colour, a badge whose shape says
 /// its state, and its name and state in words in its tooltip and label, for the eyes that do not
 /// see colours.
 fn machine_mark(id: ElementId, home: &Home, size: MarkSize) -> gpui_kit::AnyElement {
-    let side = match size {
-        MarkSize::Large => 16.,
-        MarkSize::Medium => 14.,
-        MarkSize::Small => 12.,
-    };
+    // The badge hangs out of the icon by a quarter of its side at most (4 px at 16): the room
+    // left for it beside the next element.
     div()
         .flex_none()
         .flex()
         .items_center()
-        .pr(px(side * BADGE_HANG))
+        .pr(space::XS)
         .child(
             MachineMark::new(
                 id,
@@ -3008,7 +3001,7 @@ impl SessionRow {
                     .unwrap_or_default();
                 div()
                     .flex_none()
-                    .pr(px(12. * BADGE_HANG))
+                    .pr(space::XS)
                     .child(
                         MachineMark::new(
                             presence,
