@@ -361,11 +361,14 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     let reported = !asked && seq_of("agent.reported") > prompted;
     // What waits for the user and was not said yet, its tree's included: each request once, in
     // the first wake after it reached the user, whatever ended the turns between (one cancelled
-    // to take a delivery, one cut by the process's death, wake no one).
+    // to take a delivery, one cut by the process's death, wake no one). The tree is read in
+    // several reads while it runs: only what was given to the user before them is said now, all of
+    // which they see if it still waits; what came during them is said by the next wake.
     let said = said_up_to(daemon, &session.id);
+    let before = daemon.read(|store| store.last_seq()).unwrap_or(0);
     let requests: Vec<UserRequest> = waiting_for_the_user(daemon, &session.id)
         .into_iter()
-        .filter(|request| request.seq > said)
+        .filter(|request| request.seq > said && request.seq <= before)
         .collect();
     let plain = !asked && !reported && requests.is_empty();
     let user_spoke = followed_the_user(daemon, &session.id);
@@ -437,7 +440,23 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
         ));
     }
     let waits = (!requests.is_empty()).then(|| {
-        let lines: Vec<String> = requests.iter().map(|r| format!("- {}", r.said())).collect();
+        let mut lines: Vec<String> = Vec::new();
+        let mut used = 0;
+        for request in &requests {
+            let line = format!("- {}", request.said());
+            used += line.chars().count();
+            if used > REQUESTS_CHARS {
+                break;
+            }
+            lines.push(line);
+        }
+        let left = requests.len() - lines.len();
+        if left > 0 {
+            lines.push(format!(
+                "[{left} more request{}; session_read reads them]",
+                if left == 1 { "" } else { "s" }
+            ));
+        }
         format!("{WAITS_FOR_THE_USER}\n{}", lines.join("\n"))
     });
     let last = user_spoke
@@ -492,6 +511,10 @@ fn what_of(
 /// What heads the requests of a turn that wait for the user, in a wake.
 const WAITS_FOR_THE_USER: &str = "It waits for the user, who answers it where they are (you \
     cannot answer it; you are told their answer):";
+
+/// What the requests a wake carries hold at most, in all: those past it are counted, so that a
+/// wake always fits what goes to another machine.
+const REQUESTS_CHARS: usize = 4_000;
 
 /// The longest a request is said in, in characters: what it is, not the whole call.
 const REQUEST_CHARS: usize = 300;
@@ -548,7 +571,8 @@ pub(crate) fn request_said(request: &approval::Request) -> String {
 /// The requests of `session` that wait for the user, oldest first: its calls held for them (a
 /// connection's write asked among them), and the vault entries it asked for; and those the agents
 /// below it forwarded to the user or asked them for, each naming who asked. An ask the session and
-/// an agent below it both joined waits once, as the session's.
+/// an agent below it both joined waits once, as the session's, given to the user when the first
+/// of them asked.
 pub(crate) fn waiting_for_the_user(daemon: &Daemon, session: &str) -> Vec<UserRequest> {
     let asks = daemon.read(crate::vault::open_asks).unwrap_or_default();
     let mut requests = requests_of(daemon, session, None, &asks);
@@ -561,8 +585,18 @@ pub(crate) fn waiting_for_the_user(daemon: &Daemon, session: &str) -> Vec<UserRe
             &asks,
         ));
     }
+    let mut first = std::collections::HashMap::new();
+    for request in &requests {
+        let seq = first
+            .entry((request.kind, request.number))
+            .or_insert(request.seq);
+        *seq = (*seq).min(request.seq);
+    }
     let mut listed = std::collections::HashSet::new();
     requests.retain(|request| listed.insert((request.kind, request.number)));
+    for request in &mut requests {
+        request.seq = first[&(request.kind, request.number)];
+    }
     requests.sort_by_key(|request| request.seq);
     requests
 }
@@ -614,34 +648,20 @@ fn requests_of(
         .into_iter()
         .filter(|request| request.held_by == approval::USER)
         .collect();
-    // The events that gave them to the user, read once: the request made, or its last forward to
-    // them for one forwarded up.
-    let events = match held.is_empty() {
-        true => Vec::new(),
-        false => daemon
-            .read(|store| {
-                let mut events = store.last_agent_events(agent, "approval.forwarded", 64)?;
-                events.extend(store.last_agent_events(agent, "approval.requested", 64)?);
-                Ok(events)
-            })
-            .unwrap_or_default(),
-    };
     let mut requests: Vec<UserRequest> = held
         .into_iter()
         .map(|request| {
+            // The event that gave it to the user: the request made, or its last forward to them
+            // for one forwarded up.
             let given = match request.forwards.is_empty() {
-                true => "approval.requested",
-                false => "approval.forwarded",
+                true => ("approval.requested", None),
+                false => ("approval.forwarded", Some(approval::USER)),
             };
-            let seq = events
-                .iter()
-                .find(|event| {
-                    event.name == given
-                        && event.data["number"] == request.number
-                        && (given == "approval.requested"
-                            || event.data["held_by"] == approval::USER)
-                })
-                .map_or(0, |event| event.seq);
+            let seq = daemon
+                .read(|store| store.last_request_event(agent, given.0, request.number, given.1))
+                .ok()
+                .flatten()
+                .unwrap_or(0);
             UserRequest {
                 kind: kind_of(&request.tool),
                 number: request.number,
