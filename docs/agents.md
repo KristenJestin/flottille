@@ -253,7 +253,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   changed keeps nothing, and the next check lists again. A failure (program missing or failing,
   not signed in, over time) is one line in the developer log when developer mode is on
   (`docs/developer.md`) and changes nothing: the models stay as they were, and are not asked again
-  before the state of the provider changes or it is enabled again. A read is announced by
+  before the state of the provider changes or it is enabled again. A listing refused for no login
+  (Codex's account read says none) is said in the provider's sign-in line, never in the bridge's
+  words, in the log and as `models_sign_in` of `provider.list`, until a listing goes through or
+  fails for another reason. A read is announced by
   `provider.models_read` (`docs/events.md`). Until a listing or a session said them, they are
   `null`, an agent may ask any model and effort, and one its session does not offer is replaced at
   its start (below), never a failure. Once they are known, a model or an effort they do not hold is refused
@@ -1095,8 +1098,9 @@ A resume or a load that fails is read for what it says (`acp::not_reopened`):
 - its login is gone (`turn_failures`): said as a turn's is, the session kept. The Codex bridge
   tags with `unauthorized` an open refused because `account/read` answered no account
   (`requiresOpenaiAuth`, as `codex` 0.166.0 does with no login), so that the agent says it must
-  sign in again, as for every other refused login; a ChatGPT plan it refuses carries no code and
-  fails the agent;
+  sign in again, as for every other refused login, whether the open is a resume, a load or the
+  agent's first session (`session/new`): nothing starts it again before the user writes; a ChatGPT
+  plan it refuses carries no code and fails the agent;
 - anything else (`claude` missing or broken, the network, an error of the service) fails the
   agent with its session kept, to be resumed once the cause is gone. Nothing else ever throws a
   session away.

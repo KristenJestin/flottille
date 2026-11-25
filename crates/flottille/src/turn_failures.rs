@@ -30,7 +30,7 @@ fn claude(code: Option<&str>, text: &str) -> Option<&'static str> {
     login.then_some(CLAUDE_LOGIN)
 }
 
-const CODEX_LOGIN: &str = "Codex's login expired: sign in again (run codex login)";
+pub const CODEX_LOGIN: &str = "Codex's login expired: sign in again (run codex login)";
 
 /// Codex's account signed out, as the bridge tags it (`codex_bridge.rs`, `unauthorized`): its
 /// text can hold any number.
@@ -48,7 +48,14 @@ pub fn recognise(provider: &str, code: Option<&str>, text: &str) -> Option<&'sta
 /// Whether an agent's state line says its login is gone: it waits for the user then
 /// (`agents::waits_for_the_user`).
 pub fn is_login(reason: &str) -> bool {
-    [CLAUDE_LOGIN, CODEX_LOGIN].contains(&reason)
+    login_line(reason).is_some()
+}
+
+/// The sign-in line `reason` is, when it is one.
+pub fn login_line(reason: &str) -> Option<&'static str> {
+    [CLAUDE_LOGIN, CODEX_LOGIN]
+        .into_iter()
+        .find(|line| *line == reason)
 }
 
 #[cfg(test)]

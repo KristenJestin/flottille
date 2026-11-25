@@ -2797,6 +2797,7 @@ when they name none:
                  {"id": "opus", "name": "Opus", "efforts": null}],
       "models_outdated": false,
       "models_learning": false,
+      "models_sign_in": null,
       "images": true
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
@@ -2835,7 +2836,9 @@ as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed
 as they were, but refuse no model and no effort until a session says them again.
 `models_learning` is `true` while the daemon lists the provider's models
-(`provider.models_learning`). `project` is there only when one is named; its `provider` is `null` when
+(`provider.models_learning`). `models_sign_in` is the provider's sign-in line (`Codex's login
+expired: sign in again (run codex login)`) when its last listing was refused for no login, `null`
+otherwise. `project` is there only when one is named; its `provider` is `null` when
 none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
 chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the provider's default,
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when

@@ -2003,6 +2003,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
             entry["models_outdated"] = json!(last.as_ref().is_some_and(|(_, current)| !current));
             entry["models"] = json!(last.map(|(models, _)| models));
             entry["models_learning"] = json!(crate::models::learning(check.provider.name));
+            entry["models_sign_in"] = json!(crate::models::signed_out(check.provider.name));
             entry["images"] = json!(takes_images(daemon, check.provider.name));
             entry
         })

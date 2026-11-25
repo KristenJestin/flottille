@@ -35,6 +35,8 @@ const LIMIT: Duration = Duration::from_secs(60);
 /// program, its API keys and whether its sign-in file is there. A failed listing is asked again
 /// only when one of them changes, or the provider is enabled again.
 static TRIED: Mutex<Option<HashMap<&'static str, String>>> = Mutex::new(None);
+/// The providers whose last listing was refused for no login, with the line that says so.
+static SIGNED_OUT: Mutex<Option<HashMap<&'static str, &'static str>>> = Mutex::new(None);
 /// The providers a listing is running for.
 static RUNNING: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
 
@@ -56,6 +58,16 @@ pub fn enabled(daemon: &Arc<Daemon>, provider: &'static Provider) {
         tried.remove(provider.name);
     }
     check(daemon);
+}
+
+/// The sign-in line of a provider whose last listing was refused for no login: it clears when a
+/// listing goes through, or fails for another reason.
+pub fn signed_out(provider: &str) -> Option<&'static str> {
+    SIGNED_OUT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|signed_out| signed_out.get(provider).copied())
 }
 
 /// Whether the provider's models are being listed now.
@@ -130,6 +142,16 @@ pub fn check(daemon: &Arc<Daemon>) {
 }
 
 fn report(daemon: &Daemon, provider: &'static Provider, outcome: Result<usize, String>) {
+    let line = outcome
+        .as_ref()
+        .err()
+        .and_then(|error| crate::turn_failures::login_line(error));
+    let mut signed_out = SIGNED_OUT.lock().unwrap();
+    let signed_out = signed_out.get_or_insert_with(HashMap::new);
+    match line {
+        Some(line) => signed_out.insert(provider.name, line),
+        None => signed_out.remove(provider.name),
+    };
     let fields = match &outcome {
         Ok(count) => {
             json!({"agent": null, "provider": provider.name, "outcome": "read", "models": count})

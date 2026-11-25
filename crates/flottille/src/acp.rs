@@ -254,6 +254,16 @@ pub async fn session(
     }
 }
 
+/// The state line of a login the agent refused when it opened a session, new, resumed or loaded:
+/// read as a turn's is, by the code the bridge passes (`turn_failures.rs`), never by a text.
+fn login_refused(
+    provider: &Provider,
+    error: &agent_client_protocol::Error,
+) -> Option<&'static str> {
+    let code = error.data.as_ref().and_then(|data| data["code"].as_str());
+    crate::turn_failures::recognise(provider.name, code, &error.message)
+}
+
 /// Why the agent's session did not open again, as the session loop goes on with it. Only an
 /// agent that says the session is gone (ACP's "resource not found", which both bridges answer for
 /// a session their CLI no longer has) gets a new one: anything else keeps it, since a new session
@@ -271,8 +281,7 @@ async fn not_reopened(
     }
     // Before the death check: an agent that refuses the login and then exits is a login to say,
     // not a death to count and bring back until it keeps failing.
-    let code = error.data.as_ref().and_then(|data| data["code"].as_str());
-    if let Some(said) = crate::turn_failures::recognise(provider.name, code, &error.message) {
+    if let Some(said) = login_refused(provider, &error) {
         return Ok(Exit::TurnFailed(said));
     }
     if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
@@ -376,8 +385,18 @@ async fn drive(
                         .meta(meta),
                 )
                 .block_task()
-                .await
-                .map_err(|e| format!("the agent could not open a session: {e}"))?;
+                .await;
+            let answer = match answer {
+                Ok(answer) => answer,
+                // A login refused at the first session is said as for a resume: the agent waits
+                // for the user to sign in, nothing starts it again in a loop.
+                Err(e) => {
+                    return match login_refused(provider, &e) {
+                        Some(said) => Ok(Exit::TurnFailed(said)),
+                        None => Err(format!("the agent could not open a session: {e}")),
+                    };
+                }
+            };
             let answer = serde_json::to_value(&answer).unwrap_or_default();
             let id = answer["sessionId"]
                 .as_str()
