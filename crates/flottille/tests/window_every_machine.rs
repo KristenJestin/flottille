@@ -62,6 +62,11 @@ struct Relay {
     /// The methods of this machine's daemon held this long (ms) before they are sent on.
     slow: Arc<Mutex<Vec<&'static str>>>,
     slow_by: Arc<AtomicU64>,
+    /// The links to the server that follow its events and are not a window's copy: its bell link.
+    bells: Arc<Mutex<Vec<UnixStream>>>,
+    /// The methods the server is asked that are held `held_for` ms before they are sent on.
+    held: Arc<Mutex<Vec<&'static str>>>,
+    held_for: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -131,6 +136,13 @@ impl Relay {
                     *watching = true;
                     self.watching.fetch_add(1, Ordering::SeqCst);
                 }
+                if method == "events.watch"
+                    && params["client"] != "window"
+                    && let Ok(held) = window.try_clone()
+                {
+                    self.bells.lock().unwrap().push(held);
+                }
+                let held = self.held.lock().unwrap().contains(&method.as_str());
                 let cut = self.cut.lock().unwrap().contains(&method.as_str());
                 self.asked.lock().unwrap().push((method, params));
                 if cut {
@@ -139,12 +151,22 @@ impl Relay {
                 if self.silent.load(Ordering::SeqCst) {
                     continue;
                 }
+                if held {
+                    std::thread::sleep(Duration::from_millis(self.held_for.load(Ordering::SeqCst)));
+                }
                 let delay = self.delay.load(Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(delay));
             }
             if (&*daemon).write_all(line.as_bytes()).is_err() {
                 return;
             }
+        }
+    }
+
+    /// Ends the bell links to the server, as a network that drops would.
+    fn drop_the_bells(&self) {
+        for held in self.bells.lock().unwrap().drain(..) {
+            let _ = held.shutdown(std::net::Shutdown::Both);
         }
     }
 
@@ -2638,4 +2660,155 @@ fn another_machine_s_bell_follows_its_new_notices(cx: &mut TestAppContext) {
         .filter(|m| *m != "notifications.list")
         .collect();
     assert!(again.is_empty(), "the server was read again: {asked:?}");
+}
+
+#[gpui_kit::test]
+fn another_machine_s_providers_follow_a_change_made_there(cx: &mut TestAppContext) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    let page = the_server_s_settings(&shell, cx);
+    let enabled = |cx: &mut VisualTestContext| {
+        page.read_with(cx, |p, _| {
+            p.providers()
+                .get("opencode")
+                .map(|provider| provider.enabled)
+        })
+    };
+    until(&shell, cx, "the server's providers are read", |cx| {
+        enabled(cx).is_some()
+    });
+    settle(&shell, cx);
+    let before = enabled(cx).unwrap();
+    relay.take();
+
+    // Another client of the server enables or disables one there: the page shown follows.
+    let method = if before {
+        "provider.disable"
+    } else {
+        "provider.enable"
+    };
+    server
+        .user
+        .call(method, json!({"name": "opencode"}))
+        .unwrap();
+    until(
+        &shell,
+        cx,
+        "the server's providers follow the change",
+        |cx| enabled(cx) == Some(!before),
+    );
+    // By the connection kept to the server: no second one, no read of the whole server.
+    settle(&shell, cx);
+    let asked = whole_or_again(&relay);
+    assert!(asked.is_empty(), "the server was read again: {asked:?}");
+}
+
+#[gpui_kit::test]
+fn a_change_made_while_the_link_to_another_machine_was_down_is_shown_once_it_is_back(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    set_settings(&server.user, "Server person", false);
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    the_server_s_settings(&shell, cx);
+    click(cx, "settings-tabs-general");
+    until(&shell, cx, "the server's settings are read", |cx| {
+        settings_shown(&shell, cx).0.as_deref() == Some("Server person")
+    });
+    settle(&shell, cx);
+
+    // Its bell link drops, and cannot connect again while another client changes the settings.
+    relay.cut.lock().unwrap().push("events.watch");
+    relay.drop_the_bells();
+    std::thread::sleep(Duration::from_millis(500));
+    set_settings(&server.user, "Server friend", true);
+    relay.cut.lock().unwrap().clear();
+    relay.take();
+
+    until(
+        &shell,
+        cx,
+        "the settings changed in the gap are shown",
+        |cx| {
+            settings_shown(&shell, cx)
+                == (
+                    Some("Server friend".to_owned()),
+                    Some(true),
+                    Some("Rules of Server friend.".to_owned()),
+                )
+        },
+    );
+    // By its bell link again, which resumed its events: no read of the whole server.
+    settle(&shell, cx);
+    let asked: Vec<String> = whole_or_again(&relay)
+        .into_iter()
+        .filter(|m| m != "events.watch" && m != "notifications.list")
+        .collect();
+    assert!(asked.is_empty(), "the server was read again: {asked:?}");
+}
+
+#[gpui_kit::test]
+fn another_machine_s_notices_reach_the_bell_while_its_providers_are_being_read(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server, _here, _there) = two_machines();
+    let relay = Relay::default();
+    let (shell, cx) = window(&pc, &relay, cx);
+    shell.update(cx, |shell, cx| shell.toggle_bell(cx));
+    settle(&shell, cx);
+    let order =
+        |cx: &mut VisualTestContext| shell.read_with(cx, |s, cx| s.bell_list().read(cx).order());
+    let before = order(cx);
+
+    // The server is slow to list its providers, and one of them changes there.
+    relay.held.lock().unwrap().push("provider.list");
+    relay.held_for.store(20_000, Ordering::SeqCst);
+    server
+        .user
+        .call("provider.enable", json!({"name": "opencode"}))
+        .unwrap();
+    server
+        .user
+        .call("provider.disable", json!({"name": "opencode"}))
+        .unwrap();
+    // Its bell link has asked by now.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !the_server_was_asked(&relay, "provider.list") {
+        assert!(Instant::now() < deadline, "the providers were never read");
+        step(&shell, cx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // A session of the server reports meanwhile: its notice comes into the bell at once, not
+    // once the providers are read.
+    server.user.fake_script(json!({"turns": [
+        {"when": "REPORT", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The notes are filed."}}},
+            {"say": REPLY}]},
+        {"when": "", "do": [{"say": REPLY}]}
+    ]}));
+    server
+        .user
+        .call(
+            "agent.start",
+            json!({"project": "harbor", "message": "REPORT the notes"}),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        step(&shell, cx);
+        if order(cx)
+            .iter()
+            .any(|key| key.ends_with("@server") && !before.contains(key))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the bell waited for the server's providers"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

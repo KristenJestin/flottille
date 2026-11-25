@@ -260,6 +260,29 @@ pub fn said_at_offset(ms: u64, offset: i64) -> String {
     )
 }
 
+/// What the banner of a session blocked by someone else says: `Waits for Maya: review of #123,
+/// since 14:02. It comes back by itself when they answer.`, the day said too when it is not today.
+pub fn blocked_banner(blocked: &crate::model::Blocked) -> String {
+    format!(
+        "Waits for {}: {}, since {}. It comes back by itself when they answer.",
+        blocked.who(),
+        blocked.why,
+        since_at_offset(blocked.since, now_ms(), local_offset(blocked.since))
+    )
+}
+
+/// When `ms` was, as a banner says it at `now`, `offset` seconds east of UTC: its time of day
+/// when it is the same day, else its date too (`31 Oct 2026, 14:05`).
+pub fn since_at_offset(ms: u64, now: u64, offset: i64) -> String {
+    let said = said_at_offset(ms, offset);
+    let today = said_at_offset(now, offset);
+    let day = |at: &str| at.rsplit_once(", ").map(|(day, _)| day.to_owned());
+    match day(&said) == day(&today) {
+        true => said.rsplit(", ").next().unwrap_or(&said).to_owned(),
+        false => said,
+    }
+}
+
 /// How far east of UTC the machine's clock was at `ms`, in seconds.
 fn local_offset(ms: u64) -> i64 {
     let time = (ms / 1000) as libc::time_t;
@@ -316,6 +339,9 @@ pub struct SessionPage {
     about_pull: Option<crate::session_link::PullRequest>,
     follow: Follow,
     layout: Layout,
+    /// It waits on a person, at rest (`blocked`): the banner above its composer says who, what
+    /// and since when.
+    blocked: Option<crate::model::Blocked>,
     /// The session's state, as the shell's tree draws it.
     status: Entity<Status>,
     /// The agent whose conversation is shown: the root, or a sub-agent read.
@@ -534,6 +560,7 @@ impl SessionPage {
             _run_drawer,
             _reply,
             opened,
+            blocked: None,
             subject: None,
             subject_shown: None,
             about_key: None,
@@ -1039,6 +1066,18 @@ impl SessionPage {
         };
         let session = self.opened.id.clone();
         self.perform(Command::Detach { session, from }, cx);
+    }
+
+    /// Whom it waits on, as the daemon derives it now: the banner unfolds, changes or folds away.
+    pub fn set_blocked(&mut self, blocked: Option<crate::model::Blocked>, cx: &mut Context<Self>) {
+        if self.blocked != blocked {
+            self.blocked = blocked;
+            cx.notify();
+        }
+    }
+
+    pub fn blocked(&self) -> Option<&crate::model::Blocked> {
+        self.blocked.as_ref()
     }
 
     pub fn subject(&self) -> Option<&crate::model::Subject> {
@@ -2603,6 +2642,38 @@ impl Render for SessionPage {
                                     reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
                                 }),
                         )
+                        .into_any_element()
+                },
+            ))
+            // Blocked by someone else: who, what for, since when, and that it comes back by
+            // itself. It unfolds and fades in, and folds away once the person answered.
+            .child(presence_of(
+                "session-blocked-line",
+                self.blocked
+                    .as_ref()
+                    .filter(|_| root)
+                    .map(|blocked| SharedString::from(blocked_banner(blocked))),
+                move |said| {
+                    div()
+                        .id("session-blocked")
+                        .mb(space::SM)
+                        .px(space::MD)
+                        .py(space::SM)
+                        .rounded(gpui_design_system::theme::radius::LIST_ROW)
+                        .bg(p.away_bg)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.text)
+                        .aria_label(said.clone())
+                        .child(
+                            gpui_design_system::icon(crate::glyphs::PERSON)
+                                .size(px(13.))
+                                .text_color(p.away),
+                        )
+                        .child(div().min_w_0().child(said))
+                        .test_support()
                         .into_any_element()
                 },
             ))
@@ -11638,6 +11709,23 @@ mod tests {
         assert_eq!(said_at_offset(1_709_251_140_000, 0), "29 Feb 2024, 23:59");
         assert_eq!(said_at_offset(1_709_251_140_000, 60), "1 Mar 2024, 00:00");
         assert_eq!(said_at_offset(0, -60), "31 Dec 1969, 23:59");
+    }
+
+    #[test]
+    fn a_banner_s_since_says_the_day_when_it_is_not_today() {
+        let at = 1_793_455_500_000;
+        // The same day: its time alone.
+        assert_eq!(since_at_offset(at, at + 3_600_000, 0), "14:05");
+        // Three days later: its day too.
+        assert_eq!(
+            since_at_offset(at, at + 3 * 86_400_000, 0),
+            "31 Oct 2026, 14:05"
+        );
+        // Past midnight in the local zone, though not in UTC.
+        assert_eq!(
+            since_at_offset(at, at + 9 * 3_600_000, 3600),
+            "31 Oct 2026, 15:05"
+        );
     }
 
     #[test]

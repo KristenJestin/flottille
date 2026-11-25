@@ -21,6 +21,8 @@ mod window_allow_files;
 mod window_any_machine;
 #[path = "../window_appearance.rs"]
 mod window_appearance;
+#[path = "../window_blocked.rs"]
+mod window_blocked;
 #[path = "../window_centre.rs"]
 mod window_centre;
 #[path = "../window_clicks.rs"]

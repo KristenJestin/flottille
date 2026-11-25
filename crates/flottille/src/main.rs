@@ -13,6 +13,7 @@ mod all_settings;
 mod appearance;
 mod approval_command;
 mod approvals;
+mod blocked;
 mod bridge;
 mod browsers;
 mod changes_command;

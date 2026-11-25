@@ -985,6 +985,17 @@ it was performed for an allowed request.
 | `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, `interrupted` when its process died during the turn, or `failed` when the agent failed the prompt for a reason that leaves its session usable (`docs/agents.md`, "A failed turn"). |
 | `usage` | The turn's token counts when the agent gave them, else `null`. |
 
+#### `agent.requests_said`
+
+The requests of the session's tree that wait for the user were said to its leads in a wake, up to
+`upto` (`docs/tools.md`, "Following a session"): the next wake says only those that reached the
+user after that event, whatever ended the turns between. No sign of activity.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `upto` | The `seq` of the last event that gave one of them to the user: a request made, its last forward to the user, a vault ask or its join. |
+
 #### `agent.released`
 
 Its process was let go; the next message starts it again.
@@ -1148,6 +1159,17 @@ notifications follow it.
 | `agent` | The session's root. |
 | `title` | Masked. |
 | `by` | `agent` or `user`. |
+
+#### `agent.blocked`
+
+Whether the session is blocked by someone else changed (`docs/design.md` §10, "Blocked by
+others"): it came to rest with a subscription that waits on a person, or what it waited for came,
+or it took a turn. Derived from the items the daemon keeps, never asked of the forge.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `blocked` | What its line of the tree says now (`agent.tree`, `blocked`): `{"by", "why", "since"}`, or `null`. |
 
 #### `agent.updated`
 
