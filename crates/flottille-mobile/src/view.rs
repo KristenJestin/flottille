@@ -203,6 +203,15 @@ pub struct RequestView {
     pub always: String,
     /// Who asked and who forwarded it, with its number: `asked by the conversation · #4`.
     pub source: String,
+    /// When it came to wait, in milliseconds since the Unix epoch: when the phone saw it come;
+    /// one that waited before the link, the daemon's time of it, else the link's.
+    pub at: u64,
+    /// The session whose tree asked: the root of `agent`, `agent` itself when it is a session or
+    /// an agent the phone does not know.
+    pub session: String,
+    /// The child that asked, by its title (`agent <id>` without one); empty when the session
+    /// asked itself.
+    pub child: String,
 }
 
 /// A question of an agent's that waits for the user's answer.
@@ -217,6 +226,8 @@ pub struct AskView {
     /// Each question with its options, as the daemon sent them: one question without options when
     /// the ask came without a list.
     pub questions: Vec<AskQuestion>,
+    /// When it was asked, in milliseconds since the Unix epoch, as a request's `at`.
+    pub at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -270,6 +281,9 @@ pub(crate) struct View {
     members: Vec<MemberView>,
     /// The sessions by machine and agent.
     sessions: BTreeMap<(String, String), Session>,
+    /// The children by machine and agent: their parent and their title, to name a child's
+    /// request by its session.
+    children: HashMap<(String, String), (String, String)>,
     /// The parent of each agent that has one, by machine and agent: what names a pilot's session
     /// when a child of its tree leads.
     parents: HashMap<(String, String), String>,
@@ -302,6 +316,7 @@ struct Followed {
 /// computed: the names are the followed page's tree.
 struct Held {
     number: u64,
+    at: u64,
     agent: String,
     tool: String,
     kind: String,
@@ -412,6 +427,7 @@ impl View {
     pub(crate) fn forget(&mut self, machine: &str) {
         self.machines.retain(|view| view.name != machine);
         self.sessions.retain(|(of, _), _| of != machine);
+        self.children.retain(|(of, _), _| of != machine);
         self.parents.retain(|(of, _), _| of != machine);
         self.requests.retain(|(of, _), _| of != machine);
         self.asks.retain(|(of, _), _| of != machine);
@@ -517,6 +533,7 @@ impl View {
                     .insert((machine.to_owned(), id.to_owned()), parent.to_owned());
             }
             if !is_session(agent) {
+                self.child(machine, id, agent);
                 continue;
             }
             let last = ["exchanged_at", "active_at", "created_at"]
@@ -535,8 +552,20 @@ impl View {
                 },
             );
         }
+        // A request decided while the link was down never sends its event: what the fresh list no
+        // longer holds leaves, this machine's only.
+        let held: Vec<u64> = requests["requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|request| request["number"].as_u64())
+            .collect();
+        self.requests
+            .retain(|(of, number), _| of != machine || held.contains(number));
+        let linked = now_millis();
         for request in requests["requests"].as_array().into_iter().flatten() {
-            self.requested(machine, request);
+            let at = request["created_at"].as_u64().unwrap_or(linked);
+            self.requested(machine, request, at);
         }
     }
 
@@ -618,13 +647,25 @@ impl View {
                 continue;
             }
             let root = text(&entry["agent"]["id"]);
-            self.asks
-                .retain(|(at, _), ask| at != machine || ask.agent != root);
+            let mut before: HashMap<u64, u64> = HashMap::new();
+            self.asks.retain(|(at, asked), ask| {
+                let kept = at != machine || ask.agent != root;
+                if !kept {
+                    before.insert(*asked, ask.at);
+                }
+                kept
+            });
+            let shown = now_millis();
             for ask in entry["questions"].as_array().into_iter().flatten() {
                 if let Some(asked) = ask["seq"].as_u64() {
+                    let at = before
+                        .get(&asked)
+                        .copied()
+                        .or_else(|| ask["at"].as_u64())
+                        .unwrap_or(shown);
                     self.asks.insert(
                         (machine.to_owned(), asked),
-                        ask_view(machine, &root, asked, ask),
+                        ask_view(machine, &root, asked, ask, at),
                     );
                 }
             }
@@ -657,7 +698,8 @@ impl View {
             self.parents.insert(key.clone(), parent.to_owned());
         }
         match name {
-            "agent.created" if is_session(data) => {
+            "agent.created" if !is_session(data) => self.child(machine, &agent, data),
+            "agent.created" => {
                 self.sessions.insert(
                     key.clone(),
                     Session {
@@ -679,8 +721,13 @@ impl View {
                 if let Some(session) = self.sessions.get_mut(&key) {
                     session.title = text(&data["title"]);
                 }
+                if let Some((_, title)) = self.children.get_mut(&key) {
+                    *title = text(&data["title"]);
+                }
             }
-            "approval.requested" if data["held_by"] == "user" => self.requested(machine, data),
+            "approval.requested" if data["held_by"] == "user" => {
+                self.requested(machine, data, now_millis());
+            }
             "approval.decided" | "approval.cancelled" | "approval.settled" => {
                 if let Some(number) = data["number"].as_u64() {
                     self.requests.remove(&(machine.to_owned(), number));
@@ -688,9 +735,13 @@ impl View {
             }
             "agent.asked" if data["to"] == "user" => {
                 if let Some(asked) = event["seq"].as_u64() {
+                    let at = self
+                        .asks
+                        .get(&(machine.to_owned(), asked))
+                        .map_or_else(now_millis, |ask| ask.at);
                     self.asks.insert(
                         (machine.to_owned(), asked),
-                        ask_view(machine, &agent, asked, data),
+                        ask_view(machine, &agent, asked, data, at),
                     );
                 }
             }
@@ -733,10 +784,40 @@ impl View {
         }
     }
 
-    fn requested(&mut self, machine: &str, request: &Value) {
+    /// A child of a session: an agent of `agent.list` or `agent.created` that has a parent here
+    /// (one another machine launched has none, and no session here).
+    fn child(&mut self, machine: &str, id: &str, agent: &Value) {
+        if let Some(parent) = agent["parent"].as_str() {
+            self.children.insert(
+                (machine.to_owned(), id.to_owned()),
+                (parent.to_owned(), text(&agent["title"])),
+            );
+        }
+    }
+
+    /// The session whose tree holds `id`: the root of its parents, `id` itself when it is no
+    /// child the phone knows.
+    fn session_of(&self, machine: &str, id: &str) -> String {
+        let mut at = id.to_owned();
+        // A tree is never deeper than the daemon lets it be: the bound only stops a loop.
+        for _ in 0..64 {
+            match self.children.get(&(machine.to_owned(), at.clone())) {
+                Some((parent, _)) => at.clone_from(parent),
+                None => break,
+            }
+        }
+        at
+    }
+
+    /// A request that waits, which came at `at`: one seen again keeps its first time.
+    fn requested(&mut self, machine: &str, request: &Value, at: u64) {
         let Some(number) = request["number"].as_u64() else {
             return;
         };
+        let at = self
+            .requests
+            .get(&(machine.to_owned(), number))
+            .map_or(at, |held| held.at);
         let strings = |value: &Value| -> Vec<String> {
             value.as_array().into_iter().flatten().map(text).collect()
         };
@@ -745,6 +826,7 @@ impl View {
             (machine.to_owned(), number),
             Held {
                 number,
+                at,
                 agent: text(&request["agent"]),
                 call: call_line(&tool, &request["call"]),
                 tool,
@@ -834,6 +916,13 @@ impl View {
                 forwarders.iter().map(String::as_str),
             ),
             why,
+            at: held.at,
+            session: self.session_of(machine, &held.agent),
+            child: match self.children.get(&(machine.to_owned(), held.agent.clone())) {
+                Some((_, title)) if !title.trim().is_empty() => title.clone(),
+                Some(_) => format!("agent {}", held.agent),
+                None => String::new(),
+            },
         }
     }
 
@@ -1132,7 +1221,7 @@ fn runs<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<RunView> {
 /// A question of the agent `agent`, from an `agent.asked` event or a question of `agent.tree`:
 /// each question with its options, or the ask's own text as the one question when it came
 /// without a list.
-fn ask_view(machine: &str, agent: &str, asked: u64, ask: &Value) -> AskView {
+fn ask_view(machine: &str, agent: &str, asked: u64, ask: &Value, at: u64) -> AskView {
     let question = text(&ask["question"]);
     let mut questions: Vec<AskQuestion> = ask["questions"]
         .as_array()
@@ -1165,6 +1254,7 @@ fn ask_view(machine: &str, agent: &str, asked: u64, ask: &Value) -> AskView {
         asked,
         question,
         questions,
+        at,
     }
 }
 
@@ -1443,6 +1533,132 @@ mod tests {
     }
 
     #[test]
+    fn a_request_and_a_question_say_when_they_came() {
+        let mut view = View::default();
+        let before = now_millis();
+        view.load(
+            "server",
+            &serde_json::json!({"agents": []}),
+            &serde_json::json!({"requests": [
+                {"number": 4, "agent": "a1", "tool": "run", "call": {"line": "ls"},
+                    "created_at": 1_000},
+                {"number": 5, "agent": "a1", "tool": "run", "call": {"line": "ls"}},
+            ]}),
+        );
+        let requested = serde_json::json!({"name": "approval.requested", "seq": 7, "at": 2,
+            "data": {"number": 4, "agent": "b1", "tool": "run", "call": {"line": "pwd"},
+                "held_by": "user"}});
+        view.apply("laptop", &requested);
+        view.apply(
+            "laptop",
+            &serde_json::json!({"name": "agent.asked", "seq": 9, "at": 3,
+                "data": {"agent": "b1", "to": "user", "question": "Push?"}}),
+        );
+        view.follow("server", "a1");
+        view.tree(
+            "server",
+            "a1",
+            &serde_json::json!({"agents": [{"agent": {"id": "a1", "parent": null},
+                "questions": [{"seq": 12, "at": 1_500, "question": "Which one?"}]}]}),
+        );
+        let after = now_millis();
+        let state = view.state();
+        let request = |machine: &str, number: u64| {
+            state
+                .requests
+                .iter()
+                .find(|r| r.machine == machine && r.number == number)
+                .unwrap()
+                .at
+        };
+        let ask = |machine: &str, asked: u64| {
+            state
+                .asks
+                .iter()
+                .find(|a| a.machine == machine && a.asked == asked)
+                .unwrap()
+                .at
+        };
+        // Already there at the link: its own time, else the link's.
+        assert_eq!(request("server", 4), 1_000);
+        assert!((before..=after).contains(&request("server", 5)));
+        assert_eq!(ask("server", 12), 1_500);
+        // Come since: when the phone saw it, the daemon's counters and clock aside.
+        assert!((before..=after).contains(&request("laptop", 4)));
+        assert!((before..=after).contains(&ask("laptop", 9)));
+
+        // Seen again (a link again, the tree again): it keeps the time it came at.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let first = request("laptop", 4);
+        view.apply("laptop", &requested);
+        view.tree(
+            "server",
+            "a1",
+            &serde_json::json!({"agents": [{"agent": {"id": "a1", "parent": null},
+                "questions": [{"seq": 12, "question": "Which one?"}]}]}),
+        );
+        let again = view.state();
+        assert_eq!(
+            again
+                .requests
+                .iter()
+                .find(|r| r.machine == "laptop")
+                .unwrap()
+                .at,
+            first
+        );
+        assert_eq!(again.asks.iter().find(|a| a.asked == 12).unwrap().at, 1_500);
+    }
+
+    #[test]
+    fn a_child_s_request_names_its_session_and_the_child() {
+        let mut view = View::default();
+        let request = |number: u64, agent: &str| {
+            serde_json::json!({"number": number, "agent": agent, "tool": "run",
+                "call": {"line": "ls"}})
+        };
+        view.load(
+            "server",
+            &serde_json::json!({"agents": [
+                {"id": "a1", "parent": null, "depth": 0, "title": "Fix the login",
+                    "project": "app"},
+                {"id": "c1", "parent": "a1", "depth": 1, "title": "Check"},
+                {"id": "c2", "parent": "c1", "depth": 2, "title": ""},
+            ]}),
+            &serde_json::json!({"requests": [request(4, "c2"), request(5, "a1"),
+                request(6, "c1"), request(8, "x9")]}),
+        );
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 1, "data": {"agent": "c3",
+                "parent": "a1", "depth": 1, "title": "Write"}}),
+        );
+        let mut held = request(7, "c3");
+        held["held_by"] = "user".into();
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "approval.requested", "at": 2, "data": held}),
+        );
+        let state = view.state();
+        let said: Vec<(u64, &str, &str)> = state
+            .requests
+            .iter()
+            .map(|r| (r.number, r.session.as_str(), r.child.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                (4, "a1", "agent c2"),
+                (5, "a1", ""),
+                (6, "a1", "Check"),
+                (7, "a1", "Write"),
+                // An agent the phone does not know is taken for a session.
+                (8, "x9", ""),
+            ]
+        );
+    }
+
+    #[test]
     fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {
         let (owner, phone) = (DeviceKey::make().unwrap(), DeviceKey::make().unwrap());
         let mut list = MemberList::default();
@@ -1479,6 +1695,111 @@ mod tests {
         assert_eq!(
             state.said,
             ["this phone was removed from the user's hub: pair it again"]
+        );
+    }
+
+    fn waiting(number: u64) -> Value {
+        serde_json::json!({"number": number, "agent": "a1", "tool": "run",
+            "call": {"line": "ls"}})
+    }
+
+    #[test]
+    fn a_request_decided_while_the_phone_was_off_leaves_at_the_next_load() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": []});
+        view.load(
+            "server",
+            &agents,
+            &serde_json::json!({"requests": [waiting(4), waiting(5)]}),
+        );
+        view.load(
+            "laptop",
+            &agents,
+            &serde_json::json!({"requests": [waiting(4)]}),
+        );
+
+        let first = view
+            .state()
+            .requests
+            .iter()
+            .find(|r| r.machine == "server" && r.number == 5)
+            .unwrap()
+            .at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // The server's request 4 was decided while the phone was off: its list holds 5 only.
+        view.load(
+            "server",
+            &agents,
+            &serde_json::json!({"requests": [waiting(5)]}),
+        );
+        let kept: Vec<(String, u64)> = view
+            .state()
+            .requests
+            .iter()
+            .map(|r| (r.machine.clone(), r.number))
+            .collect();
+        // Only that machine's: the laptop's 4 stays.
+        assert_eq!(
+            kept,
+            vec![("laptop".to_owned(), 4), ("server".to_owned(), 5)]
+        );
+
+        // The one it still holds keeps the time it came at.
+        let state = view.state();
+        let held = state
+            .requests
+            .iter()
+            .find(|r| r.machine == "server")
+            .unwrap();
+        assert_eq!(held.at, first);
+
+        // Nothing waits any more: a load with no request empties that machine's.
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        let left: Vec<String> = view
+            .state()
+            .requests
+            .iter()
+            .map(|r| r.machine.clone())
+            .collect();
+        assert_eq!(left, vec!["laptop".to_owned()]);
+    }
+
+    #[test]
+    fn a_question_answered_while_the_phone_was_off_leaves_at_the_next_tree() {
+        let mut view = View::default();
+        let tree = |questions: Value| {
+            serde_json::json!({"agents": [{"agent": {"id": "a1", "parent": null},
+                "questions": questions}]})
+        };
+        view.follow("server", "a1");
+        view.tree(
+            "server",
+            "a1",
+            &tree(serde_json::json!([
+                {"seq": 12, "question": "Which one?"},
+                {"seq": 13, "question": "Push?"},
+            ])),
+        );
+        view.apply(
+            "laptop",
+            &serde_json::json!({"name": "agent.asked", "seq": 3, "at": 1,
+                "data": {"agent": "b1", "to": "user", "question": "Ship?"}}),
+        );
+        view.tree(
+            "server",
+            "a1",
+            &tree(serde_json::json!([{"seq": 13, "question": "Push?"}])),
+        );
+        let kept: Vec<(String, u64)> = view
+            .state()
+            .asks
+            .iter()
+            .map(|a| (a.machine.clone(), a.asked))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![("laptop".to_owned(), 3), ("server".to_owned(), 13)]
         );
     }
 }

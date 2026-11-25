@@ -18,7 +18,9 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
-const EXPIRED: &str = "Failed to authenticate: OAuth session expired and could not be refreshed";
+/// What Claude Code 2.1.325 says with no login, as the bridge fails the prompt with it (seen on a
+/// real run, #875).
+const EXPIRED: &str = "Not logged in · Please run /login";
 
 const LOGIN_LINE: &str = "Claude's login expired: sign in again (run claude and /login)";
 

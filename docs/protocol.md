@@ -2722,7 +2722,11 @@ folder named by the project; `ticket #5 of api`, `ticket ABC-1`; `wake: <why>`),
 source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`: `project`,
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
 `expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
-end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+end of its own, and, for a following alone, `waits`: what that session waits for the user, oldest
+first, each `{"kind", "number", "what"}`, `kind` being `call` (a call held for approval),
+`connection` (a connection's write asked) or `vault` (a vault entry asked for, `number` the ask's),
+`what` what it asks in a few words, masked and cut (`a vault entry asked: staging-login: to sign in
+to staging`, the entry named, never a secret), `[]` when nothing of the user's waits), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
 epoch. A subscription with no deadline (one to a pull request or a ticket the agent gave no
 `minutes`, a following) has `expires_at` 9223372036854775807 (`i64::MAX`): it lasts until its
 target ends. `paused` is true for a following paused because its two sessions wrote to each other

@@ -93,10 +93,11 @@ class PhoneViewTest {
                 RequestView(
                     machine = "server", number = 3uL, agent = "a1", tool = "shell", kind = "call",
                     call = "shell", base = false, says = emptyList(), judgement = "", why = "", always = "", source = "",
+                    at = 0uL, session = "a1", child = "",
                 ),
             ),
             asks = listOf(
-                AskView(machine = "server", agent = "a2", asked = 9uL, question = "which one?", questions = emptyList()),
+                AskView(machine = "server", agent = "a2", asked = 9uL, question = "which one?", questions = emptyList(), at = 0uL),
             ),
         ).toPhoneView()
         val waiting = view.projects[0].sessions.map { Triple(it.machine, it.agent, it.waiting) }
@@ -133,9 +134,10 @@ class PhoneViewTest {
             ),
             requests = listOf(
                 RequestView(
-                    machine = "server", number = 4uL, agent = "a1", tool = "connections", kind = "action",
+                    machine = "server", number = 4uL, agent = "c1", tool = "connections", kind = "action",
                     call = "rm -rf build", base = true, says = listOf("Adds docs."), judgement = "The judge asks you: x",
-                    why = "It deletes.", always = "It always asks.", source = "asked by the conversation · #4",
+                    why = "It deletes.", always = "It always asks.", source = "asked by Check · #4",
+                    at = 1_700uL, session = "a1", child = "Check",
                 ),
             ),
             asks = listOf(
@@ -146,6 +148,7 @@ class PhoneViewTest {
                             question = "Push?", options = listOf(org.flottille.core.ffi.AskOption("Yes", "Squash first")), multiple = true,
                         ),
                     ),
+                    at = 1_800uL,
                 ),
             ),
         ).toPhoneView()
@@ -164,13 +167,14 @@ class PhoneViewTest {
         assertEquals(Child("c1", "Check", "running", "worker", 1), page.children.single())
         assertEquals(
             Request(
-                "server", 4, "a1", "connections", "action", "rm -rf build", true, "The judge asks you: x", "It deletes.",
-                "It always asks.", "asked by the conversation · #4", listOf("Adds docs."),
+                "server", 4, "c1", "connections", "action", "rm -rf build", true, "The judge asks you: x", "It deletes.",
+                "It always asks.", "asked by Check · #4", listOf("Adds docs."), at = 1_700, session = "a1", child = "Check",
             ),
             view.requests.single(),
         )
         val ask = view.asks.single()
         assertEquals(12L, ask.asked)
+        assertEquals(1_800L, ask.at)
         assertEquals(AskQuestion("Push?", listOf(AskOption("Yes", "Squash first")), multiple = true), ask.questions.single())
     }
 

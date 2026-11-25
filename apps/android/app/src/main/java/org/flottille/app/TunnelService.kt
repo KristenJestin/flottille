@@ -206,7 +206,7 @@ class TunnelService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(this, CHANNEL_KEPT)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(if (kept.size == 1) "Tunnel kept open" else "${kept.size} tunnels kept open")
             .setContentText(kept.values.joinToString(", ") { it.said() })
             .setContentIntent(open)
@@ -221,7 +221,7 @@ class TunnelService : Service() {
         getSystemService(NotificationManager::class.java).notify(
             ENDED_ID + (tunnel.tunnel.hashCode() and 0xFFFF),
             NotificationCompat.Builder(this, CHANNEL_ENDED)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle("Tunnel to ${tunnel.machine} ended")
                 .setContentText("${tunnel.said()}: $reason")
                 .setAutoCancel(true)
