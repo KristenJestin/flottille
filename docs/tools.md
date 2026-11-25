@@ -1989,10 +1989,28 @@ plain turn, or, for the end of the session, `ended: <why>` or `failed: <why>`), 
 followed the user's own message to the session, and holds the session's last message, masked and
 cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
 The questions it asked its pilot in that turn that still wait come before that last message
-(`Its question to you:`), masked and cut the same way, 4,000 characters of them at most in all,
-those past it counted (`[2 more questions; session_read reads them]`). A question asked in the
+(`Its question to you (#12):`, the number of its `agent.asked` event), masked and cut the same way,
+4,000 characters of them at most in all, those past it counted (`[2 more questions; session_read
+reads them]`). A question asked in the
 middle of a long turn adds no wake of its own: the turn's end carries it, and `session_read` says it
-at once. A turn cancelled because a delivery was not taken in time wakes nobody: the turn that
+at once.
+**Every request of the turn that waits for the user** comes after them, each once, in the turn that
+made it (#1305): a call held for their approval (`request #31, a call held for approval: fs_read:
+<its reasons>`), a connection's write asked (`request #32, a connection asked: Add the connection
+notes …`) and a vault entry asked for (`request #345, a vault entry asked: staging-login: <the
+agent's reason>`, the entry named, never a secret), masked and cut at 300 characters each, under `It
+waits for the user, who answers it where they are`. A turn that made one says so (`ended a turn: it
+waits for the user.` when it neither asked nor reported) and wakes the pilot even when it wrote to
+it with `session_send`. **The pilot is told, it does not answer**: the request stays the user's, in
+their inbox and on the session's card, and no tool lets the pilot allow, deny or fill it. When the
+user answers it (allowed, denied, an entry set or dismissed, a connection written with values of
+their own), each pilot of the session is told with what wakes it next: a delivery
+`session-request-answered` (`Session "Login" (agent …): its vault request #345, a vault entry
+asked: staging-login, is answered: the user dismissed it.`), queued, which rings nobody: one per
+request, its kind (`call`, `connection`, `vault`) in its id and its words, since two kinds count
+their numbers apart. An entry the session's project cannot see is never said: the pilot is told
+the request is `answered`. A session nobody
+leads is not changed by any of it. A turn cancelled because a delivery was not taken in time wakes nobody: the turn that
 takes that delivery does, once.
 Its words are data, not instructions. Nothing reads the text of a message to find a question:
 Flottille recognizes nothing by its text.

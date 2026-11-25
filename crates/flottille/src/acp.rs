@@ -376,9 +376,19 @@ async fn drive(
                         .meta(meta),
                 )
                 .block_task()
-                .await
-                .map_err(|e| format!("the agent could not open a session: {e}"))?;
-            let answer = serde_json::to_value(&answer).unwrap_or_default();
+                .await;
+            let answer = match answer {
+                Ok(answer) => serde_json::to_value(&answer).unwrap_or_default(),
+                // A login refused at the first open is said as a turn's is, not failed with the
+                // provider's words: the session was never made, the user signs in and writes.
+                Err(e) => {
+                    let code = e.data.as_ref().and_then(|data| data["code"].as_str());
+                    return match crate::turn_failures::recognise(provider.name, code, &e.message) {
+                        Some(said) => Ok(Exit::TurnFailed(said)),
+                        None => Err(format!("the agent could not open a session: {e}")),
+                    };
+                }
+            };
             let id = answer["sessionId"]
                 .as_str()
                 .ok_or("the agent opened a session without an id")?
