@@ -286,6 +286,56 @@ fn a_file_that_turns_a_request_off_is_refused_and_the_request_still_rings() {
 }
 
 #[test]
+fn a_project_s_own_levels_are_its_kinds_in_the_file() {
+    let user = User::with_fake_agent();
+    project(&user);
+    // As `docs/projects.md` says it: `[projects.<name>.kinds]`, written by hand.
+    std::fs::write(
+        config(&user),
+        "[kinds]\nreport = \"centre\"\n\n[projects.app.kinds]\nreport = \"ring\"\n",
+    )
+    .unwrap();
+
+    let said = settings(&user);
+    assert_eq!(said["projects"]["app"]["report"], "ring", "{said}");
+    assert_eq!(said["kinds"]["report"], "centre", "{said}");
+
+    // And the daemon writes it so.
+    set(
+        &user,
+        json!({"project": "app", "kinds": {"ticket": "centre"}}),
+    );
+    let text = std::fs::read_to_string(config(&user)).unwrap();
+    assert!(text.contains("[projects.app.kinds]"), "{text}");
+}
+
+#[test]
+fn a_file_that_cannot_be_read_is_said_in_the_log_and_in_settings() {
+    let user = User::with_fake_agent();
+    std::fs::write(config(&user), "[kinds\nreport = ").unwrap();
+    let Some(desk) = desk(user) else {
+        return;
+    };
+
+    // Settings says it, with the file.
+    let (code, message) = desk
+        .user
+        .call("notifications.settings", json!({}))
+        .unwrap_err();
+    assert_eq!(code, "invalid-config");
+    assert!(message.contains("notifications.toml"), "{message}");
+    // A ring follows the defaults, and the log says why, once.
+    held(&desk.mcp);
+    held(&desk.mcp);
+    desk.server.wait_for(2);
+    eventually("the log said it", || {
+        desktop::daemon_log(&desk.user).contains("notifications.toml")
+    });
+    let log = desktop::daemon_log(&desk.user);
+    assert_eq!(log.matches("notifications.toml").count(), 1, "{log}");
+}
+
+#[test]
 fn a_kind_without_sound_rings_silently() {
     let Some(desk) = desk(User::with_fake_agent()) else {
         return;
