@@ -18,7 +18,9 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
-const EXPIRED: &str = "Failed to authenticate: OAuth session expired and could not be refreshed";
+/// What Claude Code 2.1.325 says with no login (seen on a real run, #875); the older wording stays
+/// recognised (`turn_failures.rs`).
+const EXPIRED: &str = "Not logged in · Please run /login";
 
 const LOGIN_LINE: &str = "Claude's login expired: sign in again (run claude and /login)";
 
