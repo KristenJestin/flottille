@@ -1463,8 +1463,8 @@ As built (#818):
 - **The navigation, decided**: a bottom bar with three destinations. **Needs you**: each request
   and question as a card answered in place (Allow and Deny on the card, the whole call in sight).
   **Sessions**: the window's sidebar, each machine, its projects folded or not, their sessions in one
-  list ordered by last exchange, led sessions indented under their pilot; the state is the row's
-  mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
+  list newest first (#1441: a session that reports never moves), led sessions indented under their
+  pilot; the state is the row's mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
   The app opens on Needs you; a notification opens its session.
 - **The connection to the hub lives in a foreground service**, as long as the device is paired: the
   same session every device keeps, which carries the links (#1151). Android requires its permanent
@@ -1538,13 +1538,30 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   and its key's fingerprint, read from the code, no network); the user confirms this phone's name
   (the model's) and its role (**Control** or **View only**); the result says the role the hub gave.
   A refused code or a refused join stays on its screen, said.
-- **The screens**: a bottom bar, **Sessions** (the one list, #1150: grouped by project, the machine a
-  tag on each row, in a project the sessions that wait for the user first, the ended ones last, then
-  the most recent; a session of a machine that is offline is greyed and not opened) and **Machines**
+- **The screens**: a bottom bar, **Sessions** (the window's sidebar, design B, #1441: each machine
+  in the list's order, said once, its header carrying its **mark** (#1249: its icon in its colour
+  from the member list, a badge of one shape per state: a filled dot online, a hollow ring offline
+  with the icon greyed, an amber dot with an arrow for an update, a dashed ring unknown) and its
+  state, folded or not, an offline one folded by default; its projects by name with their count,
+  each folded or not, a folded one showing the most urgent mark of what it hides; their sessions in
+  compact two-line rows newest first, the state the row's mark (a spinner, a pulsing dot for what
+  needs the user, the time of the last exchange at rest), so that a row never moves when its
+  session reports; a session led by another under its pilot, indented with the window's connector,
+  **folded by default**, the pilot's row saying `leads 3 · 1 waiting` and, folded, carrying the
+  most urgent mark of its own and theirs; the ended sessions out of the list, in one **Ended**
+  group pinned at the bottom, folded by default, each row saying its project and its machine's
+  icon, and the group saying once of a machine that is not online that its ended sessions are not
+  listed. The folds are kept on the phone, as the window keeps its sidebar's. A session of a
+  machine that is offline is greyed and not opened) and **Machines**
   (the hub, reachable or not, and each machine: `Online`, `Offline since 22:14` with why, `Needs an
   update`); **Settings**, from the top bar: this device's name and role, the
   members, **Remove this device** (it asks once). There is no Add a device. The hub's card says
   that the link is in clear when its URL is `http://`.
+- **The core's view state** gives each session its `created` (what orders the list) and its `pilot`
+  (#1441: the root of the tree of the agent that leads it, `led_by`, on the same machine; a pilot on
+  another machine is not drawn yet: its session is a row of its own, without design B's `led from
+  <machine> <title>` line, which the view cannot say), read from `agent.list` and
+  `agent.created`, which says `led_by` since; `agent.detached` takes it away.
 - **The core's view state** gained what the screens say: a machine's `state` (`online`, `offline`,
   `needs an update`) and `since`, the `members` (this device marked, who added each), `hub_card`
   and `leave` (the phone's own removal, signed with its device key and sent to the hub, which ends
@@ -1557,7 +1574,9 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   row inserted, removed or moved animates (`animateItem`), a state that changes fades (machine
   state, hub state, a greyed row, the selected tab), a page and its sections come in staggered
   (`Entrance`), a message unfolds and fades in (`Message`), the confirmation and Settings come and go
-  with `MODAL` and `PANEL`.
+  with `MODAL` and `PANEL`. In Sessions (#1441) a fold's rows come and go with `animateItem` and the
+  chevron turns over `PANEL`, a row's mark cross-fades over `HOVER` (a folded pilot's or project's
+  included), a running mark turns and one that needs the user pulses.
 - **Tested** against a fake core by Compose UI tests under Robolectric (`app/src/test`), one per
   scenario of the issue; the core's mapping by JVM tests (`core/src/test`); the app starting on the
   real core by an instrumentation test on the emulator (`app/src/androidTest`); the Rust side by
@@ -1583,6 +1602,14 @@ recreated.
   unfolds them; a message that arrives unfolds and fades in, what the page held when it opened is
   simply there. A picture sent in a message is read back (`agent.image`) and shown above its words,
   a placeholder fading into it.
+  **It follows its end** (#1442): it opens on its last message and keeps it in sight as messages
+  arrive and unfold, until the user drags it up; then nothing moves it, and **New messages** says
+  what arrived below and brings them down. **A delivery is drawn as the window draws it**: the
+  core splits a prompt into its deliveries (`flottille_protocol::prompt`, the daemon's own markers)
+  and only the user's words (a root's brief included) are the user's bubble; any other delivery
+  is one line, what it is and what it says (`woken by` and the window's own sentence for a
+  subscription's news, `report` and `Report from <child>`, `message` and who wrote), its body
+  folded under it until a tap. What replays the conversation after a compaction is left out.
 - **Writing**: the composer sends text and pictures (`send`: `agent.send` with `images`). Pictures
   come from the gallery (the system's photo picker, no storage permission), the camera (it writes one
   shot into a file of the app's cache that a `FileProvider` gives the camera app alone, then the
@@ -1616,11 +1643,20 @@ recreated.
   dialog. An answer the machine refuses because the request is decided already or gone (or the ask
   is answered) is said on the card, which then folds; any other refusal (a link that ended, a time
   out) is a toast and the card stays, to answer again.
-- **Controls**: the mode as three choices (Ask, Auto, Full; Full's fill is the alarm colour; **Full
-  asks for a confirmation on the phone**, the one confirmation dialog, since one tap in a pocket
-  must not give the agents the run of the machine), Stop
-  in Send's place while a turn runs and there is nothing to send (`agent.cancel`: the agent
-  stays), and the session's tree read only. **A child's page has no composer**, no mode and no
+- **Controls** (#1442, design B brought up to date): the top bar holds an icon Back, the title
+  and where the session runs, the **mode's chip** (its name, in the warning colour in Full; a tap
+  opens a panel with the three modes as radio rows and what each lets the agents do; a choice
+  applies and closes it, **Full asks for a confirmation on the phone** first, the one confirmation
+  dialog, since one tap in a pocket must not give the agents the run of the machine) and the
+  **tree's icon**, with an amber dot while an agent under the session waits for the user: it
+  opens the tree as a panel from the bottom, read only, the pilot first, then its children and
+  grandchildren with what each does, the ended ones folded under one line. A **request is in
+  the conversation**, where it was asked, with Allow and Deny; answered from the phone, it folds
+  into one line (`Request #4 · <call>`, `Allowed` or `Denied`). The questions stay docked above
+  the composer. The composer is one row of icons, Gallery, Camera, the field, Send, each with its
+  label for a screen reader; Stop takes Send's place while a turn runs and there is nothing to
+  send (`agent.cancel`: the agent stays); a line above says the session works and what waits for
+  the user. **A child's page has no composer**, no mode and no
   Stop; an ended session says it has ended in place of the composer.
 - **A `viewer` reads only**: the page draws no composer, no pictures buttons, no answer (the
   ask card is read, its options are text), no Allow or Deny, no mode, no Stop, and says `View only`.
@@ -1632,7 +1668,13 @@ recreated.
   picture names, and the tree; a request carries the call line, its kind and class (`base`), what it
   says, the judge's sentence, every reason and forward, who asked and the warning; an ask carries each question with its options.
 - **Motion**, each with the kit's durations: a message or a tree row unfolds and fades in
-  (`ENTER`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
+  (`ENTER`); the list follows the growing end, **New messages** rises and fades in and out, a
+  delivery's body unfolds with its chevron turning (`PANEL`), the panels of the tree and of the
+  mode rise over their scrim and go down (`PANEL`), their rows come in staggered, the chosen mode's
+  radio fills, the mode's chip moves to the alarm colour and cross-fades its name, an answered
+  request folds away and its line unfolds, the tree's dot and its ended agents fade and unfold, the
+  composer's status line unfolds and its spinner turns, every
+  icon button fades and sinks when pressed (`HOVER`, `PRESS`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
   request cards dock, slide into place and fade away (`animateItem`); a question slides in from
   the side of the move, the dots and the option rows move their fill and ring (`PANEL`), the field
   of "Something else…" and the note unfold and fold; a refusal comes in on its card; the mode's
@@ -2888,18 +2930,20 @@ on a real phone, by hand, and reported.
 - The mobile core (#824): a batch is what arrives within 30 ms of its first event, 256 events at
   most; a runner that cannot be linked is dialled again after 250 ms, doubling up to 30 s, and at
   once when the hub says another list of the members online. Its sessions list holds root sessions only, by project
-  name, projects by name (rows never move between groups), sessions by last exchange. The
+  name, projects by name (rows never move between groups), sessions newest first by when they were
+  made (#1441: by last exchange, a session that reported jumped to the top). The
   questions that wait come from the events seen (`agent.asked`), not from a read when the phone
   links: one asked before the phone's first link shows from the next one. The phone links to the
   runners of the list only, never to another phone or a controller's computer.
 
 - The Android app (#825, #1443): the bottom bar has **Needs you**, **Sessions** and **Machines**,
-  and Settings is reached from the top bar; the app opens on Needs you. In a project, the sessions
-  that wait for the user come first and the ended ones last, then the most recent; the groups stay
-  by project name as the core gives them. An ended session stays in its project, said **Ended**,
-  rather than disappearing. Tapping a session of an online machine opens its page (#826). The app
-  connects to the hub only while it is on screen (the foreground service comes later) and dials it
-  again after a wait that grows (1 s, up to 30 s) when it cannot be reached. A phone proposes its model's name, as a computer proposes its host's. The QR reader is
+  and Settings is reached from the top bar; the app opens on Needs you. Since #1441 the Sessions tab
+  is design B's: by machine, then project, newest first, the state the row's mark; an ended session
+  leaves its project for the folded **Ended** group pinned at the bottom (it said **Ended** in its
+  project before). Tapping a session of an online machine opens its page (#826). The app connects
+  to the hub only while it is on screen (the foreground service comes later) and dials it again
+  after a wait that grows (1 s, up to 30 s) when it cannot be reached. A phone proposes its model's
+  name, as a computer proposes its host's. The QR reader is
   ZXing over CameraX, not Google's ML Kit: no proprietary library in a public repository's app.
   A pull request's APK is debug-signed (the release key is never given to the run of a pull
   request, which runs the branch's own scripts); only a push, which runs merged code, signs with
@@ -2989,6 +3033,22 @@ on a real phone, by hand, and reported.
   there (a project made again for a branch of another root): the caller's daemon sends the removal
   for the first of its launches holding that name, and the machine there removes that launch's
   alone. Naming which, by its session, is a follow-up if the case is met.
+- **The session page on the phone** (#1442): the mode's chip is drawn only where the mode may be
+  changed (not on a child's page, a viewer's or an ended session's); choosing the mode already
+  chosen sends nothing; Full keeps its confirmation, which the extended design left open. The
+  tree's icon is always in the top bar (the pilot is a row of its own). A request answered on
+  another device leaves no record on the phone: the phone knows only the answers it gave. A
+  request sits after the line that was the conversation's last when it came. The composer's field
+  says `Write to the agent` until something is written (its label for a screen reader is
+  `Message`). A delivery the core does not know by name is one line of its kind and its first
+  words, as the window's notice. The machine's mark of #1249 is not drawn yet: the phone has no
+  machine colour to draw it with; the subtitle names the machine.
+- **The phone's Sessions tab keeps its own folds** (#1441): what a project, a pilot or "Ended" was
+  left as is kept in the app's storage, not in the window's state on a machine (`window.get`), so
+  the phone and the window fold apart. A session whose pilot runs on another machine, or works in
+  another project, is a row of its own in its project rather than under that pilot. "Ended" is one
+  group pinned below every machine, its rows newest ended first by their last exchange (the view
+  has no `ended_at`).
 
 ## Open questions
 

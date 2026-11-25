@@ -626,6 +626,38 @@ fn a_failed_turn_ends_with_a_failure_and_only_a_sign_in_error_fails_the_prompt()
     assert_eq!(signed["data"]["code"], "unauthorized");
 }
 
+/// What `codex app-server` 0.166.0 really ends a turn with when no login is there (seen on a real
+/// run in an empty Codex folder, #875): not `unauthorized`, but the 401 its request got, said as
+/// the connection's failure.
+#[test]
+fn a_codex_with_no_login_fails_the_prompt_with_the_401_it_really_says() {
+    let user = User::with_fake_codex();
+    let refused = "unexpected status 401 Unauthorized: Missing bearer or basic authentication in \
+                   header, url: https://api.openai.com/v1/responses";
+    user.codex_script(json!({"turns": [
+        {"when": "signed out", "do": [], "error": {"message": refused,
+            "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 401}}}},
+        {"when": "unreachable", "do": [], "error": {"message": "connection refused",
+            "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": null}}}},
+        {"when": "overloaded", "do": [], "error": {"message": "bad gateway",
+            "codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 502}}}},
+    ]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &[]);
+
+    let (signed_out, _) = bridge.prompt(&session, "signed out");
+    let (unreachable, unreachable_seen) = bridge.prompt(&session, "unreachable");
+    let (overloaded, _) = bridge.prompt(&session, "overloaded");
+
+    let signed_out = signed_out.unwrap_err();
+    assert_eq!(signed_out["message"], refused);
+    assert_eq!(signed_out["data"]["code"], "unauthorized");
+    // Any other status, or none, is the provider's service failing: the session goes on.
+    assert_eq!(unreachable.unwrap()["stopReason"], "end_turn");
+    assert_eq!(failures(&unreachable_seen)[0].1, "service");
+    assert_eq!(overloaded.unwrap()["stopReason"], "end_turn");
+}
+
 #[test]
 fn a_death_of_codex_ends_the_bridge_with_its_exit_code() {
     let user = User::with_fake_codex();

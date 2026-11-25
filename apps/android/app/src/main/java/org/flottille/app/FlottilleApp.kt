@@ -155,6 +155,7 @@ fun FlottilleApp(
                     phone = phone,
                     view = view,
                     zone = zone,
+                    now = now,
                     tab = tab,
                     onTab = { tab = it },
                     onSettings = { settings = true },
@@ -232,6 +233,7 @@ private fun Main(
     phone: Phone,
     view: org.flottille.core.PhoneView,
     zone: ZoneId,
+    now: () -> Long,
     tab: Tab,
     onTab: (Tab) -> Unit,
     onSettings: () -> Unit,
@@ -273,7 +275,7 @@ private fun Main(
             ) { shown ->
                 when (shown) {
                     Tab.NeedsYou -> NeedsYouScreen(phone, view, onOpenSession, onToast)
-                    Tab.Sessions -> SessionsScreen(view, onOpenSession)
+                    Tab.Sessions -> SessionsScreen(view, zone, now, onOpenSession)
                     Tab.Machines -> MachinesScreen(view, zone)
                 }
             }

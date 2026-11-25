@@ -156,7 +156,16 @@ internal fun ViewState.toPhoneView(): PhoneView {
             Project(
                 project.name,
                 project.sessions.map {
-                    SessionRow(it.machine, it.agent, it.title, it.state, it.last.toLong(), (it.machine to it.agent) in waiting)
+                    SessionRow(
+                        it.machine,
+                        it.agent,
+                        it.title,
+                        it.state,
+                        it.last.toLong(),
+                        (it.machine to it.agent) in waiting,
+                        created = it.created.toLong(),
+                        pilot = it.pilot,
+                    )
                 },
             )
         },
@@ -172,7 +181,7 @@ internal fun ViewState.toPhoneView(): PhoneView {
                 child = page.child,
                 ended = page.ended,
                 more = page.more,
-                entries = page.entries.map { Entry(it.seq.toLong(), it.kind, it.text, it.images, it.link) },
+                entries = page.entries.map { Entry(it.seq.toLong(), it.kind, it.text, it.images, it.link, it.delivery, it.summary) },
                 children = page.children.map { Child(it.agent, it.title, it.doing, it.role, it.depth.toInt()) },
                 runs = page.runs.map { Run(it.run, it.line, it.url) },
             )

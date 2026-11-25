@@ -8,7 +8,11 @@ enum class MachineState { Online, Offline, NeedsUpdate }
 /** A runner of the user's. [since] is when it came to be in [state] (milliseconds since the epoch). */
 data class Machine(val name: String, val state: MachineState, val since: Long, val why: String = "")
 
-/** A session of a machine, tagged with it; [waiting] when it needs the user (a request or a question is open). */
+/**
+ * A session of a machine, tagged with it; [waiting] when it needs the user (a request or a question
+ * is open). [created] orders the list, never [last]; [pilot] is the session of the agent that leads
+ * it on the same machine, empty when no agent does.
+ */
 data class SessionRow(
     val machine: String,
     val agent: String,
@@ -16,10 +20,12 @@ data class SessionRow(
     val state: String,
     val last: Long,
     val waiting: Boolean = false,
+    val created: Long = 0,
+    val pilot: String = "",
 )
 
 /**
- * One entry of a conversation: `user`, `agent`, `thought`, `tool` or `link`. [seq] orders and names
+ * One entry of a conversation: `user`, `agent`, `thought`, `tool`, `link` or `delivery`. [seq] orders and names
  * it. A `link` is one an agent showed: [text] is its title (or host), [link] its address.
  */
 data class Entry(
@@ -28,6 +34,9 @@ data class Entry(
     val text: String,
     val images: List<String> = emptyList(),
     val link: String = "",
+    /** What a `delivery` entry is (`woken by`, `report`…), said in one [summary]; [text] is its body. */
+    val delivery: String = "",
+    val summary: String = "",
 )
 
 /** A command of the session that runs and reports an address: [url] opens through a tunnel. */

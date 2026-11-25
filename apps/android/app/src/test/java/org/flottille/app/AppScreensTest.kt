@@ -78,7 +78,8 @@ class AppScreensTest {
         state: String = "idle",
         last: Long = 0,
         waiting: Boolean = false,
-    ) = SessionRow(machine, agent, title, state, last, waiting)
+        created: Long = last,
+    ) = SessionRow(machine, agent, title, state, last, waiting, created = created)
 
     private fun joined(
         machines: List<Machine> = emptyList(),
@@ -99,9 +100,9 @@ class AppScreensTest {
             it.config.getOrNull(SemanticsProperties.TestTag)?.startsWith(prefix) == true
         }
 
-    /** The tags of the project headers and the session rows, from the top of the list down. */
+    /** The tags of the machines, the project headers and the session rows, from the top of the list down. */
     private fun listed(): List<String> =
-        rule.onAllNodes(tagged("project:") or tagged("session:"))
+        rule.onAllNodes(tagged("machine:") or tagged("project:") or tagged("session:"))
             .fetchSemanticsNodes()
             .sortedBy { it.positionInRoot.y }
             .map { it.config[SemanticsProperties.TestTag] }
@@ -214,7 +215,7 @@ class AppScreensTest {
     }
 
     @Test
-    fun the_sessions_of_every_machine_are_one_list_waiting_ones_first() {
+    fun the_sessions_are_listed_by_machine_then_project() {
         val phone = FakePhone(
             joined(
                 machines = listOf(machine("laptop"), machine("server")),
@@ -222,34 +223,35 @@ class AppScreensTest {
                     Project(
                         "alpha",
                         listOf(
-                            session("server", "a2", last = 300),
-                            session("laptop", "a1", state = "working", last = 100),
-                            session("laptop", "a3", last = 50, waiting = true),
+                            session("server", "a2", last = 300, created = 30),
+                            session("laptop", "a1", state = "working", last = 100, created = 20),
+                            session("laptop", "a3", last = 50, created = 10, waiting = true),
                         ),
                     ),
-                    Project("beta", listOf(session("server", "b1", last = 10))),
+                    Project("beta", listOf(session("server", "b1", last = 10, created = 5))),
                 ),
             ),
         )
         start(phone)
         rule.onNodeWithTag("tab:sessions").performClick()
 
-        // One list, grouped by project; in a project the ones that wait for the user come first.
+        // Each machine in the list's order, said once; its projects by name, their sessions newest
+        // first, whatever waits for the user.
         assertEquals(
             listOf(
-                "project:alpha",
-                "session:laptop:a3",
-                "session:server:a2",
+                "machine:laptop",
+                "project:laptop/alpha",
                 "session:laptop:a1",
-                "project:beta",
+                "session:laptop:a3",
+                "machine:server",
+                "project:server/alpha",
+                "session:server:a2",
+                "project:server/beta",
                 "session:server:b1",
             ),
             listed(),
         )
-        // The machine is a tag on each row.
-        rule.onNodeWithTag("session:laptop:a3").assertTextContains("laptop", substring = true)
-        rule.onNodeWithTag("session:server:b1").assertTextContains("server", substring = true)
-        rule.onNodeWithTag("session:laptop:a3").assertTextContains("Waiting for you", substring = true)
+        rule.onNodeWithTag("machine:laptop").assertTextContains("online", substring = true)
     }
 
     @Test
@@ -265,6 +267,9 @@ class AppScreensTest {
         start(phone)
         rule.onNodeWithTag("tab:sessions").performClick()
 
+        // An offline machine's projects are folded: unfolded, its rows are greyed.
+        rule.onNodeWithTag("machine:laptop").performClick()
+        rule.waitForIdle()
         rule.onNodeWithTag("session:laptop:l1").assertIsNotEnabled()
         rule.onNodeWithTag("session:laptop:l1").assert(
             SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Machine offline"),
@@ -309,7 +314,7 @@ class AppScreensTest {
         assertTrue("a1 slides down: $before, then $during, then $after", before < during && during < after)
         rule.onNodeWithTag("session:server:a0").assertIsDisplayed()
 
-        // Ended: it goes after the ones that go on, and the row below it slides up to its place.
+        // Ended: it leaves for the folded "Ended" group, and the row below it slides up to its place.
         val a2Before = top("session:server:a2")
         phone.state.value = phone.state.value.copy(
             projects = listOf(
@@ -326,7 +331,7 @@ class AppScreensTest {
         val a2After = top("session:server:a2")
         assertTrue("a2 slides up: $a2Before, then $a2During, then $a2After", a2Before > a2During && a2During > a2After)
         assertEquals(
-            listOf("project:alpha", "session:server:a0", "session:server:a2", "session:server:a1"),
+            listOf("machine:server", "project:server/alpha", "session:server:a0", "session:server:a2"),
             listed(),
         )
     }

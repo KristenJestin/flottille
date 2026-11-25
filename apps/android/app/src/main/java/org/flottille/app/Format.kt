@@ -19,12 +19,13 @@ fun stateLine(machine: Machine, zone: ZoneId): String =
         MachineState.NeedsUpdate -> "Needs an update"
     }
 
-/** A session's state, as its row says it. */
-fun sessionState(state: String, waiting: Boolean): String =
-    when {
-        waiting -> "Waiting for you"
-        state == "working" -> "Working"
-        state == "starting" -> "Starting"
-        state == "ended" -> "Ended"
-        else -> "Idle"
+/** How long ago a moment was, as a row at rest says it: `now`, `5 min`, `3 h`, `2 d`. */
+fun ago(millis: Long, now: Long): String {
+    val minutes = (now - millis).coerceAtLeast(0) / 60_000
+    return when {
+        minutes < 1 -> "now"
+        minutes < 60 -> "$minutes min"
+        minutes < 24 * 60 -> "${minutes / 60} h"
+        else -> "${minutes / (24 * 60)} d"
     }
+}

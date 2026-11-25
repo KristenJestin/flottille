@@ -49,7 +49,8 @@ const INTERNAL: i64 = -32603;
 /// ACP's "resource not found": the session asked for is gone, and only then does the daemon give
 /// the agent a new one (`docs/agents.md`, "A death").
 const GONE: i64 = -32002;
-/// What `claude` says on its error output when it has no conversation of the session to resume.
+/// What `claude` says on its error output when it has no conversation of the session to resume
+/// (seen on a real run of 2.1.325, #875: `No conversation found with session ID: <uuid>`).
 const NO_CONVERSATION: &str = "No conversation found with session ID";
 
 /// What Claude is told when one of its own permission prompts is refused.
