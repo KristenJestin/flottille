@@ -296,3 +296,60 @@ fn without_a_hub_about_you_is_as_today() {
     let (_, refused) = user.call("about.share", json!({"name": SAM})).unwrap_err();
     assert!(!refused.is_empty());
 }
+
+/// `laptop`, a controller of the user's, shares the name through pc, then `leave` takes it out of
+/// the members (removed, or made a viewer): its value is dropped on every machine, which falls
+/// back as if none were shared, and nothing is sealed or given again for it, so that the hub goes
+/// quiet.
+fn dropped_and_quiet(leave: impl FnOnce(&TestHub)) {
+    let (hub, pc, server) = pc_and_server(User::new());
+    let laptop = Machine::new();
+    pair(&hub, &laptop, "laptop", "controller");
+    pc.wait_for_member("laptop", true);
+    server.wait_for_member("laptop", true);
+    let answer = pc.raw(&signed(
+        &laptop.device(),
+        "laptop-share",
+        "pc",
+        "about.share",
+        json!({"name": SAM}),
+    ));
+    assert!(answer["error"].is_null(), "{answer}");
+    until(&server, "the server has the laptop's value", |about| {
+        about["name"] == SAM
+    });
+
+    leave(&hub);
+
+    for machine in [&pc, &server] {
+        until(machine, "the laptop's value is dropped", |about| {
+            about["name"] == "" && about["all"]["name"] == ""
+        });
+    }
+    // Quiet: the hub's copy and its file stay as they are, no machine sealing the value again.
+    let settled = |hub: &TestHub| {
+        (
+            hub_copy(hub),
+            std::fs::read_to_string(hub.state_file()).unwrap(),
+        )
+    };
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let before = settled(&hub);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(before == settled(&hub), "the hub is still written");
+}
+
+#[test]
+fn a_value_of_a_removed_device_is_dropped_and_the_hub_goes_quiet() {
+    dropped_and_quiet(|hub| {
+        hub.with_hub(|hub| hub.remove("laptop")).unwrap();
+    });
+}
+
+#[test]
+fn a_value_of_a_device_made_a_viewer_is_dropped_and_the_hub_goes_quiet() {
+    dropped_and_quiet(|hub| {
+        hub.with_hub(|hub| hub.change_role("laptop", flottille_link::Role::Viewer))
+            .unwrap();
+    });
+}

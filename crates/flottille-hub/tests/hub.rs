@@ -11,7 +11,7 @@ use std::rc::Rc;
 use flottille_hub::{Clock, Hub, HubError, PairEnd, PairedDevice, Presence, reset};
 use flottille_link::{
     Action, Change, ChangeHash, Colour, DeviceKey, Icon, Keyring, KeyringError, ListError,
-    MachineKey, MemberList, PairCode, Proposed, Role, Signature,
+    MachineKey, MemberList, PairCode, Proposed, Role, Sealed, Signature,
 };
 use zeroize::Zeroizing;
 
@@ -763,4 +763,120 @@ fn what_a_device_says_of_itself_is_kept_with_its_facts() {
     assert_eq!(facts.last_seen, Some(START + 30));
     assert!(hub.about(&pc.public(), "a b", "linux").is_err());
     assert!(hub.about(&stranger.public(), "computer", "linux").is_err());
+}
+
+/// `pc` paired as a runner, its machine `machine` declared: a machine that may seal values.
+fn with_machine(hub: &mut Hub<Time>, pc: &DeviceKey, machine: &MachineKey) {
+    pair(hub, pc, "pc", Role::Runner);
+    let declared = next(
+        hub,
+        Action::Machine {
+            key: pc.public(),
+            machine: machine.public(),
+        },
+        pc,
+    )
+    .claimed_by(machine);
+    hub.submit(declared).unwrap();
+}
+
+fn machine_key(dir: &Path, name: &str) -> MachineKey {
+    MachineKey::load_or_make(&dir.join(name)).unwrap()
+}
+
+/// `START` in the milliseconds of a value's time.
+const START_MS: u64 = START * 1000;
+
+#[test]
+fn a_copy_of_the_same_time_replaces_the_kept_one_only_when_it_adds_machines() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let (machine, other) = (machine_key(dir.path(), "m"), machine_key(dir.path(), "o"));
+    with_machine(&mut hub, &pc, &machine);
+    let seal = |to: &[flottille_link::PublicKey]| {
+        Sealed::seal("about.name", START_MS, b"Sam", to, &machine).unwrap()
+    };
+    assert!(hub.share(seal(&[machine.public()])).unwrap());
+    let file = std::fs::read(folder.join("hub.json")).unwrap();
+
+    // Sealed again for the same machines: another copy of the same, neither kept nor written.
+    assert!(!hub.share(seal(&[machine.public()])).unwrap());
+    assert_eq!(std::fs::read(folder.join("hub.json")).unwrap(), file);
+    // Sealed for a machine more: kept.
+    assert!(
+        hub.share(seal(&[machine.public(), other.public()]))
+            .unwrap()
+    );
+    assert_eq!(hub.shared()[0].recipients().count(), 2);
+}
+
+#[test]
+fn a_value_later_than_the_hub_s_clock_is_refused() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    with_machine(&mut hub, &pc, &machine);
+    let seal = |at: u64| Sealed::seal("about.name", at, b"Sam", &[machine.public()], &machine);
+
+    for at in [u64::MAX, START_MS + 10 * 60 * 1000] {
+        let refused = error(hub.share(seal(at).unwrap()));
+        assert!(refused.contains("later than"), "{refused}");
+    }
+    assert!(hub.shared().is_empty());
+    // A device's clock a minute ahead of the hub's is no reason to refuse.
+    assert!(hub.share(seal(START_MS + 60 * 1000).unwrap()).unwrap());
+}
+
+#[test]
+fn the_hub_keeps_only_the_names_of_values_it_knows() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    let machine = machine_key(dir.path(), "m");
+    with_machine(&mut hub, &pc, &machine);
+    let seal =
+        |name: &str| Sealed::seal(name, START_MS, b"x", &[machine.public()], &machine).unwrap();
+
+    for name in flottille_link::SHARED_NAMES {
+        assert!(hub.share(seal(name)).unwrap(), "{name}");
+    }
+    let refused = error(hub.share(seal("anything.else")));
+    assert!(refused.contains("no value of all machines"), "{refused}");
+    assert_eq!(hub.shared().len(), flottille_link::SHARED_NAMES.len());
+}
+
+#[test]
+fn a_list_that_cannot_be_written_keeps_the_hub_s_values() {
+    let (dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let (pc, phone) = (key(1), key(2));
+    let machine = machine_key(dir.path(), "m");
+    with_machine(&mut hub, &pc, &machine);
+    pair(&mut hub, &phone, "phone", Role::Controller);
+    let sealed = Sealed::seal(
+        "about.name",
+        START_MS,
+        b"Sam",
+        &[machine.public()],
+        &machine,
+    );
+    assert!(hub.share(sealed.unwrap()).unwrap());
+
+    // The disk refuses the list (a folder sits where the temporary file goes).
+    let blocked = folder.join(format!(".hub.json.{}.new", std::process::id()));
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(hub.remove("phone").is_err());
+    std::fs::remove_dir(&blocked).unwrap();
+
+    assert_eq!(hub.shared().len(), 1);
+    // Written next, the value is still there.
+    hub.remove("phone").unwrap();
+    let file = std::fs::read_to_string(folder.join("hub.json")).unwrap();
+    assert!(file.contains("about.name"), "{file}");
 }
