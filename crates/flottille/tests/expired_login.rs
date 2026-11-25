@@ -318,3 +318,36 @@ fn a_resume_refused_for_no_login_at_open_says_sign_in() {
     assert_eq!(opens, 2, "one open, one refused resume");
     assert_eq!(show(&user, &id)["state"], "idle");
 }
+
+/// Codex signed out when its first process opens the session: `session/new` refused as
+/// `codex app-server` answers with no login (`account: null, requiresOpenaiAuth: true`, seen on a
+/// real run, #875). A session never opened has no native id to keep; the agent waits for the user
+/// with the login line, as for a resume.
+#[test]
+fn a_first_session_refused_for_no_login_says_sign_in() {
+    let user = User::with_fake_codex();
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    project(&user);
+    user.codex_script(json!({"account": Value::Null}));
+    let (id, after) = run(&user, "hello");
+
+    events_until(&user, &id, after, &["agent.released", "agent.failed"]);
+
+    let agent = show(&user, &id);
+    assert_eq!(agent["state"], "idle", "it waits for the user: {agent}");
+    assert_eq!(agent["state_reason"], CODEX_LOGIN_LINE);
+    assert_eq!(agent["native_id"], Value::Null, "no session was opened");
+    assert_eq!(agent["ended_at"], Value::Null);
+    let listed = in_short(&user, &id);
+    assert_eq!(listed["state"], "idle", "it stays in the sidebar");
+    assert_eq!(listed["state_reason"], CODEX_LOGIN_LINE);
+    // Nothing starts it again in a loop before the user writes.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let opens = user
+        .codex_received()
+        .into_iter()
+        .filter(|e| e["received"]["method"] == "account/read")
+        .count();
+    assert_eq!(opens, 1, "one open, never retried");
+    assert_eq!(show(&user, &id)["state"], "idle");
+}
