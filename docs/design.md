@@ -1271,7 +1271,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   request its pilot hears, #1305: a question, a vault entry, a call held, a connection), its own
   launches of a led session held for the user's approval counted there too; those whose pull
   request's checks ended red; those blocked by someone else, with who (once the tree's line says
-  it, #1451). A part with a zero is not said. A pilot that leads nothing has no summary and its
+  it, #1451). It counts the sessions its Leads lists, wherever their rows sit (another machine's
+  group included), a child its tree launched on another machine not being one it leads; a red
+  check is the pull request its tree's line says, never one a page of this window happened to
+  read. A part with a zero is not said. A pilot that leads nothing has no summary and its
   row says what it is about, as any session's. The summary unfolds and fades in after the place
   when it first leads a session, its words fade as they change, and it folds away once it leads
   none.
@@ -1284,9 +1287,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   permission`, `waits for run 900`, `working`, `at rest`). A launch of the pilot's held for the
   user is a row (`launch held on server · 2 files`, `needs you: allow its launch`, `no session
   yet`) until it starts, when the session's row takes its place. A click on a session's row opens
-  it. The section unfolds with its first row and folds away with its last; it enters with the
-  page, staggered; its rows unfold, fold away and slide, their marks and their words fade as they
-  change, and a row's hover fades over `HOVER`. Its page's header says "led by <pilot>", and a line above its composer says
+  it. A session of another machine says what that machine's list says of it, its title, its
+  state and its machine's mark; its place, model, pull request and runs are not in that list, and
+  its row leaves them unsaid rather than guess them. Past about four rows the card scrolls inside
+  its frame, so that a pilot leading many sessions keeps its conversation in view. The section
+  unfolds with its first row and folds away with its last, its title saying its last count
+  meanwhile; it enters with the page, staggered; its rows unfold, fold away and slide, their marks
+  and their words (place and model, pull request, runs, what it waits for, the count) fade as
+  they change, the runs fading in and out, and a row's hover fades over `HOVER`. Its page's header says "led by <pilot>", and a line above its composer says
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
@@ -1878,12 +1886,16 @@ nothing built, in [`extensions.md`](extensions.md).
 ## 14. Defaults taken, to confirm
 
 - A pilot's summary and its Leads (#1452): a red check is a led session's pull request whose
-  checks failed; a run it follows that ends red is not counted yet (the window learns its end
-  only as the following closes), and the blocked part waits for #1451. A session it leads in
+  checks failed, as its tree's line says it; a run it follows that ends red is not counted yet
+  (the window learns its end only as the following closes; #1494 has the tree's line say a
+  followed run's conclusion), and the blocked part waits for #1451. A session it leads in
   another project sits among that project's rows and is counted in neither. Leads shows while
   the pilot has a launch held for the user even when it leads nothing yet (the held row is the
-  only one), and the summary only once it leads a session. A Leads row's title is the kit's row
-  title, which changes at once; its marks and its words fade.
+  only one), and the summary only once it leads a session. A Leads row of a session of another
+  machine says no place, model, pull request or runs: that machine's list does not carry them,
+  and carrying them is a change of the list of its own. A Leads row's title and ticket tag are
+  the kit's list row's, which change at once until the kit's list row fades them
+  (gpui-design-system#84); its marks and its other words fade.
 
 - A request a led session makes of the user (a call held, a connection, a vault entry) is told to
   its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
