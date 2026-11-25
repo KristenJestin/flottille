@@ -1442,7 +1442,7 @@ fn a_project_with_nothing_under_it_fades_its_chevron_where_it_stands(cx: &mut Te
     switch_grouping(&shell, cx);
     session(&pc, "notes", "Write the notes");
     // Its chevron fades in where it stood, the title still in place.
-    until(&shell, cx, "the chevron of notes", |cx| {
+    until(&shell, cx, "the chevron of notes", |_| {
         seen("project-notes-chevron") == Some(1.0)
     });
     settle(&shell, cx);
