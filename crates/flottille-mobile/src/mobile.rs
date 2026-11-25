@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
-    Action, Ask, Change, Device, DeviceKey, Endpoint, Link, MachineKey, Message, PeerState,
-    PublicKey, Pushed, Request, Role, Session, Tls,
+    Action, Ask, Change, Device, DeviceKey, Endpoint, Link, MachineKey, Message, Notice,
+    NoticeKind, PeerState, PublicKey, Pushed, Request, Role, Session, Tls,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -26,7 +26,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::join::pair;
 use crate::keys::{Sealed, Sealer, endpoint_key, write_private};
 use crate::tunnel::Opened;
-use crate::view::{View, ViewState};
+use crate::view::{NoticeView, View, ViewState};
 use crate::{MobileError, link};
 
 /// The hub this phone joined, as it pinned it and last checked its list.
@@ -40,6 +40,8 @@ const BATCH_MOST: usize = 256;
 /// The waits between two dials of a runner that could not be linked, or whose link ended.
 const FIRST_WAIT: Duration = Duration::from_millis(250);
 const LONGEST_WAIT: Duration = Duration::from_secs(30);
+/// How long a notice waits for the link to its runner: the phone it woke may be linking still.
+const NOTICE_WAIT: Duration = Duration::from_secs(20);
 
 /// What the app is given each time something changed: the events that came, and the view state.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1093,13 +1095,85 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
     Ok(())
 }
 
+impl Inner {
+    /// What the runner whose machine key is `from` told this phone: its row read back over the
+    /// link, then in the view for the app to draw; a dismissal leaves the view at once. The notice
+    /// holds only a kind and ids: the words are the runner's own, read from its centre.
+    async fn noticed(self: Arc<Self>, from: PublicKey, notice: Notice) {
+        let runner = Inner::runners(&self.state())
+            .into_iter()
+            .find(|(_, key)| *key == from)
+            .map(|(name, _)| name);
+        // The hub relays a runner's notices only; one of a machine not in the list is no one's.
+        let Some(machine) = runner else {
+            return;
+        };
+        let number = notice.notification;
+        let kind = match notice.kind {
+            NoticeKind::Request => "request",
+            NoticeKind::Question => "question",
+            NoticeKind::Report => "report",
+            NoticeKind::Failure => "failure",
+            NoticeKind::Dismissed => {
+                self.state().view.dismissed(&machine, number);
+                self.note(Note::Changed);
+                return;
+            }
+        };
+        let asked = json!({"after": number.saturating_sub(1), "limit": 1});
+        let row = match self
+            .linked_call(&machine, "notifications.list", asked)
+            .await
+        {
+            Ok(listed) => listed["notifications"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["id"] == number).cloned())
+                .unwrap_or_default(),
+            Err(_) => Value::Null,
+        };
+        let said = |field: &str| row[field].as_str().unwrap_or_default().to_owned();
+        self.state().view.noticed(NoticeView {
+            machine,
+            notification: number,
+            kind: kind.to_owned(),
+            session: notice
+                .session
+                .map(|session| session.as_str().to_owned())
+                .unwrap_or_default(),
+            title: said("title"),
+            excerpt: said("excerpt"),
+            request: 0,
+        });
+        self.note(Note::Changed);
+    }
+
+    /// `method` on `machine` once it is linked, within `NOTICE_WAIT`.
+    async fn linked_call(
+        &self,
+        machine: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, MobileError> {
+        let until = tokio::time::Instant::now() + NOTICE_WAIT;
+        loop {
+            match self.link_of(machine) {
+                Ok(link) => return self.call_on(machine, &link, method, params).await,
+                Err(error) if tokio::time::Instant::now() >= until => return Err(error),
+                Err(_) => tokio::time::sleep(FIRST_WAIT).await,
+            }
+        }
+    }
+}
+
 /// What the hub pushes, until the session ends.
 async fn control(inner: Arc<Inner>, mut session: Session) {
     while let Some(pushed) = session.next().await {
         match pushed {
             Pushed::List(list) => inner.took_list(list),
-            // A notice is drawn by the app (#828).
-            Pushed::Presence(_) | Pushed::Facts(_) | Pushed::Notice { .. } => {}
+            Pushed::Notice { from, notice } => {
+                tokio::spawn(inner.clone().noticed(from, notice));
+            }
+            Pushed::Presence(_) | Pushed::Facts(_) => {}
         }
     }
     let why = session.ended();

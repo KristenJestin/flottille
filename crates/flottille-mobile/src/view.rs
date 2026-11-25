@@ -38,6 +38,12 @@ pub struct ViewState {
     pub tunnels: Vec<TunnelView>,
     /// The tunnels that ended, with why, the newest last: `TUNNELS_ENDED_KEPT` of them.
     pub tunnels_ended: Vec<TunnelEnd>,
+    /// What the runners told this phone through the hub and is not dismissed (`docs/remote.md`,
+    /// "Notifications"), the newest last: `NOTICES_KEPT` of them. The app draws each once.
+    pub notices: Vec<NoticeView>,
+    /// The notices dismissed since the core started, the newest last: `NOTICES_KEPT` of them. The
+    /// app removes their notifications, those of an earlier run of the app included.
+    pub dismissed: Vec<DismissedView>,
     /// What the core refused and the user should know, newest last (a member list that does not
     /// check).
     pub said: Vec<String>,
@@ -220,6 +226,32 @@ pub struct AskOption {
     pub description: String,
 }
 
+/// What a runner told this phone, read back from its notification centre: the row's own words.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NoticeView {
+    pub machine: String,
+    /// The number of the runner's notification (`notifications.list`): what its dismissal names.
+    pub notification: u64,
+    /// `request`, `question`, `report` or `failure`.
+    pub kind: String,
+    /// The root agent of the session it is about; empty when it is no session's.
+    pub session: String,
+    /// The row's title and excerpt (`Request #3 waits for you`, `Run npm test`); empty when the
+    /// row could not be read.
+    pub title: String,
+    pub excerpt: String,
+    /// For a request: the newest request of the session's tree that waits for the user, what Allow
+    /// and Deny answer; 0 when none waits (answered, or not listed yet).
+    pub request: u64,
+}
+
+/// A notice the runner dismissed: answered or seen elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct DismissedView {
+    pub machine: String,
+    pub notification: u64,
+}
+
 /// What the view is computed from.
 #[derive(Default)]
 pub(crate) struct View {
@@ -241,6 +273,8 @@ pub(crate) struct View {
     followed: Option<Followed>,
     tunnels: Vec<TunnelView>,
     tunnels_ended: Vec<TunnelEnd>,
+    notices: Vec<NoticeView>,
+    dismissed: Vec<DismissedView>,
     said: Vec<String>,
 }
 
@@ -284,6 +318,9 @@ struct Session {
 
 /// The tunnels that ended kept in `tunnels_ended`, the newest.
 const TUNNELS_ENDED_KEPT: usize = 16;
+
+/// The notices kept in `notices`, and the dismissals in `dismissed`, the newest.
+const NOTICES_KEPT: usize = 32;
 
 /// The sentences kept in `said`, the newest.
 const SAID_KEPT: usize = 8;
@@ -431,6 +468,46 @@ impl View {
         if self.said.len() > SAID_KEPT {
             self.said.remove(0);
         }
+    }
+
+    /// What a runner told: drawn by the app, once, until it is dismissed.
+    pub(crate) fn noticed(&mut self, notice: NoticeView) {
+        self.notices.retain(|kept| {
+            (kept.machine.as_str(), kept.notification)
+                != (notice.machine.as_str(), notice.notification)
+        });
+        self.notices.push(notice);
+        if self.notices.len() > NOTICES_KEPT {
+            self.notices.remove(0);
+        }
+    }
+
+    /// The notice `notification` of `machine` was answered or seen elsewhere.
+    pub(crate) fn dismissed(&mut self, machine: &str, notification: u64) {
+        self.notices
+            .retain(|kept| (kept.machine.as_str(), kept.notification) != (machine, notification));
+        let gone = DismissedView {
+            machine: machine.to_owned(),
+            notification,
+        };
+        if !self.dismissed.contains(&gone) {
+            self.dismissed.push(gone);
+        }
+        if self.dismissed.len() > NOTICES_KEPT {
+            self.dismissed.remove(0);
+        }
+    }
+
+    /// The newest request of the session `session` of `machine`'s tree that waits for the user.
+    fn waiting_in(&self, machine: &str, session: &str) -> u64 {
+        self.requests
+            .iter()
+            .filter(|((of, _), held)| {
+                of == machine && self.root_of(machine, &held.agent) == session
+            })
+            .map(|(_, held)| held.number)
+            .max()
+            .unwrap_or_default()
     }
 
     /// What a runner listed when it linked: its agents (`agent.list`) and the requests that wait
@@ -847,6 +924,19 @@ impl View {
             asks: self.asks.values().cloned().collect(),
             tunnels: self.tunnels.clone(),
             tunnels_ended: self.tunnels_ended.clone(),
+            // A request's is read as the view is now: the one that waits, once it is listed.
+            notices: self
+                .notices
+                .iter()
+                .map(|notice| NoticeView {
+                    request: match notice.kind.as_str() {
+                        "request" => self.waiting_in(&notice.machine, &notice.session),
+                        _ => 0,
+                    },
+                    ..notice.clone()
+                })
+                .collect(),
+            dismissed: self.dismissed.clone(),
             said: self.said.clone(),
         }
     }
