@@ -625,8 +625,12 @@ fn a_removed_project_takes_what_rings_with_it() {
     assert!(said["projects"].get("app").is_none(), "{said}");
     let text = std::fs::read_to_string(config(&user)).unwrap_or_default();
     assert!(!text.contains("projects.app"), "{text}");
-    // A new project of the same name starts at the default.
-    project(&user);
+    // A new project of the same name starts at the default (its folder was never touched).
+    user.call(
+        "project.add",
+        json!({"folder": user.path("work/app"), "name": "app"}),
+    )
+    .unwrap();
     let said = settings(&user);
     assert!(said["projects"].get("app").is_none(), "{said}");
 }
