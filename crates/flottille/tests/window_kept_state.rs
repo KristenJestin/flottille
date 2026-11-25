@@ -914,10 +914,15 @@ fn a_second_window_opening_keeps_the_projects_folds(
     project(&user, "app");
     project(&user, "other");
     let (lead, led) = lead_and_led(&user, "app");
+    // A project folds what it holds: one with nothing under it has no chevron.
+    start(&user, "other", "a session to fold away");
 
     let (shell, cx) = window(&user, first);
     until(&shell, cx, "the lead's row", |cx| {
-        cx.update(|window, _| window.try_find(session_id(&led)).is_some())
+        cx.update(|window, _| {
+            window.try_find(session_id(&led)).is_some()
+                && window.try_find(toggle_id(project_id("other"))).is_some()
+        })
     });
     cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
     cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
@@ -981,11 +986,13 @@ fn a_project_removed_forgets_its_fold(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     project(&user, "other");
+    // A project folds what it holds: one with nothing under it has no chevron.
+    start(&user, "other", "a session to fold away");
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "both projects' rows", |cx| {
         cx.update(|window, _| {
             window.try_find(project_id("app")).is_some()
-                && window.try_find(project_id("other")).is_some()
+                && window.try_find(toggle_id(project_id("other"))).is_some()
         })
     });
     cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
