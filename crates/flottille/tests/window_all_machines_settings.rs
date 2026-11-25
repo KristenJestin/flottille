@@ -95,6 +95,7 @@ fn page(
             .read(cx)
             .settings_page()
             .expect("the settings page")
+            .clone()
     })
 }
 
