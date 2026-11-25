@@ -10,6 +10,8 @@ mod common;
 mod guard;
 #[path = "../kit_common/mod.rs"]
 mod kit_common;
+#[path = "../motion_gate/mod.rs"]
+mod motion_gate;
 
 #[path = "../window_at_rest.rs"]
 mod window_at_rest;
@@ -29,6 +31,8 @@ mod window_kept_state;
 mod window_leaves;
 #[path = "../window_led.rs"]
 mod window_led;
+#[path = "../window_motion_gate.rs"]
+mod window_motion_gate;
 #[path = "../window_new_session.rs"]
 mod window_new_session;
 #[path = "../window_polish.rs"]
