@@ -270,33 +270,40 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
             },
             _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; } => return,
         };
-        let name = event.name.clone();
-        let concerns = name.starts_with("item.")
+        let concerns = event.name.starts_with("item.")
             || matches!(
-                name.as_str(),
+                event.name.as_str(),
                 "workspace.ticket" | "agent.created" | "agent.moved"
             );
         if !concerns {
             continue;
         }
         let daemon = daemon.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let Ok(agents) = daemon.read(|store| store.agents()) else {
-                return;
-            };
-            let data = &event.data;
-            for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
-                let concerned = match data["agent"].as_str() {
-                    Some(id) if name.starts_with("agent.") => agent.id == id,
-                    _ => data["project"] == agent.project.as_str(),
-                };
-                if concerned {
-                    refresh(&daemon, agent);
-                }
-            }
-        })
-        .await;
+        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &[event])).await;
     }
+}
+
+/// Refreshes the sessions `events` can concern; how many refreshes that took.
+fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event]) -> usize {
+    let Ok(agents) = daemon.read(|store| store.agents()) else {
+        return 0;
+    };
+    let mut refreshed = 0;
+    for event in events {
+        let name = &event.name;
+        let data = &event.data;
+        for agent in agents.iter().filter(|agent| !agent.state.is_final()) {
+            let concerned = match data["agent"].as_str() {
+                Some(id) if name.starts_with("agent.") => agent.id == id,
+                _ => data["project"] == agent.project.as_str(),
+            };
+            if concerned {
+                refresh(daemon, agent);
+                refreshed += 1;
+            }
+        }
+    }
+    refreshed
 }
 
 #[cfg(test)]
