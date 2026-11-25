@@ -232,6 +232,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_value_holding_a_token_is_refused() {
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let refused = check("rules", &format!("Push with {token}.")).unwrap_err();
+        assert!(refused.contains("secret"), "{refused}");
+        assert!(check("rules", "Push with the vault's entry.").is_ok());
+    }
+
+    #[test]
     fn the_hub_keeps_every_setting_this_machine_shares_and_no_other_of_them() {
         let parts = review().expect("Review has a guidance").parts;
         let known_here: Vec<String> = SETTINGS

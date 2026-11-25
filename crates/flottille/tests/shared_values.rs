@@ -420,6 +420,31 @@ fn the_latest_of_two_changes_wins() {
 }
 
 #[test]
+fn a_secret_written_into_a_guidance_is_never_shared() {
+    let (hub, pc, server) = machines();
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
+    let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+    for leaked in [SECRET.to_owned(), token] {
+        let value = format!("Sign the commits with {leaked} before pushing.");
+        let answer = pc.raw(&signed(
+            &pc.device(),
+            &format!("share-{}", rand_id()),
+            "pc",
+            "settings.share",
+            json!({"name": "rules", "value": value}),
+        ));
+        let error = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(error.contains("secret"), "the share is refused: {answer}");
+        let kept = hub_copy(&hub);
+        assert!(!kept.contains("rules"), "the hub keeps nothing: {kept}");
+        let shown = server.user.call("rules.show", json!({})).unwrap();
+        assert!(!shown.to_string().contains(&leaked), "{shown}");
+    }
+}
+
+#[test]
 fn the_hub_cannot_read_a_value_and_no_secret_is_in_it() {
     let (hub, pc, server) = machines();
     pc.user
