@@ -541,6 +541,7 @@ fn of_this_machine_s_pages(update: &Update) -> bool {
             | Update::ProgramSignIn { .. }
             | Update::SignIn { .. }
             | Update::WorkspacesFolderChanged { .. }
+            | Update::NotificationSettingsChanged
             | Update::Extensions
             | Update::ServicesChanged
             | Update::Items { .. }
@@ -1948,6 +1949,8 @@ impl Shell {
         self.main
             .update(cx, |main, cx| main.set_settings(settings, cx));
         self.listen(cx);
+        // The bell's Do not disturb becomes the one of the machine now shown.
+        self.actions.send(Command::NotificationSettingsRead);
     }
 
     /// The pages of `machine`, made the first time it is shown: its own connections, signed
@@ -4685,9 +4688,12 @@ impl Shell {
                 }
             }
             Outcome::NotificationSettings { written, shown } => {
-                // The bell's Do not disturb follows what the daemon says, whatever page is open.
-                self.bell
-                    .update(cx, |bell, cx| bell.set_settings(shown.as_ref().ok(), cx));
+                // The bell's Do not disturb is the machine shown's, whatever page is open: what
+                // another machine said fills its own Settings only.
+                if self.pages_shown() {
+                    self.bell
+                        .update(cx, |bell, cx| bell.set_settings(shown.as_ref().ok(), cx));
+                }
                 let global = self.settings.read(cx).notifications().clone();
                 let project = self
                     .project_settings

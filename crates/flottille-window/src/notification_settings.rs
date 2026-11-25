@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use flottille_core::notification_settings::{DAYS, KINDS, label, may_be_off, next_morning};
 use gpui_design_system::{
     CheckState, Checkbox, Field, Section, Segmented, Select, SelectOption, Skeleton, Switch, Toast,
-    awaiting, changing, palette, presence, space, toast,
+    awaiting, changing, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::{
     App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -325,8 +325,9 @@ fn card(name: &str, cx: &App) -> impl ParentElement + IntoElement {
         .border_color(p.line)
 }
 
-/// The sentence a section says in place of its controls while the daemon has not answered, or
-/// cannot.
+/// A section's controls once the daemon said them: its skeleton fades into them, and when the
+/// daemon cannot say them, the skeleton folds away and why unfolds in their place. Controls that
+/// come after such a line unfold in turn.
 fn waiting(
     section: &'static str,
     view: &NotificationSettings,
@@ -334,24 +335,35 @@ fn waiting(
     cx: &App,
 ) -> gpui_kit::AnyElement {
     let p = palette(cx);
-    match (&view.shown, &view.problem) {
-        (None, Some(why)) => div()
-            .id(id(format!("{section}-problem")))
-            .aria_label(why.clone())
-            .text_size(px(12.5))
-            .text_color(p.fail)
-            .child(why.clone())
-            .test_support()
-            .into_any_element(),
-        (None, None) => awaiting(
+    let problem = view.problem.clone().filter(|_| view.shown.is_none());
+    div()
+        .flex()
+        .flex_col()
+        .child(presence_of(
+            id(format!("{section}-problem-block")),
+            problem.clone(),
+            move |why| {
+                div()
+                    .id(id(format!("{section}-problem")))
+                    .aria_label(why.clone())
+                    .text_size(px(12.))
+                    .text_color(p.fail)
+                    .child(why)
+                    .test_support()
+                    .into_any_element()
+            },
+        ))
+        .child(awaiting(
             id(format!("{section}-waiting")),
-            true,
+            view.shown.is_none() && problem.is_none(),
             Skeleton::new(id(format!("{section}-skeleton"))).h(px(96.)),
-            div(),
-        )
-        .into_any_element(),
-        (Some(_), _) => content.into_any_element(),
-    }
+            presence(
+                id(format!("{section}-content")),
+                view.shown.is_some(),
+                content,
+            ),
+        ))
+        .into_any_element()
 }
 
 /// What each kind does, and whether it rings with its sound: one row a kind.
@@ -380,7 +392,7 @@ pub fn kinds_section(
             let sound = Switch::new(
                 id(format!("kind-{kind}-sound")),
                 shown.sounds(kind),
-                "Sound",
+                format!("{} sound", label(kind)),
             )
             .disabled(!shown.sound_on)
             .on_click(move |_, _, cx| {
@@ -660,7 +672,8 @@ impl DoNotDisturb {
                 div()
                     .id("bell-dnd-line")
                     .aria_label(line.clone())
-                    .pl(space::XXXL - space::XS)
+                    // Under the switch's label: past its track and the gap, on the scale.
+                    .pl(space::XL + space::LG)
                     .text_size(px(12.))
                     .text_color(p.mute)
                     .child(line)
