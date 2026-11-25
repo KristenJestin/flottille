@@ -1293,8 +1293,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its frame, so that a pilot leading many sessions keeps its conversation in view. The section
   unfolds with its first row and folds away with its last, its title saying its last count
   meanwhile; it enters with the page, staggered; its rows unfold, fold away and slide, their marks
-  and their words (place and model, pull request, runs, what it waits for, the count) fade as
-  they change, the runs fading in and out, and a row's hover fades over `HOVER`. Its page's header says "led by <pilot>", and a line above its composer says
+  and their words (title, place and model, pull request, runs, what it waits for, the count) fade
+  as they change, a ticket's key unfolding beside the title, the runs fading in and out, and a row's hover fades over `HOVER`. Its page's header says "led by <pilot>", and a line above its composer says
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
@@ -1893,9 +1893,7 @@ nothing built, in [`extensions.md`](extensions.md).
   the pilot has a launch held for the user even when it leads nothing yet (the held row is the
   only one), and the summary only once it leads a session. A Leads row of a session of another
   machine says no place, model, pull request or runs: that machine's list does not carry them,
-  and carrying them is a change of the list of its own. A Leads row's title and ticket tag are
-  the kit's list row's, which change at once until the kit's list row fades them
-  (gpui-design-system#84); its marks and its other words fade.
+  and carrying them is a change of the list of its own.
 
 - A request a led session makes of the user (a call held, a connection, a vault entry) is told to
   its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
