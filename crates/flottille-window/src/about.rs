@@ -59,6 +59,9 @@ pub struct Shown {
     pub own: Vec<String>,
     /// The values of all machines (name, how to refer to the user, notes), with a hub.
     pub all: Option<(String, String, String)>,
+    /// Where a change of all machines went (`about.share`): `given` to the hub, `later` with the
+    /// hub out of reach, `old-hub` to a hub that keeps none.
+    pub hub: Option<String>,
 }
 
 impl Shown {
@@ -91,6 +94,7 @@ impl Shown {
                 .as_u64()
                 .map_or(8_000, |limit| limit as usize),
             cut: value["cut"].as_str().map(str::to_owned),
+            hub: value["hub"].as_str().map(str::to_owned),
         }
     }
 
@@ -359,6 +363,17 @@ impl AboutEditor {
                     }
                     Ok(_) if resetting => Toast::success("About you reset")
                         .detail("Agents started from now on are told nothing of you."),
+                    Ok(shown) if self.on_all && shown.hub.as_deref() == Some("later") => {
+                        Toast::success("About you saved on this machine").detail(
+                            "The hub is out of reach: the other machines get it once it answers.",
+                        )
+                    }
+                    Ok(shown) if self.on_all && shown.hub.as_deref() == Some("old-hub") => {
+                        Toast::failure("About you saved on this machine only").detail(
+                            "The hub is of a version that keeps no settings for all machines: \
+                             update it.",
+                        )
+                    }
                     Ok(_) if self.on_all => Toast::success("About you saved for all machines")
                         .detail("Agents started from now on read it, on every machine."),
                     Ok(_) => Toast::success("About you saved")

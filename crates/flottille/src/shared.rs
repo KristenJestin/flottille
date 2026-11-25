@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use flottille_link::{MachineKey, Members, PublicKey, Sealed, check_shared};
+use flottille_link::{MachineKey, Members, PublicKey, SHARED_NAMES, Sealed, check_shared};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,9 +27,9 @@ pub const ABOUT_SHARE: &str = "about.share";
 
 /// The values of all machines, by name, and the field of `about.share` each one is.
 pub const NAMES: [(&str, &str); 3] = [
-    ("about.name", "name"),
-    ("about.pronouns", "pronouns"),
-    ("about.notes", "notes"),
+    (SHARED_NAMES[0], "name"),
+    (SHARED_NAMES[1], "pronouns"),
+    (SHARED_NAMES[2], "notes"),
 ];
 
 /// A value as this machine checked it.
@@ -84,11 +84,12 @@ fn field_of(name: &str) -> Option<&'static str> {
         .map(|(_, field)| *field)
 }
 
-/// The value `name` of the user's signed request `request`, as `about.share` carries it: none when
-/// the request does not carry it.
+/// The value `name` of the user's signed request `request`, as `about.share` carries it and
+/// `about.set` would take it (trimmed, within its limits): none when the request does not carry
+/// it, or carries what `about.set` refuses.
 pub fn kept_of(name: &str, request: &Value, at: u64, params: &Value) -> Option<Kept> {
     let field = field_of(name)?;
-    let value = params.get(field)?.as_str()?.to_owned();
+    let value = crate::about::received(field, params.get(field)?.as_str()?)?;
     Some(Kept {
         value,
         at,
@@ -128,6 +129,12 @@ fn opened(sealed: &Sealed, key: &MachineKey, members: &Members) -> Option<Kept> 
     let at = request.signed.at;
     let request = serde_json::to_value(&request).ok()?;
     kept_of(&sealed.name, &request, at, &params)
+}
+
+/// Whether `kept` is still the change of a member that may make it.
+fn still_signed(kept: &Kept, members: &Members) -> bool {
+    serde_json::to_vec(&kept.request)
+        .is_ok_and(|text| check_shared(&text, ABOUT_SHARE, members).is_ok())
 }
 
 /// Every machine of the members: what a value is sealed for.
@@ -182,8 +189,27 @@ pub fn took(
         .iter()
         .filter_map(|sealed| Some((sealed.name.clone(), opened(sealed, key, members)?)))
         .collect();
-    let changed = keep(folder, opened.clone());
-    let values = read(folder);
+    let mut changed = keep(folder, opened.clone());
+    let mut values = read(folder);
+    // A value whose device left the members, or may only view now, is dropped, never given again:
+    // the hub's copy of it fails on every machine, and giving it again would have each machine
+    // seal it once more at each copy the hub sends. Shown as if none were shared.
+    let left: Vec<String> = values
+        .iter()
+        .filter(|(_, own)| !still_signed(own, members))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if !left.is_empty() {
+        for name in &left {
+            values.remove(name);
+            if !changed.contains(name) {
+                changed.push(name.clone());
+            }
+        }
+        if let Err(error) = write(folder, &values) {
+            eprintln!("flottille daemon: the values of all machines are not kept: {error}");
+        }
+    }
     let all = machines(members);
     let again = values
         .iter()

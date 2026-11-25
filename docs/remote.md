@@ -656,7 +656,11 @@ projects and sessions by a link of its own, whose events keep them current while
 machine's projects' pages is shown; nothing of another machine is read for a page that does not
 show it. Coming back to a machine already read shows its copy at once and refreshes it in place:
 the page of the last session of each machine keeps following it, and its Settings are as they were
-left, then read again. The first time, the
+left, then read again. Its Settings follow a change made there by another client while the window
+holds them (#1476): the bell link of that machine, which hears all of its events, says each change
+of its settings (`about.changed`, `developer.changed`, `rules.changed` and the other settings
+events), and only the section it names is read again; no other connection, no read of the whole
+machine. The first time, the
 page says it is reading that machine (its own skeletons, in the pane). A machine that does not
 answer within the window's limit (30 s) is said on its page only, `server does not answer`, a
 line above it that folds away once it answers or another page is shown; the rest of the window is
@@ -1974,20 +1978,33 @@ machine often overrides, follow in their own issues.
   undo each other.
 - **The hub keeps them without reading them**: the latest copy of each name (`hub.json`, `shared`),
   from a member's machine whose role is a runner's or a controller's, its signature checked, 40 KiB
-  at most a copy and 32 values at most. It sends them whole to each session that asks for them
+  at most a copy, of a name it knows (`SHARED_NAMES` in `flottille-link`: a setting shared later
+  adds its own there), dated no later than its clock plus a request's five minutes (a time far
+  ahead would hold the name for ever). A copy of the same time replaces the one kept only when it
+  is sealed for a machine more: the same value sealed again for the same machines is not written. It sends them whole to each session that asks for them
   (`{"ask": {"kind": "shared"}}`), then again at each change (`{"shared": [...]}`); a hub of before
   says nothing of them in its welcome, and a machine asks it nothing. What the hub sees of them:
   their names, their times, which machines they are sealed for, and their size.
 - **Each machine checks each copy itself**: it opens it with its machine key, then checks the
   user's request inside as its own (a member's device, not a viewer's, the method `about.share`,
-  the value and the time the copy says), whichever machine sealed it and whatever the hub says.
+  the value and the time the copy says, the limits and the one line `about.set` asks, a name
+  trimmed), whichever machine sealed it and whatever the hub says: what authenticates a value is
+  the device's signature inside, not the machine's that sealed it, which only lets the hub keep it.
+- **A device removed, or made a viewer**: each machine drops the values its device signed at the
+  next list, and gives them to the hub no more; About you is then as if none were shared, until the
+  user changes it again. The hub's copy stays until a newer one replaces it, refused by every
+  machine that opens it.
   Neither the request's five minutes nor its nonce is checked again: a machine off for a week takes
   the latest copy when it is back, and an older copy never replaces a newer one. **The latest of
   two changes wins**, by the time the device signed it (then by its signature, so that every
   machine keeps the same one).
 - **Each machine keeps the last copy it checked**, `remote/shared.json` (600), the user's signed
   requests themselves: with the hub out of reach its agents read what it last checked, and a change
-  made meanwhile waits on the machine where it was made, given to the hub at the next session. A
+  made meanwhile waits on the machine where it was made, given to the hub at the next session.
+  `about.share` says where it went (`hub`: `given`, `later` with the hub out of reach, `old-hub`
+  with a hub of before them, which keeps none), and the window's toast says it; a value that,
+  sealed for every machine, would be larger than the hub keeps (notes of characters escaped twice
+  over) is refused on the machine, before anything is kept. A
   change reaches every machine at once, a machine that was off at its connect. A machine paired
   since a value was sealed is given it: a machine that finds the hub's copy sealed for fewer
   machines than the list has seals it again for all of them, the user's request unchanged.
@@ -1999,6 +2016,12 @@ machine often overrides, follow in their own issues.
   entry will name it, the entry staying the machine's.
 - **Without a hub** (remote off, or this machine paired with no other runner), Settings is as it
   was: About you is the machine's own, and `about.show` says `all: null`.
+- **What a hub that misbehaves can do**: read nothing and change nothing (each copy is sealed and
+  signed inside), but withhold a value, or give an older copy than the latest to a machine paired
+  since, which has no copy of its own to prefer; the machines that have the latest keep it and give
+  it again. A hub downgraded to a version of before these values refuses its own `hub.json` (its
+  `shared` is a field it does not know): moving back to an older hub means dropping `shared` from
+  its `hub.json` first.
 
 **In the window** (decided 2026-11-25 on the prototype): Settings' picker "Settings of", on the
 title's line of the page's header, which stays in place while the sections scroll, lists **All
@@ -2373,7 +2396,7 @@ on a real phone, by hand, and reported.
 - **The bell and "Ended" hold every machine's** (#1280). The window follows each other runner that
   is online: its notification centre by a light link of its own (made once the device key is read, signed as every
   request to that machine, and reading `notifications.list` only, at each connection and on each
-  `notifications.*` event of that machine): the bell lists that machine's notifications beside this
+  `notifications.*` event of that machine, so while the bell's list is open too): the bell lists that machine's notifications beside this
   one's, each session's heading saying `on server`, and its badge and counts add them. Choosing one
   opens that machine's page of its session, and opening that page, or **Mark all read**, marks them
   read on that machine (`notifications.read`); the request or question is answered on that page,

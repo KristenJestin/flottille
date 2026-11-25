@@ -12,8 +12,8 @@ use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
     Button, Fold, Icon, Item, Listing, MachineMark, MarkSize, Menu, Modal, ReorderGroup,
-    Reorderable, Tie, TreeRow, changed, changing, fade, hoverable, meta, palette, presence,
-    presence_of, section_label, space, tipped, tree_children, tree_tie,
+    Reorderable, Tie, TreeRow, Type as _, changed, changing, fade, hoverable, meta, palette,
+    presence, presence_of, section_label, space, tipped, tipped_when_cut, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -270,6 +270,18 @@ pub fn session_place_icon_id(id: &str) -> ElementId {
 /// its checks.
 pub fn session_pull_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-pull-{id}").into())
+}
+
+/// The element id of the chip of the key of what a session is about, before its title on its
+/// row's first line.
+pub fn session_key_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-key-{id}").into())
+}
+
+/// The element id of the same chip on the second line, where it goes when the user named the
+/// session: their title keeps the first.
+pub fn session_key_beside_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-key-beside-{id}").into())
 }
 
 /// The element id of the icon that says a command runs in a project.
@@ -2119,6 +2131,12 @@ pub struct SessionRow {
     home: Option<Home>,
     /// The machine it runs on, when it is not this one: its second line says it.
     tag: Option<SharedString>,
+    /// What it is about, as the daemon derives it, and whether the user named it (their title
+    /// keeps the first line, the key goes to the second).
+    subject: Option<crate::model::Subject>,
+    renamed: bool,
+    /// The last key its chip said, which stays drawn while the chip fades out.
+    key_shown: SharedString,
     shell: WeakEntity<Shell>,
 }
 
@@ -2170,8 +2188,113 @@ impl SessionRow {
             elsewhere: None,
             home: None,
             tag: None,
+            subject: None,
+            renamed: false,
+            key_shown: SharedString::default(),
             shell,
         }
+    }
+
+    /// Whether the row says this subject already, named or not by the user.
+    pub fn holds_subject(&self, subject: Option<&crate::model::Subject>, renamed: bool) -> bool {
+        self.subject.as_ref() == subject && self.renamed == renamed
+    }
+
+    pub fn set_subject(
+        &mut self,
+        subject: Option<&crate::model::Subject>,
+        renamed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.holds_subject(subject, renamed) {
+            return;
+        }
+        self.subject = subject.cloned();
+        self.renamed = renamed;
+        if let Some(key) = self.key() {
+            self.key_shown = key;
+        }
+        cx.notify();
+    }
+
+    /// The key of what it is about: `SHOP-60`, `#12`; none for a free session.
+    fn key(&self) -> Option<SharedString> {
+        let subject = self.subject.as_ref()?;
+        subject
+            .key
+            .clone()
+            .filter(|_| subject.kind != "free")
+            .map(SharedString::from)
+    }
+
+    /// The words of its first line: what it is about, unless the user named it.
+    pub fn first_line(&self) -> SharedString {
+        match self.subject.as_ref().filter(|_| !self.renamed) {
+            Some(subject) => subject.line().into(),
+            None => self.title.clone(),
+        }
+    }
+
+    /// The key's chip, fading in as it comes and out as it goes over `PANEL`, `beside` on the
+    /// second line.
+    fn key_chip(
+        &self,
+        beside: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let on = self.key().is_some() && self.renamed == beside;
+        let fade_id = match beside {
+            false => format!("session-key-fade-{}", self.id),
+            true => format!("session-key-beside-fade-{}", self.id),
+        };
+        let t = fade(ElementId::Name(fade_id.into()), on, PANEL, window, cx);
+        if t <= 0.0 || self.key_shown.is_empty() {
+            return None;
+        }
+        let (key, gap) = match beside {
+            false => (
+                gpui_design_system::Tag::new(session_key_id(&self.id), self.key_shown.clone())
+                    .into_any_element(),
+                px(ROW_GAP),
+            ),
+            // The second line is 16 px high, a tag is taller: there the key is its mono word,
+            // which fades to a new one as a tag's does and says itself whole when cut.
+            true => {
+                let id = session_key_beside_id(&self.id);
+                let opacity = changed(&id, &self.key_shown, window, cx);
+                (
+                    tipped_when_cut(
+                        div()
+                            .id(id)
+                            .aria_label(self.key_shown.clone())
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .mono(11.)
+                            .opacity(opacity)
+                            .child(self.key_shown.clone()),
+                        self.key_shown.clone(),
+                        window,
+                        cx,
+                    ),
+                    space::SM,
+                )
+            }
+        };
+        Some(
+            div()
+                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
+                .max_w(px(KEY_WIDTH * t))
+                // The gap after it comes and goes with it.
+                .mr(-gap * (1.0 - t))
+                .opacity(t)
+                .child(key)
+                .into_any_element(),
+        )
     }
 
     /// The machine it runs on, when it is not this one.
@@ -2605,7 +2728,9 @@ impl Render for SessionRow {
         let id = self.id.clone();
         let elsewhere = self.elsewhere.clone();
         let mut row = TreeLevel::Session
-            .row(session_id(&self.id), self.title.clone())
+            .row(session_id(&self.id), self.first_line())
+            // Nothing in hand: its words have nothing to say.
+            .faint(self.first_line() == crate::model::FREE)
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
@@ -2690,6 +2815,9 @@ impl Render for SessionRow {
                 meta(when, cx),
             ))
             .into_any_element();
+        if let Some(key) = self.key_chip(false, window, cx) {
+            row = row.leading(key);
+        }
         if self.scope.is_none() {
             row = row.second(self.second_line(window, cx));
         }
@@ -2771,6 +2899,10 @@ impl SessionRow {
 /// How wide what a session waits for may unfold on its row, more than the sidebar holds: the
 /// row cuts it.
 const WAITS_WIDTH: f32 = 400.;
+/// How wide the chip of a key may unfold: a tag is cut at 160 px.
+const KEY_WIDTH: f32 = 160.;
+/// The gap a session's row puts between its key and its title (the kit's `TreeRow`).
+const ROW_GAP: f32 = 7.;
 /// The height of a session's second line.
 const LINE: f32 = 16.;
 /// The height of a row's first line, above its second.
@@ -2839,13 +2971,19 @@ impl SessionRow {
         );
         let runs = Some(self.runs_shown.clone())
             .filter(|runs| !runs.is_empty() && (!self.runs.is_empty() || running > 0.0));
-        let tip = [Some(name.clone()), waits.as_ref().map(|w| w.to_string())]
-            .into_iter()
-            .chain([runs.as_ref().map(|r| r.to_string())])
-            .flatten()
-            .chain(pull.as_ref().map(pull_said))
-            .collect::<Vec<_>>()
-            .join(" · ");
+        // The session's own title stays in the tooltip when what it is about took its line.
+        let own = (self.first_line() != self.title).then(|| self.title.to_string());
+        let tip = [
+            own,
+            Some(name.clone()),
+            waits.as_ref().map(|w| w.to_string()),
+        ]
+        .into_iter()
+        .chain([runs.as_ref().map(|r| r.to_string())])
+        .flatten()
+        .chain(pull.as_ref().map(pull_said))
+        .collect::<Vec<_>>()
+        .join(" · ");
         if let Some(there) = self.elsewhere.clone().filter(|there| !there.listed) {
             return self.machine_line(there, window, cx);
         }
@@ -2902,6 +3040,7 @@ impl SessionRow {
                     .min_w_0()
                     .max_w_full()
                     .h(px(LINE))
+                    .children(self.key_chip(true, window, cx))
                     .child(place)
                     .children(waits.map(|waits| {
                         div()

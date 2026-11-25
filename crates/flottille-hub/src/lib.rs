@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use flottille_link::{
     Action, Change, Facts, HubKey, ListError, MOST_VALUES, Member, MemberList, Members, PairCode,
-    PairSecret, Proposed, PublicKey, Role, Sealed,
+    PairSecret, Proposed, PublicKey, REQUEST_WINDOW, Role, Sealed,
 };
 
 mod qr;
@@ -538,18 +538,41 @@ impl<C: Clock> Hub<C> {
     }
 
     /// A value of all machines sealed by a member's machine, kept when it is the latest of its
-    /// name (a copy of the same time replaces it: a machine sealed it again for a machine added
-    /// since). The hub reads its name, its time and its signature, never the value.
+    /// name (a copy of the same time replaces it when it is sealed for a machine more: a machine
+    /// sealed it again for a machine added since), of a known name (`SHARED_NAMES`) and no later
+    /// than the hub's clock allows. The hub reads its name, its time and its signature, never the
+    /// value.
     pub fn share(&mut self, sealed: Sealed) -> Result<bool, HubError> {
         let members = self
             .checked
             .as_ref()
             .ok_or_else(|| refused("the hub has no member yet"))?;
         sealed.check_for_hub(members).map_err(refused)?;
+        // A time past the hub's clock would hold the name for ever: a device's clock may be ahead
+        // by the window a signed request is taken in, no more.
+        let latest = self
+            .clock
+            .now()
+            .saturating_mul(1000)
+            .saturating_add(REQUEST_WINDOW.as_millis() as u64);
+        if sealed.at > latest {
+            return Err(refused(
+                "this value is dated later than the hub's clock allows",
+            ));
+        }
         let shared = &mut self.stored.shared;
         match shared.iter().position(|kept| kept.name == sealed.name) {
             Some(at) if shared[at].at > sealed.at => return Ok(false),
-            Some(at) if shared[at] == sealed => return Ok(false),
+            // A copy of the same time is the same value sealed again: kept only when it is
+            // sealed for a machine the kept one is not, a machine paired since.
+            Some(at)
+                if shared[at].at == sealed.at
+                    && sealed
+                        .recipients()
+                        .all(|to| shared[at].recipients().any(|kept| kept == to)) =>
+            {
+                return Ok(false);
+            }
             Some(at) => shared[at] = sealed,
             None if shared.len() >= MOST_VALUES => {
                 return Err(refused(format!(
@@ -612,7 +635,7 @@ impl<C: Clock> Hub<C> {
                 .filter(|facts| checked.get(&facts.key).is_some())
                 .cloned()
                 .collect(),
-            shared: std::mem::take(&mut self.stored.shared),
+            shared: self.stored.shared.clone(),
             members,
         };
         write(&self.file, &stored)?;

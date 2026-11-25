@@ -296,3 +296,107 @@ fn without_a_hub_about_you_is_as_today() {
     let (_, refused) = user.call("about.share", json!({"name": SAM})).unwrap_err();
     assert!(!refused.is_empty());
 }
+
+/// `laptop`, a controller of the user's, shares the name through pc, then `leave` takes it out of
+/// the members (removed, or made a viewer): its value is dropped on every machine, which falls
+/// back as if none were shared, and nothing is sealed or given again for it, so that the hub goes
+/// quiet.
+fn dropped_and_quiet(leave: impl FnOnce(&TestHub)) {
+    let (hub, pc, server) = pc_and_server(User::new());
+    let laptop = Machine::new();
+    pair(&hub, &laptop, "laptop", "controller");
+    pc.wait_for_member("laptop", true);
+    server.wait_for_member("laptop", true);
+    let answer = pc.raw(&signed(
+        &laptop.device(),
+        "laptop-share",
+        "pc",
+        "about.share",
+        json!({"name": SAM}),
+    ));
+    assert!(answer["error"].is_null(), "{answer}");
+    until(&server, "the server has the laptop's value", |about| {
+        about["name"] == SAM
+    });
+
+    leave(&hub);
+
+    for machine in [&pc, &server] {
+        until(machine, "the laptop's value is dropped", |about| {
+            about["name"] == "" && about["all"]["name"] == ""
+        });
+    }
+    // Quiet: the hub's copy and its file stay as they are, no machine sealing the value again.
+    let settled = |hub: &TestHub| {
+        (
+            hub_copy(hub),
+            std::fs::read_to_string(hub.state_file()).unwrap(),
+        )
+    };
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let before = settled(&hub);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(before == settled(&hub), "the hub is still written");
+}
+
+#[test]
+fn a_value_of_a_removed_device_is_dropped_and_the_hub_goes_quiet() {
+    dropped_and_quiet(|hub| {
+        hub.with_hub(|hub| hub.remove("laptop")).unwrap();
+    });
+}
+
+#[test]
+fn a_value_of_a_device_made_a_viewer_is_dropped_and_the_hub_goes_quiet() {
+    dropped_and_quiet(|hub| {
+        hub.with_hub(|hub| hub.change_role("laptop", flottille_link::Role::Viewer))
+            .unwrap();
+    });
+}
+
+#[test]
+fn the_answer_says_where_the_change_went() {
+    let (mut hub, pc, _server) = pc_and_server(User::new());
+
+    assert_eq!(share(&pc, "pc", json!({"name": SAM}))["hub"], "given");
+
+    hub.stop();
+    pc.wait_until("the hub is out of reach", |remote| {
+        remote["hub"]["state"] == "unreachable"
+    });
+    let later = share(&pc, "pc", json!({"name": "Later"}));
+    assert_eq!(later["hub"], "later", "{later}");
+    assert_eq!(later["all"]["name"], "Later", "{later}");
+}
+
+#[test]
+fn a_value_too_large_to_seal_is_refused_on_its_machine() {
+    let (hub, pc, _server) = pc_and_server(User::new());
+    // Within the notes' 8,000 characters, but each escaped in the signed request, then again in
+    // what is sealed: past what the hub keeps.
+    let notes = "\u{1}".repeat(8_000);
+
+    let answer = pc.raw(&signed(
+        &pc.device(),
+        "large",
+        "pc",
+        "about.share",
+        json!({"notes": notes}),
+    ));
+
+    assert!(error_of(&answer).contains("too large"), "{answer}");
+    assert_eq!(about(&pc)["all"]["notes"], "", "nothing is kept");
+    assert!(!hub_copy(&hub).contains("about.notes"));
+}
+
+#[test]
+fn a_name_shared_is_kept_trimmed_on_every_machine() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+
+    let shown = share(&pc, "pc", json!({"name": "  Sam  "}));
+
+    assert_eq!(shown["all"]["name"], SAM, "{shown}");
+    until(&server, "the server has the name, trimmed", |about| {
+        about["all"]["name"] == SAM
+    });
+}

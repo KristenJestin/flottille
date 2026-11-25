@@ -535,6 +535,21 @@ fn what_the_machine_shown_lists_is_read_when_the_window_switches_to_it(cx: &mut 
     });
 }
 
+/// Waits until the link `machine` holds to `other`, named `name`, is the one both keep when each
+/// dialled the other at once: the one the machine of the lower key dialled. Online says there is
+/// a link, not that it is the one that stays; a link taken before is closed ("the link to laptop
+/// was lost: closed") when the other's arrives late, as it does on a loaded runner.
+fn kept_link(machine: &Machine, other: &Machine, name: &str) {
+    let dialled_by_machine = remote::key_of(machine).as_bytes() < remote::key_of(other).as_bytes();
+    machine.wait_until(&format!("the link to {name} that stays"), |seen| {
+        seen["machines"].as_array().unwrap().iter().any(|peer| {
+            peer["name"] == name
+                && peer["state"] == "online"
+                && peer["reached"]["dialled"] == dialled_by_machine
+        })
+    });
+}
+
 #[gpui_kit::test]
 fn sign_in_on_a_machine_while_another_is_shown(cx: &mut TestAppContext) {
     let (hub, pc, server) = pc_and_server(User::new());
@@ -544,6 +559,9 @@ fn sign_in_on_a_machine_while_another_is_shown(cx: &mut TestAppContext) {
     server.wait_for_member("laptop", true);
     pc.wait_for("laptop", "online");
     server.wait_for("laptop", "online");
+    // A share goes over the link the server holds then, and the server closes it when the laptop's
+    // own dial of the same moment is the one both keep ("linked twice"): wait for the one that stays.
+    kept_link(&server, &laptop, "laptop");
     notes_on(&server);
     let shared = server.user.run(&[
         "connection",
