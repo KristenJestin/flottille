@@ -660,7 +660,9 @@ holds them (#1476): the bell link of that machine, which hears all of its events
 of its settings (`about.changed`, `developer.changed`, `rules.changed` and the other settings
 events), and only the section it names is read again; no other connection, no read of the whole
 machine. Its providers follow the same way (#1483): a `provider.*` event of that machine has its
-bell link read `provider.list` again, on the connection it holds, and the page shows the answer.
+bell link read `provider.list` again, on a thread of its own (one read at a time, one more when
+events came meanwhile), so that a machine slow to list them never delays that link's notices, and
+the page shows the answer.
 That link resumes its events after the last one it saw (`events.watch` with `after`) each time it
 connects again, so a change made while it was cut is heard when it is back, not lost. The first time, the
 page says it is reading that machine (its own skeletons, in the pane). A machine that does not
