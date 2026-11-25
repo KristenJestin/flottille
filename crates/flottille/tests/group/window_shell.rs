@@ -13,6 +13,8 @@ mod remote;
 
 #[path = "../window_all_machines.rs"]
 mod window_all_machines;
+#[path = "../window_all_machines_settings.rs"]
+mod window_all_machines_settings;
 #[path = "../window_allow_files.rs"]
 mod window_allow_files;
 #[path = "../window_any_machine.rs"]

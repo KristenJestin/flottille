@@ -105,7 +105,7 @@ fn type_name(editor: &Entity<AboutEditor>, text: &str, cx: &mut VisualTestContex
 }
 
 /// The window of a machine with no hub.
-fn window_alone<'a>(
+pub fn window_alone<'a>(
     machine: &Machine,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
@@ -158,12 +158,14 @@ fn the_picker_offers_all_machines_first_with_only_what_is_shared(cx: &mut TestAp
         Some("Settings of")
     );
     assert!(present(cx, "about-title"));
+    for own in ["vault", "machines"] {
+        assert!(
+            !present(cx, &format!("settings-tabs-{own}")),
+            "no tab of a machine's own"
+        );
+    }
     assert!(
-        !present(cx, "settings-tabs-agents"),
-        "no tab of a machine's own"
-    );
-    assert!(
-        !present(cx, "appearance-title"),
+        !present(cx, "developer-title"),
         "no section of a machine's own"
     );
     assert!(!present(cx, "about-shared"), "All machines follows nothing");
