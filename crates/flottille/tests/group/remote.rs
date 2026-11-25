@@ -67,6 +67,8 @@ mod remote_tunnels;
 mod remote_uploads;
 #[path = "../shared_settings.rs"]
 mod shared_settings;
+#[path = "../shared_settings_often.rs"]
+mod shared_settings_often;
 #[path = "../ssh_agent.rs"]
 mod ssh_agent;
 #[path = "../ssh_files.rs"]

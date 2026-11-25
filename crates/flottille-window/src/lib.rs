@@ -5,6 +5,7 @@
 pub mod about;
 pub mod actions;
 pub mod add_project;
+pub mod all_settings;
 pub mod arrange;
 pub mod ask_dock;
 pub mod attachments;

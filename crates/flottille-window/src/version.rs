@@ -392,6 +392,12 @@ impl VersionSection {
             "never"
         };
         self.ask("update.set", json!({"check": check}), cx);
+        // Chosen here, it is this machine's own, which its Settings mark.
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform_on(None, Command::AllSettingsRead)
+            })
+            .ok();
     }
 
     /// Restart to update: the daemon says which sessions a restart stops, then it restarts at

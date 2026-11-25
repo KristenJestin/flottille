@@ -48,7 +48,25 @@ pub const SEALED_LIMIT: usize = 40 * 1024;
 pub const MOST_VALUES: usize = 32;
 /// The names of the values of all machines: the hub keeps no other, so that a member's machine
 /// cannot take its places with names of its own. A setting shared later adds its name here.
-pub const SHARED_NAMES: &[&str] = &["about.name", "about.pronouns", "about.notes"];
+pub const SHARED_NAMES: &[&str] = &[
+    "about.name",
+    "about.pronouns",
+    "about.notes",
+    // The settings a machine often overrides.
+    "new_session",
+    "judge",
+    "compactor",
+    "review.spec_model",
+    "review.bugs_model",
+    "review.standards_model",
+    "review.security_model",
+    "review.verifier_model",
+    "sessions.end_inactive_days",
+    "sessions.resume_at_reset",
+    "workspaces_folder",
+    "update.check",
+    "connections",
+];
 
 /// Bytes, in base64 in JSON.
 #[derive(Clone, PartialEq, Eq)]

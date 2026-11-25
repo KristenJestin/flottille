@@ -16,7 +16,7 @@ mod schema;
 
 pub use oauth::Waiting as SignInWaiting;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use flottille_core::Result;
@@ -1005,8 +1005,154 @@ fn check(tables: &[Value], at: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// What the user declared, checked; nothing when the file cannot be read.
+/// The name of the value of all machines that is the connections shared with every machine.
+pub const SHARED: &str = "connections";
+
+/// The connections all machines share, as their value says them: a JSON list of declarations, each
+/// reached over `https://`, naming no vault entry, no program and no variable. Each machine signs
+/// in to each for itself; nothing of a sign-in is ever part of one.
+pub fn shared_check(value: &str) -> std::result::Result<Vec<Declaration>, String> {
+    let tables: Vec<Value> =
+        serde_json::from_str(value).map_err(|_| "must be a list of connections".to_owned())?;
+    let mut all: Vec<Declaration> = Vec::new();
+    for (n, table) in tables.iter().enumerate() {
+        let at = format!("connections[{n}]");
+        let table = table
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be a table"))?;
+        let declaration = Declaration::of(table, &at)?;
+        let name = &declaration.name;
+        let https = match &declaration.reach {
+            Reach::Url(url) => url.starts_with("https://"),
+            Reach::Command(_) => false,
+        };
+        if !https || declaration.url_fault().is_some() {
+            return Err(format!(
+                "{name}: only a connection reached at an https:// address with no secret in it is \
+                 shared with all machines"
+            ));
+        }
+        if declaration.entries().next().is_some() {
+            return Err(format!(
+                "{name}: it names a vault entry, which is this machine's: a connection shared with \
+                 all machines names none, each machine signing in for itself"
+            ));
+        }
+        if all.iter().any(|other| other.name == *name) {
+            return Err(format!("{name} is declared twice"));
+        }
+        all.push(declaration);
+    }
+    Ok(all)
+}
+
+/// All machines' connections: none without a hub, or when the value cannot be read.
+fn of_all(paths: &Paths) -> Vec<Declaration> {
+    flottille_core::all_machines::value(paths, SHARED)
+        .and_then(|value| shared_check(&value).ok())
+        .unwrap_or_default()
+}
+
+/// The names of the connections all machines share.
+pub fn shared_names(paths: &Paths) -> BTreeSet<String> {
+    of_all(paths).into_iter().map(|d| d.name).collect()
+}
+
+/// The names of this machine's own declarations that stand for another than all machines' of
+/// that name.
+pub fn overrides(paths: &Paths) -> std::result::Result<Vec<String>, String> {
+    let all = of_all(paths);
+    Ok(own_declarations(paths)?
+        .into_iter()
+        .filter(|own| {
+            all.iter()
+                .any(|shared| shared.name == own.name && shared != own)
+        })
+        .map(|own| own.name)
+        .collect())
+}
+
+/// Drops this machine's own declaration of a connection all machines share: theirs applies again.
+/// Its sign-in and what was reviewed of it go with it when it reached another address.
+pub fn drop_own(daemon: &Arc<Daemon>, name: &str) -> std::result::Result<(), Failure> {
+    let invalid = |why| Failure::new("invalid-config", why);
+    let shared = of_all(&daemon.paths)
+        .into_iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| Failure::refused(format!("{name} is no connection of all machines")))?;
+    let Some(own) = own_declarations(&daemon.paths)
+        .map_err(invalid)?
+        .into_iter()
+        .find(|d| d.name == name)
+    else {
+        return Ok(());
+    };
+    super::rewrite(daemon, &EXTENSION, |table| {
+        servers(table)?.retain(|table| table.get("name").and_then(|n| n.as_str()) != Some(name));
+        Ok(())
+    })?;
+    if own.reach != shared.reach {
+        let daemon = daemon.clone();
+        let name = name.to_owned();
+        tokio::spawn(async move {
+            forget_all_of(&daemon, &name).await;
+            changed_event(&daemon, &name, None);
+            pin_at_once(&daemon, &name).await;
+        });
+    }
+    Ok(())
+}
+
+/// What the daemon holds of a connection that is declared no more: its server, its browser and
+/// profile, what was reviewed of it and its sign-in.
+async fn forget_all_of(daemon: &Arc<Daemon>, name: &str) {
+    client::stop(daemon, name).await;
+    client::vault_removed(daemon, name).await;
+    crate::browsers::remove(&daemon.paths, name);
+    if let Err(error) = forget_row(daemon, name) {
+        eprintln!("flottille daemon: connection {name}: {error}");
+    }
+    if let Err(why) = oauth::forget(daemon, name).await {
+        eprintln!("flottille daemon: connection {name}: {why}");
+    }
+}
+
+/// All machines' connections changed: one taken away leaves this machine as a removed one does,
+/// unless it declares it itself, and each one new here is given to agents as an added one is.
+pub fn shared_changed(daemon: &Arc<Daemon>) {
+    let now = shared_names(&daemon.paths);
+    let before = std::mem::replace(&mut *daemon.shared_connections.lock().unwrap(), now.clone());
+    crate::projects::tools_changed(daemon);
+    let daemon = daemon.clone();
+    tokio::spawn(async move {
+        for name in before.difference(&now) {
+            if declarations(&daemon.paths).is_ok_and(|all| all.iter().all(|d| d.name != *name)) {
+                forget_all_of(&daemon, name).await;
+                changed_event(&daemon, name, None);
+            }
+        }
+        for name in now {
+            changed_event(&daemon, &name, None);
+            pin_at_once(&daemon, &name).await;
+        }
+        crate::projects::tools_changed(&daemon);
+    });
+}
+
+/// What this machine runs with: its own declarations, and all machines' of the names it declares
+/// none of; nothing when its file cannot be read.
 fn declarations(paths: &Paths) -> std::result::Result<Vec<Declaration>, String> {
+    let mut all = own_declarations(paths)?;
+    for shared in of_all(paths) {
+        if all.iter().all(|own| own.name != shared.name) {
+            all.push(shared);
+        }
+    }
+    Ok(all)
+}
+
+/// What the user declared on this machine, checked; nothing when the file cannot be read.
+fn own_declarations(paths: &Paths) -> std::result::Result<Vec<Declaration>, String> {
     super::declared(paths, &EXTENSION)?
         .iter()
         .enumerate()
@@ -2325,6 +2471,8 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
     let state = state_of(on, declaration, &row);
     let mut entry = declaration.served();
     entry["tool"] = json!(declaration.tool());
+    // All machines share a connection of this name; this machine runs its own when it differs.
+    entry["all"] = json!(shared_names(&daemon.paths).contains(&declaration.name));
     entry["state"] = json!(state.word());
     entry["review_due"] = json!(
         matches!(state, State::Awaiting | State::CutOff)
@@ -2621,23 +2769,29 @@ async fn edit_if(
     entries_checked(daemon, &new)?;
     let written = table_of(&new)?;
     let mut claimed = None;
+    let shared = shared_names(&daemon.paths).contains(&name);
     let rewritten = super::rewrite(daemon, &EXTENSION, |table| {
         let servers = servers(table)?;
-        let at = (0..servers.len())
-            .find(|at| {
-                servers
-                    .get(*at)
-                    .and_then(|table| table.get("name")?.as_str())
-                    == Some(name.as_str())
-            })
-            .ok_or_else(|| Failure::new("not-found", format!("no connection {name}")))?;
+        let at = (0..servers.len()).find(|at| {
+            servers
+                .get(*at)
+                .and_then(|table| table.get("name")?.as_str())
+                == Some(name.as_str())
+        });
+        // A connection of all machines edited here is this machine's own from now on.
+        if at.is_none() && !shared {
+            return Err(Failure::new("not-found", format!("no connection {name}")));
+        }
         still()?;
         // Decided under the file's lock, as an add's.
         if let Some(number) = request {
             requests::saved_checked(daemon, Some(&old), &new)?;
             claimed = Some(requests::claimed(daemon, number)?);
         }
-        *servers.get_mut(at).expect("found") = written;
+        match at {
+            Some(at) => *servers.get_mut(at).expect("found") = written,
+            None => servers.push(written),
+        }
         Ok(())
     });
     if let (Some(claimed), Err(failure)) = (&claimed, &rewritten) {
@@ -2715,6 +2869,14 @@ async fn remove_if(
 ) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     declaration(&daemon.paths, &name)?;
+    if own_declarations(&daemon.paths)
+        .is_ok_and(|own| own.iter().all(|declaration| declaration.name != name))
+    {
+        return Err(Failure::refused(format!(
+            "the connection {name} is all machines': take it away on All machines, or turn it \
+             off here"
+        )));
+    }
     super::rewrite(daemon, &EXTENSION, |table| {
         still()?;
         let servers = servers(table)?;
@@ -2730,6 +2892,10 @@ async fn remove_if(
         .await
         .map_err(|why| Failure::new("unavailable", why))?;
     changed_event(daemon, &name, None);
+    // All machines' connection of that name applies here again, given as an added one is.
+    if shared_names(&daemon.paths).contains(&name) {
+        pin_at_once(daemon, &name).await;
+    }
     Ok(json!({"name": name, "removed": true}))
 }
 

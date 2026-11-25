@@ -4,9 +4,11 @@
 //! that it can be sealed again for a machine paired since; the hub keeps the same, sealed for every
 //! machine (`flottille_link::Sealed`), and never reads it.
 //!
-//! Only what the user says of themselves is a value of all machines for now: `about.name`,
-//! `about.pronouns` and `about.notes`. No secret is one: a vault value, a token, a key and a
-//! project's `[variables]` stay on their machine, and `about.share` takes no other field.
+//! The values of all machines are what the user says of themselves (`about.name`,
+//! `about.pronouns`, `about.notes`, changed by `about.share`) and the settings a machine often
+//! overrides (`crate::all_settings`, changed by `settings.share`). No secret is one: a vault
+//! value, a token, a key and a project's `[variables]` stay on their machine, and neither method
+//! takes one.
 //!
 //! ```json
 //! {"about.name": {"value": "Sam", "at": 1764000000000, "request": {/* as signed */}}}
@@ -84,12 +86,26 @@ fn field_of(name: &str) -> Option<&'static str> {
         .map(|(_, field)| *field)
 }
 
-/// The value `name` of the user's signed request `request`, as `about.share` carries it and
-/// `about.set` would take it (trimmed, within its limits): none when the request does not carry
-/// it, or carries what `about.set` refuses.
+/// The method whose signed request changes the value `name`: none for a name this version does
+/// not know.
+fn method_of(name: &str) -> Option<&'static str> {
+    if field_of(name).is_some() {
+        Some(ABOUT_SHARE)
+    } else {
+        crate::all_settings::NAMES
+            .contains(&name)
+            .then_some(crate::all_settings::SHARE)
+    }
+}
+
+/// The value `name` of the user's signed request `request`, as its method carries it and the
+/// setting would take it (for About you, trimmed and within its limits): none when the request
+/// does not carry it, or carries what the setting refuses.
 pub fn kept_of(name: &str, request: &Value, at: u64, params: &Value) -> Option<Kept> {
-    let field = field_of(name)?;
-    let value = crate::about::received(field, params.get(field)?.as_str()?)?;
+    let value = match field_of(name) {
+        Some(field) => crate::about::received(field, params.get(field)?.as_str()?)?,
+        None => crate::all_settings::received(name, params.get("values")?.get(name)?.as_str()?)?,
+    };
     Some(Kept {
         value,
         at,
@@ -97,15 +113,24 @@ pub fn kept_of(name: &str, request: &Value, at: u64, params: &Value) -> Option<K
     })
 }
 
-/// The values a request `about.share` changes, checked again as another machine would.
+/// The values a request `about.share` or `settings.share` changes, checked again as another
+/// machine would.
 pub fn from_request(text: &str, members: &Members) -> Result<Vec<(String, Kept)>, String> {
+    let asked: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let method = match asked["signed"]["method"].as_str() {
+        Some(crate::all_settings::SHARE) => crate::all_settings::SHARE,
+        _ => ABOUT_SHARE,
+    };
     let (_, request, params) =
-        check_shared(text.as_bytes(), ABOUT_SHARE, members).map_err(|error| error.to_string())?;
+        check_shared(text.as_bytes(), method, members).map_err(|error| error.to_string())?;
     let at = request.signed.at;
     let request = serde_json::to_value(&request).map_err(|error| error.to_string())?;
     Ok(NAMES
         .iter()
-        .filter_map(|(name, _)| Some((name.to_string(), kept_of(name, &request, at, &params)?)))
+        .map(|(name, _)| *name)
+        .chain(crate::all_settings::NAMES)
+        .filter(|name| method_of(name) == Some(method))
+        .filter_map(|name| Some((name.to_string(), kept_of(name, &request, at, &params)?)))
         .collect())
 }
 
@@ -113,9 +138,9 @@ pub fn from_request(text: &str, members: &Members) -> Result<Vec<(String, Kept)>
 /// change signed by a member's device that may make it, of the name and time the copy says. None
 /// otherwise, whatever sealed it.
 fn opened(sealed: &Sealed, key: &MachineKey, members: &Members) -> Option<Kept> {
-    field_of(&sealed.name)?;
+    let method = method_of(&sealed.name)?;
     let plain = sealed.open(key)?;
-    let (_, request, params) = check_shared(&plain, ABOUT_SHARE, members)
+    let (_, request, params) = check_shared(&plain, method, members)
         .map_err(|error| {
             eprintln!(
                 "flottille daemon: a value of all machines, {}, is not taken: {error}",
@@ -132,9 +157,11 @@ fn opened(sealed: &Sealed, key: &MachineKey, members: &Members) -> Option<Kept> 
 }
 
 /// Whether `kept` is still the change of a member that may make it.
-fn still_signed(kept: &Kept, members: &Members) -> bool {
-    serde_json::to_vec(&kept.request)
-        .is_ok_and(|text| check_shared(&text, ABOUT_SHARE, members).is_ok())
+fn still_signed(name: &str, kept: &Kept, members: &Members) -> bool {
+    method_of(name).is_some_and(|method| {
+        serde_json::to_vec(&kept.request)
+            .is_ok_and(|text| check_shared(&text, method, members).is_ok())
+    })
 }
 
 /// Every machine of the members: what a value is sealed for.
@@ -196,7 +223,7 @@ pub fn took(
     // seal it once more at each copy the hub sends. Shown as if none were shared.
     let left: Vec<String> = values
         .iter()
-        .filter(|(_, own)| !still_signed(own, members))
+        .filter(|(name, own)| !still_signed(name, own, members))
         .map(|(name, _)| name.clone())
         .collect();
     if !left.is_empty() {

@@ -43,11 +43,62 @@ pub struct Settings {
     pub resume: bool,
 }
 
+/// The names of the values of all machines these settings are.
+pub const SHARED_DAYS: &str = "sessions.end_inactive_days";
+pub const SHARED_RESUME: &str = "sessions.resume_at_reset";
+
+/// What `sessions.toml` itself holds, key by key: a key left out is all machines' value, else off.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Own {
+    pub days: Option<Option<u64>>,
+    pub resume: Option<bool>,
+}
+
+/// All machines' days, as their value says them: a number from `MIN_DAYS` to `MAX_DAYS`, or
+/// `off`.
+pub fn shared_days(value: &str) -> Result<Option<u64>, String> {
+    if value == "off" {
+        return Ok(None);
+    }
+    value
+        .parse()
+        .ok()
+        .filter(|days| (MIN_DAYS..=MAX_DAYS).contains(days))
+        .map(Some)
+        .ok_or_else(|| {
+            format!("end_inactive_days is a number of days from {MIN_DAYS} to {MAX_DAYS}, or off")
+        })
+}
+
+/// All machines' resuming, as its value says it: `true` or `false`.
+pub fn shared_resume(value: &str) -> Result<bool, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{RESUME_KEY} is true or false"))
+}
+
+/// What applies here: this machine's own key (`own`), else all machines' value, else off.
 pub fn read(paths: &Paths) -> Result<Settings, String> {
+    let own = own(paths)?;
+    let all = flottille_core::all_machines::all(paths);
+    let shared = |name: &str| all.get(name).map(String::as_str);
+    Ok(Settings {
+        days: own.days.unwrap_or_else(|| {
+            shared(SHARED_DAYS)
+                .and_then(|value| shared_days(value).ok())
+                .flatten()
+        }),
+        resume: own.resume.unwrap_or_else(|| {
+            shared(SHARED_RESUME).and_then(|value| shared_resume(value).ok()) == Some(true)
+        }),
+    })
+}
+
+pub fn own(paths: &Paths) -> Result<Own, String> {
     let text = match std::fs::read_to_string(config(paths)) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Settings::default());
+            return Ok(Own::default());
         }
         Err(error) => return Err(format!("sessions.toml: {error}")),
     };
@@ -60,16 +111,19 @@ pub fn read(paths: &Paths) -> Result<Settings, String> {
         }
     }
     let resume = match document.get(RESUME_KEY) {
-        None => false,
-        Some(item) => item
-            .as_bool()
-            .ok_or_else(|| format!("sessions.toml: {RESUME_KEY} is true or false"))?,
+        None => None,
+        Some(item) => Some(
+            item.as_bool()
+                .ok_or_else(|| format!("sessions.toml: {RESUME_KEY} is true or false"))?,
+        ),
     };
     let days = match document.get("end_inactive_days") {
         None => None,
-        Some(item) if item.as_str() == Some("off") => None,
+        Some(item) if item.as_str() == Some("off") => Some(None),
         Some(item) => match item.as_integer() {
-            Some(days) if (MIN_DAYS as i64..=MAX_DAYS as i64).contains(&days) => Some(days as u64),
+            Some(days) if (MIN_DAYS as i64..=MAX_DAYS as i64).contains(&days) => {
+                Some(Some(days as u64))
+            }
             _ => {
                 return Err(format!(
                     "sessions.toml: end_inactive_days is a number of days from {MIN_DAYS} to \
@@ -78,7 +132,22 @@ pub fn read(paths: &Paths) -> Result<Settings, String> {
             }
         },
     };
-    Ok(Settings { days, resume })
+    Ok(Own { days, resume })
+}
+
+/// Writes `sessions.toml`: the keys this machine chose, no other.
+pub fn write(paths: &Paths, own: Own) -> Result<(), String> {
+    std::fs::create_dir_all(&paths.config)
+        .map_err(|e| format!("{}: {e}", paths.config.display()))?;
+    let mut text = match own.days {
+        Some(Some(days)) => format!("end_inactive_days = {days}\n"),
+        Some(None) => "end_inactive_days = \"off\"\n".to_owned(),
+        None => String::new(),
+    };
+    if let Some(resume) = own.resume {
+        text.push_str(&format!("{RESUME_KEY} = {resume}\n"));
+    }
+    providers::write_in_place(&config(paths), &text).map_err(|e| format!("sessions.toml: {e}"))
 }
 
 /// The key of resuming a session at its quota's reset.
@@ -143,25 +212,14 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                 ));
             }
             // What is not asked stays as the file says; a file that cannot be read is written
-            // again whole.
-            let before = read(paths).unwrap_or_default();
-            let wanted = Settings {
-                days: days.unwrap_or(before.days),
-                resume: resume.unwrap_or(before.resume),
+            // again whole. What is asked is this machine's own from now on.
+            let before = own(paths).unwrap_or_default();
+            let wanted = Own {
+                days: days.or(before.days),
+                resume: resume.or(before.resume),
             };
-            std::fs::create_dir_all(&paths.config).map_err(|e| {
-                Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
-            })?;
-            let mut text = match wanted.days {
-                Some(days) => format!("end_inactive_days = {days}\n"),
-                None => "end_inactive_days = \"off\"\n".to_owned(),
-            };
-            if wanted.resume {
-                text.push_str(&format!("{RESUME_KEY} = true\n"));
-            }
-            providers::write_in_place(&config(paths), &text)
-                .map_err(|e| Failure::new("unavailable", format!("sessions.toml: {e}")))?;
-            let answer = shown(wanted);
+            write(paths, wanted).map_err(|why| Failure::new("unavailable", why))?;
+            let answer = shown(read(paths).map_err(|e| Failure::new("invalid-config", e))?);
             daemon
                 .emit("sessions.changed", answer.clone())
                 .map_err(|error| Failure::new("unavailable", error.to_string()))?;

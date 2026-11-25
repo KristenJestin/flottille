@@ -501,7 +501,8 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                 )
             };
             let slot = value.as_object().ok_or_else(refuse)?;
-            if !slot["provider"].is_string()
+            // `get`: a map indexed at a key it lacks panics.
+            if !slot.get("provider").is_some_and(Value::is_string)
                 || slot.iter().any(|(key, value)| {
                     !["provider", "model", "effort"].contains(&key.as_str()) || !value.is_string()
                 })
@@ -1269,8 +1270,76 @@ pub fn on(daemon: &Daemon, extension: &Extension) -> Result<(), Failure> {
     )))
 }
 
+pub use connections::{
+    SHARED as SHARED_CONNECTIONS, drop_own as drop_own_connection,
+    overrides as overridden_connections, shared_changed as shared_connections_changed,
+    shared_check as shared_connections, shared_names as shared_connection_names,
+};
+
+/// The extension whose models all machines may share, as `<name>.<key>` (`crate::all_settings`).
+const SHARED_MODELS: &str = "review";
+
+/// All machines' value of a model, as its value says it: a slot, `{"provider", "model",
+/// "effort"}` in JSON, of a provider Flottille knows.
+pub fn shared_model(value: &str) -> Result<Value, String> {
+    let slot: Value = serde_json::from_str(value).map_err(|error| error.to_string())?;
+    // The check of a slot reads neither the rule nor what it gives.
+    let kind = Kind::Model {
+        rule: "",
+        gives: |_, _| None,
+    };
+    let slot = checked(kind, &slot)?;
+    match slot["provider"].as_str().and_then(providers::get) {
+        Some(_) => Ok(slot),
+        None => Err(format!("unknown provider {}", slot["provider"])),
+    }
+}
+
+/// All machines' value of the setting, if the setting is one they share and they have one.
+fn shared_setting(paths: &Paths, extension: &Extension, key: &str) -> Option<Value> {
+    if extension.name != SHARED_MODELS || !key.ends_with("_model") {
+        return None;
+    }
+    let value = flottille_core::all_machines::value(paths, &format!("{}.{key}", extension.name))?;
+    shared_model(&value).ok()
+}
+
+/// Whether `extensions.toml` holds the setting: this machine's own.
+pub fn own_setting(paths: &Paths, extension: &str, key: &str) -> bool {
+    global(paths).is_ok_and(|global| {
+        global
+            .get(extension)
+            .is_some_and(|values| values.settings.contains_key(key))
+    })
+}
+
+/// Drops this machine's own value of a setting: all machines' applies again.
+pub(crate) fn forget_setting(daemon: &Daemon, extension: &str, key: &str) -> Result<(), Failure> {
+    if !own_setting(&daemon.paths, extension, key) {
+        return Ok(());
+    }
+    set(
+        daemon,
+        Set {
+            name: extension.to_owned(),
+            project: None,
+            enabled: None,
+            settings: Map::from_iter([(key.to_owned(), Value::Null)]),
+        },
+    )
+    .map(drop)
+}
+
+/// Whether the project's value of a setting is all machines': neither the project nor this
+/// machine holds one.
+pub fn from_all(daemon: &Daemon, extension: &Extension, project: &Project, key: &str) -> bool {
+    !of_project(extension, project).is_ok_and(|own| own.settings.contains_key(key))
+        && !own_setting(&daemon.paths, extension.name, key)
+        && shared_setting(&daemon.paths, extension, key).is_some()
+}
+
 /// A setting's value for a project: the project's own, else the one of `extensions.toml`, else
-/// its default.
+/// all machines' (`shared_setting`), else its default.
 pub fn value(
     daemon: &Daemon,
     extension: &Extension,
@@ -1290,6 +1359,7 @@ pub fn value(
         .get(key)
         .or_else(|| global.get(extension.name)?.settings.get(key))
         .cloned()
+        .or_else(|| shared_setting(&daemon.paths, extension, key))
         .unwrap_or_else(|| default_of(setting.kind)))
 }
 
@@ -1387,6 +1457,11 @@ fn list(daemon: &Daemon) -> Value {
                 .settings
                 .iter()
                 .map(|setting| {
+                    let value = own
+                        .settings
+                        .get(setting.key)
+                        .cloned()
+                        .or_else(|| shared_setting(&daemon.paths, extension, setting.key));
                     json!({
                         "default": default_says(daemon, &ready, setting.kind),
                         "key": setting.key,
@@ -1394,9 +1469,8 @@ fn list(daemon: &Daemon) -> Value {
                         "hint": setting.hint,
                         "kind": kind_word(setting.kind),
                         "per_project": setting.per_project,
-                        "value": own.settings.get(setting.key).cloned()
-                            .unwrap_or_else(|| default_of(setting.kind)),
-                        "set": own.settings.contains_key(setting.key),
+                        "set": value.is_some(),
+                        "value": value.unwrap_or_else(|| default_of(setting.kind)),
                     })
                 })
                 .collect();

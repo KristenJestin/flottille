@@ -324,6 +324,9 @@ pub struct Daemon {
     pub judge_chose_none: Lock<Option<bool>>,
     /// Where each agent's compaction by Flottille stands.
     pub compactions: crate::compaction::Live,
+    /// The connections of all machines as last given to agents
+    /// (`extensions::shared_connections_changed`).
+    pub shared_connections: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Lock<HashMap<String, usize>>,
     /// The children whose launch waits for their session to open (`tree::launch`).
@@ -388,9 +391,17 @@ pub(crate) fn start_link(
     // Held weakly: the daemon holds the link, which must not hold the daemon.
     let emitting = Arc::downgrade(daemon);
     let emit: crate::link::Emit = Arc::new(move |name: &str, data: Value| {
-        if let Some(daemon) = emitting.upgrade()
-            && let Err(error) = daemon.emit(name, data)
-        {
+        let Some(daemon) = emitting.upgrade() else {
+            return;
+        };
+        // Values of all machines taken from the hub: each setting says its own change too.
+        if name == "settings.shared_changed" {
+            let changed: Vec<String> =
+                serde_json::from_value(data["names"].clone()).unwrap_or_default();
+            crate::all_settings::applied(&daemon, &changed);
+            return;
+        }
+        if let Err(error) = daemon.emit(name, data) {
             eprintln!("flottille daemon: the event {name} was not stored: {error}");
         }
     });
@@ -454,6 +465,7 @@ impl Daemon {
             waiting_provider: Lock::named("waiting_provider", HashSet::new()),
             judge_chose_none: Lock::named("judge_chose_none", None),
             compactions: crate::compaction::Live::default(),
+            shared_connections: std::sync::Mutex::new(extensions::shared_connection_names(paths)),
             launching: Lock::named("launching", HashMap::new()),
             opening: Lock::named("opening", HashSet::new()),
             forges: forge::Forges::default(),
@@ -1228,6 +1240,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("window.") => (
             match crate::drafts::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("settings.") => (
+            match crate::all_settings::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },

@@ -178,7 +178,8 @@ impl Control {
     }
 
     /// What the hub holds of the values of all machines, taken: what is newer is kept, said as
-    /// `about.changed`, and what the hub lacks is given to it. `hub` is none to look again at what
+    /// `settings.shared_changed` (and as each setting's own change, `crate::all_settings`), and
+    /// what the hub lacks is given to it. `hub` is none to look again at what
     /// it last sent in this session, once the members changed.
     fn took_shared(&self, hub: Option<Vec<Sealed>>, members: &Members) {
         let hub = {
@@ -193,7 +194,7 @@ impl Control {
         };
         let (changed, again) = crate::shared::took(&self.folder, &hub, &self.key, members);
         if !changed.is_empty() {
-            (self.emit)("about.changed", json!({}));
+            (self.emit)("settings.shared_changed", json!({"names": changed}));
         }
         self.give(members, &again);
     }

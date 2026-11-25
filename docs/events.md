@@ -209,6 +209,16 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `settings.shared_changed`
+
+Values of all machines changed on this machine (changed here, taken from the hub, or dropped with
+a device removed), or the machine dropped a value of its own (`docs/remote.md`, "Settings for all
+machines"). Each setting's own change is said too, but the judge's.
+
+| Field | |
+|---|---|
+| `names` | The values' names (`about.name`, `new_session`, `connections`, …). |
+
 ### `sessions.changed`
 
 The user chose after how many days an inactive session is ended, or switched that off

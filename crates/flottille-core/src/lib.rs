@@ -4,6 +4,7 @@
 // path stays for the daemon and the window.
 pub use flottille_protocol::address;
 pub mod agent;
+pub mod all_machines;
 pub mod ansi;
 pub mod approval;
 pub mod claude_folder;

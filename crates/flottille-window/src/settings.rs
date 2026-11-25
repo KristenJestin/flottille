@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 
 use crate::about::AboutEditor;
 use crate::actions::{Command, SessionsSetting};
+use crate::all_settings::AllSettings;
 use crate::commands::{spaced, stack};
 use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
@@ -345,6 +346,9 @@ pub struct SettingsPage {
     rules: Entity<RulesEditor>,
     /// What the user says of themselves, edited on this page.
     about: Entity<AboutEditor>,
+    /// The settings of all machines a machine often overrides: chosen on All machines, marked on
+    /// a machine.
+    all_settings: Entity<AllSettings>,
     /// The Auto judge's guidance, edited on this page.
     judge_guidance: Entity<RulesEditor>,
     /// The compactor's guidance, edited on this page.
@@ -485,8 +489,10 @@ impl SettingsPage {
         sign_in: Entity<crate::sign_in::SignInSection>,
         filing: Entity<crate::findings::Filing>,
         check: Entity<crate::check::CheckSection>,
+        all_settings: Entity<AllSettings>,
     ) -> Self {
         Self {
+            all_settings,
             of: None,
             sign_in,
             check,
@@ -610,6 +616,10 @@ impl SettingsPage {
 
     pub fn about(&self) -> &Entity<AboutEditor> {
         &self.about
+    }
+
+    pub fn all_settings(&self) -> &Entity<AllSettings> {
+        &self.all_settings
     }
 
     pub fn judge_guidance(&self) -> &Entity<RulesEditor> {
@@ -2670,6 +2680,35 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let drawn = self.drawn_part(part, window, cx);
+        // A feature whose settings all machines may share is marked where this machine changed
+        // them.
+        let marked = match part {
+            Part::Feature(key) if key == COMPACTION => "compaction",
+            Part::Feature(key) if key == connections::NAME => "connections",
+            Part::Feature(key) if key == "review" => "review",
+            _ => return drawn,
+        };
+        let machine = self
+            .of
+            .clone()
+            .or_else(|| {
+                self.machines
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.this.clone())
+            })
+            .unwrap_or_else(|| "this machine".to_owned());
+        let hub = self.has_hub(cx);
+        crate::all_settings::around(&self.all_settings, marked, hub, &machine, drawn, cx)
+    }
+
+    fn drawn_part(
+        &mut self,
+        part: &Part,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match part {
             Part::CompactionMore => self.compaction_more(cx),
             Part::Feature(key) if key == COMPACTION => self.compaction_page(window, cx),
@@ -2737,8 +2776,19 @@ impl Render for SettingsPage {
             about.place(all, this_machine, hub, window, cx)
         });
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
-            // Only what every machine may share: About you, for now.
-            _ if all => vec![("about", self.about.clone().into_any_element())],
+            // Only what every machine may share.
+            _ if all => {
+                let models = self.providers.model_entries();
+                let mut blocks = vec![("about", self.about.clone().into_any_element())];
+                blocks.extend(crate::all_settings::SECTIONS.map(|section| {
+                    let models = models.clone();
+                    let drawn = self
+                        .all_settings
+                        .update(cx, |all, cx| all.section(section, models, window, cx));
+                    (section, drawn)
+                }));
+                blocks
+            }
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
                 ("forges", self.sign_in.clone().into_any_element()),
@@ -2821,6 +2871,18 @@ impl Render for SettingsPage {
             Some(machine) => ElementId::Name(format!("enter-settings-{machine}-{part}").into()),
         };
         let hub = !all && self.has_hub(cx);
+        let machine = self
+            .of
+            .clone()
+            .or_else(|| {
+                self.machines
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.this.clone())
+            })
+            .unwrap_or_else(|| "this machine".to_owned());
+        // The version section is this window's machine's, whichever machine's page this is.
+        let own_page = self.of.is_none();
         let column = |element: AnyElement| {
             div()
                 .w_full()
@@ -2860,6 +2922,17 @@ impl Render for SettingsPage {
             // with the sections, so that no text is ever drawn over it or under it (#1293).
             .child(column(self.own_line(cx).into_any_element()))
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
+                let section = match all || (part == "version" && !own_page) {
+                    true => section,
+                    false => crate::all_settings::around(
+                        &self.all_settings,
+                        part_of(part),
+                        hub,
+                        &machine,
+                        section,
+                        cx,
+                    ),
+                };
                 let section = match MACHINE_ONLY.contains(&part) {
                     true => machine_only(part, hub, section, cx),
                     false => section,
@@ -2876,6 +2949,19 @@ impl Render for SettingsPage {
             .text_color(p.text)
             .child(top)
             .child(page)
+    }
+}
+
+/// The key a block is marked under, when all machines have to do with it.
+fn part_of(block: &str) -> &'static str {
+    match block {
+        "new-sessions" => "new-sessions",
+        "judge" => "judge",
+        "sessions" => "sessions",
+        "workspaces" => "workspaces",
+        "appearance" => "appearance",
+        "version" => "version",
+        _ => "",
     }
 }
 

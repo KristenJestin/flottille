@@ -749,6 +749,14 @@ fn each_pass_runs_on_its_slot_and_a_project_overrides_it() {
         )
         .unwrap_err();
     assert!(message.contains("verifier_model"), "{message}");
+    // So is a slot that names no provider.
+    let (_, message) = user
+        .call(
+            "extension.set",
+            json!({"name": "review", "settings": {"verifier_model": {"model": "large"}}}),
+        )
+        .unwrap_err();
+    assert!(message.contains("verifier_model"), "{message}");
 }
 
 #[test]

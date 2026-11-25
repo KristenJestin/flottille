@@ -142,6 +142,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `about.set` | drive |
 | `about.reset` | drive |
 | `about.share` | drive |
+| `settings.shared` | read |
+| `settings.share` | drive |
+| `settings.use_all` | drive |
 | `rules.show` | read |
 | `rules.set` | drive |
 | `rules.reset` | drive |
@@ -740,6 +743,38 @@ A change emits `about.changed {}`, and so does a value of all machines this mach
 hub. No tool of an agent reads or writes them: they are in its
 instructions.
 
+### The settings of all machines
+
+The settings a machine often overrides (`docs/remote.md`, "Settings for all machines"), each a
+value of all machines under its name, a text: `new_session` (`{"provider", "model"?, "effort"?}` in
+JSON), `judge` and `compactor` (`"none"`, or `{"provider", "model"?}` in JSON, with `effort` for
+the compactor), `review.spec_model`, `review.bugs_model`, `review.standards_model`,
+`review.security_model` and `review.verifier_model` (a model slot in JSON),
+`sessions.end_inactive_days` (`"1"` to `"90"`, or `"off"`), `sessions.resume_at_reset` (`"true"` or
+`"false"`), `workspaces_folder` (a folder under the home, `~/…`, holding `<project>`),
+`update.check` (`"automatically"` or `"never"`) and `connections` (a JSON list of declarations
+reached over `https://`, each `{"name", "about", "url", "only"?, "except"?, "client_id"?,
+"enabled"?}`).
+
+- `settings.shared` answers `{"all", "own", "ignored"}`: all machines' values by name (`null`
+  without a hub), the names among them this machine holds itself (a connection it declares
+  otherwise as `connections.<name>`; a judge or compactor Flottille picked is none), and why each
+  value it cannot follow is ignored here, by name (a provider not ready, a model it does not
+  offer).
+- `settings.share {values: {<name>: <text>}}` sets values of all machines, an empty text clearing
+  one. Only as a request signed by the user's device, as `about.share`; `refused` for a name that
+  is none, a value the setting would refuse, a workspaces folder that is not under the home, a
+  connection that names a vault entry, a program or a plain address. Answers as `settings.shared`,
+  with `hub` as `about.share` says it.
+- `settings.use_all {names}` drops this machine's own value of each name (one of `own`), which
+  follows all machines again, and answers as `settings.shared`.
+
+A value of all machines this machine takes or changes, and an own value dropped, emits
+`settings.shared_changed {names}`, and each setting it changes emits its own change
+(`provider.new_session_changed`, `compaction.changed`, `sessions.changed` and the others; the
+judge only `settings.shared_changed`, `provider.judge_changed` being this machine's own choice). No
+tool of an agent reads or writes them.
+
 ### The judge methods
 
 `judge.show`, `judge.set` and `judge.reset` read, write and reset the Auto judge's guidance
@@ -917,7 +952,8 @@ is off globally, the projects' switches kept.
   (`<name>.show`, below), `guidance_parts` the parts of that guidance (Review's
   `["spec", "bugs", "standards", "security"]`, `[]` for none), `commands` the words of its composer commands (`["review"]`),
   `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set", "default"}` with its
-  global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
+  global value (its default when not `set`; all machines' value, with `set` true, for one of
+  Review's models this machine sets none of), `kind` being `"language"`, `"model"` (a slot,
   `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice), `"switch"` (`true` or
   `false`, the setting's default when none is set: `false` for Review's `auto_on_pull_request`,
   `true` for its `agents_start`), `{"subset": [...]}`
@@ -970,7 +1006,10 @@ server did not start, or `null`), `server` (`{name, version}` as accepted) and `
 setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
 
 - `connection.list` answers `{"enabled", "error", "connections"}`: Connections' switch, why
-  `extensions.toml` cannot be used, and each connection.
+  `extensions.toml` cannot be used, and each connection: those this machine declares, then all
+  machines' of the names it declares none of (`all` true for a name all machines share).
+  `connection.edit` of one of all machines declares it here, as this machine's own;
+  `connection.remove` of one is `refused`.
 - `connection.add {name, about, command | url, env?, headers?, only?, except?, client_id?,
   enabled?}` declares
   one under `[[connections.server]]` of `extensions.toml`, checked key by key as the file is; `env`

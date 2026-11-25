@@ -108,6 +108,8 @@ pub struct Settings {
     /// Whether the file says anything of the compactor, one or `compactor = "none"`: Flottille
     /// picks one only while it does not.
     pub compactor_set: bool,
+    /// The compactor, or none, is all machines': this machine chose none.
+    pub compactor_from_all: bool,
     /// The agent writes its own handoff (`summary = "agent"`), not the compactor.
     pub by_agent: bool,
     pub automatic: bool,
@@ -131,6 +133,7 @@ impl Default for Settings {
         Settings {
             compactor: None,
             compactor_set: false,
+            compactor_from_all: false,
             by_agent: false,
             automatic: true,
             threshold: THRESHOLD,
@@ -153,8 +156,23 @@ fn guidance_file(paths: &Paths) -> std::path::PathBuf {
 }
 
 impl Settings {
-    /// Reads `compaction.toml`: the defaults when there is none.
+    /// What this machine compacts with: its own `compaction.toml` (`own`), under which all
+    /// machines' compactor applies while it chose none (one Flottille picked is no choice).
     pub fn load(paths: &Paths) -> Result<Settings, String> {
+        let mut settings = Settings::own(paths)?;
+        if (!settings.compactor_set || settings.compactor.as_ref().is_some_and(|c| c.picked))
+            && let Some(compactor) = flottille_core::all_machines::value(paths, SHARED)
+                .and_then(|value| shared_compactor(&value).ok())
+        {
+            settings.compactor = compactor;
+            settings.compactor_set = true;
+            settings.compactor_from_all = true;
+        }
+        Ok(settings)
+    }
+
+    /// Reads `compaction.toml`: the defaults when there is none.
+    pub fn own(paths: &Paths) -> Result<Settings, String> {
         match std::fs::read_to_string(file(paths)) {
             Ok(text) => Settings::parse(&text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
@@ -269,6 +287,43 @@ impl Settings {
     }
 }
 
+/// The name of the value of all machines that is the compactor.
+pub const SHARED: &str = "compactor";
+
+/// All machines' compactor, as its value says it: `none`, or `{"provider", "model", "effort"}` in
+/// JSON.
+pub fn shared_compactor(value: &str) -> Result<Option<Compactor>, String> {
+    if value == "none" {
+        return Ok(None);
+    }
+    let table: Value = serde_json::from_str(value).map_err(|error| error.to_string())?;
+    let table = table
+        .as_object()
+        .ok_or("the compactor is {provider, model, effort}, or none")?;
+    let mut compactor = Compactor {
+        provider: String::new(),
+        model: None,
+        effort: None,
+        picked: false,
+    };
+    for (key, value) in table {
+        let text = value
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("compactor.{key} is a text"))?;
+        match key.as_str() {
+            "provider" => compactor.provider = text,
+            "model" => compactor.model = Some(text),
+            "effort" => compactor.effort = Some(text),
+            key => return Err(format!("unknown key `compactor.{key}`")),
+        }
+    }
+    match providers::get(&compactor.provider) {
+        Some(_) => Ok(Some(compactor)),
+        None => Err(format!("unknown provider `{}`", compactor.provider)),
+    }
+}
+
 const SUMMARY_SOURCES: &str = "summary is \"compactor\" or \"agent\"";
 
 fn threshold_range() -> String {
@@ -369,8 +424,17 @@ fn compactor_table(compactor: &Compactor) -> toml_edit::Item {
 /// is, `providers::smallest_ready`): written once, marked `picked` until the user saw the notice,
 /// and said once with `compaction.changed`.
 pub fn settings(daemon: &Daemon) -> Result<Settings, Failure> {
-    let settings =
+    let mut settings =
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
+    // All machines' compactor this machine lacks is ignored here: its own pick compacts.
+    if settings.compactor_from_all
+        && settings.compactor.as_ref().is_some_and(|compactor| {
+            providers::lacks(daemon, &compactor.provider, compactor.model.as_deref()).is_some()
+        })
+    {
+        settings =
+            Settings::own(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
+    }
     if settings.compactor_set {
         return Ok(settings);
     }
@@ -398,8 +462,18 @@ pub fn settings(daemon: &Daemon) -> Result<Settings, Failure> {
     })?;
     if written {
         announce(daemon)?;
+        // The pick just written: all machines' compactor, ignored here, would stand over it.
+        return Settings::own(&daemon.paths).map_err(|error| Failure::new("invalid-config", error));
     }
     Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))
+}
+
+/// Drops this machine's own compactor, or its choice of none: all machines' applies again.
+pub(crate) fn forget_compactor(paths: &Paths) -> Result<(), Failure> {
+    edit(paths, |before, document| {
+        Ok(before.compactor_set && document.remove("compactor").is_some())
+    })
+    .map(drop)
 }
 
 /// The user's guidance, if any: none when it is blank. A file that cannot be read whole, or holds
@@ -451,7 +525,7 @@ fn instructions(paths: &Paths) -> Result<String, String> {
     Ok(format!("{before}{}{after}", guidance.trim()))
 }
 
-fn announce(daemon: &Daemon) -> Result<(), Failure> {
+pub(crate) fn announce(daemon: &Daemon) -> Result<(), Failure> {
     let shown = show(daemon)?;
     daemon
         .emit("compaction.changed", shown)
