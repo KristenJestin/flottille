@@ -398,6 +398,7 @@ and whatever else they want.
 |---|---|---|
 | Default | `crates/flottille/roles/rules.md`, in the binary | never; it is what Reset to default returns to |
 | All projects | `rules.md` in Flottille's configuration folder (`$XDG_CONFIG_HOME/flottille/`), absent while the default holds | the window's Settings, "Rules"; by hand |
+| All machines | sealed for every machine, kept by the hub without reading it (`docs/remote.md`, "Settings for all machines"); followed by a machine with no `rules.md` of its own | the window's Settings, All machines |
 | One project | the `rules` key of its file | the project's Settings, "Rules"; by hand; `project {action: "set_rules"}` of an agent, held |
 
 The project's rules **add to** the global ones: an agent gets the global rules (the user's, else the
