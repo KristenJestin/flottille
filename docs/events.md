@@ -666,6 +666,7 @@ An agent was written, before its process starts.
 | `parent` | The agent that launched it, `null` for a root. |
 | `depth` | 0 for a root, its parent's plus one for a child. |
 | `title` | Its task's title, `null` for a root. |
+| `led_by` | The agent that leads it, as `agent.list` says it: `null` for a session no agent leads (a child, the user's own, one handed to the user). |
 
 #### `agent.moved`
 
