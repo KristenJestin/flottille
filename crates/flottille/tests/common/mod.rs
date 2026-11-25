@@ -1382,3 +1382,20 @@ pub fn user_namespaces() -> bool {
         .status()
         .is_ok_and(|status| status.success())
 }
+
+/// Unfolds, as the user would, the led rows of every pilot the window folds by default (#1452):
+/// for a test of what those rows show, not of the fold. A fold the user chose stays.
+pub fn unfold_pilots(
+    shell: &gpui_kit::Entity<flottille_window::Shell>,
+    cx: &mut gpui_kit::VisualTestContext,
+) {
+    let folded: Vec<_> = shell.read_with(cx, |s, cx| {
+        s.session_row_list()
+            .into_iter()
+            .filter(|row| row.read(cx).folded_by_default())
+            .collect()
+    });
+    for row in folded {
+        row.update(cx, |row, cx| row.toggle(cx));
+    }
+}

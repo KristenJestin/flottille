@@ -2821,11 +2821,15 @@ impl Shell {
         // A session of another machine is known here by its row: its id there is its page's.
         let agent = self.agent_of(id);
         let subject = self.snapshot.session(id).and_then(|s| s.subject.clone());
+        let led = self.led_lines_of(id);
         if let Some(open) = self.session_page.clone()
             && open.read(cx).id() == agent
         {
             if open.read(cx).subject() != subject.as_ref() {
                 open.update(cx, |open, cx| open.set_subject(subject, cx));
+            }
+            if open.read(cx).led() != led.as_slice() {
+                open.update(cx, |open, cx| open.set_leads(led, cx));
             }
             open.update(cx, |open, cx| open.set_title(title, cx));
             return Some(open);
@@ -2834,6 +2838,9 @@ impl Shell {
         if let Some(kept) = self.kept_pages.get(id).cloned() {
             if kept.read(cx).subject() != subject.as_ref() {
                 kept.update(cx, |kept, cx| kept.set_subject(subject, cx));
+            }
+            if kept.read(cx).led() != led.as_slice() {
+                kept.update(cx, |kept, cx| kept.set_leads(led, cx));
             }
             kept.update(cx, |kept, cx| kept.set_title(title, cx));
             self.chose_on(&kept, id, cx);
@@ -2935,6 +2942,7 @@ impl Shell {
         page.update(cx, |page, cx| {
             page.set_providers(&providers, cx);
             page.set_subject(subject, cx);
+            page.set_leads(led, cx);
         });
         self.chose_on(&page, id, cx);
         self.session_page = Some(page.clone());
@@ -5427,6 +5435,27 @@ impl Shell {
         }
     }
 
+    /// The rows of the sidebar's sessions, every one it holds.
+    pub fn session_row_list(&self) -> Vec<Entity<SessionRow>> {
+        self.sessions.values().cloned().collect()
+    }
+
+    /// The rows of the Leads section of the session `id`: the sessions it leads, here and on
+    /// other machines, and its launches held for the user.
+    fn led_lines_of(&self, id: &str) -> Vec<crate::leads::LedLine> {
+        let read = &self.snapshot;
+        let held = read
+            .session(id)
+            .map(|session| session.held.as_slice())
+            .unwrap_or_default();
+        crate::leads::led_lines(
+            id,
+            read.sessions.iter().chain(read.elsewhere.iter()),
+            held,
+            &read.homes,
+        )
+    }
+
     /// The pull request of a session: the daemon's, with what it is about, else the one of the
     /// place it works in, when a project page read it. A session of another machine's list says
     /// its own machine's.
@@ -5905,6 +5934,14 @@ impl Shell {
         {
             let subject = found.subject.clone();
             page.update(cx, |page, cx| page.set_subject(subject, cx));
+        }
+        // What the sessions the open one leads do changed: its Leads says it.
+        if let Some(page) = self.session_page.clone() {
+            let id = page.read(cx).id().to_owned();
+            let led = self.led_lines_of(&id);
+            if page.read(cx).led() != led.as_slice() {
+                page.update(cx, |page, cx| page.set_leads(led, cx));
+            }
         }
         // The sessions on other machines are found there, not here: they are not in `sessions`.
         let read = self.snapshot.clone();
@@ -7915,6 +7952,23 @@ fn nested(
             .collect();
         if row.read(cx).leads() != led.len() {
             row.update(cx, |row, cx| row.set_leads(led.len(), cx));
+        }
+        // What it says of them, the same words as every client's (`flottille_core::leads`).
+        let counted: Vec<flottille_core::leads::Led> = led
+            .iter()
+            .map(|&other| flottille_core::leads::Led {
+                needs_you: live[other].mark == Some(AgentState::NeedsYou),
+                red: rows[other]
+                    .read(cx)
+                    .pull()
+                    .is_some_and(|pull| pull.mark.as_deref() == Some("failing")),
+                // Nothing says who blocks a session yet (#1451).
+                blocked_by: Vec::new(),
+            })
+            .collect();
+        let summary = flottille_core::leads::summary(&counted, live[at].held.len());
+        if row.read(cx).summary() != summary.as_deref() {
+            row.update(cx, |row, cx| row.set_summary(summary, cx));
         }
         // Folded, the row shows what the sessions it hides ask of the user.
         let hidden = match row.read(cx).is_open() {

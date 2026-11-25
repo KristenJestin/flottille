@@ -314,6 +314,10 @@ pub struct SessionPage {
     /// The last ticket key and pull request its line showed, drawn while their chips fold away.
     about_key: Option<SharedString>,
     about_pull: Option<crate::session_link::PullRequest>,
+    /// The sessions it leads and its launches held for the user, its Leads section, and the rows
+    /// it was last given.
+    leads: crate::leads::Leads,
+    led_lines: Vec<crate::leads::LedLine>,
     follow: Follow,
     layout: Layout,
     /// The session's state, as the shell's tree draws it.
@@ -538,6 +542,8 @@ impl SessionPage {
             subject_shown: None,
             about_key: None,
             about_pull: None,
+            leads: crate::leads::Leads::default(),
+            led_lines: Vec::new(),
         };
         page.relink();
         page.sync_pending(cx);
@@ -1039,6 +1045,23 @@ impl SessionPage {
         };
         let session = self.opened.id.clone();
         self.perform(Command::Detach { session, from }, cx);
+    }
+
+    /// The rows of its Leads section, as it was last given them.
+    pub fn led(&self) -> &[crate::leads::LedLine] {
+        &self.led_lines
+    }
+
+    pub fn leads(&self) -> &crate::leads::Leads {
+        &self.leads
+    }
+
+    pub fn set_leads(&mut self, lines: Vec<crate::leads::LedLine>, cx: &mut Context<Self>) {
+        if self.led_lines != lines {
+            self.led_lines = lines.clone();
+            self.leads.set(lines, cx);
+            cx.notify();
+        }
     }
 
     pub fn subject(&self) -> Option<&crate::model::Subject> {
@@ -2662,6 +2685,7 @@ impl Render for SessionPage {
             .child(self.room.watch(crate::ask_dock::Part::Column))
             .child(self.section(0, header))
             .child(self.section(1, self.about_line(window, cx)))
+            .child(self.section(2, self.leads.section(self.shell.clone(), cx)))
             // The conversation gives up its room to the dock first, down to what it keeps: past
             // that the questions of the card scroll.
             .child(
@@ -2714,7 +2738,7 @@ impl Render for SessionPage {
                     .child(self.ask_dock.clone())
                     .test_support(),
             )
-            .child(self.section(2, dock))
+            .child(self.section(3, dock))
             .test_support();
         div()
             .id("session-page")

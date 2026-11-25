@@ -29,6 +29,7 @@ use crate::project_removal::ProjectRemoval;
 use crate::session::end_sentence;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
+use flottille_core::leads::{Kind, Part};
 
 /// The levels of Flottille's left tree: what a row stands for, drawn with the parts of the tree
 /// the kit has: a project is a first-level row, a session a plain row.
@@ -2120,6 +2121,8 @@ pub struct SessionRow {
     /// How many led sessions sit under its row, and whether they are unfolded.
     leads: usize,
     open: bool,
+    /// The user chose its fold: unfolded or folded it, here or in a window before (kept).
+    chosen: bool,
     /// Where its row sits among the sessions its pilot leads, which the connector to the row
     /// above draws, and the last one it drew, which stays while it fades out.
     tie: Option<Tie>,
@@ -2137,6 +2140,10 @@ pub struct SessionRow {
     renamed: bool,
     /// The last key its chip said, which stays drawn while the chip fades out.
     key_shown: SharedString,
+    /// What it says of the sessions it leads, while it leads one (`flottille_core::leads`), and
+    /// the last it said, which stays drawn while it folds away.
+    summary: Option<Vec<Part>>,
+    summary_shown: Vec<Part>,
     shell: WeakEntity<Shell>,
 }
 
@@ -2182,7 +2189,10 @@ impl SessionRow {
             own: None,
             hidden: None,
             leads: 0,
-            open: true,
+            // A pilot's led rows are folded until the user unfolds them: its summary speaks for
+            // them.
+            open: false,
+            chosen: false,
             tie: None,
             tie_shown: Tie::default(),
             elsewhere: None,
@@ -2191,7 +2201,24 @@ impl SessionRow {
             subject: None,
             renamed: false,
             key_shown: SharedString::default(),
+            summary: None,
+            summary_shown: Vec::new(),
             shell,
+        }
+    }
+
+    /// What it says of the sessions it leads; `None` while it leads none.
+    pub fn summary(&self) -> Option<&[Part]> {
+        self.summary.as_deref()
+    }
+
+    pub fn set_summary(&mut self, summary: Option<Vec<Part>>, cx: &mut Context<Self>) {
+        if self.summary != summary {
+            if let Some(parts) = &summary {
+                self.summary_shown = parts.clone();
+            }
+            self.summary = summary;
+            cx.notify();
         }
     }
 
@@ -2219,7 +2246,8 @@ impl SessionRow {
 
     /// The key of what it is about: `SHOP-60`, `#12`; none for a free session.
     fn key(&self) -> Option<SharedString> {
-        let subject = self.subject.as_ref()?;
+        // A pilot that leads keeps its own title: its second line sums up what it leads.
+        let subject = self.subject.as_ref().filter(|_| self.summary.is_none())?;
         subject
             .key
             .clone()
@@ -2229,7 +2257,11 @@ impl SessionRow {
 
     /// The words of its first line: what it is about, unless the user named it.
     pub fn first_line(&self) -> SharedString {
-        match self.subject.as_ref().filter(|_| !self.renamed) {
+        match self
+            .subject
+            .as_ref()
+            .filter(|_| !self.renamed && self.summary.is_none())
+        {
             Some(subject) => subject.line().into(),
             None => self.title.clone(),
         }
@@ -2404,15 +2436,22 @@ impl SessionRow {
         self.open
     }
 
+    /// Its led rows are folded as they are by default, the user having chosen nothing.
+    pub fn folded_by_default(&self) -> bool {
+        self.leads > 0 && !self.open && !self.chosen
+    }
+
     /// Makes its led rows folded or unfolded as the user left them, before it is first listed:
     /// nothing animates.
     pub fn restore_open(&mut self, open: bool) {
         self.open = open;
+        self.chosen = true;
     }
 
     /// Folds or unfolds the led sessions under its row: the tree draws its level again.
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
+        self.chosen = true;
         cx.notify();
         // The level reads this row: it is drawn again once this update is over.
         let (shell, id) = (self.shell.clone(), self.id.clone());
@@ -2908,6 +2947,18 @@ const LINE: f32 = 16.;
 /// The height of a row's first line, above its second.
 const FIRST: f32 = 18.;
 
+/// The element id of what a pilot says of the sessions it leads, on its second line after the
+/// place: labelled `leads 4 · 1 needs you · 1 red check`.
+pub fn session_summary_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-summary-{id}").into())
+}
+
+/// The element id of one part of a pilot's summary, `leads`, `needs`, `red` or `blocked`, drawn
+/// in the ink of what it says.
+pub fn session_summary_part_id(id: &str, part: &str) -> ElementId {
+    ElementId::Name(format!("session-summary-{part}-{id}").into())
+}
+
 impl SessionRow {
     /// Under the title, faint: the place's icon and name, then, when there is room, its pull
     /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
@@ -2958,8 +3009,20 @@ impl SessionRow {
             window,
             cx,
         );
-        let waits = Some(self.waits_shown.clone())
-            .filter(|waits| !waits.is_empty() && (!self.waits.is_empty() || waiting > 0.0));
+        let waits = Some(self.waits_shown.clone()).filter(|waits| {
+            !waits.is_empty() && (!self.waits.is_empty() || waiting > 0.0) && self.summary.is_none()
+        });
+        // What a pilot says of the sessions it leads takes that place: it unfolds and fades in
+        // after the place, its words fading as they change, and folds away once it leads none.
+        let summing = fade(
+            ElementId::Name(format!("session-summary-fade-{}", self.id).into()),
+            self.summary.is_some(),
+            PANEL,
+            window,
+            cx,
+        );
+        let summary = Some(self.summary_shown.clone())
+            .filter(|parts| !parts.is_empty() && (self.summary.is_some() || summing > 0.0));
         // What a led session runs on unfolds and fades in after the place too, its words fading
         // as they change.
         let running = fade(
@@ -2973,10 +3036,15 @@ impl SessionRow {
             .filter(|runs| !runs.is_empty() && (!self.runs.is_empty() || running > 0.0));
         // The session's own title stays in the tooltip when what it is about took its line.
         let own = (self.first_line() != self.title).then(|| self.title.to_string());
+        // What a pilot waits for stays said in the tooltip once its summary takes the line.
+        let waited = (!self.waits.is_empty()).then(|| self.waits.to_string());
         let tip = [
             own,
             Some(name.clone()),
-            waits.as_ref().map(|w| w.to_string()),
+            summary
+                .as_ref()
+                .map(|parts| flottille_core::leads::words(parts)),
+            waited,
         ]
         .into_iter()
         .chain([runs.as_ref().map(|r| r.to_string())])
@@ -3070,6 +3138,7 @@ impl SessionRow {
                             ))
                             .test_support()
                     }))
+                    .children(summary.map(|parts| self.summary_line(parts, summing, &p)))
                     .children(runs.map(|runs| {
                         div()
                             .id(session_runs_id(&self.id))
@@ -3119,6 +3188,70 @@ impl SessionRow {
                     .test_support()
             }));
         tipped(line, SharedString::from(tip), LINE, window, cx).into_any_element()
+    }
+
+    /// A pilot's summary on its second line, `shown` as far as it unfolded: each part in the ink
+    /// of what it says, the whole fading as its words change.
+    fn summary_line(
+        &self,
+        parts: Vec<Part>,
+        shown: f32,
+        p: &gpui_design_system::Palette,
+    ) -> gpui_kit::AnyElement {
+        let words = SharedString::from(flottille_core::leads::words(&parts));
+        let id = self.id.clone();
+        let p = *p;
+        div()
+            .id(session_summary_id(&self.id))
+            .aria_label(words.clone())
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .min_w_0()
+            .h(px(LINE))
+            .overflow_hidden()
+            .max_w(px(WAITS_WIDTH * shown))
+            .opacity(shown)
+            .child(div().flex_none().child("·"))
+            .child(changing(
+                ElementId::Name(format!("session-summary-words-{}", self.id).into()),
+                words,
+                move |_| {
+                    let mut line = div()
+                        .flex()
+                        .items_center()
+                        .gap(space::XS)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap();
+                    for (at, part) in parts.into_iter().enumerate() {
+                        if at > 0 {
+                            line = line.child(div().flex_none().child("·"));
+                        }
+                        let (name, ink) = match part.kind {
+                            Kind::Leads => ("leads", p.faint),
+                            Kind::NeedsYou => ("needs", AgentState::NeedsYou.colors(&p).0),
+                            Kind::Red => ("red", p.fail),
+                            Kind::Blocked => ("blocked", p.mute),
+                        };
+                        let words = SharedString::from(part.words);
+                        line = line.child(
+                            div()
+                                .id(session_summary_part_id(&id, name))
+                                .aria_label(words.clone())
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(ink)
+                                .child(words)
+                                .test_support(),
+                        );
+                    }
+                    line.into_any_element()
+                },
+            ))
+            .test_support()
+            .into_any_element()
     }
 
     /// The mark of the machine a session runs on (the kit's `MachineMark`, at its small size): its

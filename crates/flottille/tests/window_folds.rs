@@ -204,6 +204,7 @@ fn frames(cx: &mut VisualTestContext) {
 /// One step of the window with what the daemon said.
 fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    common::unfold_pilots(shell, cx);
     frame(cx, Duration::from_millis(16));
 }
 

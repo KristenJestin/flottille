@@ -25,6 +25,8 @@ mod window_ended_section;
 mod window_message_checks;
 #[path = "../window_models.rs"]
 mod window_models;
+#[path = "../window_pilot_leads.rs"]
+mod window_pilot_leads;
 #[path = "../window_questions.rs"]
 mod window_questions;
 #[path = "../window_runs_on.rs"]

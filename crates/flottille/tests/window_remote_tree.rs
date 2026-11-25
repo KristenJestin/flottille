@@ -16,6 +16,7 @@ use flottille_core::protocol::Event;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::device::Device;
+use flottille_window::leads::{lead_machine_id, lead_place_id};
 use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
@@ -23,7 +24,7 @@ use flottille_window::session_link::SessionUpdate;
 use flottille_window::shell::Selection;
 use flottille_window::tree::{session_id, session_machine_id, session_mark_id};
 use gpui_design_system::omarchy::Environment;
-use gpui_design_system::tie_id;
+use gpui_design_system::{tie_id, toggle_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -152,6 +153,7 @@ fn window<'a>(
 /// One step of the window as the platform would run it.
 fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    common::unfold_pilots(shell, cx);
     cx.executor().advance_clock(by);
     cx.run_until_parked();
     cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -220,11 +222,31 @@ fn the_led_row<'a>(
 ) -> (Entity<Shell>, &'a mut VisualTestContext, String) {
     let (shell, cx) = window(pc, cx);
     let row = elsewhere_id("server", agent);
+    // Its pilot's led rows are folded by default (#1452): the user unfolds them.
+    until(&shell, cx, "its pilot's row", |cx| {
+        pilot_row(&shell, cx).is_some()
+    });
+    settle(&shell, cx);
+    if let Some((pilot, false)) = pilot_row(&shell, cx) {
+        cx.update(|window, cx| window.click(toggle_id(session_id(&pilot)), cx));
+    }
     until(&shell, cx, "the row of the session on server", |cx| {
         present(cx, session_id(&row))
     });
     settle(&shell, cx);
     (shell, cx, row)
+}
+
+/// The row of `app` that leads a session, and whether its led rows are unfolded.
+fn pilot_row(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<(String, bool)> {
+    shell.read_with(cx, |s, cx| {
+        let node = s.project("app")?;
+        node.read(cx)
+            .sessions(cx)
+            .iter()
+            .find(|row| row.read(cx).leads() > 0)
+            .map(|row| (row.read(cx).id().to_owned(), row.read(cx).is_open()))
+    })
 }
 
 #[gpui_kit::test]
@@ -369,7 +391,7 @@ fn opening_it_shows_that_machine_s_page_of_it(cx: &mut TestAppContext) {
         })
     });
     // The page arrives: its header and its composer enter, one after the other.
-    for section in ["0", "2"] {
+    for section in ["0", "3"] {
         let id = gpui_kit::ElementId::Name(format!("session-section-{agent}-{section}").into());
         assert!(present(cx, id), "section {section} enters");
     }
@@ -684,6 +706,7 @@ fn quiet(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
             "the window never stopped asking for animation frames"
         );
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        common::unfold_pilots(shell, cx);
         cx.executor().advance_clock(STEP);
         cx.run_until_parked();
         let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -732,6 +755,7 @@ fn a_row_of_another_machine_draws_no_frame_at_rest(cx: &mut TestAppContext) {
     let mut gone = Duration::ZERO;
     while gone < Duration::from_secs(10) {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        common::unfold_pilots(&shell, cx);
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.run_until_parked();
         asked += cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -1710,4 +1734,33 @@ fn mark_all_read_marks_read_on_the_other_machine(cx: &mut TestAppContext) {
     eventually("server says its notification was read", || {
         noted_read(&server, id)
     });
+}
+
+#[gpui_kit::test]
+fn a_led_session_of_another_machine_says_its_machine_in_leads(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+    let (shell, cx) = window(&pc, cx);
+    let row = elsewhere_id("server", &agent);
+    until(&shell, cx, "the pilot's row", |cx| {
+        present(cx, session_id(&pilot))
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&pilot), cx));
+
+    // Its row of Leads names the machine by its mark, before its place.
+    until(&shell, cx, "the machine of its row of Leads", |cx| {
+        present(cx, lead_machine_id(&row))
+    });
+    let machine = label(cx, lead_machine_id(&row)).unwrap_or_default();
+    assert!(machine.contains("server"), "{machine}");
+    let place = label(cx, lead_place_id(&row)).unwrap_or_default();
+    assert!(place.starts_with("main"), "{place}");
 }
