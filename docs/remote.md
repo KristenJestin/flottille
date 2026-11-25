@@ -2927,7 +2927,12 @@ on a real phone, by hand, and reported.
   ZXing over CameraX, not Google's ML Kit: no proprietary library in a public repository's app.
   A pull request's APK is debug-signed (the release key is never given to the run of a pull
   request, which runs the branch's own scripts); only a push, which runs merged code, signs with
-  it. The launcher icon is Android's default until the brand's is added.
+  it. The launcher icon is the brand's (#1242): an adaptive icon (the mark of `assets/brand/mark.svg`
+  as a vector drawable over the icon's dark ground `#141414`, the same drawable as the themed icon's
+  layer), with PNG mipmaps for the legacy shape made by `apps/android/icons.sh` from
+  `assets/brand/icon.svg`; the notifications' small icon is the mark in one colour. The app's
+  `minSdk` is 31, so the legacy PNGs and the `-v26` folder are never read: the issue asked for them
+  and they are kept, a few kilobytes, until a decision to drop them.
 
 - The session page (#826): a request's call is the window's `call_line` computed again in the
   mobile core (a few lines, the same words), not moved to a shared crate (`flottille-core` carries

@@ -18,6 +18,9 @@ a UniFFI library) for everything that talks to a daemon.
 - `app/`: the screens (Jetpack Compose): joining, the sessions in one list, the machines, Settings.
   They see `Phone` (the module's own types), never the bindings; their tests play it with a fake
   (`app/src/test`, Robolectric). `ui/Tokens.kt` holds the kit's colours, durations and easing.
+- the icon (#1242): `app/src/main/res` holds the adaptive launcher icon and the notification's mark
+  (vector drawables of `assets/brand/mark.svg`) and the legacy PNGs, which `icons.sh` renders from
+  `assets/brand/icon.svg`.
 - `version-code.sh`, `apk.sh`: the APK as CI builds it, with the repository's version
   (`docs/releases.md`, "The version"). Never by hand.
 
