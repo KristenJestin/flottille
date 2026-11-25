@@ -4841,7 +4841,7 @@ impl Store {
     ) -> Result<Vec<Notification>> {
         let filter = if unread { "AND read_at IS NULL" } else { "" };
         let columns =
-            "id, at, kind, session, project, workspace, title, excerpt, read_at, resolved";
+            "id, at, kind, session, project, workspace, title, excerpt, read_at, resolved, source";
         let found = match after {
             Some(after) => {
                 let mut statement = self.connection.prepare(&format!(
@@ -5553,6 +5553,10 @@ fn notification_row(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
         excerpt: row.get(7)?,
         read_at: row.get(8)?,
         resolved: row.get::<_, i64>(9)? != 0,
+        request: row
+            .get::<_, String>(10)?
+            .strip_prefix("request:")
+            .and_then(|number| number.parse().ok()),
     })
 }
 
