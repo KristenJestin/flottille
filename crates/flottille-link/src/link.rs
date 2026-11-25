@@ -1030,6 +1030,11 @@ impl Link {
         self.conn.close(CLOSE_DONE, reason);
     }
 
+    /// Lets the link go, as `close` does.
+    pub fn retire(&self, reason: &str) {
+        self.close(reason);
+    }
+
     /// Waits until the link is gone; why, in a sentence.
     pub async fn closed(&self) -> String {
         self.lost(self.conn.closed().await).to_string()
