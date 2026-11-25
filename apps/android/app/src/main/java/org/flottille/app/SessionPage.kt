@@ -4,7 +4,12 @@ import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -14,6 +19,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -55,10 +61,13 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -160,6 +169,23 @@ private fun toLines(entries: List<Entry>): List<Block> {
     }
     flush()
     return out
+}
+
+/** A row of the conversation's list: a line of it, a request asked in it, or the record of one answered. */
+private sealed interface Item {
+    val key: String
+
+    data class Line(val block: Block) : Item {
+        override val key get() = "m-${block.key}"
+    }
+
+    data class Asked(val request: Request) : Item {
+        override val key get() = "r-${request.number}"
+    }
+
+    data class Record(val request: Request, val allowed: Boolean) : Item {
+        override val key get() = "a-${request.number}"
+    }
 }
 
 /**
@@ -292,16 +318,60 @@ fun SessionPage(
         },
     )
 
+    // What the user answered here: once the core drops the request, its card folds into one line.
+    val answered = remember(key) { mutableStateMapOf<Long, Pair<Request, Boolean>>() }
+    val records = answered.values.filter { (r, _) -> requests.none { it.number == r.number } }.sortedBy { it.first.number }
+    val requestCard: @Composable (Request, Modifier) -> Unit = { request, modifier ->
+        RequestCard(
+            request = request,
+            readOnly = readOnly,
+            answering = "request:${request.number}" in answering,
+            refusal = refusedRequests[request.number]?.second,
+            onAnswer = { allow ->
+                answering += "request:${request.number}"
+                scope.launch {
+                    try {
+                        phone.answer(request.machine, request.number, allow)
+                        answered[request.number] = request to allow
+                    } catch (refused: PhoneException) {
+                        if (refused.gone) {
+                            // Decided already or gone: said on its card, which then folds.
+                            refusedRequests[request.number] = request to refused.why
+                            delay(REFUSED_MILLIS)
+                            folded += "request:${request.number}"
+                            refusedRequests.remove(request.number)
+                        } else {
+                            // A link that ended, a time out: the request still waits, so
+                            // does its card, and the user can answer again.
+                            onToast(refused.why)
+                        }
+                    } finally {
+                        answering -= "request:${request.number}"
+                    }
+                }
+            },
+            modifier = modifier,
+        )
+    }
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(palette.bg).testTag("page")) {
             val project = view.projects.firstOrNull { p -> p.sessions.any { it.machine == key.machine && it.agent == key.agent } }?.name
+            // The tree's icon has its amber dot while an agent under the session waits for the user.
+            val childIds = page?.children?.map { it.agent }.orEmpty().toSet()
+            val waitingBelow = view.requests.any { it.machine == key.machine && it.agent in childIds } ||
+                view.asks.any { it.machine == key.machine && it.agent in childIds }
             Header(
                 page = page,
                 key = key,
                 project = project,
                 readOnly = readOnly,
                 onBack = onBack,
-                onTree = if (page != null && page.children.isNotEmpty()) ({ treeOpen = true }) else null,
+                // A child's page, a viewer's and an ended session's change no mode.
+                mode = if (page != null && !readOnly && !page.child && !page.ended) page.mode else null,
+                onMode = { choosingMode = true },
+                waitingBelow = waitingBelow,
+                onTree = if (page != null) ({ treeOpen = true }) else null,
             )
             if (page != null) RunsSection(page.runs, view.tunnels.filter { it.machine == key.machine }, opening)
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -312,7 +382,7 @@ fun SessionPage(
                         modifier = Modifier.padding(Space.Lg),
                     )
                 } else {
-                    ConversationList(phone, key, page, opening, onOlder = {
+                    ConversationList(phone, key, page, opening, requests, records, requestCard, onOlder = {
                         scope.launch {
                             try {
                                 phone.older(key.machine, key.agent)
@@ -323,8 +393,8 @@ fun SessionPage(
                     })
                 }
             }
-            // The asks and the requests wait docked above the composer, never scrolled away with the
-            // conversation: each unfolds in, and folds away once answered.
+            // The asks wait docked above the composer, never scrolled away with the conversation: each
+            // unfolds in, and folds away once answered. A request is in the conversation, where it was asked.
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp).padding(horizontal = Space.Lg)) {
                 items(asks, key = { "ask:${it.asked}" }) { ask ->
                     AskCard(
@@ -361,41 +431,6 @@ fun SessionPage(
                         ),
                     )
                 }
-                items(requests, key = { "request:${it.number}" }) { request ->
-                    RequestCard(
-                        request = request,
-                        readOnly = readOnly,
-                        answering = "request:${request.number}" in answering,
-                        refusal = refusedRequests[request.number]?.second,
-                        onAnswer = { allow ->
-                            answering += "request:${request.number}"
-                            scope.launch {
-                                try {
-                                    phone.answer(request.machine, request.number, allow)
-                                } catch (refused: PhoneException) {
-                                    if (refused.gone) {
-                                        // Decided already or gone: said on its card, which then folds.
-                                        refusedRequests[request.number] = request to refused.why
-                                        delay(REFUSED_MILLIS)
-                                        folded += "request:${request.number}"
-                                        refusedRequests.remove(request.number)
-                                    } else {
-                                        // A link that ended, a time out: the request still waits, so
-                                        // does its card, and the user can answer again.
-                                        onToast(refused.why)
-                                    }
-                                } finally {
-                                    answering -= "request:${request.number}"
-                                }
-                            }
-                        },
-                        modifier = Modifier.animateItem(
-                            fadeInSpec = Motion.spec(Motion.ENTER),
-                            placementSpec = Motion.spec(Motion.PANEL),
-                            fadeOutSpec = Motion.spec(Motion.HOVER),
-                        ),
-                    )
-                }
             }
 
             when {
@@ -413,12 +448,14 @@ fun SessionPage(
                     pictures = pictures,
                     offline = if (online) null else offlineSentence(key.machine, machine, zone),
                     onToast = onToast,
-                    onMode = { choosingMode = true },
+                    waiting = requests.size + asks.size,
                 )
             }
         }
-        Sheet(visible = treeOpen, title = "Agents", tag = "tree", onClose = { treeOpen = false }) {
-            TreeRows(page?.children.orEmpty())
+        Sheet(visible = treeOpen, title = "Agents of this session", aside = "Read only", tag = "tree", onClose = { treeOpen = false }) {
+            val waiting = (view.requests.filter { it.machine == key.machine }.map { it.agent } +
+                view.asks.filter { it.machine == key.machine }.map { it.agent }).toSet()
+            TreeRows(page?.title.orEmpty().ifEmpty { "This session" }, key.agent, page?.working == true, page?.children.orEmpty(), waiting)
         }
         Sheet(visible = choosingMode, title = "Mode", tag = "modes", onClose = { choosingMode = false }) {
             ModeChoices(page?.mode.orEmpty()) { mode ->
@@ -476,13 +513,26 @@ private fun pressedFill(source: MutableInteractionSource): androidx.compose.ui.g
     return fill
 }
 
-/** The top bar: Back, the session and where it runs, and the tree's panel when it has one. */
+/**
+ * The top bar: Back, the session and where it runs, the mode's chip when the user may change it,
+ * and the tree's icon, its amber dot while an agent under the session waits for the user.
+ */
 @Composable
-private fun Header(page: Conversation?, key: SessionKey, project: String?, readOnly: Boolean, onBack: () -> Unit, onTree: (() -> Unit)?) {
+private fun Header(
+    page: Conversation?,
+    key: SessionKey,
+    project: String?,
+    readOnly: Boolean,
+    onBack: () -> Unit,
+    mode: String?,
+    onMode: () -> Unit,
+    waitingBelow: Boolean,
+    onTree: (() -> Unit)?,
+) {
     val palette = LocalPalette.current
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(start = Space.Xs, end = Space.Sm),
-        horizontalArrangement = Arrangement.spacedBy(Space.Xs),
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(start = Space.Xs, end = Space.Xs).testTag("top-bar"),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(Icons.Back, "Back", onBack, modifier = Modifier.testTag("page-back"))
@@ -502,26 +552,71 @@ private fun Header(page: Conversation?, key: SessionKey, project: String?, readO
         }
         if (readOnly) Tag("View only")
         AnimatedVisibility(
+            visible = mode != null,
+            enter = fadeIn(Motion.spec(Motion.ENTER)) + scaleIn(Motion.spec(Motion.ENTER), initialScale = 0.8f),
+            exit = fadeOut(Motion.spec(Motion.HOVER)) + scaleOut(Motion.spec(Motion.HOVER), targetScale = 0.8f),
+        ) {
+            var shown by remember { mutableStateOf(mode.orEmpty()) }
+            if (mode != null) shown = mode
+            ModeChip(shown, onMode, Modifier.padding(horizontal = 2.dp))
+        }
+        AnimatedVisibility(
             visible = onTree != null,
             enter = fadeIn(Motion.spec(Motion.ENTER)) + scaleIn(Motion.spec(Motion.ENTER), initialScale = 0.8f),
             exit = fadeOut(Motion.spec(Motion.HOVER)) + scaleOut(Motion.spec(Motion.HOVER), targetScale = 0.8f),
         ) {
-            IconButton(Icons.Tree, "Agents", { onTree?.invoke() }, modifier = Modifier.testTag("open-tree"))
+            Box {
+                IconButton(Icons.Tree, "Agents", { onTree?.invoke() }, modifier = Modifier.testTag("open-tree"))
+                val dot by animateFloatAsState(if (waitingBelow) 1f else 0f, Motion.spec(Motion.ENTER), label = "tree dot")
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 10.dp, end = 10.dp)
+                        .size(7.dp)
+                        .alpha(dot)
+                        .background(palette.wait, CircleShape),
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, opening: Opening, onOlder: () -> Unit) {
+private fun ConversationList(
+    phone: Phone,
+    key: SessionKey,
+    page: Conversation,
+    opening: Opening,
+    requests: List<Request>,
+    records: List<Pair<Request, Boolean>>,
+    requestCard: @Composable (Request, Modifier) -> Unit,
+    onOlder: () -> Unit,
+) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
     val lines = toLines(page.entries)
-    // It opens on its end: the line before "Earlier messages" is the last one.
-    val state = rememberLazyListState(initialFirstVisibleItemIndex = lines.size)
+    // It opens on its end: the last line, or the last request after it.
+    val state = rememberLazyListState(initialFirstVisibleItemIndex = lines.size + requests.size)
     // What was there when the page opened is simply there; what arrives after unfolds and fades in.
-    val initial = remember(key) { lines.map { it.key }.toSet() }
+    val initial = remember(key) { (lines.map { "m-${it.key}" } + requests.map { "r-${it.number}" }).toSet() }
     val appeared = remember(key) { mutableStateListOf<String>() }
     val unfolded = remember(key) { mutableStateListOf<String>() }
+    // A request sits after the line that was the last when it came, its record once answered too.
+    val anchors = remember(key) { mutableMapOf<Long, String?>() }
+    val lastLine = lines.lastOrNull()?.key
+    for (request in requests) anchors.getOrPut(request.number) { lastLine }
+    for ((request, _) in records) anchors.getOrPut(request.number) { lastLine }
+    val rows = buildList<Item> {
+        fun asked(after: String?) {
+            requests.filter { anchors[it.number] == after }.forEach { add(Item.Asked(it)) }
+            records.filter { anchors[it.first.number] == after }.forEach { (request, allowed) -> add(Item.Record(request, allowed)) }
+        }
+        asked(null)
+        for (line in lines) {
+            add(Item.Line(line))
+            asked(line.key)
+        }
+    }
 
     // It follows its end until the user drags it away from it, and again once they are back at it.
     var following by remember(key) { mutableStateOf(true) }
@@ -562,22 +657,33 @@ private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, 
                     FButton("Earlier messages", onOlder, kind = ButtonKind.Secondary, modifier = Modifier.fillMaxWidth().testTag("earlier"))
                 }
             }
-            items(lines, key = { it.key }) { line ->
-                // Decided once for the line: it never changes shape while it unfolds.
-                val animated = remember { line.key !in initial && line.key !in appeared }
-                LaunchedEffect(line.key) { if (animated) appeared += line.key }
-                val move = Modifier.animateItem(placementSpec = Motion.spec(Motion.PANEL))
-                val open = line.key in unfolded
-                val toggle: () -> Unit = { if (open) unfolded -= line.key else unfolded += line.key }
-                // The tag is on what unfolds: the line's own size is what grows.
-                Unfold(animated, move.testTag("line:${line.key}")) {
-                    when (line) {
-                        is Block.Message -> when (line.entry.kind) {
-                            "link" -> LinkCard(line.entry.seq, line.entry.text, line.entry.link, opening)
-                            else -> MessageView(phone, key, line.entry, line.id)
+            items(rows, key = { it.key }) { row ->
+                // Decided once for the row: it never changes shape while it unfolds.
+                val animated = remember { row.key !in initial && row.key !in appeared }
+                LaunchedEffect(row.key) { if (animated) appeared += row.key }
+                val move = Modifier.animateItem(
+                    fadeInSpec = null,
+                    placementSpec = Motion.spec(Motion.PANEL),
+                    fadeOutSpec = Motion.spec(Motion.HOVER),
+                )
+                // The tag is on what unfolds: the row's own size is what grows.
+                Unfold(animated, move.testTag(if (row is Item.Line) "line:${row.block.key}" else "line:${row.key}")) {
+                    when (row) {
+                        is Item.Line -> {
+                            val line = row.block
+                            val open = line.key in unfolded
+                            val toggle: () -> Unit = { if (open) unfolded -= line.key else unfolded += line.key }
+                            when (line) {
+                                is Block.Message -> when (line.entry.kind) {
+                                    "link" -> LinkCard(line.entry.seq, line.entry.text, line.entry.link, opening)
+                                    else -> MessageView(phone, key, line.entry, line.id)
+                                }
+                                is Block.Delivery -> DeliveryView(line.entry, line.id, open, toggle)
+                                is Block.Steps -> StepsView(line.steps, open, toggle)
+                            }
                         }
-                        is Block.Delivery -> DeliveryView(line.entry, line.id, open, toggle)
-                        is Block.Steps -> StepsView(line.steps, open, toggle)
+                        is Item.Asked -> requestCard(row.request, Modifier)
+                        is Item.Record -> RequestRecord(row.request, row.allowed)
                     }
                 }
             }
@@ -733,85 +839,189 @@ private fun DeliveryView(entry: Entry, id: String, open: Boolean, onToggle: () -
         "message", "started by", "brief" -> Icons.Tree
         else -> Icons.Spark
     }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(palette.card, RoundedCornerShape(12.dp))
-            .border(BorderStroke(1.dp, palette.line), RoundedCornerShape(12.dp)),
-    ) {
-        Row(
+    val what = when (entry.delivery) {
+        "report" -> "a child's report"
+        "woken by" -> "a subscription's news"
+        "message" -> "a message from another session"
+        "started by" -> "a session started for you"
+        "brief" -> "its brief"
+        else -> entry.delivery
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Label("Delivery · $what", style = Type.Small, color = palette.faint, modifier = Modifier.padding(start = Space.Xs, bottom = Space.Xs))
+        Column(
             Modifier
                 .fillMaxWidth()
-                .background(press, RoundedCornerShape(12.dp))
-                .testTag("delivery:$id")
-                .clickable(enabled = foldable, role = Role.Button, indication = null, interactionSource = source, onClick = onToggle)
-                .padding(horizontal = Space.Md, vertical = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(Space.Sm),
-            verticalAlignment = Alignment.CenterVertically,
+                .background(palette.card, RoundedCornerShape(12.dp))
+                .border(BorderStroke(1.dp, palette.line), RoundedCornerShape(12.dp)),
         ) {
-            Glyph(icon, palette.faint, size = 13.dp)
-            Label(entry.delivery, style = Type.Label.copy(fontWeight = FontWeight.SemiBold), color = palette.mute)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(press, RoundedCornerShape(12.dp))
+                    .testTag("delivery:$id")
+                    .clickable(enabled = foldable, role = Role.Button, indication = null, interactionSource = source, onClick = onToggle)
+                    .padding(horizontal = Space.Md, vertical = 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(Space.Sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Glyph(icon, palette.faint, size = 13.dp)
+                Label(entry.delivery, style = Type.Label.copy(fontWeight = FontWeight.SemiBold), color = palette.mute)
+                BasicText(
+                    entry.summary.ifEmpty { entry.text.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() },
+                    style = Type.Label.copy(color = palette.mute),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (foldable) Chevron(open)
+            }
+            AnimatedVisibility(
+                visible = open,
+                enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.PANEL)),
+                exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
+            ) {
+                Label(
+                    entry.text,
+                    style = Type.Label.copy(lineHeight = 19.sp),
+                    color = palette.mute,
+                    modifier = Modifier.padding(start = 36.dp, end = Space.Md, bottom = 10.dp).testTag("delivery-body:$id"),
+                )
+            }
+        }
+    }
+}
+
+/** A request the user answered here, folded to one line: what was asked, and what they said. */
+@Composable
+private fun RequestRecord(request: Request, allowed: Boolean) {
+    val palette = LocalPalette.current
+    val ink = if (allowed) palette.ok else palette.fail
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .border(BorderStroke(1.dp, palette.line), RoundedCornerShape(14.dp))
+            .testTag("request-record:${request.number}")
+            .padding(horizontal = Space.Md, vertical = Space.Sm),
+        horizontalArrangement = Arrangement.spacedBy(Space.Sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Glyph(if (allowed) Icons.Check else Icons.Close, ink, size = 13.dp)
+        BasicText(
+            "Request #${request.number} · ${request.call}",
+            style = Type.Label.copy(color = palette.mute),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Label(if (allowed) "Allowed" else "Denied", style = Type.Label.copy(fontWeight = FontWeight.Medium), color = ink)
+    }
+}
+
+/** The mark of an agent of the tree: amber while it waits for the user, a hollow ring once ended, else running. */
+@Composable
+private fun TreeMark(waits: Boolean, ended: Boolean) {
+    val palette = LocalPalette.current
+    val colour by animateColorAsState(
+        when {
+            waits -> palette.wait
+            ended -> palette.faint
+            else -> palette.run
+        },
+        Motion.spec(Motion.PANEL),
+        label = "tree mark",
+    )
+    Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(9.dp)
+                .border(BorderStroke(1.5.dp, colour), CircleShape)
+                .background(if (ended) colour.copy(alpha = 0f) else colour, CircleShape),
+        )
+    }
+}
+
+/** One agent of the tree, indented under its parent with the window's connector. */
+@Composable
+private fun TreeRow(title: String, line: String, depth: Int, waits: Boolean, ended: Boolean, tag: String) {
+    val palette = LocalPalette.current
+    val indent = 20 + depth * 24
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .testTag(tag)
+            .drawBehind {
+                if (depth > 0) {
+                    val x = (indent - 16).dp.toPx()
+                    val stroke = 1.5.dp.toPx()
+                    drawLine(palette.line2, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x, size.height / 2), stroke)
+                    drawLine(palette.line2, androidx.compose.ui.geometry.Offset(x, size.height / 2), androidx.compose.ui.geometry.Offset(x + 10.dp.toPx(), size.height / 2), stroke)
+                }
+            }
+            .padding(start = indent.dp, end = 20.dp, top = Space.Sm, bottom = Space.Sm),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TreeMark(waits, ended)
+        Column(Modifier.weight(1f)) {
+            BasicText(title, style = Type.Body.copy(fontWeight = FontWeight.Medium, color = palette.text), maxLines = 1, overflow = TextOverflow.Ellipsis)
             BasicText(
-                entry.summary.ifEmpty { entry.text.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() },
-                style = Type.Label.copy(color = palette.mute),
+                if (waits) "waits for you · $line" else line,
+                style = Type.Small.copy(color = if (waits) palette.wait else palette.faint),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            if (foldable) Chevron(open)
-        }
-        AnimatedVisibility(
-            visible = open,
-            enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.PANEL)),
-            exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
-        ) {
-            Label(
-                entry.text,
-                style = Type.Label.copy(lineHeight = 19.sp),
-                color = palette.mute,
-                modifier = Modifier.padding(start = 36.dp, end = Space.Md, bottom = 10.dp).testTag("delivery-body:$id"),
             )
         }
     }
 }
 
-/** The agents of the session's tree, read only, in their panel: each with what it does. */
+/**
+ * The session's tree in its panel, read only: the pilot, then its children and grandchildren with
+ * what each does; the ended ones folded under one line until a tap.
+ */
 @Composable
-private fun TreeRows(children: List<Child>) {
+private fun TreeRows(title: String, agent: String, working: Boolean, children: List<Child>, waiting: Set<String>) {
     val palette = LocalPalette.current
+    val isEnded = { child: Child -> child.doing.startsWith("ended") || child.doing.startsWith("failed") }
+    val (ended, live) = children.partition(isEnded)
+    var showEnded by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-        children.forEachIndexed { index, child ->
-            Entrance(index) {
+        Entrance(0) { TreeRow(title, if (working) "pilot · working" else "pilot", 0, agent in waiting, false, "tree-pilot") }
+        live.forEachIndexed { index, child ->
+            Entrance(index + 1) {
+                TreeRow(child.title.ifEmpty { child.agent }, child.doing, child.depth.coerceIn(1, 2), child.agent in waiting, false, "child:${child.agent}")
+            }
+        }
+        if (ended.isNotEmpty()) {
+            val source = remember { MutableInteractionSource() }
+            Entrance(live.size + 1) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .testTag("child:${child.agent}")
-                        .padding(start = Space.Xl - Space.Xs + ((child.depth.coerceAtLeast(1) - 1) * 20).dp, end = Space.Xl - Space.Xs, top = 9.dp, bottom = 9.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        .background(pressedFill(source))
+                        .testTag("tree-ended")
+                        .clickable(role = Role.Button, indication = null, interactionSource = source) { showEnded = !showEnded }
+                        .padding(start = 44.dp, end = 20.dp, top = 10.dp, bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Space.Sm),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    val ended = child.doing.startsWith("ended") || child.doing.startsWith("failed")
-                    Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                        Box(
-                            Modifier
-                                .size(9.dp)
-                                .border(BorderStroke(1.5.dp, if (ended) palette.faint else palette.run), CircleShape)
-                                .background(if (ended) palette.bg.copy(alpha = 0f) else palette.run, CircleShape),
-                        )
-                    }
-                    Column(Modifier.weight(1f)) {
-                        BasicText(child.title.ifEmpty { child.agent }, style = Type.Body.copy(fontWeight = FontWeight.Medium, color = palette.text), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        BasicText(child.doing, style = Type.Small.copy(color = palette.faint), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Chevron(showEnded)
+                    Label("Ended", style = Type.Label, color = palette.mute)
+                    Label("${ended.size}", style = Type.Small, color = palette.faint)
+                }
+            }
+            AnimatedVisibility(
+                visible = showEnded,
+                enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.PANEL)),
+                exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
+            ) {
+                Column {
+                    ended.forEach { child ->
+                        TreeRow(child.title.ifEmpty { child.agent }, child.doing, 1, false, true, "child:${child.agent}")
                     }
                 }
             }
         }
-        Label(
-            "Read only: a sub-agent belongs to its parent.",
-            style = Type.Small,
-            color = palette.faint,
-            modifier = Modifier.padding(horizontal = Space.Xl - Space.Xs, vertical = Space.Sm),
-        )
     }
 }
 
@@ -824,7 +1034,7 @@ private fun Composer(
     pictures: PictureSource,
     offline: String?,
     onToast: (String) -> Unit,
-    onMode: () -> Unit,
+    waiting: Int,
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -867,6 +1077,7 @@ private fun Composer(
             .padding(start = 10.dp, end = 10.dp, top = Space.Sm, bottom = Space.Sm),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        ComposerStatus(page.working, waiting)
         // What is attached unfolds in the composer and folds away when it leaves.
         AnimatedVisibility(
             visible = attached.isNotEmpty(),
@@ -891,28 +1102,73 @@ private fun Composer(
                 }
             }
         }
-        MessageField(text, { text = it })
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().testTag("composer-bar"),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
             IconButton(Icons.Image, "Gallery", { pictures.gallery(::attach) }, size = 40.dp)
             IconButton(Icons.Camera, "Camera", { pictures.camera { it?.let { picture -> attach(Pictured(listOf(picture))) } } }, size = 40.dp)
-            ModeChip(page.mode, onMode, Modifier.padding(start = Space.Xs))
-            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                // Stop takes Send's place while a turn runs and Send has nothing to send.
-                Crossfade(targetState = page.working && !canSend, animationSpec = Motion.spec(Motion.PANEL), label = "send or stop") { stop ->
-                    if (stop) {
-                        IconButton(
-                            Icons.Stop,
-                            "Stop",
-                            { scope.launch { try { phone.stop(key.machine, key.agent) } catch (refused: PhoneException) { onToast(refused.why) } } },
-                            kind = ButtonKind.Secondary,
-                            modifier = Modifier.testTag("stop"),
-                        )
-                    } else {
-                        IconButton(Icons.Send, "Send", ::send, kind = ButtonKind.Primary, enabled = canSend, modifier = Modifier.testTag("send"))
-                    }
+            Box(Modifier.weight(1f).padding(horizontal = Space.Xs)) { MessageField(text, { text = it }) }
+            // Stop takes Send's place while a turn runs and Send has nothing to send.
+            Crossfade(targetState = page.working && !canSend, animationSpec = Motion.spec(Motion.PANEL), label = "send or stop") { stop ->
+                if (stop) {
+                    IconButton(
+                        Icons.Stop,
+                        "Stop",
+                        { scope.launch { try { phone.stop(key.machine, key.agent) } catch (refused: PhoneException) { onToast(refused.why) } } },
+                        kind = ButtonKind.Secondary,
+                        modifier = Modifier.testTag("stop"),
+                    )
+                } else {
+                    IconButton(Icons.Send, "Send", ::send, kind = ButtonKind.Primary, enabled = canSend, modifier = Modifier.testTag("send"))
                 }
             }
         }
+    }
+}
+
+/** What the session does, above the composer: it works, and what waits for the user; nothing at rest. */
+@Composable
+private fun ComposerStatus(working: Boolean, waiting: Int) {
+    val palette = LocalPalette.current
+    val said = when {
+        !working && waiting == 0 -> null
+        waiting == 0 -> "Working"
+        else -> (if (working) "Working · " else "") + if (waiting == 1) "one question or request waits for you" else "$waiting wait for you"
+    }
+    var shown by remember { mutableStateOf(said.orEmpty()) }
+    if (said != null) shown = said
+    AnimatedVisibility(
+        visible = said != null,
+        enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.ENTER)),
+        exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp).testTag("composer-status"),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (working) Spinner()
+            Crossfade(targetState = shown, animationSpec = Motion.spec(Motion.HOVER), label = "composer status") {
+                Label(it, style = Type.Small, color = palette.faint)
+            }
+        }
+    }
+}
+
+/** A small ring that turns while the agent works. */
+@Composable
+private fun Spinner() {
+    val palette = LocalPalette.current
+    val turn by rememberInfiniteTransition(label = "spinner").animateFloat(
+        0f,
+        360f,
+        infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "spinner turn",
+    )
+    Canvas(Modifier.size(10.dp).rotate(turn)) {
+        drawArc(palette.run, 0f, 270f, false, style = Stroke(1.5.dp.toPx()))
     }
 }
 
@@ -961,9 +1217,9 @@ private fun Thumbnail(picture: Picture) {
 
 /** The names of the modes, and what each lets the agents do. */
 private val Modes = listOf(
-    Triple("ask", "Ask", "Every call that is not harmless asks you."),
-    Triple("auto", "Auto", "The judge allows what is harmless and asks you the rest."),
-    Triple("full", "Full", "The agents run commands and change files without asking you."),
+    Triple("ask", "Ask", "Every call that changes something asks you."),
+    Triple("auto", "Auto", "A judge allows what is safe; the rest asks you."),
+    Triple("full", "Full", "Your own terminal: its commands are confined in no way, with your keys and sign-ins."),
 )
 
 /** The mode, one control: its name, in the alarm colour in Full; a tap opens the choices. */
@@ -1005,52 +1261,60 @@ private fun ModeChip(mode: String, onOpen: () -> Unit, modifier: Modifier = Modi
     }
 }
 
-/** The three modes in their panel, the chosen one marked: its fill and its check move over [Motion.PANEL]. */
+/** The three modes in their panel, the chosen one's radio filled over [Motion.PANEL]; Full in its warning colour. */
 @Composable
 private fun ModeChoices(mode: String, onChoose: (String) -> Unit) {
     val palette = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = Space.Md)) {
+    Column(Modifier.fillMaxWidth()) {
         Modes.forEachIndexed { index, (value, name, says) ->
             val chosen = mode == value
             val alarm = value == "full"
             val source = remember { MutableInteractionSource() }
-            val pressed by source.collectIsPressedAsState()
-            val fill by animateColorAsState(
+            val ring by animateColorAsState(
                 when {
-                    chosen && alarm -> palette.failBg
-                    chosen -> palette.sel
-                    pressed -> palette.hover
-                    else -> palette.bg.copy(alpha = 0f)
+                    chosen && alarm -> palette.fail
+                    chosen -> palette.text
+                    else -> palette.faint
                 },
-                Motion.spec(Motion.PANEL),
-                label = "mode choice fill",
+                Motion.spec(Motion.HOVER),
+                label = "mode radio ring",
             )
-            val mark by animateFloatAsState(if (chosen) 1f else 0f, Motion.spec(Motion.PANEL), label = "mode choice mark")
+            val dot by animateFloatAsState(if (chosen) 1f else 0f, Motion.spec(Motion.PANEL), label = "mode radio")
             Entrance(index) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .background(fill, RoundedCornerShape(12.dp))
+                        .background(pressedFill(source))
                         .testTag("mode:$value")
                         .semantics { selected = chosen }
                         .clickable(role = Role.RadioButton, indication = null, interactionSource = source) { onChoose(value) }
-                        .padding(horizontal = Space.Md, vertical = Space.Md),
+                        .padding(horizontal = 20.dp, vertical = Space.Md),
                     horizontalArrangement = Arrangement.spacedBy(Space.Md),
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalAlignment = Alignment.Top,
                 ) {
+                    Box(Modifier.padding(top = 2.dp).size(18.dp).border(BorderStroke(1.5.dp, ring), CircleShape), contentAlignment = Alignment.Center) {
+                        Box(
+                            Modifier
+                                .size(9.dp)
+                                .graphicsLayer {
+                                    scaleX = dot
+                                    scaleY = dot
+                                }
+                                .background(if (alarm) palette.fail else palette.text, CircleShape),
+                        )
+                    }
                     Column(Modifier.weight(1f)) {
-                        Label(name, style = Type.Body.copy(fontWeight = FontWeight.Medium), color = if (alarm) palette.fail else palette.text)
+                        Label(name, style = Type.Body.copy(fontWeight = FontWeight.SemiBold), color = if (alarm) palette.fail else palette.text)
                         Label(says, style = Type.Small, color = palette.faint)
                     }
-                    Glyph(Icons.Check, palette.text, Modifier.alpha(mark), size = 18.dp)
                 }
             }
         }
         Label(
-            "Full asks you to confirm it first.",
+            "Applies to this session and the agents it leads. Full asks you to confirm it.",
             style = Type.Small,
             color = palette.faint,
-            modifier = Modifier.padding(horizontal = Space.Md, vertical = Space.Sm),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = Space.Sm),
         )
     }
 }

@@ -1624,14 +1624,20 @@ recreated.
   dialog. An answer the machine refuses because the request is decided already or gone (or the ask
   is answered) is said on the card, which then folds; any other refusal (a link that ended, a time
   out) is a toast and the card stays, to answer again.
-- **Controls**: the mode as one control in the composer's bar, its name (in the alarm colour in
-  Full); a tap opens a panel with the three choices and what each lets the agents do (#1442).
-  **Full asks for a confirmation on the phone**, the one confirmation dialog, since one tap in a
-  pocket must not give the agents the run of the machine. Stop, an icon,
-  in Send's place while a turn runs and there is nothing to send (`agent.cancel`: the agent
-  stays), and the session's tree read only, **in a panel opened from the top bar** (Agents), never
-  under the conversation. Back, the gallery, the camera, Send and Stop are icons, each with its
-  label for a screen reader. **A child's page has no composer**, no mode and no
+- **Controls** (#1442, design B brought up to date): the top bar holds an icon Back, the title
+  and where the session runs, the **mode's chip** (its name, in the warning colour in Full; a tap
+  opens a panel with the three modes as radio rows and what each lets the agents do; a choice
+  applies and closes it, **Full asks for a confirmation on the phone** first, the one confirmation
+  dialog, since one tap in a pocket must not give the agents the run of the machine) and the
+  **tree's icon**, with an amber dot while an agent under the session waits for the user: it
+  opens the tree as a panel from the bottom, read only, the pilot first, then its children and
+  grandchildren with what each does, the ended ones folded under one line. A **request is in
+  the conversation**, where it was asked, with Allow and Deny; answered from the phone, it folds
+  into one line (`Request #4 · <call>`, `Allowed` or `Denied`). The questions stay docked above
+  the composer. The composer is one row of icons, Gallery, Camera, the field, Send, each with its
+  label for a screen reader; Stop takes Send's place while a turn runs and there is nothing to
+  send (`agent.cancel`: the agent stays); a line above says the session works and what waits for
+  the user. **A child's page has no composer**, no mode and no
   Stop; an ended session says it has ended in place of the composer.
 - **A `viewer` reads only**: the page draws no composer, no pictures buttons, no answer (the
   ask card is read, its options are text), no Allow or Deny, no mode, no Stop, and says `View only`.
@@ -1646,7 +1652,9 @@ recreated.
   (`ENTER`); the list follows the growing end, **New messages** rises and fades in and out, a
   delivery's body unfolds with its chevron turning (`PANEL`), the panels of the tree and of the
   mode rise over their scrim and go down (`PANEL`), their rows come in staggered, the chosen mode's
-  fill and check move, the mode's control moves to the alarm colour and cross-fades its name, every
+  radio fills, the mode's chip moves to the alarm colour and cross-fades its name, an answered
+  request folds away and its line unfolds, the tree's dot and its ended agents fade and unfold, the
+  composer's status line unfolds and its spinner turns, every
   icon button fades and sinks when pressed (`HOVER`, `PRESS`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
   request cards dock, slide into place and fade away (`animateItem`); a question slides in from
   the side of the move, the dots and the option rows move their fill and ring (`PANEL`), the field
@@ -2971,12 +2979,16 @@ on a real phone, by hand, and reported.
   there (a project made again for a branch of another root): the caller's daemon sends the removal
   for the first of its launches holding that name, and the machine there removes that launch's
   alone. Naming which, by its session, is a follow-up if the case is met.
-- **The session page on the phone** (#1442): the tree's button is in the top bar only when the
-  session has sub-agents; the mode's control sits in the composer's bar, as in the prototype, so a
-  child's page and a viewer's, which have no composer, show no mode; choosing the mode already
-  chosen sends nothing. The composer's field says `Write to the agent` until something is written
-  (its label for a screen reader is `Message`). A delivery the core does not know by name is one
-  line of its kind and its first words, as the window's notice.
+- **The session page on the phone** (#1442): the mode's chip is drawn only where the mode may be
+  changed (not on a child's page, a viewer's or an ended session's); choosing the mode already
+  chosen sends nothing; Full keeps its confirmation, which the extended design left open. The
+  tree's icon is always in the top bar (the pilot is a row of its own). A request answered on
+  another device leaves no record on the phone: the phone knows only the answers it gave. A
+  request sits after the line that was the conversation's last when it came. The composer's field
+  says `Write to the agent` until something is written (its label for a screen reader is
+  `Message`). A delivery the core does not know by name is one line of its kind and its first
+  words, as the window's notice. The machine's mark of #1249 is not drawn yet: the phone has no
+  machine colour to draw it with; the subtitle names the machine.
 
 ## Open questions
 

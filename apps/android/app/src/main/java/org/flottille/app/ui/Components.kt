@@ -334,18 +334,28 @@ fun IconButton(
 
 /**
  * A panel that rises from the bottom over a scrim, over [Motion.PANEL], and goes down again: the
- * tree of a session, the choice of its mode. [onClose] is its Close button and the scrim's tap.
+ * tree of a session, the choice of its mode. [onClose] is its Close button and the scrim's tap;
+ * [aside] a word said beside the title (`Read only`).
  * [tag] names the panel for the tests.
  */
 @Composable
-fun Sheet(visible: Boolean, title: String, tag: String, onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+fun Sheet(
+    visible: Boolean,
+    title: String,
+    tag: String,
+    onClose: () -> Unit,
+    aside: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val palette = LocalPalette.current
     AnimatedVisibility(visible, enter = fadeIn(Motion.spec(Motion.PANEL)), exit = fadeOut(Motion.spec(Motion.PANEL))) {
         Box(
             Modifier
                 .fillMaxSize()
                 .background(palette.scrim)
-                .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onClose),
+                // A tap with no semantics: a clickable scrim would merge the panel into itself, and
+                // Close is the panel's way out for a screen reader.
+                .pointerInput(onClose) { detectTapGestures { onClose() } },
             contentAlignment = Alignment.BottomCenter,
         ) {
             Column(
@@ -371,6 +381,7 @@ fun Sheet(visible: Boolean, title: String, tag: String, onClose: () -> Unit, con
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Label(title, style = Type.Body.copy(fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f))
+                    if (aside != null) Label(aside, style = Type.Small, color = palette.faint)
                     IconButton(Icons.Close, "Close", onClose)
                 }
                 content()
