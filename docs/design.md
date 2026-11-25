@@ -1691,7 +1691,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   by them (`blocked` on its line of the tree, derived by the daemon from the items it keeps, never
   set by hand; a check, a run, a wake or a led session it follows is `waiting`, as before, and a
   person is a named human, never a CI, a bot or the user). Its mark is a person's silhouette in
-  the `away` ink, its line 2 `waits for Maya · review of #123`. A blocked **root** leaves its
+  the `away` ink, its line 1 what it is about as every row's, its line 2 `waits for Maya ·
+  review of #123`. A blocked **root** leaves its
   project's list for one group "Blocked by others", pinned at the bottom of the sidebar above
   "Ended", folded by default, the pattern of Ended (its rows say their project and their machine's
   icon), its heading saying the count and who (`Blocked by others 2 · Maya, Noor`), absent while
