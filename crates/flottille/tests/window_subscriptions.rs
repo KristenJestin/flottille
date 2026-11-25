@@ -959,6 +959,12 @@ fn a_following_says_what_its_session_waits_for_you_and_folds_it_away_once_answer
 ) {
     let user = user();
     script(&user, pull());
+    // Connections on: a root may then propose entries, and so has the tool `vault`.
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
     user.fake_script(json!({"turns": [
         {"when": "Sign in to staging.", "do": [
             {"mcp": {"tool": "vault", "arguments": {"action": "ask", "name": "staging-login",

@@ -823,6 +823,16 @@ fn call(tool: &str, arguments: Value) -> Value {
     json!({"mcp": {"tool": tool, "arguments": arguments}})
 }
 
+/// Connections on: a root may then propose entries, and so has the tool `vault` to ask for one
+/// though its project sees no entry yet.
+fn with_vault(user: &User) {
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+}
+
 /// The led session asks the user for the vault entry `staging-login`.
 fn vault_ask() -> Value {
     call(
@@ -880,7 +890,7 @@ fn a_lead_is_woken_with_the_question_its_led_session_asks_its_number_and_its_tex
     let woken = wakes(&user, &lead).remove(0);
     for word in [
         "asked you",
-        &format!("Its question #{number} to you"),
+        &format!("Its question to you (#{number}):"),
         "Which scope?",
     ] {
         assert!(woken.contains(word), "{word}: {woken}");
@@ -890,6 +900,7 @@ fn a_lead_is_woken_with_the_question_its_led_session_asks_its_number_and_its_tex
 #[test]
 fn a_lead_is_woken_with_the_vault_entry_its_led_session_asks_its_number_and_its_reason() {
     let user = User::with_fake_agent();
+    with_vault(&user);
     user.fake_script(json!({"turns": [
         {"when": "Fix the login.", "do": [vault_ask(),
             {"say": "Waiting for the user's answer on the vault entry."}]}
@@ -978,6 +989,7 @@ fn a_lead_is_woken_with_the_connection_its_led_session_asks_its_number_and_its_r
 #[test]
 fn a_session_with_no_lead_wakes_nobody_with_its_requests() {
     let user = User::with_fake_agent();
+    with_vault(&user);
     on_github(&user);
     user.fake_script(json!({"turns": [
         {"when": "hello", "do": [vault_ask(), {"say": "Waiting for you."}]}
@@ -1001,6 +1013,7 @@ fn a_session_with_no_lead_wakes_nobody_with_its_requests() {
 #[test]
 fn a_turn_that_wrote_to_its_starter_and_waits_for_the_user_wakes_it_with_the_request() {
     let user = User::with_fake_agent();
+    with_vault(&user);
     let (lead, mcp) = lead(&user);
     user.fake_script(json!({"turns": [
         {"when": "Fix the login.", "do": [
@@ -1026,6 +1039,7 @@ fn a_turn_that_wrote_to_its_starter_and_waits_for_the_user_wakes_it_with_the_req
 #[test]
 fn each_request_is_said_once_in_the_turn_that_asked_it() {
     let user = User::with_fake_agent();
+    with_vault(&user);
     user.fake_script(json!({"turns": [
         {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]},
         {"when": "Go on.", "do": [{"say": "Still waiting."}]}
@@ -1043,6 +1057,7 @@ fn each_request_is_said_once_in_the_turn_that_asked_it() {
 #[test]
 fn the_lead_is_told_on_its_next_wake_when_the_user_dismisses_the_vault_entry() {
     let user = User::with_fake_agent();
+    with_vault(&user);
     user.fake_script(json!({"turns": [
         {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]}
     ]}));
@@ -1106,6 +1121,7 @@ fn the_lead_is_told_on_its_next_wake_when_the_user_denies_a_held_call() {
 #[test]
 fn the_following_lists_what_its_session_waits_for_the_user() {
     let user = User::with_fake_agent();
+    with_vault(&user);
     user.fake_script(json!({"turns": [
         {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]}
     ]}));
