@@ -83,8 +83,14 @@ fn waits_on(
         "pull" => match item.details["requested"].as_array() {
             Some(requested) => requested
                 .iter()
-                .filter_map(|name| name.as_str())
-                .map(|name| (name.to_owned(), String::new()))
+                .filter_map(|who| match who.as_str() {
+                    // As a round before the login was kept stored it.
+                    Some(name) => Some((name.to_owned(), String::new())),
+                    None => Some((
+                        who["name"].as_str()?.to_owned(),
+                        who["login"].as_str().unwrap_or_default().to_owned(),
+                    )),
+                })
                 .collect(),
             // Bitbucket keeps its reviewers with their verdicts.
             None => item.details["reviewers"]

@@ -4538,19 +4538,23 @@ fn listed_pull(path: &str, value: &Value) -> Option<crate::items::Fetched> {
 }
 
 /// The people a review is asked of and not given yet, as `gh pr list --json reviewRequests` says
-/// them (GitHub drops a reviewer from it once they reviewed): each by the name they set, else
-/// their login, never their account's id or an e-mail. A team or a bot is no person.
-fn requested(list: &Value) -> Vec<String> {
+/// them (GitHub drops a reviewer from it once they reviewed): each `{name, login}`, by the name
+/// they set, else their login, never their account's id or an e-mail. The login is only compared
+/// with the user's (`blocked`). A team or a bot is no person: gh says which (`__typename`).
+fn requested(list: &Value) -> Vec<Value> {
     list.as_array()
         .into_iter()
         .flatten()
+        .filter(|who| who["__typename"].as_str().is_none_or(|kind| kind == "User"))
         .filter(|who| who["login"].as_str().is_some_and(|login| !login.is_empty()) && !is_bot(who))
         .map(|who| {
+            let login = masked(who["login"].as_str().unwrap_or_default());
             let name = who["name"].as_str().unwrap_or_default();
-            match name.is_empty() || name.contains('@') {
-                true => masked(who["login"].as_str().unwrap_or_default()),
+            let name = match name.is_empty() || name.contains('@') {
+                true => login.clone(),
                 false => masked(name),
-            }
+            };
+            json!({"name": name, "login": login})
         })
         .collect()
 }
