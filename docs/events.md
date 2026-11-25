@@ -1325,7 +1325,8 @@ event of its own, when the session ends: `agent.ended` (or `agent.failed`) says 
 #### `exception.granted`
 
 The user allowed a call asked with `exception`: the rule no longer stops that session, and its
-next calls are classed without it.
+next calls are classed without it. One the session held for that rule is replaced, with no
+`exception.withdrawn`: this event's `scope` is what it covers now.
 
 #### `exception.withdrawn`
 

@@ -1044,20 +1044,26 @@ with `exception`, its reason, saying exactly what the rule refuses and why it is
   be resumed) or the user withdraws it, in the window (the session's rail, Exceptions) or with
   `flottille exception withdraw`. Other sessions and the session's own sub-agents still ask for
   themselves. Denied or left unanswered, nothing changes. The exception and the answer stay in the
-  session's history (`exception.granted`, `exception.withdrawn`).
+  session's history (`exception.granted`, `exception.withdrawn`). A session holds one exception
+  of a rule: a second ask for it says on its card which one it replaces (`it replaces the
+  exception for #12 of app/login`), and allowed, it does.
 - An exception is what the user allowed, exactly that, nothing wider. It covers the branch and
-  the repository it was asked for, and for a merge that pull request: after a `git switch`, a
-  forced push of another branch, or the merge of another pull request, is held and refused as
-  before. It lifts only its rule's reasons: what else the gate says of a call stays, and the
+  the repository it was asked for, and for a merge that pull request at the head commit and with
+  the blockers its card said: after a `git switch`, a forced push of another branch, or the merge
+  of another pull request, is held and refused as before, and a commit pushed or a blocker come
+  since (a review asking for changes, another check failing) refuses the merge until it is asked
+  again. `forge-state` has no scope, and its card says so. It lifts only its rule's reasons: what else the gate says of a call stays, and the
   session's mode decides it as before; one rule's exception never lifts another.
 
 What can be asked for are the refusals that protect the project's own process, where the user
 could do the same by hand on the forge:
 
-- `force-push`: a forced push of the agent's own branch (`git push --force origin <its branch>`,
-  `--force-with-lease`, a `+` refspec), base and held by the project's never list; then judged as
-  any push is. Only a plain line of `git push`, its forcing options, a named remote and one
-  refspec whose destination is the workspace's branch, never `main`, `master`, `dev`, `develop`,
+- `force-push`: a forced push of the agent's own branch (`git push --force origin
+  HEAD:refs/heads/<its branch>`, `--force-with-lease`, a `+` refspec), base and held by the
+  project's never list; then judged as any push is. Only a plain line of `git push`, its forcing
+  options, a named remote and one refspec whose destination is the workspace's branch named in
+  full (`:refs/heads/<its branch>`, so that no `remote.<name>.push` setting sends it elsewhere),
+  never `main`, `master`, `dev`, `develop`,
   `trunk`, `stable/*`, `next/*` or `release/*`, nor a base of the project's repositories, nor a
   branch the workspace resumed (it was the user's before), never a deletion;
 - `merge-blocked`: a merge of the workspace's pull request whose required checks fail or whose
@@ -1066,7 +1072,8 @@ could do the same by hand on the forge:
   only while something blocks it; Bitbucket has no bypass, and its merge checks still answer. A
   merge nothing blocks needs none, and the ask is refused;
 - `forge-state`: closing, reopening or relabelling an issue or a pull request (`forge` and
-  `tickets` `close`, `reopen`, `edit` of labels alone), then harmless.
+  `tickets` `close`, `reopen`, `edit` of labels alone), then harmless. A close or a reopen with a
+  comment is not one: the comment's text is judged as before, whatever the session holds.
 
 What can never be asked for is refused with no ask, `exception` or not: a shell, or a command with
 shell syntax; the value of a secret or of a credential, from the vault or from a file; anything

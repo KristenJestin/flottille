@@ -2763,8 +2763,10 @@ ended after its own, as the window lists them. Each is `{"session", "title", "ru
 `null`, `rule` is `force-push`, `merge-blocked` or `forge-state`, `said` what it lets the session
 do, `why` the agent's reason as the user read it, masked, `request` the number of the request the
 user allowed it in, `granted_at` in milliseconds since the Unix epoch, and `scope` what it covers,
-`{"repository"?, "branch"?, "pull"?}`: the repository and branch of a forced push, the pull
-request of a merge, `{}` for `forge-state`.
+`{"repository"?, "branch"?, "pull"?, "head"?, "blocks"?}`: the repository and branch of a forced
+push, the pull request of a merge with its head commit and what blocked it as the card said (a
+merge whose head or blockers changed is not covered), `{}` for `forge-state`. A session holds one
+exception of a rule: one granted again for it replaces it.
 
 #### `exception.withdraw`
 
