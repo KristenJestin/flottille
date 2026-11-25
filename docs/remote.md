@@ -876,7 +876,13 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   and can run an agent, else on the one machine online that has it; when several do and this one
   cannot, the composer asks which before it starts anything, and the answer is kept for the
   project by the window. Its settings switch between the machines that
-  have it, this one first.
+  have it, this one first. The page, the start choice and the settings switch follow the
+  sidebar's grouping (#1410): the machines they offer are exactly those the project's row marks,
+  each by the name the row holds of it ("the same project" below), and the row of another machine
+  alone opens that machine's project, never one of this machine's the row does not hold. A project
+  another machine has under another name, with the same remotes, is offered there, and choosing
+  that machine shows its page or its settings of it, by its name there; a project of the same name
+  with other remotes, or with no remote, is another row, and not offered.
 - **The same project.** Two projects are the same when the remotes of their repositories are the
   same, each normalised (`github.com/acme/app` for `https://GitHub.com/acme/app.git`,
   `git@github.com:acme/app` and `ssh://git@github.com:22/acme/app/`: no scheme, user, port nor
@@ -886,7 +892,9 @@ size, up to the limits a local message has (#1187), as a file an agent showed co
   projects by those remotes in a message of its own, after its sessions (`projects`, "What a
   machine may send"; `remote.sessions` says them), and the copy kept for a machine that is off
   holds them too, so that its projects stay in the sidebar, greyed. A machine whose list came before projects were
-  listed says none: its sessions' project names are matched by name, as before. The message is
+  listed says none: its sessions' project names are matched by name, as before. What another
+  machine lists matches a project of this machine only by the remotes this machine's own daemon
+  says of it. The message is
   one a machine of before does not know, so that it refuses it alone (`not a message a machine may
   send`) and goes on taking the sessions: the protocol number is not raised, two machines of
   different builds keep their lists of sessions, and the one that sent the projects says in its
@@ -1936,10 +1944,12 @@ on a real phone, by hand, and reported.
   out while its providers are not read; a start it cannot run is refused there, and said. This
   machine "can run" when its role is a runner: its providers are not looked at either, so that the
   page that opens does not change as they are read (its composer says when none is ready).
-- **A shared project's start and settings switches match the project by its name on each machine**
-  (#1266), as the composer's picker did: a project another machine has under another name (the same
-  repositories) has its sessions on the page, but that machine is not offered to start on nor in
-  the settings' switch. Matching by the remotes there too could come later.
+- **A project with no remote is matched by no other, in the switches as in the sidebar** (#1410):
+  the start choice and the settings switch offer the machines of the project's row, so the name is
+  the fallback only where the sidebar groups by it (a machine whose list says no remotes). Two
+  projects of the same name with no remote are two rows (`notes`, `notes@server`), and each one's
+  switches offer its own machine only. Matching them by the name would change the sidebar's rows
+  too, in one rule for both.
 - **The machine chosen for a shared project is kept with the sidebar's folds** (#1266, `starts`
   under `sidebar`), not under a key of its own as the arrangement is: two windows choosing at the
   same moment may keep one choice, which is harmless (the next choice writes it again).

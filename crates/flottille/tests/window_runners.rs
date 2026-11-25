@@ -27,13 +27,17 @@ const WAIT: Duration = Duration::from_secs(60);
 /// Each scenario runs two daemons and a hub: one at a time.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// A throwaway repository with one commit, registered as the project `name` of `user`.
+/// A throwaway repository with one commit, registered as the project `name` of `user`. Its
+/// remote is the name's, so that projects of one name on two machines are one shared project
+/// (#1410).
 fn project(user: &User, name: &str) {
     let folder = user.path(&format!("work/{name}"));
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "x\n").unwrap();
     user.git(&folder, &["add", "."]);
     user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let remote = format!("https://git.example/acme/{name}.git");
+    user.git(&folder, &["remote", "add", "origin", &remote]);
     user.call("project.add", json!({"folder": folder, "name": name}))
         .unwrap();
 }
