@@ -1569,6 +1569,38 @@ fn the_window_draws_no_frame_at_rest_with_a_pilot_and_two_led_sessions_one_folde
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_pilot_s_page_with_its_leads(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let lead = idle_session(&user);
+    let (url, authorization) = common::mcp::server_of(&user, 0);
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    led_by_lead(&user, &mcp, "Docs");
+    led_by_lead(&user, &mcp, "Tests");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the pilot's row", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "its Leads lists both", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(flottille_window::leads::leads_id())
+                .and_then(|found| found.label().map(str::to_owned))
+                .as_deref()
+                == Some("Leads 2")
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_spec_page_with_amendments(cx: &mut TestAppContext) {
     let user = User::with_fake_agent()
         .with_fetcher()
