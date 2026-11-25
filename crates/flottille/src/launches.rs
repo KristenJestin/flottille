@@ -258,10 +258,11 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
         depth: caller.depth,
         copied: crate::travelled::copied(&project, &repositories),
     };
-    let judged = link
-        .send(&Message::Machine(MachineMessage::Launch(Box::new(
-            message.clone(),
-        ))))
+    let judged = remote
+        .send(
+            &link,
+            &Message::Machine(MachineMessage::Launch(Box::new(message.clone()))),
+        )
         .await
         .map_err(|error| {
             refused(format!(

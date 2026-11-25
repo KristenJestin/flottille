@@ -1870,6 +1870,12 @@ nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
 
+- Two machines that dialled each other at once let the link they do not keep go rather than cut
+  it (#1491, `docs/remote.md`): it stays open a second at the least (GRACE), so that what the
+  other sent on it before it chose too is turned away or served, and ten at the most, while a
+  request and its answer are under way on it. A request turned away there waits ten seconds at
+  the most for the link kept before it fails.
+
 - A request a led session makes of the user (a call held, a connection, a vault entry) is told to
   its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
   turn that made it, not in a wake of its own (a wake costs the pilot a turn, and the turn's end
