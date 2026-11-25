@@ -73,14 +73,20 @@ fn project(user: &User) {
     a_round(user);
 }
 
-/// The fake `gh` answers the pull request #12, a review asked of `requested`.
+/// The fake `gh` answers the pull request #12, a review asked of `requested`: Maya's, given,
+/// once it is asked of no one.
 fn script(user: &User, requested: Value) {
-    static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let reviews = match requested.as_array().is_some_and(Vec::is_empty) {
         true => json!([{"author": {"login": "maya"}, "state": "APPROVED", "body": "Fine"}]),
         false => json!([]),
     };
+    answer(user, requested, reviews);
+}
+
+/// The fake `gh` answers the pull request #12, a review asked of `requested`, `reviews` given.
+fn answer(user: &User, requested: Value, reviews: Value) {
+    static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     user.gh_script(json!({"pulls": {"acme/atlas": {"feat/docs": {
         "number": 12, "title": "Write the docs", "state": "OPEN", "isDraft": false,
         "headRefOid": "aaaaaaa1", "baseRefName": "main",
@@ -448,6 +454,92 @@ fn a_blocked_led_session_stays_under_its_pilot(cx: &mut TestAppContext) {
     });
     assert_eq!(mark, Some(AgentState::Blocked));
     assert_eq!(waits, "waits for Maya · review of #12");
+}
+
+#[gpui_kit::test]
+fn a_withdrawn_review_request_brings_the_row_back(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let (id, mcp) = start(&user, "open the docs pull request");
+    wait_for_maya(&user, &id, &mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the group", |cx| {
+        blocked(&shell, cx) == [id.clone()]
+    });
+    let turns = user.received_requests("session/prompt").len();
+
+    // The review is no longer asked of Maya, and no one reviewed: no event wakes the session,
+    // and no subscription moves.
+    answer(&user, json!([]), json!([]));
+    a_round(&user);
+    eventually("the session no longer blocked", || {
+        line(&user, &id)["blocked"].is_null()
+    });
+    until(&shell, cx, "the row back in its project", |cx| {
+        listed(&shell, cx).contains(&id)
+    });
+    assert!(blocked(&shell, cx).is_empty());
+    assert_eq!(
+        user.received_requests("session/prompt").len(),
+        turns,
+        "no turn"
+    );
+}
+
+#[gpui_kit::test]
+fn a_blocked_pilot_stays_with_the_sessions_it_leads(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let opened = user.received_requests("session/new").len();
+    let lead = user
+        .call(
+            "agent.start",
+            json!({"project": "atlas", "message": "begin the docs session"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (url, authorization) = server_of(&user, opened);
+    eventually("the launch is held", || {
+        !user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    let number = user.call("approval.list", json!({})).unwrap()["requests"][0]["number"]
+        .as_u64()
+        .unwrap();
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the led session", || agents(&user).len() == 2);
+    let led = agents(&user)
+        .into_iter()
+        .find(|agent| agent["led_by"] == lead.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("its first turn", || line(&user, &led)["state"] == "idle");
+    eventually("its pilot at rest", || {
+        line(&user, &lead)["state"] == "idle"
+    });
+    // The pilot, which follows the session it leads, also waits on Maya's review.
+    let mcp = Mcp::initialize(&url, &authorization);
+    wait_for_maya(&user, &lead, &mcp);
+
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led row", |cx| {
+        label(cx, session_id(&led)).is_some()
+    });
+    settle(cx);
+
+    // It stays in its project with the session it leads, its mark saying it is blocked.
+    assert_eq!(listed(&shell, cx), [lead.clone(), led.clone()]);
+    assert!(blocked(&shell, cx).is_empty());
+    assert!(label(cx, blocked_id()).is_none(), "no group");
+    let mark = shell.read_with(cx, |s, cx| s.session(&lead).unwrap().read(cx).mark());
+    assert_eq!(mark, Some(AgentState::Blocked));
 }
 
 #[gpui_kit::test]

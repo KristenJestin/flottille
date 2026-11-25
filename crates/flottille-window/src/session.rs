@@ -11521,6 +11521,23 @@ mod tests {
     }
 
     #[test]
+    fn a_banner_s_since_says_the_day_when_it_is_not_today() {
+        let at = 1_793_455_500_000;
+        // The same day: its time alone.
+        assert_eq!(since_at_offset(at, at + 3_600_000, 0), "14:05");
+        // Three days later: its day too.
+        assert_eq!(
+            since_at_offset(at, at + 3 * 86_400_000, 0),
+            "31 Oct 2026, 14:05"
+        );
+        // Past midnight in the local zone, though not in UTC.
+        assert_eq!(
+            since_at_offset(at, at + 9 * 3_600_000, 3600),
+            "31 Oct 2026, 15:05"
+        );
+    }
+
+    #[test]
     fn durations_are_said_short() {
         assert_eq!(seconds(2_000), "2.0s");
         assert_eq!(seconds(38_400), "38s");
