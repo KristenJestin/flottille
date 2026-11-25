@@ -615,6 +615,12 @@ pub enum Command {
         place: Option<String>,
         path: Option<String>,
     },
+    /// What rings, and when (`notifications.settings`).
+    NotificationSettingsRead,
+    /// Changes it (`notifications.set_settings`): what the daemon takes, as it takes it.
+    NotificationSettingsSet {
+        params: Value,
+    },
     /// Where this machine makes the projects of other machines' launches
     /// (`travelled_folder.show`).
     TravelledFolderRead,
@@ -1304,6 +1310,11 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// What rings and when, as the daemon says it, after a read (`written` false) or a choice.
+    NotificationSettings {
+        written: bool,
+        shown: Result<crate::notification_settings::Shown, String>,
     },
     /// Where this machine makes the projects of other machines' launches, after a read
     /// (`written` false) or a choice.
@@ -3399,6 +3410,26 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 project,
             }
         }
+        Command::NotificationSettingsRead => Outcome::NotificationSettings {
+            written: false,
+            shown: answer(ask_alone(
+                connect,
+                "notifications.settings",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|shown| crate::notification_settings::Shown::of(&shown)),
+        },
+        Command::NotificationSettingsSet { params } => Outcome::NotificationSettings {
+            written: true,
+            shown: answer(ask_alone(
+                connect,
+                "notifications.set_settings",
+                params,
+                bounds.quick,
+            ))
+            .map(|shown| crate::notification_settings::Shown::of(&shown)),
+        },
         Command::WorkspacesFolderSet {
             project,
             place,

@@ -121,6 +121,9 @@ pub enum Update {
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
+    /// What rings, or when, was changed, from any client: the tab, the project's section and the
+    /// bell's Do not disturb read it again.
+    NotificationSettingsChanged,
     /// An agent created or changed a ticket or a pull request.
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
@@ -552,6 +555,9 @@ fn follow(
                 project: event.data["project"].as_str().map(str::to_owned),
             });
         }
+        if event.name == "notifications.settings_changed" {
+            let _ = updates.unbounded_send(Update::NotificationSettingsChanged);
+        }
         if event.name == "vault.changed" {
             let _ = updates.unbounded_send(Update::VaultChanged);
         }
@@ -813,7 +819,8 @@ fn matters(event: &Event) -> bool {
         // A workspace's preparation shows in its place, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
         // The notification centre: a notification came, was read or was answered, in any client.
-        Some("notifications") => true,
+        // (What rings, or when, is a setting the settings views follow, not a notification.)
+        Some("notifications") => name != "notifications.settings_changed",
         // A request for a vault entry marks its session and rings the bell until it is answered.
         Some("vault") => matches!(name, "vault.asked" | "vault.ask_answered"),
         // A subscription opening or ending moves the session from waiting to rest.

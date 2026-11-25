@@ -1604,6 +1604,39 @@ at once. `flottille inbox` stays what it was: the agents' view of the stored eve
 Marks a notification read by its number, or all of them with `--all`, and says how many changed.
 The window's bell follows (`notifications.changed`). Reading a request does not answer it.
 
+### `flottille notifications settings [--project <name>] [options] [--json]`
+
+What rings, and when (`docs/protocol.md`, `notifications.settings`): with no option, every kind
+and what it does (`rings`, `centre only` or `off`), the sound, the quiet hours and Do not disturb,
+and what each project sets itself; `--project <name>` says that project's levels, and with
+`--kind` changes them. Options, each repeatable where it names a kind, change what is given and
+print the settings as they are then:
+
+- `--kind <kind>=<ring|centre|off|default>`: what a kind does; `default` follows the defaults
+  again. The kinds are `request`, `question`, `report`, `failure`, `pull_request`, `ticket`,
+  `paused`, `vault`, `daemon`, `routine`. A request, a question and a vault ask cannot be `off`.
+- `--sound <on|off>`, `--volume <0-100>` and `--sound-kind <kind>=<on|off>`: the sound, for all and
+  for a kind.
+- `--quiet <HH:MM-HH:MM|off>` and `--days <mon,tue,…>`: the quiet hours, and the days they start
+  on.
+- `--dnd <on|1h|tomorrow|off>`: Do not disturb, until turned off, for an hour, until the next 08:00,
+  or off.
+
+`--json` prints what `notifications.settings` answers. The window's Settings, Notifications tab,
+the project's Notifications section and the bell's Do not disturb do the same.
+
+```
+$ flottille notifications settings --kind report=centre --quiet 22:00-08:00
+Notifications
+  Request       rings
+  Question      rings
+  Report        centre only
+  …
+Sound: on, volume 100
+Quiet hours: 22:00–08:00 on mon, tue, wed, thu, fri, sat, sun
+Do not disturb: off
+```
+
 ### `flottille runs list [project]`
 
 The commands running now, of a project or of all of them: the run, the agent that started it

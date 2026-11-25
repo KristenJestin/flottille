@@ -194,6 +194,10 @@ pub const COMMANDS: &[(&str, Place)] = &[
     ("inbox", Window(&["notifications.list"])),
     ("notifications", Window(&["notifications.list"])),
     ("notifications read", Window(&["notifications.read"])),
+    (
+        "notifications settings",
+        Window(&["notifications.settings", "notifications.set_settings"]),
+    ),
     ("runs list", Window(&["run.list"])),
     ("runs stop", Window(&["run.stop"])),
     ("runs restart", Window(&["run.restart"])),

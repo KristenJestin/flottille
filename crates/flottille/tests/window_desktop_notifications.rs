@@ -270,7 +270,7 @@ fn settings_say_when_this_desktop_shows_no_notifications(cx: &mut TestAppContext
     until(&shell, cx, "the settings page is shown", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
     });
-    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+    cx.update(|window, cx| window.click("settings-tabs-notifications", cx));
 
     until(&shell, cx, "the line of the desktop", |cx| {
         has("desktop-notifications", cx)

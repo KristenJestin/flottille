@@ -12,6 +12,9 @@
 //! notices, nothing is told, and nothing waits for it: a notice due then is dropped, and never
 //! dismissed.
 //!
+//! It reads the notification settings as the desktop's ring does (#1003): a kind or a project at
+//! Centre only, the quiet hours and Do not disturb keep the phone silent too.
+//!
 //! What is decided is kept in memory: a row is decided once, at its delay, and what came before
 //! the daemon started is never told.
 
@@ -19,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use flottille_core::notification_settings::Level;
 use flottille_core::store::now_ms;
 use flottille_link::{Ask, Asker, Notice, NoticeKind};
 use serde::Deserialize;
@@ -162,10 +166,16 @@ pub fn check(daemon: &Daemon) {
         if now < row.at.saturating_add(DELAY_MS) {
             continue;
         }
-        let tell = *tells.get_or_insert_with(|| {
-            crate::remote::notify_always(&daemon.paths)
-                || control.as_ref().is_some_and(|control| away(control, now))
+        let (tell, settings) = tells.get_or_insert_with(|| {
+            let tell = crate::remote::notify_always(&daemon.paths)
+                || control.as_ref().is_some_and(|control| away(control, now));
+            (tell, crate::notification_settings::load(&daemon.paths))
         });
+        // What the settings keep from ringing on the desktop (a kind or a project at Centre only,
+        // quiet hours, Do not disturb) is not told to the phone either (#1003).
+        let rings = settings.level(&row.kind, row.project.as_deref()) == Level::Ring
+            && !crate::notification_settings::muted(settings);
+        let tell = *tell && rings;
         // Told only once it is queued on a session: what was never sent is never dismissed.
         let told = notifier.as_ref().filter(|_| tell).and_then(|notifier| {
             let notice = Notice {

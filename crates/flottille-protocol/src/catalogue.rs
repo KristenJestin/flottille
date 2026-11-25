@@ -256,6 +256,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("notifications.list", Read),
     ("notifications.read", Drive),
     ("notifications.status", Read),
+    ("notifications.settings", Read),
+    ("notifications.set_settings", Drive),
     // The window's toast it could not draw, told by the window it was for.
     ("notifications.unshown", Local),
     // The window's own presence, told on the connection it keeps: only a window of this machine.

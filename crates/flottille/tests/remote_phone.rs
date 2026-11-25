@@ -373,3 +373,103 @@ fn notify_the_phone_is_when_i_am_away_by_default_and_kept_in_daemon_toml() {
         .unwrap();
     assert_eq!(set["notify"], "away", "{set}");
 }
+
+/// What the phone is told follows the notification settings (#1003): what does not ring on the
+/// desktop does not reach the phone either. `user` is the runner's, before it starts.
+fn server_and_phone_of(user: User) -> (TestHub, Machine, Phone) {
+    let hub = TestHub::new();
+    let server = Machine::of(user.with_env("FLOTTILLE_TEST_CLOCK", "1"));
+    pair(&hub, &server, "server", "runner");
+    connected(&server);
+    let phone = Phone::pair(&hub, "pixel");
+    (hub, server, phone)
+}
+
+fn set_settings(machine: &Machine, params: Value) {
+    machine
+        .user
+        .call("notifications.set_settings", params)
+        .unwrap();
+}
+
+/// A report of a root of `app` to the user, once the centre keeps it.
+fn reported(server: &Machine) {
+    project(&server.user);
+    let (_, mcp) = root(&server.user);
+    let answer = mcp.call("report", json!({"text": "Login fixed."}));
+    assert!(!answer.error, "{}", answer.text);
+    row_titled(server, "Reported");
+}
+
+#[test]
+fn a_kind_at_centre_only_never_reaches_the_phone() {
+    let (_hub, server, phone) = server_and_phone();
+    set_settings(&server, json!({"kinds": {"request": "centre"}}));
+    held_request(&server);
+
+    advance(&server, 30_000);
+    assert!(phone.told_nothing_more(0, QUIET), "{:?}", phone.told());
+}
+
+#[test]
+fn a_kind_turned_off_never_reaches_the_phone() {
+    let (_hub, server, phone) = server_and_phone();
+    set_settings(&server, json!({"kinds": {"report": "off"}}));
+    project(&server.user);
+    let (_, mcp) = root(&server.user);
+    let answer = mcp.call("report", json!({"text": "Login fixed."}));
+    assert!(!answer.error, "{}", answer.text);
+
+    advance(&server, 30_000);
+    assert!(phone.told_nothing_more(0, QUIET), "{:?}", phone.told());
+}
+
+#[test]
+fn quiet_hours_keep_the_phone_silent() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_LOCAL_TIME", "Fri 23:30");
+    let (_hub, server, phone) = server_and_phone_of(user);
+    set_settings(
+        &server,
+        json!({"quiet": {"on": true, "from": "22:00", "to": "08:00"}}),
+    );
+    held_request(&server);
+
+    advance(&server, 30_000);
+    assert!(phone.told_nothing_more(0, QUIET), "{:?}", phone.told());
+}
+
+#[test]
+fn do_not_disturb_keeps_the_phone_silent() {
+    let (_hub, server, phone) = server_and_phone();
+    set_settings(&server, json!({"do_not_disturb": {"on": true}}));
+    held_request(&server);
+
+    advance(&server, 30_000);
+    assert!(phone.told_nothing_more(0, QUIET), "{:?}", phone.told());
+}
+
+#[test]
+fn a_project_s_own_level_holds_for_the_phone() {
+    let (_hub, server, phone) = server_and_phone();
+    project(&server.user);
+    set_settings(
+        &server,
+        json!({"project": "app", "kinds": {"request": "centre"}}),
+    );
+    let (_, mcp) = root(&server.user);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    row_titled(&server, &format!("Request #{number} waits for you"));
+
+    advance(&server, 30_000);
+    assert!(phone.told_nothing_more(0, QUIET), "{:?}", phone.told());
+}
+
+#[test]
+fn a_report_that_rings_still_reaches_the_phone() {
+    let (_hub, server, phone) = server_and_phone();
+    reported(&server);
+
+    advance(&server, 30_000);
+    let told = phone.wait_told(1);
+    assert_eq!(told[0].1.kind, NoticeKind::Report, "{told:?}");
+}

@@ -1206,7 +1206,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   looks, a row arriving unfolds and one forgotten folds away. The centre keeps 30 days, or 1,000,
   whichever is less; a second window shows the same list and the same marks, following
   `notifications.changed`. What a session changes while its page is open is in sight, and rings
-  nothing;
+  nothing. **Do not disturb** is at the foot of the panel: a switch with "Until you turn it off",
+  "For 1 hour" and "Until tomorrow" beside it, and a line that says until when (`Until 14:30`); the
+  line cross-fades when it changes, and the panel keeps what arrived meanwhile. Settings has a
+  **Notifications** tab (the desktop's status, then **What rings** with each kind's Ring / Centre
+  only / Off and its sound, **Sound** with its switch and volume, **Quiet hours** with the range
+  and the days), and a project's Settings a **Notifications** tab with each kind's level
+  ("As Settings: …", the general level, or Ring, Centre only, Off) for that project only;
   the search field, "Search  Ctrl K", is a **quick switcher**: Ctrl K anywhere in the window or a
   click on the field opens it over the page (the modal layer, near the top), its own text field
   focused; Escape, a click outside, the mouse's back button or choosing a result closes it, and
@@ -1455,7 +1461,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its tickets and its open questions, with "New spec"; a spec's page shows the spec, its
   questions each answered in one click, Ready and Back to draft, and the sessions that worked on
   it (`docs/extensions.md`, "Specs");
-  the project's Settings, in six tabs (`reference/gpui.md`, rule 13), opening on the first.
+  the project's Settings, in seven tabs (`reference/gpui.md`, rule 13), opening on the first.
   **Repositories** holds its **Repositories** (a count; "The git repositories of the project. Each
   workspace gets its own copy of each.", or for a project of one, "The project folder is the
   repository."): each a row with **Starts from** (`develop, then main`), **Remote** (`origin ·
@@ -1857,10 +1863,22 @@ Linux desktop's notification server answers; nothing in it is specific to one de
 daemon sends them, with a D-Bus library (`zbus`, never `notify-send`), so that they come when the
 window is closed.
 
-- **What rings.** Each new notification of the centre (§10) whose settings say it rings: until
-  the notification settings land (#1003: on and off, volume, quiet hours, Do not disturb), the
-  requests, the questions, the failures and the reports of a root session. The rule is one
-  function of the daemon, where the settings plug in.
+- **What rings.** Each new notification of the centre (§10) whose settings say it rings. The user
+  chooses, by kind, **Ring** (the desktop and the sound), **Centre only** (kept in the bell, never
+  rings) or **Off** (not even kept), kinds being request, question, vault entry, report, failure,
+  pull request, ticket, paused and routine; a project may have its own level for a kind, which wins
+  over the general one. A request, a question and a vault entry need the user, so they cannot be
+  Off, only lowered to Centre only. Without a choice, the requests, the questions, the failures and
+  the reports of a root session ring and the rest stays in the centre. **Quiet hours** (a range
+  that may cross midnight, and the days it holds on) and **Do not disturb** (until turned off, for
+  an hour, or until tomorrow morning) silence every ring, never the centre: what came meanwhile is
+  there, and the first ring after says `N new while quiet`. The phone's push (`docs/remote.md`,
+  "Notifications") reads the same: what does not ring here is not told to the phone. The choices
+  are in `notifications.toml`
+  of the configuration folder, read at every ring, so a file edited by hand is followed; no tool of
+  an agent reaches them. The rule is one function of the daemon (`rings.rs`), the settings its
+  input (`notifications.settings`, `notifications.set_settings`, `flottille notifications
+  settings`).
 - **Where it rings.** The window tells the daemon its presence (`presence.set`: focused or not,
   and the session its page shows), on a connection it keeps open, so that a window that closes or
   dies is no longer there; it is the presence the remote design uses (`remote.md`,
@@ -1873,7 +1891,8 @@ window is closed.
   for the session whose page is open: it is in sight. **Window not focused, minimised or
   closed**: the system notification. The window says its presence again every 30 seconds: a
   focus not said again for 75 seconds (a window that hangs) counts as away.
-- **Sound.** Each notification that rings plays a short sound, in the window or out of it, once
+- **Sound.** Each notification that rings plays, unless the sound is off (for all, or for its
+  kind), a short sound at the volume the user set (0 to 100), in the window or out of it, once
   for a notification: one for what needs the user (a request, a question), another for the rest.
   They are Flottille's own, made from sine waves by a script and committed under `assets/sounds/`,
   under the repository's licence, and the daemon plays them through the sound server (PulseAudio's

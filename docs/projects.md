@@ -30,6 +30,13 @@ write the file where it stands, its comments kept (`project.add_repository`,
 one the daemon can use. The tab reads the repositories again when it opens and each time the
 window takes the focus back while it is shown; it has no button for it (`design.md` §10).
 
+**Notifications.** A project's Settings, Notifications tab, says for each kind of notification
+whether it rings in that project: "As Settings: …", the general level (the default, nothing kept), Ring, Centre
+only or Off (a request, a question and a vault entry cannot be Off). The choices are the
+project's, but they are kept in `notifications.toml` of the configuration folder, under
+`[projects.<name>.kinds]`, beside the user's general ones, not in the project's file
+(`docs/protocol.md`, `notifications.set_settings` with `project`); no agent reaches them.
+
 **The branch prefix** starts the branch of a workspace that is given none: `<branch prefix>/<name>`.
 It defaults to a slug of the project's name, and a file that does not hold the key keeps that. It
 may be empty (`branch_prefix = ""`): the branch is then the workspace's name alone, never

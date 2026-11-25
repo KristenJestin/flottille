@@ -35,6 +35,7 @@ use crate::actions::{Command, SessionsSetting};
 use crate::commands::{spaced, stack};
 use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
+use crate::notification_settings::NotificationSettings;
 use crate::providers::{NewSession, Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::vault::VaultSection;
@@ -43,13 +44,14 @@ use crate::workspaces_folder::WorkspacesFolder;
 /// The tabs of the page, in order: each one's key and label. A part of Flottille gets a tab of its
 /// own when it fits (rule 13): a subject the user goes to on its own, with several sections of its
 /// own, as Machines; a smaller part is a row of Features or a section of its subject's tab.
-pub const SECTIONS: [(&str, &str); 6] = [
+pub const SECTIONS: [(&str, &str); 7] = [
     ("agents", "Agents"),
     ("approvals", "Approvals"),
     ("features", "Features"),
     ("vault", "Vault"),
     ("machines", "Machines"),
     ("general", "General"),
+    ("notifications", "Notifications"),
 ];
 
 /// The blocks of the Agents tab, top to bottom: each one is a section of the page, entering on its
@@ -292,9 +294,9 @@ pub const RESUME_HINT: &str = "A session stopped by its quota goes on at the res
      can change it in its composer.";
 
 /// What the Notifications section says of what rings.
-pub const NOTIFICATIONS_HINT: &str = "A request, a question, a failure or a report rings with a \
-    short sound: as a notification of this desktop when the window is not focused, as a toast \
-    in the window when it is.";
+pub const NOTIFICATIONS_HINT: &str = "What rings is a notification of this desktop when the \
+    window is not focused, a toast in the window when it is, with a short sound. Choose below \
+    what rings, and when.";
 
 /// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, one JSON line each, \
@@ -333,6 +335,8 @@ pub struct SettingsPage {
     compaction_pending: bool,
     /// Where the workspaces of every project go, chosen on this page.
     workspaces: Entity<WorkspacesFolder>,
+    /// What rings and when, chosen on this page.
+    notifications: Entity<NotificationSettings>,
     /// Where this machine makes the projects of other machines' launches, chosen on this page.
     travelled: Entity<crate::travelled_folder::TravelledFolder>,
     /// The vault's entries, set and removed on this page.
@@ -457,6 +461,7 @@ impl SettingsPage {
         judge_guidance: Entity<RulesEditor>,
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
+        notifications: Entity<NotificationSettings>,
         travelled: Entity<crate::travelled_folder::TravelledFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
@@ -479,6 +484,7 @@ impl SettingsPage {
             compaction: None,
             compaction_pending: false,
             workspaces,
+            notifications,
             travelled,
             vault,
             connections,
@@ -1028,6 +1034,11 @@ impl SettingsPage {
                     ),
             )
             .into_any_element()
+    }
+
+    /// What rings and when, as this page chooses it.
+    pub fn notifications(&self) -> &Entity<NotificationSettings> {
+        &self.notifications
     }
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
@@ -2744,15 +2755,36 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
+            // What rings and when (#1003): the desktop's line, then the kinds, the sound and the
+            // quiet hours, each entering after the other.
+            "notifications" => {
+                let desktop = self.notifications_section(cx).into_any_element();
+                let this = self.notifications.downgrade();
+                let view = self.notifications.read(cx);
+                vec![
+                    ("notifications", desktop),
+                    (
+                        "notifications-kinds",
+                        crate::notification_settings::kinds_section(view, this.clone(), cx)
+                            .into_any_element(),
+                    ),
+                    (
+                        "notifications-sound",
+                        crate::notification_settings::sound_section(view, this.clone(), cx)
+                            .into_any_element(),
+                    ),
+                    (
+                        "notifications-quiet",
+                        crate::notification_settings::quiet_section(view, this, cx)
+                            .into_any_element(),
+                    ),
+                ]
+            }
             // Remote (#814, #1144): whether it is on, the hub, the devices.
             "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
-                (
-                    "notifications",
-                    self.notifications_section(cx).into_any_element(),
-                ),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("travelled", self.travelled.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),

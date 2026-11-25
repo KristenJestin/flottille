@@ -815,6 +815,74 @@ fn the_window_draws_no_frame_at_rest_with_the_notification_centre_open_and_close
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_project_s_notifications_tab(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    cx.update(|window, cx| window.click("project-settings-tabs-notifications", cx));
+    until(&shell, cx, "the project's levels are shown", |cx| {
+        cx.update(|window, _| window.try_find("notify-project-report").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_bell_s_do_not_disturb_on_and_off(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    let dnd = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| s.bell_list().read(cx).do_not_disturb())
+    };
+    until(&shell, cx, "the bell knows Do not disturb", |cx| {
+        dnd(&shell, cx).is_some()
+    });
+    cx.update(|window, cx| window.click("bell", cx));
+    until(&shell, cx, "the panel shows Do not disturb", |cx| {
+        cx.update(|window, _| window.try_find("bell-dnd-switch").is_some())
+    });
+    settle(&shell, cx);
+    past_the_pulse(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "off");
+
+    cx.update(|window, cx| window.click("bell-dnd-switch", cx));
+    until(&shell, cx, "the bell says it is on", |cx| {
+        dnd(&shell, cx) == Some(true)
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "on");
+
+    cx.update(|window, cx| window.click("bell-dnd-switch", cx));
+    until(&shell, cx, "the bell says it is off", |cx| {
+        dnd(&shell, cx) == Some(false)
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "off again");
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);
@@ -867,6 +935,9 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
         ("machines", "remote-notice"),
         ("general", "about-title"),
         ("general", "appearance-title"),
+        // What rings and when (#1003): the kinds, the sound and the quiet hours.
+        ("notifications", "notifications-kinds-title"),
+        ("notifications", "notifications-quiet-title"),
     ] {
         cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
         until(&shell, cx, "the tab is shown", |cx| {

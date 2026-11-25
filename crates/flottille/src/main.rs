@@ -56,6 +56,7 @@ mod message_checks;
 mod models;
 mod mounts;
 mod nofollow;
+mod notification_settings;
 mod notifications;
 mod notifications_command;
 mod opencode;
@@ -366,6 +367,35 @@ enum NotificationsAction {
         /// Mark every notification read
         #[arg(long)]
         all: bool,
+    },
+    /// What rings, and when: read the settings, or change them with the options
+    Settings {
+        /// Change a project's own levels, or read them; the defaults for every project without
+        #[arg(long)]
+        project: Option<String>,
+        /// What a kind does, `<kind>=<ring|centre|off|default>`; repeat for several
+        #[arg(long = "kind", value_name = "KIND=LEVEL")]
+        kinds: Vec<String>,
+        /// The sound, for every kind: on or off
+        #[arg(long, value_parser = ["on", "off"])]
+        sound: Option<String>,
+        /// A kind's own sound, `<kind>=<on|off>`; repeat for several
+        #[arg(long = "sound-kind", value_name = "KIND=on|off")]
+        sound_kinds: Vec<String>,
+        /// How loud sounds are, from 0 to 100
+        #[arg(long)]
+        volume: Option<u64>,
+        /// The quiet hours, `HH:MM-HH:MM`, or `off`
+        #[arg(long)]
+        quiet: Option<String>,
+        /// The days the quiet hours start on, `mon,tue,...`
+        #[arg(long, value_delimiter = ',')]
+        days: Vec<String>,
+        /// Do not disturb: `on` until turned off, `1h`, `tomorrow` (the next 08:00), or `off`
+        #[arg(long, value_name = "on|1h|tomorrow|off")]
+        dnd: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -706,6 +736,30 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Some(NotificationsAction::Read { id, all }) => {
                 notifications_command::read(&paths, id, all)?
             }
+            Some(NotificationsAction::Settings {
+                project,
+                kinds,
+                sound,
+                sound_kinds,
+                volume,
+                quiet,
+                days,
+                dnd,
+                json,
+            }) => notifications_command::settings(
+                &paths,
+                notifications_command::Changes {
+                    project,
+                    kinds,
+                    sound,
+                    sound_kinds,
+                    volume,
+                    quiet,
+                    days,
+                    dnd,
+                },
+                json,
+            )?,
             None => notifications_command::list(&paths, unread, json)?,
         },
         Command::Mcp => pilot::run(&paths)?,

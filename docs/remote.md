@@ -1712,7 +1712,9 @@ minutes: an input at a client of this machine, as the daemon stamped it, or any 
 phone as the hub last told it (the app says an input each time it opens its session, on another
 network say: it would silence the next notices). An input said to come more than a minute after
 the runner's clock is not counted: a clock ahead would silence the phone until then. Otherwise it
-is dropped, and does not ring later. A row told that is then read, answered or gone tells
+is dropped, and does not ring later. It follows the notification settings as the desktop's ring
+does (`docs/design.md` §10, #1003): a row whose kind, or whose project's own level, is at Centre
+only, or that is due inside the quiet hours or while Do not disturb holds, is dropped too. A row told that is then read, answered or gone tells
 `dismissed`; a row never sent (no session then) is never dismissed, and what is told is queued in
 order, so that a `dismissed` never overtakes its notice. What came before the daemon started is
 never told, and with no session to the hub nothing is told and nothing is kept for later.

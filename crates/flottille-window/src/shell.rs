@@ -45,6 +45,7 @@ use crate::machines::Machines;
 use crate::machines_page::{MachinesSection, RemovalDialog};
 use crate::modals::Modals;
 use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Rang, Snapshot};
+use crate::notification_settings::NotificationSettings;
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PageTab, PlaceData, ProjectData, SessionLine};
@@ -540,6 +541,7 @@ fn of_this_machine_s_pages(update: &Update) -> bool {
             | Update::ProgramSignIn { .. }
             | Update::SignIn { .. }
             | Update::WorkspacesFolderChanged { .. }
+            | Update::NotificationSettingsChanged
             | Update::Extensions
             | Update::ServicesChanged
             | Update::Items { .. }
@@ -571,6 +573,7 @@ fn settings_of(
     let judge_guidance = cx.new(|_| RulesEditor::judge(asks.clone()));
     let compaction_guidance = cx.new(|_| RulesEditor::compaction(asks.clone()));
     let workspaces = cx.new(|_| WorkspacesFolder::new(asks.clone(), None));
+    let notifications = cx.new(|_| NotificationSettings::new(asks.clone(), None));
     let travelled = cx.new(|_| crate::travelled_folder::TravelledFolder::new(asks.clone()));
     let vault = cx.new(|_| VaultSection::new(asks.clone(), modals.clone()));
     let sign_in = cx.new(|_| crate::sign_in::SignInSection::new(asks.clone(), modals.clone()));
@@ -588,6 +591,7 @@ fn settings_of(
             judge_guidance.clone(),
             compaction_guidance.clone(),
             workspaces.clone(),
+            notifications,
             travelled.clone(),
             vault.clone(),
             connections.clone(),
@@ -1945,6 +1949,8 @@ impl Shell {
         self.main
             .update(cx, |main, cx| main.set_settings(settings, cx));
         self.listen(cx);
+        // The bell's Do not disturb becomes the one of the machine now shown.
+        self.actions.send(Command::NotificationSettingsRead);
     }
 
     /// The pages of `machine`, made the first time it is shown: its own connections, signed
@@ -2242,6 +2248,7 @@ impl Shell {
         self.perform(Command::WorkspacesFolderRead {
             project: Some(name.clone()),
         });
+        self.perform(Command::NotificationSettingsRead);
         // The Tracker's select offers the entries the project sees.
         self.perform(Command::Vault);
         self.project_settings = Some(made.clone());
@@ -3647,6 +3654,9 @@ impl Shell {
                     });
                 }
             }
+            Update::NotificationSettingsChanged => {
+                self.actions.send(Command::NotificationSettingsRead)
+            }
             Update::AppearanceChanged => self.ask_appearance(None),
             Update::Extensions => {
                 self.extensions
@@ -4677,6 +4687,22 @@ impl Shell {
                     });
                 }
             }
+            Outcome::NotificationSettings { written, shown } => {
+                // The bell's Do not disturb is the machine shown's, whatever page is open: what
+                // another machine said fills its own Settings only.
+                if self.pages_shown() {
+                    self.bell
+                        .update(cx, |bell, cx| bell.set_settings(shown.as_ref().ok(), cx));
+                }
+                let global = self.settings.read(cx).notifications().clone();
+                let project = self
+                    .project_settings
+                    .clone()
+                    .map(|page| page.read(cx).notifications().clone());
+                for view in std::iter::once(global).chain(project) {
+                    view.update(cx, |view, cx| view.answered(shown.clone(), written, cx));
+                }
+            }
             Outcome::TravelledFolder { written, shown } => {
                 let section = self.settings.read(cx).travelled_folder().clone();
                 section.update(cx, |section, cx| {
@@ -5280,6 +5306,7 @@ impl Shell {
         self.actions.send(Command::SessionsRead);
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
+        self.actions.send(Command::NotificationSettingsRead);
         self.actions.send(Command::TravelledFolderRead);
         self.actions.send(Command::Vault);
         self.actions.send(Command::SignIns);
@@ -5293,6 +5320,8 @@ impl Shell {
             self.read_settings();
         } else {
             self.ask_appearance(None);
+            // The bell's Do not disturb says what the daemon holds, on any page.
+            self.actions.send(Command::NotificationSettingsRead);
         }
         if let Some(name) = self
             .project_settings
@@ -6102,9 +6131,8 @@ impl Shell {
         }
         let key = format!("notification-{}", rang.id);
         let mut toast = gpui_design_system::Toast::notice(rang.title.clone()).keyed(key);
-        let said = rang.whole.as_ref().unwrap_or(&rang.excerpt);
-        if !said.is_empty() {
-            toast = toast.detail(said.clone());
+        if let Some(detail) = rang.detail() {
+            toast = toast.detail(detail);
         }
         if let (Some(number), Some(session)) = (rang.request, rang.session.clone()) {
             let answer = |answer: Answer| {
@@ -6263,6 +6291,14 @@ impl Shell {
                 session.to_owned(),
             )));
         }
+    }
+
+    /// The bell's Do not disturb: turned on for the choice `how` of
+    /// `notification_settings::HOW_LONG`, or off.
+    pub fn set_do_not_disturb(&mut self, on: bool, how: usize) {
+        self.actions.send(Command::NotificationSettingsSet {
+            params: crate::notification_settings::dnd_patch(on, how, now_ms()),
+        });
     }
 
     /// "Mark all read" in the bell's panel.
@@ -7638,6 +7674,10 @@ pub struct BellList {
     counts: (usize, usize),
     list: Listing<Entry>,
     open: bool,
+    /// What the daemon says of what rings, for the panel's Do not disturb.
+    settings: Option<crate::notification_settings::Shown>,
+    /// How long Do not disturb lasts when the panel turns it on: the choice of `HOW_LONG`.
+    how_long: usize,
 }
 
 impl BellList {
@@ -7648,7 +7688,28 @@ impl BellList {
             counts: (0, 0),
             list: Listing::default(),
             open: false,
+            settings: None,
+            how_long: 0,
         }
+    }
+
+    /// What the daemon says of what rings: the panel's Do not disturb follows it.
+    fn set_settings(
+        &mut self,
+        settings: Option<&crate::notification_settings::Shown>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = settings
+            && self.settings.as_ref() != Some(settings)
+        {
+            self.settings = Some(settings.clone());
+            cx.notify();
+        }
+    }
+
+    /// Whether Do not disturb holds, as the daemon last said it.
+    pub fn do_not_disturb(&self) -> Option<bool> {
+        self.settings.as_ref().map(|settings| settings.dnd_on)
     }
 
     fn set(&mut self, rows: Vec<BellRow>, counts: (usize, usize), cx: &mut Context<Self>) {
@@ -7915,7 +7976,32 @@ impl Render for BellList {
                     .into_any_element()
                 })
                 .collect();
+        let (on_shell, how_shell) = (self.shell.clone(), cx.entity().downgrade());
+        let how = self.how_long;
+        let dnd = crate::notification_settings::DoNotDisturb::block(
+            cx,
+            self.settings.as_ref(),
+            how,
+            |until| {
+                let time = flottille_core::notification_settings::local_time(until);
+                (time.minute / 60, time.minute % 60)
+            },
+            move |on, cx| {
+                on_shell
+                    .update(cx, |shell, _| shell.set_do_not_disturb(on, how))
+                    .ok();
+            },
+            move |chosen, cx| {
+                how_shell
+                    .update(cx, |bell, cx| {
+                        bell.how_long = chosen;
+                        cx.notify();
+                    })
+                    .ok();
+            },
+        );
         list.child(header)
+            .child(dnd)
             .child(presence(
                 "bell-empty",
                 self.list.is_empty(),

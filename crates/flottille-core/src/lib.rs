@@ -17,6 +17,7 @@ pub mod glob;
 pub mod images;
 pub mod item;
 pub mod notification;
+pub mod notification_settings;
 pub mod pasted;
 pub mod paths;
 pub mod place;
