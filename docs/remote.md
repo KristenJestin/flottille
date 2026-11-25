@@ -1438,8 +1438,10 @@ As built (#818):
   questions asked of it, even while it still waits there, queued, the session busy. It is woken at the turn's end (`session-turn-ended`, `it asked you a
   question`), its questions said whole, and the requests of the session and of its children that
   wait for the user there. When that user answers one, the pilot is told, once, as a pilot of the
-  same machine is (`session-request-answered`, kept under the request's kind and number and
-  queued there, ringing nobody: `docs/tools.md`, "Following a session", #1470).
+  same machine is (`session-request-answered`, queued there, ringing nobody: `docs/tools.md`,
+  "Following a session", #1470): one message of the launch waits for its machine at a time, the
+  latest listing every answer not sent yet, as a plain turn's end is kept. Only a `led` launch
+  takes one.
 - When the pilot's machine links again, each led session it leads here sends it one
   `session-meanwhile` delivery: each question it asked the user while that machine was off, with
   the user's answer or `not answered yet`; kept, ordered and sent once as every delivery
