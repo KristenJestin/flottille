@@ -1649,7 +1649,8 @@ fn asked_by_a_child(user: &User, session_asks: bool) -> (String, String, String,
     user.fake_script(json!({"turns": [
         {"when": "Ask the vault.", "do": [vault_ask(), {"say": "Waiting for the user."}]},
         {"when": "Fix the login.", "do": first},
-        {"when": "Go on.", "do": [{"say": "Going on."}]}
+        {"when": "Go on.", "do": [{"say": "Going on."}]},
+        {"when": "Join the ask.", "do": [vault_ask(), {"say": "Joined."}]}
     ]}));
     let (lead, _, session, second) = followed(user, "Fix the login.");
     user.call(
@@ -1821,9 +1822,6 @@ fn an_ask_a_child_made_and_its_session_joined_later_is_said_once() {
     eventually("a wake says the child's ask", || {
         !wakes_saying(&user, &lead, number).is_empty()
     });
-    user.fake_script(json!({"turns": [
-        {"when": "Join the ask.", "do": [vault_ask(), {"say": "Joined."}]}
-    ]}));
     let before = wakes(&user, &lead).len();
 
     user.call(
