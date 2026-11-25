@@ -1310,7 +1310,7 @@ pub(super) fn saved_checked(
 
 /// The request the user answers by writing their own values, decided before it is written; one
 /// decided meanwhile (an Accept of it) is refused, and the Save writes nothing.
-pub(super) fn claimed(daemon: &Daemon, number: u64) -> Result<approval::Request, Failure> {
+pub(super) fn claimed(daemon: &Arc<Daemon>, number: u64) -> Result<approval::Request, Failure> {
     let request = daemon
         .write(|store| {
             Ok(

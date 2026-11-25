@@ -363,10 +363,12 @@ An agent that pilots a session (`agent_launch` with `kind: led`) is woken, betwe
 `session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
 the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
-and that still wait, whole, and the requests of that turn that wait for the user (a call held, a
-connection asked, a vault entry asked for), each with its number and what it asks: the pilot is
-told, the user answers, and how they answered is queued for the pilot's next wake
-(`session-request-answered`, `docs/tools.md`, "Following a session"). It is a following, a subscription that has no end of its own (§5.6,
+and that still wait, whole, and the requests that wait for the user and no wake said yet (a call
+held, a connection asked, a vault entry asked for), its own and those its children forwarded to
+the user or asked them for, each with its number, what it asks and who asked: the pilot is
+told, the user answers, and how they answered is queued for the pilot's next wake, here or on
+another machine (`session-request-answered`, `docs/tools.md`, "Following a session"). It is a
+following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
 without the user pause it. A session led by a pilot is part of its job: **it ends with
 its pilot** (`docs/tools.md`, "The pilot ends"). A led session the user wants to keep is
@@ -1243,7 +1245,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
-  row's mark, never by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
+  row's mark, never by reordering, with one exception: a root blocked by someone else, below). There is no row for `main` nor for a workspace: workspaces live on the project
   page, and one with no session is not in the sidebar. A session is titled by the title its agent
   gives it in its first turn (`session_title`, 3 to 8 words, `docs/tools.md`, "The session's
   title") or the user gives it (`Rename…` in its row's "⋯" menu and its header, a dialog with a
@@ -1685,8 +1687,25 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
   whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
   it takes at most eight rows, or 35% of the window's height when that is less, and its rows
-  scroll inside it, the most recently ended first; and its
-  page shows,
+  scroll inside it, the most recently ended first. **Blocked by others**: a session at rest (not
+  in a turn, asking nothing of the user) whose open subscription waits on a person, a review asked
+  of someone else than the user and not given yet or a ticket assigned to someone else, is blocked
+  by them (`blocked` on its line of the tree, derived by the daemon from the items it keeps, never
+  set by hand; a check, a run, a wake or a led session it follows is `waiting`, as before, and a
+  person is a named human, never a CI, a bot or the user). Its mark is a person's silhouette in
+  the `away` ink, its line 1 what it is about as every row's, its line 2 `waits for Maya ·
+  review of #123`. A blocked **root** leaves its
+  project's list for one group "Blocked by others", pinned at the bottom of the sidebar above
+  "Ended", folded by default, the pattern of Ended (its rows say their project and their machine's
+  icon), its heading saying the count and who (`Blocked by others 2 · Maya, Noor`), absent while
+  empty, its fold kept with the sidebar's folds. It is the one state that moves a row, and only at
+  rest, never during a turn: what the user waits on someone else for is out of the way of what
+  needs them, and it comes back by itself, on top of its project, when its subscription fires
+  (the agent takes a turn) or the person answers. A **led** session that is blocked stays under
+  its pilot, which speaks for it, and a blocked root that leads a live session stays in its
+  project with the sessions it leads, its mark saying it is blocked. The page of a blocked session has a banner above its composer:
+  who, what, since when, and that it comes back by itself. The phone follows in its own issue.
+  An ended session's page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
   where it says it ended, not its header, and its conversation says it ended, then resumed. A
@@ -1853,8 +1872,8 @@ nothing built, in [`extensions.md`](extensions.md).
 - A request a led session makes of the user (a call held, a connection, a vault entry) is told to
   its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
   turn that made it, not in a wake of its own (a wake costs the pilot a turn, and the turn's end
-  comes anyway), and the user's answer waits for the pilot's next wake. A pilot on another
-  machine hears the request in its wake, not yet the user's answer.
+  comes anyway), and the user's answer waits for the pilot's next wake. A request the session's
+  children forward while it is at rest is said in the wake of its next turn (#1470).
 
 - An agent's proposed edit of a vault entry (`docs/vault.md`, "Proposing an edit of an entry"):
   a second one for the entry while one waits is refused rather than joined (it would hide what

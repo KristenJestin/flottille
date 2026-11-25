@@ -2059,6 +2059,24 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The `seq` of the agent's last event of that name about the request `number`, `held_by`
+    /// that one when given: however many came after it.
+    pub fn last_request_event(
+        &self,
+        agent: &str,
+        name: &str,
+        number: u64,
+        held_by: Option<&str>,
+    ) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "SELECT max(e.seq) FROM agent_events a JOIN events e ON e.seq = a.seq \
+             WHERE a.agent = ?1 AND e.name = ?2 AND json_extract(e.data, '$.number') = ?3 \
+             AND (?4 IS NULL OR json_extract(e.data, '$.held_by') = ?4)",
+            params![agent, name, number, held_by],
+            |row| row.get(0),
+        )?)
+    }
+
     /// When the last of the agent's runs ended, if one did.
     pub fn last_run_end(&self, agent: &str) -> Result<Option<u64>> {
         Ok(self.connection.query_row(
@@ -2069,7 +2087,8 @@ impl Store {
     }
 
     /// The latest sign of activity of these agents, from what is recorded: their events (but
-    /// the two the daemon says on its own, `agent.tools_outdated` and `agent.released`), their
+    /// those the daemon says on its own, `agent.tools_outdated`, `agent.tools_reload`,
+    /// `agent.released` and `agent.requests_said`), their
     /// deliveries made and sent, their runs started and ended, their requests asked and decided,
     /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
     pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
@@ -2080,7 +2099,8 @@ impl Store {
                  FROM agents WHERE id IN tree \
                UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
                  WHERE a.agent IN tree \
-                 AND e.name NOT IN ('agent.tools_outdated', 'agent.tools_reload', 'agent.released') \
+                 AND e.name NOT IN ('agent.tools_outdated', 'agent.tools_reload', \
+                   'agent.released', 'agent.requests_said') \
                UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
                  WHERE agent IN tree \
                UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
@@ -4147,6 +4167,24 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?;
         }
         Ok(items)
+    }
+
+    /// One item of the project as it is kept, without its checks; none when it is not kept.
+    pub fn item(
+        &self,
+        project: &str,
+        kind: &str,
+        repository: &str,
+        key: &str,
+    ) -> Result<Option<Item>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT project, kind, source, repository, key, title, state, author, assignees, \
+             labels, url, updated_at, seen_at, mine, details FROM items WHERE project = ?1 \
+             AND kind = ?2 AND repository = ?3 AND key = ?4",
+        )?;
+        Ok(statement
+            .query_row(params![project, kind, repository, key], item_row)
+            .optional()?)
     }
 
     /// One item of the project by its kind and key, with its checks: the repository's when one is
