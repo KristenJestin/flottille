@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gpui_design_system::{
-    Button, Chosen, EmptyLine, Field, Icon, ModelChoice, ModelEntry, Section, Segmented, SetHere,
-    Switch, Toast, enter, palette, presence, presence_of, space, toast,
+    Button, Chosen, EmptyLine, Field, Icon, Item, Listing, ModelChoice, ModelEntry, Section,
+    Segmented, SetHere, Switch, Toast, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -294,6 +294,8 @@ pub struct AllSettings {
     shown: Option<Shown>,
     edits: Edits,
     fields: Option<Fields>,
+    /// The connections of All machines' list, as they come and go.
+    rows: Listing<Shareable>,
     /// A save, or the way back to all machines' value, waits for the daemon.
     waiting: bool,
     _subscriptions: Vec<Subscription>,
@@ -306,6 +308,7 @@ impl AllSettings {
             shown: None,
             edits: Edits::default(),
             fields: None,
+            rows: Listing::default(),
             waiting: false,
             _subscriptions: Vec::new(),
         }
@@ -730,22 +733,32 @@ impl AllSettings {
             .into_any_element()
     }
 
-    /// A switch for each connection that may be shared.
-    fn connection_switches(&self, card: gpui_kit::Div, cx: &mut Context<Self>) -> AnyElement {
-        let Some(shown) = &self.shown else {
+    /// A switch for each connection that may be shared, in a list: one that comes unfolds, one
+    /// that goes folds away.
+    fn connection_switches(&mut self, card: gpui_kit::Div, cx: &mut Context<Self>) -> AnyElement {
+        let Some(shown) = self.shown.clone() else {
             return card.into_any_element();
         };
-        if shown.connections.is_empty() {
-            let line = EmptyLine::new("all-connections-none", Icon::Lucide("plug"), NO_CONNECTION);
-            return enter("all-connections-none-enter", 0, line).into_any_element();
-        }
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let listed = shown.connections.iter();
+        self.rows.sync(
+            listed.map(|connection| (connection.name.clone(), connection.clone())),
+            now,
+            reduce,
+        );
         let chosen = self
             .edits
             .connections
             .clone()
             .unwrap_or_else(|| shown.shared_connections());
-        let mut card = card;
-        for (at, connection) in shown.connections.iter().enumerate() {
+        let mut card = card.gap(px(0.));
+        let drawn: Vec<_> = self
+            .rows
+            .rows()
+            .map(|row| (row.placement, row.value.clone()))
+            .collect();
+        for (placement, connection) in drawn {
             let name = connection.name.clone();
             let on = chosen.contains(&name);
             let this = cx.entity().downgrade();
@@ -769,11 +782,24 @@ impl AllSettings {
                 })
                 .ok();
             });
-            // Each connection shows up as a row of a list does.
-            let row = ElementId::Name(format!("all-connection-{}-enter", connection.name).into());
-            card = card.child(enter(row, at, switch));
+            let id = ElementId::Name(format!("all-connection-{}-row", connection.name).into());
+            card = card.child(Item::new(id, placement, div().py(space::XS).child(switch)));
         }
-        card.into_any_element()
+        let none = EmptyLine::new("all-connections-none", Icon::Lucide("plug"), NO_CONNECTION);
+        div()
+            .flex()
+            .flex_col()
+            .child(presence(
+                "all-connections-list-block",
+                !self.rows.is_empty(),
+                card,
+            ))
+            .child(presence(
+                "all-connections-none-block",
+                shown.connections.is_empty(),
+                none,
+            ))
+            .into_any_element()
     }
 }
 
