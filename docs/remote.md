@@ -659,7 +659,10 @@ left, then read again. Its Settings follow a change made there by another client
 holds them (#1476): the bell link of that machine, which hears all of its events, says each change
 of its settings (`about.changed`, `developer.changed`, `rules.changed` and the other settings
 events), and only the section it names is read again; no other connection, no read of the whole
-machine. The first time, the
+machine. Its providers follow the same way (#1483): a `provider.*` event of that machine has its
+bell link read `provider.list` again, on the connection it holds, and the page shows the answer.
+That link resumes its events after the last one it saw (`events.watch` with `after`) each time it
+connects again, so a change made while it was cut is heard when it is back, not lost. The first time, the
 page says it is reading that machine (its own skeletons, in the pane). A machine that does not
 answer within the window's limit (30 s) is said on its page only, `server does not answer`, a
 line above it that folds away once it answers or another page is shown; the rest of the window is
@@ -2299,8 +2302,8 @@ on a real phone, by hand, and reported.
   machine's.
 - **The bell and "Ended" hold every machine's** (#1280). The window follows each other runner that
   is online: its notification centre by a light link of its own (made once the device key is read, signed as every
-  request to that machine, and reading `notifications.list` only, at each connection and on each
-  `notifications.*` event of that machine, so while the bell's list is open too): the bell lists that machine's notifications beside this
+  request to that machine, and reading `notifications.list` at each connection and on each
+  `notifications.*` event of that machine, and `provider.list` on each `provider.*` event, so while the bell's list is open too): the bell lists that machine's notifications beside this
   one's, each session's heading saying `on server`, and its badge and counts add them. Choosing one
   opens that machine's page of its session, and opening that page, or **Mark all read**, marks them
   read on that machine (`notifications.read`); the request or question is answered on that page,
