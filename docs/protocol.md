@@ -142,6 +142,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `about.set` | drive |
 | `about.reset` | drive |
 | `about.share` | drive |
+| `settings.share` | drive |
 | `rules.show` | read |
 | `rules.set` | drive |
 | `rules.reset` | drive |
@@ -699,6 +700,9 @@ own (the `rules` key of its file, where it stands, what is around it kept).
   text agents created from now on get at that level, its `source` (`default`, `global` or
   `project`), why it was cut to the limit (`null` when it was not), Flottille's default text, and
   the text a project without its own follows.
+- Without a `project`, `rules.show` adds `own` (whether this machine has a `rules.md`) and `all`
+  (the rules of all machines, `""` while they say none, `null` while this machine has no hub); a
+  machine with no `rules.md` follows all machines' rules, `source` `all`, else the default.
 - `rules.set {project?, text}` writes the text and answers as `rules.show`. `refused` above
   8,000 characters. An empty text is no rules.
 - `rules.reset {project?}` removes the file or the key, and answers as `rules.show`.
@@ -737,6 +741,35 @@ them, one line) and `notes` (anything every agent should know). Each is optional
 A change emits `about.changed {}`, and so does a value of all machines this machine takes from the
 hub. No tool of an agent reads or writes them: they are in its
 instructions.
+
+### The settings methods
+
+`settings.share {name, value}` sets one setting for all machines (`docs/remote.md`, "Settings for
+all machines"), as `about.share` does for About you. The names: `rules`, `judge.guidance`,
+`compaction.guidance`, `review.guidance` and `review.guidance.<check>` (the guidance files, as text),
+`tool_results.limit` (a number of characters from 4,000 to the largest, or `off`),
+`tool_results.unchanged` (`true`, `false`), `appearance.shade` (`light`, `dark`), and the settings of
+an extension, whose value is its JSON text, as `extension.set` takes it: `specs.language`
+(`"fr-FR"`), `specs.mode`, `autosubscriptions.created_pull`, `autosubscriptions.branch_pull`,
+`autosubscriptions.ticket`, `review.passes` (`["bugs"]`). A value is checked as the machine's own
+would be: `refused` for a text past its limit, a word the setting does not take, or a name that is
+no setting of all machines (no vault value, token, key or project variable is one). An empty value
+says nothing: every machine falls back to its default. Only as a request signed by the user's
+device, by a member that is no viewer, on a machine that has a hub; else `refused`; and `refused`
+for a text too long for a sealed copy (40 KiB). Answers `{"name", "value"}`.
+
+A machine takes what the hub keeps, and says it with `settings.changed {names}`: a client reads the
+settings again.
+
+Each reader says the three levels in its own answer: `rules.show` (no `project`), `judge.show`,
+`review.show` and `compaction.show`'s `guidance` add `own` (the machine has its file) and `all` (all
+machines' text, `""` while they say none, `null` without a hub), and their `source` is `all` while
+the machine has none of its own and all machines say one. `tool_results.show` and `appearance.show`
+add `own` (their keys the machine holds itself) and `all` (the values of all machines, the keys
+they say, `null` without a hub); `tool_results.set` and `appearance.set` change only the keys they
+are given, and `reset` (a list of keys) drops the machine's own, which then follows all machines.
+`extension.list`'s settings add `shared`, `all` (the value of all machines, `null` when there is
+none), and their `value` is the machine's own, else all machines', else the default.
 
 ### The judge methods
 

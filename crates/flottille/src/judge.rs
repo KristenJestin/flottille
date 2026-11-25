@@ -133,9 +133,12 @@ fn own(paths: &flottille_core::paths::Paths) -> Result<Option<String>, (String, 
 /// The judge's instructions now: read at each judgement, so that an edit reaches the next one.
 /// Why not, when the user's guidance cannot be followed as they wrote it.
 pub fn instructions(paths: &flottille_core::paths::Paths) -> Result<String, String> {
-    let guidance = own(paths)
-        .map_err(|(_, why)| why)?
-        .unwrap_or_else(|| DEFAULT.to_owned());
+    // The user's own on this machine, else all machines', else the default.
+    let guidance = match own(paths).map_err(|(_, why)| why)? {
+        Some(text) => text,
+        None => crate::settings_share::guidance(paths, "judge.guidance")
+            .unwrap_or_else(|| DEFAULT.to_owned()),
+    };
     Ok(instructions_with(&guidance))
 }
 
@@ -211,18 +214,27 @@ fn announce(daemon: &Daemon) -> Result<(), Failure> {
         .map_err(|error| Failure::new("unavailable", error.to_string()))
 }
 
-/// `{"text", "source", "error", "default"}`: the guidance the next judgement follows, whether it
-/// is the user's (`global`) or Flottille's (`default`), why the judge cannot follow the user's
+/// `{"text", "source", "error", "default", "own", "all"}`: the guidance the next judgement
+/// follows, whether it is the user's on this machine (`global`), all machines' (`all`) or
+/// Flottille's (`default`), whether this machine holds its own, the guidance of all machines
+/// (`null` while it has no hub), why the judge cannot follow the user's
 /// (`null` when it can: then every judgement fails, and asks, with that reason; `text` is what of
 /// it could be read), and Flottille's default. The shape of `rules.show`, which the window's
 /// editor reads.
 fn show(daemon: &Daemon) -> Result<Value, Failure> {
-    let (text, source, error) = match own(&daemon.paths) {
+    let paths = &daemon.paths;
+    let (text, source, error) = match own(paths) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (DEFAULT.to_owned(), "default", None),
+        Ok(None) => match crate::settings_share::guidance(paths, "judge.guidance") {
+            Some(text) => (text, "all", None),
+            None => (DEFAULT.to_owned(), "default", None),
+        },
         Err((text, why)) => (text, "global", Some(why)),
     };
-    Ok(json!({"text": text, "source": source, "error": error, "default": DEFAULT}))
+    Ok(
+        json!({"text": text, "source": source, "error": error, "default": DEFAULT,
+        "own": paths.judge().exists(), "all": crate::settings_share::all(paths, "judge.guidance")}),
+    )
 }
 
 /// How long a judgement may take before it is taken for a failure, which asks.

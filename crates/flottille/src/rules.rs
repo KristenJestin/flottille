@@ -26,6 +26,9 @@ pub enum Source {
     #[default]
     Default,
     Global,
+    /// The rules of all machines, which this machine has none of its own to replace
+    /// (`docs/remote.md`, "Settings for all machines").
+    All,
 }
 
 impl Source {
@@ -33,6 +36,7 @@ impl Source {
         match self {
             Source::Default => "default",
             Source::Global => "global",
+            Source::All => "all",
         }
     }
 }
@@ -154,7 +158,14 @@ fn users(paths: &Paths) -> (String, Source, Option<String>) {
             );
             (text, Source::Global, cut)
         }
-        Ok(None) => (DEFAULT.to_owned(), Source::Default, None),
+        // None of its own: the rules of all machines, else the default.
+        Ok(None) => match crate::settings_share::said_of(paths, "rules") {
+            Some(text) => {
+                let (text, cut) = limited(&text, "the rules of all machines");
+                (text, Source::All, cut)
+            }
+            None => (DEFAULT.to_owned(), Source::Default, None),
+        },
         Err(failure) => {
             eprintln!("flottille daemon: rules: {}", failure.message);
             (DEFAULT.to_owned(), Source::Default, None)
@@ -288,7 +299,8 @@ fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
     let mut shown = json!({"project": project, "text": followed, "source": source.word(),
         "cut": global_cut, "default": DEFAULT, "global": followed,
         "global_source": source.word(), "global_cut": global_cut, "alone": false,
-        "repeats": false});
+        "repeats": false, "own": paths.rules().exists(),
+        "all": crate::settings_share::all(paths, "rules")});
     if let Some(name) = project {
         let project = projects::load_project(daemon, name)?;
         let (rules, cuts) = resolved(paths, &project);

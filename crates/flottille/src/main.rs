@@ -92,6 +92,7 @@ mod service_command;
 mod services;
 mod session_name;
 mod session_read;
+mod settings_share;
 mod setup;
 mod shared;
 mod show;

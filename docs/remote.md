@@ -1995,18 +1995,33 @@ machine often overrides, follow in their own issues.
   `controller` or a `runner` ("Roles"); a viewer's change is refused by the machine it is asked of,
   by the hub when its machine seals it, and by every machine that opens it.
 - **Secrets never go there**: no vault value, no OAuth token, no key, no project `[variables]`.
-  `about.share` takes the three fields of About you and nothing else; a setting that names a vault
-  entry will name it, the entry staying the machine's.
+  `about.share` takes the three fields of About you and `settings.share` the names it lists, nothing
+  else; a setting that names a vault entry will name it, the entry staying the machine's.
+- **The guidance and the rest of "Shared, personal"** (#1461) go the same way, by `settings.share
+  {name, value}` (`docs/protocol.md`, "The settings methods"), one value a request and a sealed
+  copy: the rules for every project (`rules`), the guidance of the judge, of the compaction and of
+  Review and its checks (`judge.guidance`, `compaction.guidance`, `review.guidance`,
+  `review.guidance.<check>`), long tool results (`tool_results.limit`, `tool_results.unchanged`),
+  Specs' language and mode, the automatic subscriptions, Review's passes and the shade. A machine
+  reads each in the same order: a project's value where one exists (a project's rules, an
+  extension's setting a project's file sets), the machine's own (its file: `rules.md`, `judge.md`,
+  `tool-results.toml`, `extensions.toml`, `appearance.toml`…, and a key it leaves out is not its
+  own), all machines', the default. A machine drops its own with the way it always did (reset a
+  guidance, an extension's setting set to `null`, `reset` for the tool results and the shade).
+  The hub keeps up to 64 values, each 40 KiB at most: the rules' 8,000 characters of four bytes
+  each, signed, fit it, and a text that would not is refused when it is shared.
 - **Without a hub** (remote off, or this machine paired with no other runner), Settings is as it
   was: About you is the machine's own, and `about.show` says `all: null`.
 
 **In the window** (decided 2026-11-25 on the prototype): Settings' picker "Settings of", on the
 title's line of the page's header, which stays in place while the sections scroll, lists **All
 machines** first, then each machine. All machines shows the sections every machine may share (About
-you, for now) on General; a change there is signed with the device key and saved for all machines.
-On a machine, About you says once `The values of all machines, unless changed here.`; a field
+you, the shade) on General; the rules and the tool results on Agents; the judge's and the
+compaction's guidance on Approvals; Specs, the automatic subscriptions and Review (its passes and
+its guidance) on Features. A change there is signed with the device key and saved for all machines.
+On a machine, each of these sections says once `The values of all machines, unless changed here.`; a field
 changed there is that machine's own: its edge takes the colour of what waits (`wait`), and one line
-under it says `Changed on server` with **Use all machines' value**, which drops it. A section that
+under it says `Changed on server` with **Use all machines' value**, which drops it (for a guidance, its reset: the text of all machines is shown again). A section that
 belongs to the machine alone (Providers, Forges, Vault, the folder of travelled projects, Developer
 mode, Check) says `This machine only.` above it. Each of these moves: the line and the mark unfold
 and fold with their gaps, the edge fades over `PANEL`, the way back fades on hover, and All
@@ -2059,8 +2074,9 @@ on a real phone, by hand, and reported.
   state folder. Code it runs can sign what this device's role allows, a switch to Full among
   them: the twelve hours a signed switch to Full counts for, and the check that the user made it,
   do not hold against code run in Full, which can sign a new one at any time.
-- **Configuration is synced for About you only** ("Settings for all machines"): the rest of the
-  settings follow in their own issues, and a project is registered by hand on each machine.
+- **Configuration is synced for About you and the guidance and the rest of "Shared, personal"
+  only** ("Settings for all machines"): the settings a machine often overrides follow in their own
+  issue, and a project is registered by hand on each machine.
 - **No session moves** between machines; no conversation travels.
 - **Files other than pictures** do not travel yet; submodules and Git LFS objects are not sent by a
   launch.
@@ -2069,6 +2085,17 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
+- **One generic method for the settings of all machines** (#1461): `settings.share {name, value}`
+  for the guidance files and the rest, rather than a method for each setting, since the first two
+  (`about.share`, then a text) read the same; `about.share` keeps its three fields.
+- **A guidance or a text left blank on a machine follows all machines** (#1461): a blank
+  `judge.md`, `compaction.md` or review guidance is none, as before, and with a hub none follows
+  all machines' text; there is no way to say "nothing here" while all machines say something, as
+  for About you.
+- **A key a machine's file leaves out is not its own** (#1461): `tool-results.toml` and
+  `appearance.toml` used to be written whole; they now hold only what the machine changed, so a
+  machine that never touched the shade follows all machines'. A file written by an earlier
+  version holds both keys, which stay the machine's own.
 - **Settings for all machines are sealed to the machines' own keys** (#1330): each machine's
   Ed25519 key is turned into its X25519 form to open what is sealed for it (as libsodium and age
   do), rather than a key of its own for it, which the member list would have to sign and send. The

@@ -1288,6 +1288,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        "settings.share" => (
+            match crate::settings_share::call(daemon, "settings.share", request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("rules.") => (
             match rules::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

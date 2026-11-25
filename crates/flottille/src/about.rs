@@ -227,7 +227,7 @@ fn checked(set: Set) -> Result<Given, Failure> {
 }
 
 /// Why `about.share` is refused unless the user's device signed it here.
-const NOT_SIGNED: &str = "the values of all machines change only as a request signed by the user's \
+pub(crate) const NOT_SIGNED: &str = "the values of all machines change only as a request signed by the user's \
                           device: change them in the window, on All machines";
 
 /// Answers an `about.*` request: `about.show`, `about.set`, `about.reset`, `about.share`.
@@ -255,7 +255,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                          with all machines",
                     )
                 })?;
-            control.share(&asked.signed).map_err(Failure::refused)?;
+            control
+                .share(crate::shared::ABOUT_SHARE, &asked.signed)
+                .map_err(Failure::refused)?;
             announce(daemon)?;
         }
         "about.set" => {

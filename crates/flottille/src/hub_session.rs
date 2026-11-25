@@ -117,10 +117,22 @@ impl Control {
     }
 
     /// The user's change of values of all machines made on this machine, checked already: kept,
-    /// then given to the hub now, or once a session to it is open again.
-    pub(crate) fn share(&self, text: &str) -> Result<(), String> {
+    /// then given to the hub now, or once a session to it is open again. `method` is the request
+    /// the device signed (`about.share`, `settings.share`).
+    pub(crate) fn share(&self, method: &str, text: &str) -> Result<(), String> {
         let (_, members) = self.checked()?;
-        let changes = crate::shared::from_request(text, &members)?;
+        let changes = crate::shared::from_request(method, text, &members)?;
+        // A value too large for a sealed copy is refused here, before anything is kept.
+        for (name, kept) in &changes {
+            let sealed = crate::shared::seal(name, kept, &self.key, &members)
+                .ok_or_else(|| format!("{name} cannot be sealed for the machines"))?;
+            if sealed.size() > flottille_link::SEALED_LIMIT {
+                return Err(format!(
+                    "{name} is too long to share: a value of all machines holds {} KiB at most",
+                    flottille_link::SEALED_LIMIT / 1024
+                ));
+            }
+        }
         let changed = crate::shared::keep(&self.folder, changes);
         self.give(&members, &changed);
         Ok(())
@@ -172,9 +184,7 @@ impl Control {
             }
         };
         let (changed, again) = crate::shared::took(&self.folder, &hub, &self.key, members);
-        if !changed.is_empty() {
-            (self.emit)("about.changed", json!({}));
-        }
+        crate::settings_share::said(&self.emit, &changed);
         self.give(members, &again);
     }
 

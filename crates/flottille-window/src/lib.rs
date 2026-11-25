@@ -59,6 +59,7 @@ pub mod session_link;
 pub mod session_options;
 pub mod settings;
 pub mod setup;
+pub mod shared_level;
 pub mod shell;
 pub mod shown_files;
 pub mod sign_in;

@@ -183,6 +183,14 @@ pub enum Command {
     AboutShare {
         fields: Vec<(String, String)>,
     },
+    /// Saves one setting for all machines (`settings.share`), signed with this device's key, then
+    /// does `then`, the read of the section that holds it: the answer is the section's own, its
+    /// `written` set, and a refused share is its failure.
+    Shared {
+        name: String,
+        value: String,
+        then: Box<Command>,
+    },
     /// The developer mode (`developer.show`).
     DeveloperRead,
     /// Switches the developer mode (`developer.set`).
@@ -2766,6 +2774,18 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                     .map(|shown| crate::about::Shown::of(&shown)),
             }
         }
+        Command::Shared { name, value, then } => {
+            let shared = signed_by_device(
+                connect,
+                sign.clone(),
+                None,
+                "settings.share",
+                json!({"name": name, "value": value}),
+                bounds.quick,
+            );
+            let outcome = perform(connect, sign, *then, bounds);
+            after_share(outcome, shared.map(|_| ()))
+        }
         Command::DeveloperRead | Command::DeveloperSet { .. } => {
             let (method, params, written) = match command {
                 Command::DeveloperSet { log } => ("developer.set", json!({"log": log}), true),
@@ -4166,6 +4186,56 @@ pub(crate) fn appearance_json(appearance: gpui_design_system::Appearance) -> Val
         Shade::Dark => "dark",
     };
     json!({"theme": theme, "shade": shade})
+}
+
+/// The outcome of the read that follows a share of a setting for all machines: what the section
+/// shows next, written, or why the share was refused.
+fn after_share(outcome: Outcome, shared: Result<(), String>) -> Outcome {
+    // A refused share is the section's failure; a read that fails after it is its own.
+    let shown = |read: Result<Shown, String>| shared.clone().and(read);
+    match outcome {
+        Outcome::Rules {
+            project,
+            shown: read,
+            ..
+        } => Outcome::Rules {
+            project,
+            written: true,
+            shown: shown(read),
+        },
+        Outcome::JudgeGuidance { shown: read, .. } => Outcome::JudgeGuidance {
+            written: true,
+            shown: shown(read),
+        },
+        Outcome::Guidance {
+            name,
+            part,
+            shown: read,
+            ..
+        } => Outcome::Guidance {
+            name,
+            part,
+            written: true,
+            shown: shown(read),
+        },
+        Outcome::Compaction { shown: read, .. } => Outcome::Compaction {
+            written: true,
+            guidance: true,
+            shown: shared.clone().and(read),
+        },
+        Outcome::ToolResults { shown: read, .. } => Outcome::ToolResults {
+            written: true,
+            shown: shared.clone().and(read),
+        },
+        Outcome::Appearance {
+            seq, shown: read, ..
+        } => Outcome::Appearance {
+            seq,
+            written: true,
+            shown: shared.clone().and(read),
+        },
+        other => other,
+    }
 }
 
 /// What `appearance.show` says, or why it says nothing the window knows.

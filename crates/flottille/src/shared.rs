@@ -4,9 +4,11 @@
 //! that it can be sealed again for a machine paired since; the hub keeps the same, sealed for every
 //! machine (`flottille_link::Sealed`), and never reads it.
 //!
-//! Only what the user says of themselves is a value of all machines for now: `about.name`,
-//! `about.pronouns` and `about.notes`. No secret is one: a vault value, a token, a key and a
-//! project's `[variables]` stay on their machine, and `about.share` takes no other field.
+//! The values of all machines are what the user says of themselves (`about.name`, `about.pronouns`,
+//! `about.notes`, by `about.share`) and the settings of `crate::settings_share` (`rules`, the
+//! guidance files, `tool_results.limit`…, by `settings.share`, one value a request). No secret is
+//! one: a vault value, a token, a key and a project's `[variables]` stay on their machine, and no
+//! method takes a name that is not listed.
 //!
 //! ```json
 //! {"about.name": {"value": "Sam", "at": 1764000000000, "request": {/* as signed */}}}
@@ -25,12 +27,27 @@ pub const FILE: &str = "shared.json";
 /// The method whose signed request is a change of About you for all machines.
 pub const ABOUT_SHARE: &str = "about.share";
 
-/// The values of all machines, by name, and the field of `about.share` each one is.
+/// The method whose signed request is a change of one setting for all machines: `{name, value}`.
+pub const SETTINGS_SHARE: &str = "settings.share";
+
+/// The values of About you, by name, and the field of `about.share` each one is.
 pub const NAMES: [(&str, &str); 3] = [
     ("about.name", "name"),
     ("about.pronouns", "pronouns"),
     ("about.notes", "notes"),
 ];
+
+/// The method whose signed request carries the value `name`: none for a name that is no value of
+/// all machines.
+fn method_of(name: &str) -> Option<&'static str> {
+    if NAMES.iter().any(|(known, _)| *known == name) {
+        Some(ABOUT_SHARE)
+    } else if crate::settings_share::known(name) {
+        Some(SETTINGS_SHARE)
+    } else {
+        None
+    }
+}
 
 /// A value as this machine checked it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,23 +89,38 @@ pub fn read(folder: &Path) -> Values {
     }
 }
 
-fn write(folder: &Path, values: &Values) -> std::io::Result<()> {
-    crate::link::write_json(&folder.join(FILE), values)
+/// The values this machine last checked, while it has a hub: none while remote is off or this
+/// machine is paired with none. Read from its files alone, so that what reads a setting needs no
+/// daemon (`crate::settings_share::all`).
+pub fn at(paths: &flottille_core::paths::Paths) -> Option<Values> {
+    if !crate::remote::on(paths) {
+        return None;
+    }
+    let folder = crate::remote::folder(paths);
+    folder
+        .join(crate::hub_session::HUB_FILE)
+        .exists()
+        .then(|| read(&folder))
 }
 
-/// The field of `about.share` the value `name` is.
-fn field_of(name: &str) -> Option<&'static str> {
-    NAMES
-        .iter()
-        .find(|(known, _)| *known == name)
-        .map(|(_, field)| *field)
+fn write(folder: &Path, values: &Values) -> std::io::Result<()> {
+    crate::link::write_json(&folder.join(FILE), values)
 }
 
 /// The value `name` of the user's signed request `request`, as `about.share` carries it: none when
 /// the request does not carry it.
 pub fn kept_of(name: &str, request: &Value, at: u64, params: &Value) -> Option<Kept> {
-    let field = field_of(name)?;
-    let value = params.get(field)?.as_str()?.to_owned();
+    let value = match method_of(name)? {
+        ABOUT_SHARE => {
+            let field = NAMES.iter().find(|(known, _)| *known == name)?.1;
+            params.get(field)?.as_str()?.to_owned()
+        }
+        _ => {
+            // One value a request: a copy carries the text of its own name alone.
+            (params.get("name")?.as_str()? == name).then_some(())?;
+            params.get("value")?.as_str()?.to_owned()
+        }
+    };
     Some(Kept {
         value,
         at,
@@ -96,15 +128,31 @@ pub fn kept_of(name: &str, request: &Value, at: u64, params: &Value) -> Option<K
     })
 }
 
-/// The values a request `about.share` changes, checked again as another machine would.
-pub fn from_request(text: &str, members: &Members) -> Result<Vec<(String, Kept)>, String> {
+/// The values a request `method` (`about.share` or `settings.share`) changes, checked again as
+/// another machine would.
+pub fn from_request(
+    method: &str,
+    text: &str,
+    members: &Members,
+) -> Result<Vec<(String, Kept)>, String> {
     let (_, request, params) =
-        check_shared(text.as_bytes(), ABOUT_SHARE, members).map_err(|error| error.to_string())?;
+        check_shared(text.as_bytes(), method, members).map_err(|error| error.to_string())?;
     let at = request.signed.at;
     let request = serde_json::to_value(&request).map_err(|error| error.to_string())?;
-    Ok(NAMES
-        .iter()
-        .filter_map(|(name, _)| Some((name.to_string(), kept_of(name, &request, at, &params)?)))
+    let names: Vec<String> = match method {
+        ABOUT_SHARE => NAMES.iter().map(|(name, _)| name.to_string()).collect(),
+        _ => params["name"]
+            .as_str()
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+    };
+    Ok(names
+        .into_iter()
+        .filter_map(|name| {
+            let kept = kept_of(&name, &request, at, &params)?;
+            Some((name, kept))
+        })
         .collect())
 }
 
@@ -112,9 +160,9 @@ pub fn from_request(text: &str, members: &Members) -> Result<Vec<(String, Kept)>
 /// change signed by a member's device that may make it, of the name and time the copy says. None
 /// otherwise, whatever sealed it.
 fn opened(sealed: &Sealed, key: &MachineKey, members: &Members) -> Option<Kept> {
-    field_of(&sealed.name)?;
+    let method = method_of(&sealed.name)?;
     let plain = sealed.open(key)?;
-    let (_, request, params) = check_shared(&plain, ABOUT_SHARE, members)
+    let (_, request, params) = check_shared(&plain, method, members)
         .map_err(|error| {
             eprintln!(
                 "flottille daemon: a value of all machines, {}, is not taken: {error}",

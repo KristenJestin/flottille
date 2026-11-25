@@ -440,11 +440,25 @@ fn own(paths: &Paths) -> Result<Option<String>, (String, String)> {
     Ok(Some(text).filter(|text| !text.trim().is_empty()))
 }
 
+/// What is wrong with a text offered as the compaction model's guidance.
+pub fn check_guidance(text: &str) -> Result<(), String> {
+    let count = text.chars().count();
+    match count > LIMIT {
+        true => Err(format!(
+            "the compaction model's guidance is {count} characters long and may hold {LIMIT}"
+        )),
+        false => Ok(()),
+    }
+}
+
 /// The compactor's instructions with the guidance read now.
 fn instructions(paths: &Paths) -> Result<String, String> {
-    let guidance = own(paths)
-        .map_err(|(_, why)| why)?
-        .unwrap_or_else(|| DEFAULT.to_owned());
+    // The user's own on this machine, else all machines', else the default.
+    let guidance = match own(paths).map_err(|(_, why)| why)? {
+        Some(text) => text,
+        None => crate::settings_share::guidance(paths, "compaction.guidance")
+            .unwrap_or_else(|| DEFAULT.to_owned()),
+    };
     let (before, after) = FIXED
         .split_once("{guidance}")
         .expect("the compactor's fixed instructions hold the guidance's place");
@@ -465,7 +479,10 @@ fn show(daemon: &Daemon) -> Result<Value, Failure> {
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
     let (text, source, error) = match own(&daemon.paths) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (DEFAULT.to_owned(), "default", None),
+        Ok(None) => match crate::settings_share::guidance(&daemon.paths, "compaction.guidance") {
+            Some(text) => (text, "all", None),
+            None => (DEFAULT.to_owned(), "default", None),
+        },
         Err((text, why)) => (text, "global", Some(why)),
     };
     Ok(json!({
@@ -484,7 +501,9 @@ fn show(daemon: &Daemon) -> Result<Value, Failure> {
             .iter()
             .map(|provider| (provider.name.to_owned(), json!((provider.cache_lifetime)())))
             .collect::<serde_json::Map<_, _>>(),
-        "guidance": {"text": text, "source": source, "error": error, "default": DEFAULT},
+        "guidance": {"text": text, "source": source, "error": error, "default": DEFAULT,
+            "own": guidance_file(&daemon.paths).exists(),
+            "all": crate::settings_share::all(&daemon.paths, "compaction.guidance")},
     }))
 }
 

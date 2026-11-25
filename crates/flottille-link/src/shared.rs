@@ -45,7 +45,7 @@ pub const NAME_LIMIT: usize = 64;
 /// The most a sealed copy holds, its value and its boxes together: the hub refuses a larger one.
 pub const SEALED_LIMIT: usize = 40 * 1024;
 /// The most values the hub keeps.
-pub const MOST_VALUES: usize = 32;
+pub const MOST_VALUES: usize = 64;
 
 /// Bytes, in base64 in JSON.
 #[derive(Clone, PartialEq, Eq)]

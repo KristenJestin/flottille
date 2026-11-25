@@ -87,14 +87,29 @@ fn own(
     Ok(Some(text).filter(|text| !text.trim().is_empty()))
 }
 
-/// The guidance the next use follows: the user's, else the default; why not when the user's
-/// cannot be followed.
+/// The name under which the guidance (or its part) is a value of all machines
+/// (`crate::settings_share`); no guidance of an extension that does not share it is one.
+fn shared_name(extension: &Extension, part: Option<&str>) -> String {
+    match part {
+        Some(part) => format!("{}.guidance.{part}", extension.name),
+        None => format!("{}.guidance", extension.name),
+    }
+}
+
+/// The guidance of all machines, when this machine has no hub or the extension shares none: none.
+fn of_all_machines(daemon: &Daemon, extension: &Extension, part: Option<&str>) -> Option<String> {
+    crate::settings_share::guidance(&daemon.paths, &shared_name(extension, part))
+}
+
+/// The guidance the next use follows: the user's on this machine, else all machines', else the
+/// default; why not when the user's cannot be followed.
 pub fn text(daemon: &Daemon, extension: &Extension) -> Result<String, String> {
     let Some(guidance) = &extension.guidance else {
         return Ok(String::new());
     };
     Ok(own(daemon, extension, guidance, None)
         .map_err(|(_, why)| why)?
+        .or_else(|| of_all_machines(daemon, extension, None))
         .unwrap_or_else(|| guidance.default.to_owned()))
 }
 
@@ -108,7 +123,9 @@ pub fn part_text(
     let Some(guidance) = &extension.guidance else {
         return Ok(None);
     };
-    own(daemon, extension, guidance, Some(part)).map_err(|(_, why)| why)
+    Ok(own(daemon, extension, guidance, Some(part))
+        .map_err(|(_, why)| why)?
+        .or_else(|| of_all_machines(daemon, extension, Some(part))))
 }
 
 /// Whether the method is a guidance's of an extension that has one.
@@ -208,8 +225,16 @@ pub fn call(
     };
     let (text, source, error) = match own(daemon, extension, guidance, part) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (default.to_owned(), "default", None),
+        Ok(None) => match of_all_machines(daemon, extension, part) {
+            Some(text) => (text, "all", None),
+            None => (default.to_owned(), "default", None),
+        },
         Err((text, why)) => (text, "global", Some(why)),
     };
-    Ok(json!({"text": text, "source": source, "error": error, "default": default}))
+    let held = file(daemon, extension, part).exists();
+    let all = crate::settings_share::all(&daemon.paths, &shared_name(extension, part));
+    Ok(
+        json!({"text": text, "source": source, "error": error, "default": default,
+        "own": held, "all": all}),
+    )
 }

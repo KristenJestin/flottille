@@ -457,6 +457,26 @@ fn find(name: &str) -> Result<&'static Extension, String> {
         })
 }
 
+/// Whether `value` is one the setting `key` of `extension` takes, as `extension.set` checks it.
+pub(crate) fn check_setting(extension: &str, key: &str, value: &Value) -> Result<(), String> {
+    let extension = find(extension)?;
+    let setting = extension
+        .settings
+        .iter()
+        .find(|setting| setting.key == key)
+        .ok_or_else(|| format!("{}.{key}: unknown key", extension.name))?;
+    checked(setting.kind, value)
+        .map(|_| ())
+        .map_err(|why| format!("{}.{key}: {why}", extension.name))
+}
+
+/// The value of all machines of the setting `key`, when it says one the setting takes
+/// (`crate::settings_share`).
+fn of_all_machines(daemon: &Daemon, extension: &Extension, setting: &Setting) -> Option<Value> {
+    let value = crate::settings_share::of_extension(&daemon.paths, extension.name, setting.key)?;
+    checked(setting.kind, &value).ok()
+}
+
 /// A setting's value checked against its kind; the error names what is wrong, not the key.
 fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
     match kind {
@@ -1270,7 +1290,7 @@ pub fn on(daemon: &Daemon, extension: &Extension) -> Result<(), Failure> {
 }
 
 /// A setting's value for a project: the project's own, else the one of `extensions.toml`, else
-/// its default.
+/// the one of all machines (`docs/remote.md`, "Settings for all machines"), else its default.
 pub fn value(
     daemon: &Daemon,
     extension: &Extension,
@@ -1285,11 +1305,13 @@ pub fn value(
         .expect("a setting the extension declares");
     let global = global(&daemon.paths).map_err(invalid)?;
     let own = of_project(extension, project).map_err(invalid)?;
+    // The project's value, the machine's own, all machines', the default.
     Ok(own
         .settings
         .get(key)
         .or_else(|| global.get(extension.name)?.settings.get(key))
         .cloned()
+        .or_else(|| of_all_machines(daemon, extension, setting))
         .unwrap_or_else(|| default_of(setting.kind)))
 }
 
@@ -1395,8 +1417,13 @@ fn list(daemon: &Daemon) -> Value {
                         "kind": kind_word(setting.kind),
                         "per_project": setting.per_project,
                         "value": own.settings.get(setting.key).cloned()
+                            .or_else(|| of_all_machines(daemon, extension, setting))
                             .unwrap_or_else(|| default_of(setting.kind)),
                         "set": own.settings.contains_key(setting.key),
+                        // The value of all machines: the setting is shared, and what the hub
+                        // says of it is `null` while there is none or this machine has no hub.
+                        "shared": crate::settings_share::name_of(extension.name, setting.key).is_some(),
+                        "all": of_all_machines(daemon, extension, setting),
                     })
                 })
                 .collect();

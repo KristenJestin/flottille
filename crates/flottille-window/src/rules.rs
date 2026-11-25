@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::actions::Command;
 use crate::commands::{perform_later, spaced, stack};
 use crate::settings::Reveal;
+use crate::shared_level::{Place, edge, follows_line, set_here};
 
 /// What a project's editor says when its text starts with the global one.
 pub const REPEATS: &str = "These rules repeat the global ones; you can remove that part.";
@@ -49,6 +50,9 @@ pub enum Source {
     Global,
     /// The project's own.
     Project,
+    /// The text of all machines, this machine having none of its own (`docs/remote.md`,
+    /// "Settings for all machines").
+    All,
 }
 
 /// The rules as the daemon says them (`rules.show`).
@@ -70,6 +74,10 @@ pub struct Shown {
     /// Why the judge cannot follow the stored guidance (`judge.show`): every judgement fails,
     /// and asks, until it is fixed.
     pub error: Option<String>,
+    /// The text of all machines, `""` while they say none: none without a hub.
+    pub all: Option<String>,
+    /// This machine holds a text of its own (its file).
+    pub own: bool,
 }
 
 impl Shown {
@@ -79,17 +87,21 @@ impl Shown {
             source: match value["source"].as_str() {
                 Some("project") => Source::Project,
                 Some("global") => Source::Global,
+                Some("all") => Source::All,
                 _ => Source::Default,
             },
             global: value["global"].as_str().unwrap_or_default().to_owned(),
             global_source: match value["global_source"].as_str() {
                 Some("global") => Source::Global,
+                Some("all") => Source::All,
                 _ => Source::Default,
             },
             alone: value["alone"].as_bool().unwrap_or(false),
             repeats: value["repeats"].as_bool().unwrap_or(false),
             cut: value["cut"].as_str().map(str::to_owned),
             error: value["error"].as_str().map(str::to_owned),
+            all: value["all"].as_str().map(str::to_owned),
+            own: value["own"].as_bool().unwrap_or(false),
         }
     }
 }
@@ -117,6 +129,10 @@ pub struct RulesEditor {
     waiting: bool,
     /// What waits is a reset.
     resetting: bool,
+    /// What waits is the way back to all machines' text, not a reset to the default.
+    using_all: bool,
+    /// Where the editor is drawn: on All machines, or on a machine with or without a hub.
+    place: Place,
     /// The global rules above a project's editor are unfolded.
     global_open: bool,
     problem: Option<SharedString>,
@@ -137,6 +153,8 @@ impl RulesEditor {
             shown: None,
             waiting: false,
             resetting: false,
+            using_all: false,
+            place: Place::default(),
             global_open: false,
             problem: None,
             _subscriptions: Vec::new(),
@@ -199,10 +217,10 @@ impl RulesEditor {
         self.project.as_deref()
     }
 
-    /// Asks the daemon for the rules.
-    pub fn read(&self, cx: &mut Context<Self>) {
+    /// What asks the daemon for the text this editor shows.
+    fn read_command(&self) -> Command {
         let project = self.project.clone();
-        let command = if let Some((name, part, _)) = &self.check {
+        if let Some((name, part, _)) = &self.check {
             Command::GuidanceRead {
                 name: name.clone(),
                 part: Some(part.clone()),
@@ -218,12 +236,94 @@ impl RulesEditor {
             Command::CompactionRead
         } else {
             Command::RulesRead { project }
+        }
+    }
+
+    /// Asks the daemon for the rules.
+    pub fn read(&self, cx: &mut Context<Self>) {
+        perform_later(&self.shell, self.read_command(), cx);
+    }
+
+    /// The name of the text among the values of all machines: none for a project's rules, which
+    /// no machine shares.
+    fn shared_name(&self) -> Option<String> {
+        if let Some((name, part, _)) = &self.check {
+            Some(format!("{name}.guidance.{part}"))
+        } else if let Some((name, _)) = &self.part {
+            Some(format!("{name}.guidance"))
+        } else if self.judge {
+            Some("judge.guidance".to_owned())
+        } else if self.compaction {
+            Some("compaction.guidance".to_owned())
+        } else {
+            self.project.is_none().then(|| "rules".to_owned())
+        }
+    }
+
+    /// Where the editor is drawn: on All machines, or on `machine`, which has a hub or not. Coming
+    /// to All machines or leaving it puts in the field what that place holds.
+    pub fn place(&mut self, place: Place, window: &mut Window, cx: &mut Context<Self>) {
+        let place = Place {
+            on_all: place.on_all && self.shared_name().is_some(),
+            ..place
         };
-        perform_later(&self.shell, command, cx);
+        if self.place == place {
+            return;
+        }
+        let moved = self.place.on_all != place.on_all;
+        self.place = place;
+        if moved && let (Some(field), Some(shown)) = (self.field.clone(), self.shown.clone()) {
+            let text = self.text_of(&shown);
+            field.update(cx, |field, cx| field.set_value(&text, window, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn on_all(&self) -> bool {
+        self.place.on_all
+    }
+
+    /// What the field holds of `shown` where the editor is drawn: all machines' text on All
+    /// machines, what the machine's agents are told on a machine.
+    fn text_of(&self, shown: &Shown) -> String {
+        match self.place.on_all {
+            true => shown.all.clone().unwrap_or_default(),
+            false => shown.text.clone(),
+        }
+    }
+
+    /// Whether this machine holds a text of its own, while it has a hub: the field wears the
+    /// mark of a value set apart.
+    pub fn held_here(&self) -> bool {
+        self.project.is_none() && self.shown.as_ref().is_some_and(|shown| shown.own)
+    }
+
+    /// Drops the machine's own text: the field follows all machines again.
+    pub fn use_all(&mut self, cx: &mut Context<Self>) {
+        if self.waiting || !self.place.is_own(self.held_here()) {
+            return;
+        }
+        self.waiting = true;
+        self.using_all = true;
+        self.problem = None;
+        self.write(None, cx);
+        cx.notify();
     }
 
     /// Saves `text`, or with none resets to the default.
     fn write(&self, text: Option<String>, cx: &mut Context<Self>) {
+        // On All machines it is the value every machine uses, signed with the device key.
+        if self.place.on_all
+            && let Some(name) = self.shared_name()
+        {
+            let command = Command::Shared {
+                name,
+                value: text.unwrap_or_default(),
+                then: Box::new(self.read_command()),
+            };
+            perform_later(&self.shell, command, cx);
+            return;
+        }
         let project = self.project.clone();
         let command = if let Some((name, part, _)) = &self.check {
             Command::GuidanceWrite {
@@ -269,7 +369,7 @@ impl RulesEditor {
     /// The text differs from what the daemon last said.
     pub fn is_edited(&self, cx: &gpui_kit::App) -> bool {
         match (&self.shown, self.typed(cx)) {
-            (Some(shown), Some(typed)) => shown.text != typed,
+            (Some(shown), Some(typed)) => self.text_of(shown) != typed,
             _ => false,
         }
     }
@@ -284,9 +384,8 @@ impl RulesEditor {
         };
         self.typed(cx).is_some()
             && (self.is_edited(cx)
-                || (self.project.is_none() && !self.is_own())
-                || shown.cut.is_some()
-                || shown.error.is_some())
+                || (self.project.is_none() && !self.place.on_all && !self.is_own())
+                || (!self.place.on_all && (shown.cut.is_some() || shown.error.is_some())))
     }
 
     /// Whether Save is drawn: the text differs from what is saved, or what is stored must be
@@ -295,13 +394,22 @@ impl RulesEditor {
     pub fn save_shown(&self, cx: &gpui_kit::App) -> bool {
         self.savable(cx)
             && self.shown.as_ref().is_some_and(|shown| {
-                self.is_edited(cx) || shown.cut.is_some() || shown.error.is_some()
+                self.is_edited(cx)
+                    || (!self.place.on_all && (shown.cut.is_some() || shown.error.is_some()))
             })
     }
 
     /// Whether Reset to default has something to remove: rules of its own at this level, or a
     /// project's `rules_alone`.
     pub fn is_own(&self) -> bool {
+        // On All machines, what Reset forgets is what all machines say.
+        if self.place.on_all {
+            return self
+                .shown
+                .as_ref()
+                .and_then(|shown| shown.all.as_ref())
+                .is_some_and(|all| !all.trim().is_empty());
+        }
         let own = match self.project {
             Some(_) => Source::Project,
             None => Source::Global,
@@ -369,7 +477,8 @@ impl RulesEditor {
                 }
             }));
         if let Some(shown) = &self.shown {
-            field.update(cx, |field, cx| field.set_value(&shown.text, window, cx));
+            let text = self.text_of(shown);
+            field.update(cx, |field, cx| field.set_value(&text, window, cx));
         }
         self.field = Some(field.clone());
         field
@@ -397,9 +506,16 @@ impl RulesEditor {
             "Rules".to_owned()
         };
         let resetting = std::mem::take(&mut self.resetting);
+        let using_all = std::mem::take(&mut self.using_all);
+        let on_all = self.place.on_all;
         if written {
             let said = match &said {
+                Ok(_) if using_all => Toast::success(format!("{what}: all machines' text used")),
+                Ok(_) if resetting && on_all => {
+                    Toast::success(format!("{what} reset for all machines"))
+                }
                 Ok(_) if resetting => Toast::success(format!("{what} reset to the default")),
+                Ok(_) if on_all => Toast::success(format!("{what} saved for all machines")),
                 Ok(_) => Toast::success(format!("{what} saved")),
                 Err(why) => Toast::failure(format!("{what} not saved")).detail(why.clone()),
             };
@@ -428,7 +544,8 @@ impl RulesEditor {
                 self.problem = None;
                 let keep = !written && self.is_edited(cx);
                 if !keep && let Some(field) = self.field.clone() {
-                    field.update(cx, |field, cx| field.set_value(&shown.text, window, cx));
+                    let text = self.text_of(&shown);
+                    field.update(cx, |field, cx| field.set_value(&text, window, cx));
                 }
                 self.shown = Some(shown);
             }
@@ -490,6 +607,8 @@ impl RulesEditor {
             self.shown.as_ref().map(|shown| shown.source),
         ) {
             (_, _, None) => "asking Flottille",
+            (_, None, Some(Source::All)) if !self.place.on_all => "all your machines'",
+            (_, None, Some(_)) if self.place.on_all => "all your machines'",
             (true, _, Some(Source::Global)) => "your own",
             (true, _, Some(_)) => "Flottille's own",
             (false, None, Some(Source::Global)) => "your own",
@@ -593,19 +712,44 @@ impl Render for RulesEditor {
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                 )),
             );
-        let text = div()
-            .id(id("text"))
-            .min_h(px(150.))
-            .px(space::MD)
-            .py(space::MD)
-            .rounded(px(10.))
-            .bg(p.field)
-            .border_1()
-            .border_color(p.line2)
-            .text_size(px(13.))
-            .line_height(px(20.))
-            .child(field)
-            .test_support();
+        // On a machine with a hub, a text it holds itself has the edge of what is set apart and
+        // the way back to all machines' text under it; on All machines, a plain edge.
+        let prefix = if let Some(name) = &named {
+            format!("{name}-guidance")
+        } else if judge {
+            "judge-guidance".to_owned()
+        } else if compaction {
+            "compaction-guidance".to_owned()
+        } else {
+            format!("rules-{scope}")
+        };
+        let held = self.held_here();
+        let edge_colour = edge(&prefix, &self.place, held, window, cx);
+        let editor = cx.entity().downgrade();
+        let text = set_here(
+            &prefix,
+            &self.place,
+            div()
+                .id(id("text"))
+                .min_h(px(150.))
+                .px(space::MD)
+                .py(space::MD)
+                .rounded(px(10.))
+                .bg(p.field)
+                .border_1()
+                .border_color(edge_colour)
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .child(field)
+                .test_support(),
+            held,
+            move |_, cx| {
+                editor.update(cx, |editor, cx| editor.use_all(cx)).ok();
+            },
+        );
+        let follows = self.place.follows()
+            && self.project.is_none()
+            && self.shown.as_ref().is_some_and(|shown| shown.all.is_some());
         let line = move |id: ElementId| {
             move |said: SharedString| {
                 div()
@@ -779,6 +923,7 @@ impl Render for RulesEditor {
             .sentence(sentence)
             .child(
                 stack(space::MD)
+                    .child(follows_line(&prefix, follows, cx))
                     .children(global_toggle.map(|toggle| spaced(space::MD, toggle)))
                     .children(global_body)
                     .children(alone_switch.map(|switch| spaced(space::MD, switch)))
