@@ -741,7 +741,12 @@ fn its_second_line_comes_back_when_it_is_no_longer_blocked(cx: &mut TestAppConte
         Some(Some("main".to_owned())),
         "its place, as every row of its project says it"
     );
-    assert_eq!(within(IN_PROJECT, session_waits_id(&id), cx), None);
+    // The session waits for the review as any session does, no longer on a person.
+    assert_eq!(
+        within(IN_PROJECT, session_waits_id(&id), cx),
+        Some(Some("waits for review of #12".to_owned())),
+        "the words of a wait, not of a person"
+    );
     let scope = shell.read_with(cx, |s, cx| {
         s.session(&id).unwrap().read(cx).scope().map(str::to_owned)
     });
