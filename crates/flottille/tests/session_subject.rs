@@ -361,3 +361,48 @@ fn a_change_of_subject_is_an_event() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(updated(&user).len(), 1);
 }
+
+#[test]
+fn a_session_holding_a_ticket_before_the_first_round_shows_its_title_after_it() {
+    let user = user();
+    fixture(&user);
+    link(&user, "#5");
+    let (id, _mcp) = agent(&user);
+    let subject = subject(&user, &id);
+    assert_eq!(subject["key"], "#5", "{subject}");
+    assert_eq!(subject["title"], Value::Null, "the tracker was never read");
+
+    // The tracker's first round stores its items and tells no event of them.
+    script(&user, &[issue(5, "The login fails", "OPEN")], None);
+    a_round(&user);
+
+    let subject = subject_once(&user, &id, |s| s["title"] == "The login fails");
+    assert_eq!(subject["kind"], "ticket", "{subject}");
+    assert_eq!(subject["key"], "#5");
+}
+
+#[test]
+fn an_unset_forge_drops_the_pull_request_from_the_subject() {
+    let user = user();
+    fixture(&user);
+    script(
+        &user,
+        &[issue(5, "The login fails", "OPEN")],
+        Some(pull("OPEN")),
+    );
+    a_round(&user);
+    link(&user, "#5");
+    let (id, _mcp) = agent(&user);
+    let subject = subject_once(&user, &id, |s| s["pull_request"]["key"] == "#12");
+    assert_eq!(subject["key"], "#5", "{subject}");
+
+    // The repository's forge unset: its pull requests are forgotten (`items.forgotten`).
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": "api"}], "tracker": null}),
+    )
+    .unwrap();
+
+    let subject = subject_once(&user, &id, |s| s["pull_request"].is_null());
+    assert_eq!(subject["key"], "#5", "{subject}");
+}

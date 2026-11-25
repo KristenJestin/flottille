@@ -327,7 +327,7 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
             }
         }
         let daemon = daemon.clone();
-        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &burst)).await;
+        let _ = tokio::task::spawn_blocking(move || settle(&daemon, &burst, false)).await;
     }
 }
 
@@ -345,7 +345,7 @@ fn concerns(event: &flottille_core::protocol::Event) -> bool {
 
 /// Refreshes, each once, the live sessions `events` can concern: those of the projects they
 /// are of, and the sessions they name; how many refreshes that took.
-fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event]) -> usize {
+fn settle(daemon: &Daemon, events: &[flottille_core::protocol::Event], _lagged: bool) -> usize {
     let mut projects = std::collections::BTreeSet::new();
     let mut named = std::collections::BTreeSet::new();
     for event in events.iter().filter(|event| concerns(event)) {
@@ -439,7 +439,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(settle(&daemon, &burst), 1);
+        assert_eq!(settle(&daemon, &burst, false), 1);
         // Another project's items, or an item that is neither a ticket nor a pull request.
         let others = [
             event(
@@ -451,7 +451,21 @@ mod tests {
                 json!({"project": "app", "kind": "review", "key": "2"}),
             ),
         ];
-        assert_eq!(settle(&daemon, &others), 0);
+        assert_eq!(settle(&daemon, &others, false), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lagged_bus_refreshes_every_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = crate::daemon::tests::an_agent("c1");
+        let daemon = crate::tree::tests::a_daemon_with(dir.path(), &agent);
+        // What the bus dropped is unknown: it could be of any project.
+        let others = [event(
+            "item.changed",
+            json!({"project": "web", "kind": "ticket", "key": "1"}),
+        )];
+        assert_eq!(settle(&daemon, &others, true), 1);
+        assert_eq!(settle(&daemon, &[], true), 1);
     }
 
     #[tokio::test]
