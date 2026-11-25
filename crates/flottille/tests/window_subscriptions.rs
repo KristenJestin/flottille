@@ -1036,3 +1036,165 @@ fn a_following_says_what_its_session_waits_for_you_and_folds_it_away_once_answer
         "(frames drawn, frames asked)"
     );
 }
+
+/// A call of the tool `tool` with `arguments`, in a turn of the fake agent.
+fn call(tool: &str, arguments: Value) -> Value {
+    json!({"mcp": {"tool": tool, "arguments": arguments}})
+}
+
+/// A session of `kind` titled `title` that the agent of `mcp` starts: its id and MCP session.
+fn launch(user: &User, mcp: &Mcp, title: &str, brief: &str, kind: &str) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": kind, "title": title, "brief": brief}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let (url, authorization) = server_of(user, opened);
+    let id = user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"] == title)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (id, Mcp::initialize(&url, &authorization))
+}
+
+/// A lead whose session "Login", in Ask, is followed and listed in the rail with nothing that
+/// waits for the user. Then the session's child "Reader" asks to read `.env`, a call its parent
+/// held and forwards to the user: the shell, the page, the following's id, the child's id and the
+/// request's number.
+fn a_child_asks_below_a_followed_session<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    Entity<SessionPage>,
+    String,
+    String,
+    u64,
+) {
+    script(user, pull());
+    user.fake_script(json!({"turns": [
+        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
+            {"say": "Waiting for my parent."}]},
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]}
+    ]}));
+    let (lead, mcp) = lead(user);
+    let (shell, cx) = open_session(user, &lead, cx);
+    let page = session_page(&shell, cx);
+    let (session, second) = launch(user, &mcp, "Login", "Fix the login.", "led");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+    until(&shell, cx, "the rail lists the following", |cx| {
+        rows(&page, cx).iter().any(|row| row.following)
+    });
+    // The session's own answers have come and gone: only the child's request is still to come.
+    rest(&shell, cx);
+    let id = rows(&page, cx)[0].id.clone();
+    assert!(rows(&page, cx)[0].waits.is_empty());
+    assert!(!present(cx, &format!("subscription-waits-{id}")));
+
+    let (child, _) = launch(user, &second, "Reader", "Read the env.", "child");
+    let number = std::cell::Cell::new(0);
+    eventually("the child's call held by its parent", || {
+        let listed = user
+            .call("approval.list", json!({"tree": session}))
+            .unwrap();
+        listed["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["agent"] == child.as_str())
+            .map(|request| number.set(request["number"].as_u64().unwrap()))
+            .is_some()
+    });
+    let number = number.get();
+    let forwarded = second.call(
+        "approval_answer",
+        json!({"request_id": number, "decision": "forward", "why": "the user decides"}),
+    );
+    assert!(!forwarded.error, "{}", forwarded.text);
+    (shell, cx, page, id, child, number)
+}
+
+#[gpui_kit::test]
+fn the_rail_shows_a_child_s_request_as_it_reaches_the_user(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, page, id, _child, number) = a_child_asks_below_a_followed_session(&user, cx);
+
+    // Nothing else moves the following: only the child's request does.
+    until(&shell, cx, "the rail says what the child waits for", |cx| {
+        present(cx, &format!("subscription-waits-{id}"))
+    });
+    // It unfolds, it does not appear: partway it is between nothing and its width.
+    let mut widths = Vec::new();
+    for _ in 0..30 {
+        step(&shell, Duration::from_millis(16), cx);
+        widths.push(
+            size_of(cx, &format!("subscription-waits-{id}"))
+                .unwrap()
+                .width,
+        );
+    }
+    let last = *widths.last().unwrap();
+    assert!(last > px(0.), "it ends drawn: {widths:?}");
+    assert!(
+        widths.iter().any(|&w| w < last),
+        "partway it is not at its width yet: {widths:?}"
+    );
+    let said = label(cx, &format!("subscription-waits-{id}")).unwrap();
+    assert!(
+        said.starts_with(&format!("Waits for you: request #{number}, ")) && said.contains("Reader"),
+        "{said}"
+    );
+    assert_eq!(rows(&page, cx)[0].waits.len(), 1);
+    rest(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_rail_drops_a_child_s_request_once_answered(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, page, id, _child, number) = a_child_asks_below_a_followed_session(&user, cx);
+    until(&shell, cx, "the rail says what the child waits for", |cx| {
+        present(cx, &format!("subscription-waits-{id}"))
+    });
+    rest(&shell, cx);
+
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    until(&shell, cx, "the wait is over", |cx| {
+        rows(&page, cx).iter().all(|row| row.waits.is_empty())
+    });
+    // It does not vanish: it stays for the frames of its fold, then is gone.
+    let mut folding = 0;
+    for _ in 0..60 {
+        step(&shell, Duration::from_millis(16), cx);
+        if present(cx, &format!("subscription-waits-{id}")) {
+            folding += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(folding > 1, "the line folds over frames, not at once");
+    rest(&shell, cx);
+    assert!(
+        !present(cx, &format!("subscription-waits-{id}")),
+        "the line folded away"
+    );
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
