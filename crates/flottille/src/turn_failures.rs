@@ -30,7 +30,7 @@ fn claude(code: Option<&str>, text: &str) -> Option<&'static str> {
     login.then_some(CLAUDE_LOGIN)
 }
 
-const CODEX_LOGIN: &str = "Codex's login expired: sign in again (run codex login)";
+pub const CODEX_LOGIN: &str = "Codex's login expired: sign in again (run codex login)";
 
 /// Codex's account signed out, as the bridge tags it (`codex_bridge.rs`, `unauthorized`): its
 /// text can hold any number.

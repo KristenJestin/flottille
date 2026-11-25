@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use flottille_core::subscription::NO_DEADLINE;
 use gpui_design_system::{
-    Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, presence_of, space,
+    Button, Icon, Item, Listing, Palette, Type, changing, icon, palette, presence, presence_of,
+    space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -42,6 +43,9 @@ pub struct SubscriptionRow {
     pub following: bool,
     /// A following paused because the two sessions wrote to each other without the user.
     pub paused: bool,
+    /// What the session followed waits for the user, a request each: `request #12, a call held
+    /// for approval: fs_read: …` (#1305).
+    pub waits: Vec<String>,
     pub events: Vec<String>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -100,6 +104,18 @@ impl SubscriptionRow {
             wake,
             following,
             paused: value["paused"] == true,
+            waits: value["waits"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|wait| {
+                    format!(
+                        "request #{}, {}",
+                        wait["number"].as_u64().unwrap_or_default(),
+                        text(&wait["what"])
+                    )
+                })
+                .collect(),
             events: value["events"]
                 .as_array()
                 .into_iter()
@@ -110,6 +126,12 @@ impl SubscriptionRow {
             expires_at,
             until,
         }
+    }
+
+    /// What the session followed waits for the user, said once: `Waits for you: request #12, …`;
+    /// none when it waits for nothing of theirs.
+    pub fn waits_said(&self) -> Option<String> {
+        (!self.waits.is_empty()).then(|| format!("Waits for you: {}", self.waits.join("; ")))
     }
 
     /// Whether its time left is drawn, and drawn again as it passes.
@@ -247,6 +269,32 @@ impl SubscriptionList {
                     })
                 }),
         );
+        // What the session followed waits for the user unfolds under it, its words fading into
+        // the next when a request comes or goes, and folds away once nothing of theirs waits.
+        let waits = {
+            let (fade, line_id) = (id("waits-fade"), id("waits"));
+            presence_of(
+                id("waits-block"),
+                row.waits_said().map(SharedString::from),
+                move |said| {
+                    changing(fade, said, move |said| {
+                        div()
+                            .id(line_id)
+                            .pt(space::XS)
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .aria_label(said.clone())
+                            .child(said)
+                            .test_support()
+                            .into_any_element()
+                    })
+                    .into_any_element()
+                },
+            )
+        };
         let cancel = {
             let (page, subscription) = (self.page.clone(), row.id.clone());
             Button::icon(id("cancel"), Icon::Close, "Cancel").on_click(move |_, _, cx| {
@@ -290,6 +338,7 @@ impl SubscriptionList {
                         d.child(line(id("events"), row.events.join(", ")))
                     })
                     .child(line(id("times"), row.times(now)))
+                    .child(waits)
                     .child(paused),
             )
             .child(cancel)
@@ -442,6 +491,28 @@ mod tests {
             "{times}"
         );
         assert!(!row(5 * 60_000).following);
+    }
+
+    #[test]
+    fn a_following_says_once_what_its_session_waits_for_you() {
+        let following = |waits: Value| {
+            SubscriptionRow::of(&json!({
+                "id": "sub-6", "agent": "a1", "source": "session",
+                "target": {"session": "a2", "title": "Staging"}, "events": ["asked"],
+                "created_at": 0, "expires_at": 5 * 60_000, "waits": waits,
+            }))
+        };
+        assert_eq!(following(json!([])).waits_said(), None);
+        assert_eq!(
+            following(json!([
+                {"kind": "vault", "number": 345, "what": "a vault entry asked: staging-login: to sign in"},
+                {"kind": "call", "number": 31, "what": "a call held for approval: fs_read: .env"}
+            ]))
+            .waits_said()
+            .unwrap(),
+            "Waits for you: request #345, a vault entry asked: staging-login: to sign in; \
+             request #31, a call held for approval: fs_read: .env"
+        );
     }
 
     #[test]

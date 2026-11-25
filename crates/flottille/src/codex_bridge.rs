@@ -947,10 +947,8 @@ pub fn list_models(
         server.write(json!({"method": "initialized"}))?;
         let read = server.request(2, "account/read", json!({}))?;
         if read["account"].is_null() && read["requiresOpenaiAuth"] == true {
-            return Err(format!(
-                "Codex is not signed in: {}",
-                codex::PROVIDER.sign_in
-            ));
+            // What a session's refused login says, not the bridge's own words.
+            return Err(crate::turn_failures::CODEX_LOGIN.to_owned());
         }
         if let Some(why) = codex::refused_account(&read["account"]) {
             return Err(why);

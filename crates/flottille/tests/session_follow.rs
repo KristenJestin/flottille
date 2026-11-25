@@ -817,3 +817,529 @@ fn unsubscribe_takes_the_followed_session_s_title() {
         unknown.text
     );
 }
+
+/// A call of the tool `tool` with `arguments`, in a turn of the fake agent.
+fn call(tool: &str, arguments: Value) -> Value {
+    json!({"mcp": {"tool": tool, "arguments": arguments}})
+}
+
+/// Connections on: a root may then propose entries, and so has the tool `vault` to ask for one
+/// though its project sees no entry yet.
+fn with_vault(user: &User) {
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+}
+
+/// The led session asks the user for the vault entry `staging-login`.
+fn vault_ask() -> Value {
+    call(
+        "vault",
+        json!({"action": "ask", "name": "staging-login", "why": "to sign in to staging"}),
+    )
+}
+
+/// The requests for a vault entry that wait for the user.
+fn vault_asks(user: &User) -> Vec<Value> {
+    user.call("vault.asks", json!({})).unwrap()["asks"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The requests of `agent` held for the user.
+fn held_for_the_user(user: &User, agent: &str) -> Vec<Value> {
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|request| request["agent"] == agent)
+        .cloned()
+        .collect()
+}
+
+/// The deliveries of `kind` stored for `agent`, newest first: their body and their id.
+fn delivered_with_id(user: &User, agent: &str, kind: &str) -> Vec<(String, String)> {
+    store(user)
+        .last_deliveries(agent, 64)
+        .unwrap()
+        .into_iter()
+        .filter(|delivery| delivery.kind == kind)
+        .map(|delivery| (delivery.body, delivery.id))
+        .collect()
+}
+
+/// The delivery `id` rings nobody: it waits, queued, for what wakes `agent` next, and is played
+/// in that prompt beside it, never alone. The session told of the answer plays a turn, whose end
+/// wakes the lead: that wake takes it.
+fn taken_with_the_next_wake(user: &User, agent: &str, id: &str) {
+    let delivery = store(user).delivery(id).unwrap().unwrap();
+    assert_eq!(delivery.urgency, "between-turns", "{}", delivery.body);
+    eventually("the next wake takes it", || {
+        store(user).delivery(id).unwrap().unwrap().state == "sent"
+    });
+    let prompts = store(user)
+        .last_agent_events(agent, "agent.prompted", 64)
+        .unwrap();
+    let with = prompts
+        .iter()
+        .find(|prompt| {
+            prompt.data["deliveries"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|i| i == id))
+        })
+        .unwrap_or_else(|| panic!("no prompt took {id}"));
+    let ids = with.data["deliveries"].as_array().unwrap();
+    assert!(ids.len() > 1, "played alone: {ids:?}");
+}
+
+/// The kind of the delivery that tells a lead how the user answered its led session's request.
+const ANSWERED: &str = "session-request-answered";
+
+#[test]
+fn a_lead_is_woken_with_the_question_its_led_session_asks_its_number_and_its_text() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [ask("Which scope?"), {"say": "I asked."}]}
+    ]}));
+
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+
+    let number = store(&user)
+        .last_agent_events(&session, "agent.asked", 1)
+        .unwrap()[0]
+        .seq;
+    let woken = wakes(&user, &lead).remove(0);
+    for word in [
+        "asked you",
+        &format!("Its question to you (#{number}):"),
+        "Which scope?",
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+}
+
+#[test]
+fn a_lead_is_woken_with_the_vault_entry_its_led_session_asks_its_number_and_its_reason() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [vault_ask(),
+            {"say": "Waiting for the user's answer on the vault entry."}]}
+    ]}));
+
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+
+    let asks = vault_asks(&user);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0]["agent"], session.as_str());
+    let number = asks[0]["ask"].as_u64().unwrap();
+    let woken = wakes(&user, &lead).remove(0);
+    for word in [
+        "ended a turn: it waits for the user.",
+        "It waits for the user",
+        &format!("request #{number}, a vault entry asked: staging-login: to sign in to staging"),
+        "Waiting for the user's answer on the vault entry.",
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+}
+
+#[test]
+fn a_lead_is_woken_with_the_call_of_its_led_session_held_for_approval_its_number_and_its_reasons() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
+            {"say": "Waiting for the user's approval."}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Read the env."}),
+    )
+    .unwrap();
+
+    eventually("the second wake", || wakes(&user, &lead).len() == 2);
+    let held = held_for_the_user(&user, &session);
+    assert_eq!(held.len(), 1, "{held:?}");
+    let number = held[0]["number"].as_u64().unwrap();
+    let reason = held[0]["reasons"][0].as_str().unwrap().to_owned();
+    let woken = wakes(&user, &lead).remove(0);
+    for word in [
+        "ended a turn: it waits for the user.",
+        &format!("request #{number}, a call held for approval: fs_read"),
+        reason.as_str(),
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+}
+
+#[test]
+fn a_lead_is_woken_with_the_connection_its_led_session_asks_its_number_and_its_reason() {
+    let user = User::with_fake_agent();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            call("connections", json!({"action": "add", "name": "notes", "about": "Notes.",
+                "url": "https://notes.example.com/mcp"})),
+            {"say": "Waiting for the user to accept the connection."}]}
+    ]}));
+
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+
+    let held = held_for_the_user(&user, &session);
+    assert_eq!(held.len(), 1, "{held:?}");
+    let number = held[0]["number"].as_u64().unwrap();
+    let woken = wakes(&user, &lead).remove(0);
+    for word in [
+        "ended a turn: it waits for the user.",
+        &format!("request #{number}, a connection asked"),
+        "Add the connection notes",
+    ] {
+        assert!(woken.contains(word), "{word}: {woken}");
+    }
+}
+
+#[test]
+fn a_session_with_no_lead_wakes_nobody_with_its_requests() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    on_github(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "do": [vault_ask(), {"say": "Waiting for you."}]}
+    ]}));
+
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("its turn", || turns(&user, &id) == 1);
+    assert_eq!(vault_asks(&user).len(), 1);
+    settle();
+    for agent in agents(&user) {
+        let agent = agent["id"].as_str().unwrap();
+        assert!(wakes(&user, agent).is_empty(), "{agent} was woken");
+        assert!(delivered(&user, agent, ANSWERED).is_empty(), "{agent}");
+    }
+}
+
+#[test]
+fn a_turn_that_wrote_to_its_starter_and_waits_for_the_user_wakes_it_with_the_request() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    let (lead, mcp) = lead(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            call("session_send", json!({"session": lead, "text": "I need a login."})),
+            vault_ask(),
+            {"say": "Waiting for the vault entry."}]}
+    ]}));
+
+    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", "led");
+
+    assert!(!answer.error, "{}", answer.text);
+    eventually("the wake", || wakes(&user, &lead).len() == 1);
+    let woken = wakes(&user, &lead).remove(0);
+    assert!(
+        woken.contains("a vault entry asked: staging-login"),
+        "{woken}"
+    );
+    settle();
+    assert_eq!(wakes(&user, &lead).len(), 1);
+    drop(session);
+}
+
+#[test]
+fn each_request_is_said_once_in_the_turn_that_asked_it() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]},
+        {"when": "Go on.", "do": [{"say": "Still waiting."}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+
+    user.call("agent.send", json!({"agent": session, "message": "Go on."}))
+        .unwrap();
+
+    eventually("the second wake", || wakes(&user, &lead).len() == 2);
+    let woken = wakes(&user, &lead).remove(0);
+    assert!(!woken.contains("staging-login"), "{woken}");
+}
+
+#[test]
+fn the_lead_is_told_on_its_next_wake_when_the_user_dismisses_the_vault_entry() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]}
+    ]}));
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+    let number = vault_asks(&user)[0]["ask"].as_u64().unwrap();
+
+    eventually("the lead took its first wake", || turns(&user, &lead) == 2);
+    user.call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    let (body, id) = delivered_with_id(&user, &lead, ANSWERED).remove(0);
+    for word in [
+        "\"Login\"",
+        &format!("request #{number}"),
+        "staging-login",
+        "dismissed",
+    ] {
+        assert!(body.contains(word), "{word}: {body}");
+    }
+    taken_with_the_next_wake(&user, &lead, &id);
+}
+
+#[test]
+fn the_lead_is_told_on_its_next_wake_when_the_user_denies_a_held_call() {
+    let user = User::with_fake_agent();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            call("connections", json!({"action": "add", "name": "notes", "about": "Notes.",
+                "url": "https://notes.example.com/mcp"})),
+            {"say": "Waiting."}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+    let number = held_for_the_user(&user, &session)[0]["number"]
+        .as_u64()
+        .unwrap();
+
+    eventually("the lead took its first wake", || turns(&user, &lead) == 2);
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    let (body, id) = delivered_with_id(&user, &lead, ANSWERED).remove(0);
+    for word in ["\"Login\"", &format!("request #{number}"), "denied"] {
+        assert!(body.contains(word), "{word}: {body}");
+    }
+    taken_with_the_next_wake(&user, &lead, &id);
+}
+
+#[test]
+fn the_following_lists_what_its_session_waits_for_the_user() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]}
+    ]}));
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+    let number = vault_asks(&user)[0]["ask"].as_u64().unwrap();
+
+    let following = subscriptions(&user, &lead).remove(0);
+
+    assert_eq!(
+        following["waits"],
+        json!([{"kind": "vault", "number": number,
+            "what": "a vault entry asked: staging-login: to sign in to staging"}]),
+        "{following}"
+    );
+    user.call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+    let following = subscriptions(&user, &lead).remove(0);
+    assert_eq!(following["waits"], json!([]), "{following}");
+}
+
+/// A second project `other` over its own throwaway repository.
+fn other_project(user: &User) {
+    let folder = user.path("work/other");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "other\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "other"}))
+        .unwrap();
+}
+
+#[test]
+fn a_lead_is_not_told_the_user_set_an_entry_its_led_session_s_project_cannot_see() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    other_project(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [vault_ask(), {"say": "Waiting."}]}
+    ]}));
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+    let number = vault_asks(&user)[0]["ask"].as_u64().unwrap();
+
+    // The user saves the entry for another project: the session's project does not see it.
+    user.call(
+        "vault.set",
+        json!({"name": "staging-login", "secret": "st4ging-s3cret-value", "project": "other"}),
+    )
+    .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    let (body, _) = delivered_with_id(&user, &lead, ANSWERED).remove(0);
+    assert!(body.contains(&format!("request #{number}")), "{body}");
+    assert!(body.contains("answered it"), "{body}");
+    assert!(!body.contains("set it"), "{body}");
+}
+
+#[test]
+fn the_answers_to_a_vault_ask_and_to_a_connection_are_told_apart_by_their_kind() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            vault_ask(),
+            call("connections", json!({"action": "add", "name": "notes", "about": "Notes.",
+                "url": "https://notes.example.com/mcp"})),
+            {"say": "Waiting."}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+    let vault = vault_asks(&user)[0]["ask"].as_u64().unwrap();
+    let connection = held_for_the_user(&user, &session)[0]["number"]
+        .as_u64()
+        .unwrap();
+    eventually("the lead took its first wake", || turns(&user, &lead) == 2);
+
+    user.call("vault.ask_dismiss", json!({"ask": vault}))
+        .unwrap();
+    // The write-own path: the user saves the connection's form with values of their own.
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "The notes of the user.",
+            "url": "https://notes.example.com/mcp", "request": connection}),
+    )
+    .unwrap();
+
+    eventually("the lead is told of both", || {
+        delivered(&user, &lead, ANSWERED).len() == 2
+    });
+    let told = delivered_with_id(&user, &lead, ANSWERED);
+    let of = |kind: &str, number: u64| {
+        told.iter()
+            .find(|(_, id)| id.ends_with(&format!("-{kind}-{number}")))
+            .unwrap_or_else(|| panic!("no answer of a {kind} #{number}: {told:?}"))
+            .0
+            .clone()
+    };
+    let body = of("vault", vault);
+    assert!(body.contains(&format!("vault request #{vault}")), "{body}");
+    assert!(body.contains("dismissed"), "{body}");
+    let body = of("connection", connection);
+    assert!(
+        body.contains(&format!("connection request #{connection}")),
+        "{body}"
+    );
+    assert!(body.contains("wrote values of their own"), "{body}");
+}
+
+#[test]
+fn the_lead_is_told_on_its_next_wake_when_the_user_allows_a_held_call() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"say": "Ready."}]},
+        {"when": "Read the env.", "do": [call("fs_read", json!({"path": ".env"})),
+            {"say": "Waiting for the user's approval."}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+    user.call("agent.mode", json!({"agent": session, "mode": "ask"}))
+        .unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Read the env."}),
+    )
+    .unwrap();
+    eventually("the second wake", || wakes(&user, &lead).len() == 2);
+    let number = held_for_the_user(&user, &session)[0]["number"]
+        .as_u64()
+        .unwrap();
+
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    eventually("the lead is told", || {
+        !delivered(&user, &lead, ANSWERED).is_empty()
+    });
+    let (body, id) = delivered_with_id(&user, &lead, ANSWERED).remove(0);
+    assert!(body.contains(&format!("call request #{number}")), "{body}");
+    assert!(body.contains("allowed it"), "{body}");
+    assert!(id.ends_with(&format!("-call-{number}")), "{id}");
+}
+
+#[test]
+fn a_secret_in_a_vault_reason_or_in_a_calls_reasons_is_masked_in_the_wake() {
+    const TOKEN: &str = "ghp_fakefakefakefakefakefakefakefake0001";
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            call("vault", json!({"action": "ask", "name": "staging-login",
+                "why": format!("to sign in with {TOKEN}")})),
+            call("connections", json!({"action": "add", "name": "notes",
+                "about": format!("Notes of {TOKEN}."), "url": "https://notes.example.com/mcp"})),
+            {"say": "Waiting."}]}
+    ]}));
+
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+
+    let woken = wakes(&user, &lead).remove(0);
+    assert!(
+        woken.contains("a vault entry asked: staging-login"),
+        "{woken}"
+    );
+    assert!(woken.contains("a connection asked"), "{woken}");
+    assert!(!woken.contains("ghp_fake"), "{woken}");
+}
+
+#[test]
+fn the_answer_of_a_vault_ask_names_the_sessions_that_joined_it() {
+    let user = User::with_fake_agent();
+    with_vault(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "First.", "do": [vault_ask(), {"say": "Waiting."}]},
+        {"when": "Second.", "do": [vault_ask(), {"say": "Waiting too."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    let (first, _) = launch(&user, &mcp, "One", "First.", "led");
+    assert!(!first.error, "{}", first.text);
+    eventually("the first ask", || vault_asks(&user).len() == 1);
+    let (second, session) = launch(&user, &mcp, "Two", "Second.", "led");
+    assert!(!second.error, "{}", second.text);
+    let (joiner, _) = session.unwrap();
+    eventually("the second joined it", || {
+        vault_asks(&user)[0]["joined"] == json!([joiner])
+    });
+    let ask = &vault_asks(&user)[0];
+    let (number, asker) = (
+        ask["ask"].as_u64().unwrap(),
+        ask["agent"].as_str().unwrap().to_owned(),
+    );
+
+    user.call("vault.ask_dismiss", json!({"ask": number}))
+        .unwrap();
+
+    let answered = store(&user)
+        .last_agent_events(&asker, "vault.ask_answered", 1)
+        .unwrap();
+    assert_eq!(answered[0].data["joined"], json!([joiner]), "{answered:?}");
+    drop(lead);
+}

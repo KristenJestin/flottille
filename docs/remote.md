@@ -1703,6 +1703,9 @@ top bar).
   its first time. Request numbers and ask numbers are two counters, and each machine has its own:
   they only break a tie. A question asked before the phone linked shows once the core reads it (see
   "Defaults taken, to confirm").
+- **A load is the truth of its machine**: at every load of a runner, the requests of that runner the
+  fresh `approval.list` no longer holds leave (decided while the phone was off, no event ever came),
+  and the questions the fresh `agent.tree` no longer holds leave with it; another runner's stay.
 - **Motion**: a card that comes unfolds and fades in, one that leaves fades and folds away (kept on
   screen until its fold ends), the others slide (`animateItem`); a card sinks a little while
   pressed (`PRESS`); the line of an empty screen fades in once the last card has folded and out as

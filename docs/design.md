@@ -363,7 +363,10 @@ An agent that pilots a session (`agent_launch` with `kind: led`) is woken, betwe
 `session-turn-ended` at each end of a turn of that session, asked or reported or not, and when
 the session ends or fails. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
-and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
+and that still wait, whole, and the requests of that turn that wait for the user (a call held, a
+connection asked, a vault entry asked for), each with its number and what it asks: the pilot is
+told, the user answers, and how they answered is queued for the pilot's next wake
+(`session-request-answered`, `docs/tools.md`, "Following a session"). It is a following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
 without the user pause it. A session led by a pilot is part of its job: **it ends with
 its pilot** (`docs/tools.md`, "The pilot ends"). A led session the user wants to keep is
@@ -474,7 +477,9 @@ The window shows them: the session page's rail lists the session's open subscrip
 request or the ticket, the events, since when and until when: `until merged or closed`,
 `until closed` for a ticket, or the deadline the agent gave; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
 (`subscription.cancel`); the following of a session an agent started, `Following <title>`, since
-when, and, paused because the two sessions wrote to each other fifty times without the user, a line
+when, what that session waits for the user, said once in a faint line (`Waits for you: request #345,
+a vault entry asked: staging-login: …`), unfolding when a request comes, its words fading into the
+next when one comes or goes, and folding away once nothing of the user's waits (#1305), and, paused because the two sessions wrote to each other fifty times without the user, a line
 that says so with a Resume (`subscription.resume`), unfolding when it pauses and folding away when
 it resumes; an agent between turns that waits on one is drawn waiting, not idle, in the
 left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
@@ -1837,6 +1842,12 @@ included, built in today (§7.1, §5.8), later specs, review and a handbook) are
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
+
+- A request a led session makes of the user (a call held, a connection, a vault entry) is told to
+  its pilot, which does not answer it: the user still does (#1305). It is said in the wake of the
+  turn that made it, not in a wake of its own (a wake costs the pilot a turn, and the turn's end
+  comes anyway), and the user's answer waits for the pilot's next wake. A pilot on another
+  machine hears the request in its wake, not yet the user's answer.
 
 - An agent's proposed edit of a vault entry (`docs/vault.md`, "Proposing an edit of an entry"):
   a second one for the entry while one waits is refused rather than joined (it would hide what
