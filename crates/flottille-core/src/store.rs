@@ -5954,6 +5954,21 @@ mod tests {
     }
 
     #[test]
+    fn a_request_s_row_names_its_request_and_another_names_none() {
+        let store = Store::open_in_memory().unwrap();
+        noted(&store, "request:7", 10, "s1", "request");
+        noted(&store, "event:2", 11, "s1", "failure");
+        let listed = store.notifications(None, 10, false).unwrap();
+        assert_eq!(
+            listed.iter().map(|row| row.request).collect::<Vec<_>>(),
+            [Some(7), None]
+        );
+        let shown = serde_json::to_value(&listed).unwrap();
+        assert_eq!(shown[0]["request"], 7);
+        assert!(shown[1].get("request").is_none());
+    }
+
+    #[test]
     fn reading_marks_by_ids_by_session_or_all_and_counts_what_waits_apart() {
         let store = Store::open_in_memory().unwrap();
         let a = noted(&store, "request:1", 10, "s1", "request");

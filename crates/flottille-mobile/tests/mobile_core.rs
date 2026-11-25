@@ -3246,7 +3246,8 @@ async fn a_request_held(place: &Place) -> Arc<Core> {
         "notifications.list",
         json!({"notifications": [{"id": 12, "at": 1, "kind": "request", "session": "a1",
             "project": "app", "workspace": null, "title": "Request #7 waits for you",
-            "excerpt": "Run make", "read_at": null, "resolved": false, "needs_you": true}],
+            "excerpt": "Run make", "read_at": null, "resolved": false, "needs_you": true,
+            "request": 7}],
             "unread": {"needs_you": 1, "new": 0}}),
     );
     let (phone, _taken) = place.linked().await;
@@ -3290,16 +3291,46 @@ async fn a_request_notice_is_in_the_view_with_the_request_to_answer() {
         serde_json::from_str::<Value>(listed[0].0["signed"]["params"].as_str().unwrap()).unwrap(),
         json!({"after": 11, "limit": 1})
     );
-    // Another request of the tree waits too: which one the notice is about is not known, so it
-    // answers none (its notification only opens the session).
+    // Another request of the tree waits too: the notice names its own, so it still answers 7.
     place.runner.emit(
         "approval.requested",
         json!({"number": 8, "agent": "a1", "tool": "command", "held_by": "user"}),
     );
-    until(&phone, "the notice answering none", |view| {
-        view.requests.len() == 2 && view.notices[0].request == 0
+    let view = until(&phone, "the second request held", |view| {
+        view.requests.len() == 2
     })
     .await;
+    assert_eq!(view.notices[0].request, 7);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_answered_elsewhere_then_a_new_one_never_moves_the_notice() {
+    let place = Place::new().await;
+    let phone = a_request_held(&place).await;
+    place
+        .runner
+        .notify(json!({"kind": "request", "notification": 12, "session": "a1"}))
+        .await;
+    until(&phone, "the notice in the view", |view| {
+        !view.notices.is_empty()
+    })
+    .await;
+    // 7 is answered at the desk and its dismissal never reaches the phone; 9 then waits alone in
+    // the same tree.
+    place
+        .runner
+        .emit("approval.decided", json!({"number": 7, "agent": "c1"}));
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 9, "agent": "c1", "tool": "command", "held_by": "user"}),
+    );
+    let view = until(&phone, "9 alone held", |view| {
+        view.requests.len() == 1 && view.requests[0].number == 9
+    })
+    .await;
+    // Allow on the notification of 7 must never answer 9.
+    assert_eq!(view.notices[0].request, 7);
     place.served.stop().await;
 }
 
