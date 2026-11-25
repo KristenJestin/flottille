@@ -72,8 +72,8 @@ do is the gate's business, not the list's), `skills`, `commands`, `setup` and `p
 
 ### Guides read on demand
 
-The families an agent rarely calls (`services`, `setup`, `project`, `connections`, `vault`, and
-`agent_launch`) are listed
+The families an agent rarely calls (`services`, `setup`, `project`, `connections`, `vault`,
+`agent_launch` and `routine`) are listed
 short, so that every agent does not read their whole text at every request for a call it may
 never make (`docs/reference/mcp.md` §4, "The budget"). Nothing of them is lost: it is read when
 it is needed, as a skill is read with `skill_read`.
@@ -1662,7 +1662,7 @@ too ("make me a routine that lists my reviews every morning", "what did last nig
 
 | Tool | |
 |---|---|
-| `routine {action: list \| show \| result \| create \| edit \| pause \| resume \| run \| remove, routine?, name?, prompt?, schedule?, event?, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?, date?}` | The routines of the caller's project, each named by its name in `routine`, answered as the daemon's methods answer the user (`docs/protocol.md`, "The routine methods"), in JSON. `list`: the project's routines, each with its last run. `show`: one, its settings, its next run and its history, each run with its session's id. `result`: a run's result, its summary, its items with their `new` marks, what `left`, and its report (`body`), with its session's id: the last run that gave one, or with `date` (`YYYY-MM-DD`, in the routine's zone) the last of that day; a run that failed or was skipped gave none. `create {name, prompt, schedule \| event, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?}` makes one in the caller's project, as `routine.add` does, marked as made by the caller's session (`made_by`); `edit` changes what it is given (`name` renames it), as `routine.edit`, marked as edited by the caller's session (`edited_by`); `pause`, `resume`, `run` (now: a new session, refused while a run is under way) and `remove`, as their methods. |
+| `routine {action: list \| show \| result \| create \| edit \| pause \| resume \| run \| remove, routine?, name?, prompt?, schedule?, event?, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?, date?}` | The routines of the caller's project, each named by its name in `routine`, answered as the daemon's methods answer the user (`docs/protocol.md`, "The routine methods"), in JSON. `list`: the project's routines, each with its last run. `show`: one, its settings, its next run and its history, each run with its session's id. `result`: a run's result, its summary, its items with their `new` marks, what `left`, and its report (`body`), with its session's id: the last run that gave one, or with `date` (`YYYY-MM-DD`, in the routine's zone) the last of that day; a run that failed or was skipped gave none. `create {name, prompt, schedule \| event, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?}` makes one in the caller's project, as `routine.add` does, marked as made by the caller's session (`made_by`); `edit` changes what it is given (`name` renames it), as `routine.edit`, marked as edited by the caller's session (`edited_by`); `pause`, `resume`, `run` (now: a new session, refused while a run is under way) and `remove`, as their methods. Listed short, its guide read on demand ("Guides read on demand"): its description holds what a routine is, the ceiling of its mode and a `create`; its guide the rest, the user's decision on `ask` and `auto`, and the refusals of a run's session. |
 
 - **Reads run at once**: `list`, `show` and `result`, a read-only routine's run included.
 - **Every write is to judge**, as the other writes of the project ("The project"): a card in

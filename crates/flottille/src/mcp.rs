@@ -562,12 +562,9 @@ const SERVED: [Definition; 35] = [
         title: "The project's routines",
         description: "This project's routines: work the daemon starts by itself, each run a new \
             session asked the routine's prompt, on a schedule (`weekdays 08:30`) or an event. \
-            list and show (its settings, next run and history, each run with its session, which \
-            session_read reads) read them; result gives a run's result (its summary, its items \
-            marked new since the run before, what left, its report), the last one or that of \
-            date (YYYY-MM-DD). create, edit, pause, resume, run (now) and remove are done once \
-            the judge or the user allows them. A routine's mode (read_only, the default; ask; \
-            auto) is never above your session's: in Ask, read_only or ask. \
+            list, show and result read them; create, edit, pause, resume, run (now) and remove \
+            are done once the judge or the user allows them. A routine's mode (read_only, the \
+            default; ask; auto) is never above your session's: in Ask, read_only or ask. \
             {\"action\": \"create\", \"name\": \"Tickets to review\", \"prompt\": \
             \"List the tickets waiting for my review\", \"schedule\": \"weekdays 08:30\"}.",
         read_only: false,
@@ -1097,15 +1094,31 @@ const AGENT_LAUNCH_WHOLE: &str = "kind (required): child, a part of your own tas
     held for the user. new_workspace: name its branch by the repository's convention. \
     provider, model and effort are yours when left out, and role is worker.";
 
+/// The whole description of `routine`, its guide (`docs/tools.md`, "Guides read on demand").
+const ROUTINE_WHOLE: &str = "This project's routines: work the daemon starts by itself, each run a new \
+    session asked the routine's prompt, on a schedule (`weekdays 08:30`) or an event. \
+    list and show (its settings, next run and history, each run with its session, which \
+    session_read reads) read them; result gives a run's result (its summary, its items \
+    marked new since the run before, what left, its report), the last one or that of \
+    date (YYYY-MM-DD). create, edit, pause, resume, run (now) and remove are done once \
+    the judge or the user allows them. A routine's mode (read_only, the default; ask; \
+    auto) is never above your session's: in Ask, read_only or ask. A create, an edit or a \
+    resume that leaves a routine in ask or auto is the user's to decide, in every mode. \
+    A session a routine's run started reads routines and writes none, and a read-only \
+    routine's run writes nothing at all: both are refused. \
+    {\"action\": \"create\", \"name\": \"Tickets to review\", \"prompt\": \
+    \"List the tickets waiting for my review\", \"schedule\": \"weekdays 08:30\"}.";
+
 /// The families an agent rarely calls, listed short: their whole description, with each
 /// argument's sentence, is their guide, read on demand (`docs/tools.md`, "Guides read on demand").
-const ON_DEMAND: [(&str, &str); 6] = [
+const ON_DEMAND: [(&str, &str); 7] = [
     ("services", SERVICES_WHOLE),
     ("setup", SETUP_WHOLE),
     ("project", PROJECT_WHOLE),
     ("connections", CONNECTIONS_WHOLE),
     ("vault", VAULT_WHOLE),
     ("agent_launch", AGENT_LAUNCH_WHOLE),
+    ("routine", ROUTINE_WHOLE),
 ];
 
 /// What a family read on demand says of its guide, after its short description.
@@ -4650,6 +4663,12 @@ mod tests {
         ] {
             assert!(launch.contains(said), "agent_launch lost: {said}\n{launch}");
         }
+        // A routine is never above the session that makes it: said before the first call.
+        let routine = listed("routine");
+        assert!(
+            routine.contains("never above your session's"),
+            "routine lost: {routine}"
+        );
         // A secret never goes in a connection's variables or headers.
         let connections = listed("connections");
         assert!(
@@ -4688,13 +4707,14 @@ mod tests {
             one family tool with actions (as forge and tickets), guidance read on demand (as \
             skill_read), or tool search for rarely used families. A tool cannot be withheld by \
             context.";
-        // The roots list is measured with the tool `vault` (an entry exists) and `routine`, which
-        // is in the list: 58,399 characters of the 60,000 with `routine` whole (measured on this
-        // branch, round 6, 2026-11-25). Round 5 failed with 61,314 because `routine` was counted
-        // twice, by the list and by an allowance made before it joined the list. Round 2 left
-        // 130, and `workspace` took 190 with its `machine` argument (#1371), which made 60,060;
-        // `agent_launch` is listed short, which gave 2,023 back, and the `propose` action of
-        // `vault` (listed short too) took 118. The limits are not raised, and no tool is trimmed.
+        // The roots list is measured with the tool `vault` (an entry exists) and `routine`, both
+        // listed short as the other rarely used families are: 57,291 characters of the 60,000
+        // (measured on this branch, round 6, 2026-11-25; `routine` whole is 58,399). Round 5
+        // failed with 61,314 because `routine` was counted twice, by the list and by an
+        // allowance made before it joined the list. Round 2 left 130, and `workspace` took 190
+        // with its `machine` argument (#1371), which made 60,060; `agent_launch` is listed short,
+        // which gave 2,023 back, and the `propose` action of `vault` (listed short too) took
+        // 118. The limits are not raised, and no tool is trimmed.
         let mut biggest = 0;
         for (role, root, at_depth_limit) in [
             ("a root", true, false),
