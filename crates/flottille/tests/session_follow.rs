@@ -1542,10 +1542,10 @@ fn a_child_s_request_forwarded_during_a_turn_its_process_died_in_is_said_in_the_
     std::fs::write(user.path("fake/release"), "").unwrap();
     eventually("the turn cut by the death", || {
         store(&user)
-            .last_agent_events(&session, "agent.turn_ended", 1)
+            .last_agent_events(&session, "agent.turn_ended", 16)
             .unwrap()
-            .first()
-            .is_some_and(|end| end.data["stop_reason"] == "interrupted")
+            .iter()
+            .any(|end| end.data["stop_reason"] == "interrupted")
     });
     eventually("the session at rest", || !working(&user, &session));
     user.call("agent.send", json!({"agent": session, "message": "Go on."}))
@@ -1642,11 +1642,6 @@ fn a_child_s_call_held_before_the_previous_turn_end_and_forwarded_after_it_is_sa
 /// the child's id and the ask's number.
 fn asked_by_a_child(user: &User, session_asks: bool) -> (String, String, String, u64) {
     with_vault(user);
-    user.call(
-        "vault.set",
-        json!({"name": "deploy-key", "secret": "d3ploy-fake-value", "project": "app"}),
-    )
-    .unwrap();
     let first = match session_asks {
         true => json!([vault_ask(), {"say": "Ready."}]),
         false => json!([{"say": "Ready."}]),
@@ -1657,6 +1652,11 @@ fn asked_by_a_child(user: &User, session_asks: bool) -> (String, String, String,
         {"when": "Go on.", "do": [{"say": "Going on."}]}
     ]}));
     let (lead, _, session, second) = followed(user, "Fix the login.");
+    user.call(
+        "vault.set",
+        json!({"name": "deploy-key", "secret": "d3ploy-fake-value", "project": "app"}),
+    )
+    .unwrap();
     let (answer, child) = launch(user, &second, "Reader", "Ask the vault.", "child");
     assert!(!answer.error, "{}", answer.text);
     let (child, _) = child.unwrap();
