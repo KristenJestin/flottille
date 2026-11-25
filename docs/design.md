@@ -1189,7 +1189,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   online, a hollow ring offline (the icon greyed), an amber dot with an up arrow when it needs an
   update, a dashed ring when this machine cannot say (#1249). A state that changes fades and
   scales the badge over `PANEL`. The words are in the mark's tooltip and label only. A project
-  with nothing under it has no chevron, its title where the others' start. **A project several machines have is one row**: two projects are the same when the
+  with nothing under it fades its chevron out where it stands (`PANEL`), its title never moving.
+  **A project several machines have is one row**: two projects are the same when the
   remotes of their repositories are the same (normalised: scheme, user, port, `.git` and the
   case of the host do not count; a project of several repositories matches when all of them
   match), whatever their names; a repository with no remote matches none. Two projects of one
