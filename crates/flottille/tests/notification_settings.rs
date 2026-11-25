@@ -609,6 +609,57 @@ fn the_command_line_reads_and_sets_them() {
     assert!(said.contains("needs you"), "{said}");
 }
 
+#[test]
+fn a_removed_project_takes_what_rings_with_it() {
+    let user = User::with_fake_agent();
+    project(&user);
+    set(
+        &user,
+        json!({"project": "app", "kinds": {"report": "centre"}}),
+    );
+    assert_eq!(settings(&user)["projects"]["app"]["report"], "centre");
+
+    user.call("project.remove", json!({"name": "app"})).unwrap();
+
+    let said = settings(&user);
+    assert!(said["projects"].get("app").is_none(), "{said}");
+    let text = std::fs::read_to_string(config(&user)).unwrap_or_default();
+    assert!(!text.contains("projects.app"), "{text}");
+    // A new project of the same name starts at the default (its folder was never touched).
+    user.call(
+        "project.add",
+        json!({"folder": user.path("work/app"), "name": "app"}),
+    )
+    .unwrap();
+    let said = settings(&user);
+    assert!(said["projects"].get("app").is_none(), "{said}");
+}
+
+#[test]
+fn what_was_kept_quiet_survives_a_restart() {
+    let user = at(User::with_fake_agent(), "Fri 23:30");
+    let Some(desk) = desk(user) else {
+        return;
+    };
+    set(
+        &desk.user,
+        json!({"quiet": {"on": true, "from": "22:00", "to": "08:00"}}),
+    );
+    held(&desk.mcp);
+    held(&desk.mcp);
+    eventually("the two rows", || rows(&desk.user).len() == 2);
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert!(desk.user.run(&["daemon", "stop"]).status.success());
+    // The agent of before went with the daemon: a root of the new one.
+    let (_, mcp) = root(&desk.user, "hello again");
+    set(&desk.user, json!({"quiet": {"on": false}}));
+    held(&mcp);
+
+    let told = desk.server.wait_for(1);
+    assert!(told[0].body.contains("2 new while quiet"), "{:?}", told[0]);
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

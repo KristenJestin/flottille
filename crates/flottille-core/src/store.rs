@@ -1164,6 +1164,17 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[
     ALTER TABLE agents ADD COLUMN routine_run INTEGER NOT NULL DEFAULT 0;
 "#,
     ),
+    (
+        "notification_held",
+        r#"
+    -- How many notifications the quiet hours or Do not disturb held since the last that rang
+    -- (#1473): the next ring says it, a restart of the daemon in between forgets nothing.
+    CREATE TABLE notification_held (
+        id    INTEGER PRIMARY KEY CHECK (id = 1),
+        count INTEGER NOT NULL
+    ) STRICT;
+"#,
+    ),
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -5156,6 +5167,29 @@ impl Store {
             [seq],
         )?;
         Ok(())
+    }
+
+    /// One more notification held by the quiet hours or Do not disturb.
+    pub fn hold_notification(&self) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO notification_held (id, count) VALUES (1, 1) \
+             ON CONFLICT (id) DO UPDATE SET count = count + 1",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// How many notifications were held since the last ring, and none from now on.
+    pub fn take_held_notifications(&self) -> Result<usize> {
+        Ok(self
+            .connection
+            .query_row(
+                "DELETE FROM notification_held WHERE id = 1 RETURNING count",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     /// Whether the rows of what waited for the user at the upgrade were made.

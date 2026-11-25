@@ -276,6 +276,44 @@ fn apply(daemon: &Daemon, settings: &mut Settings, set: Set) -> Result<(), Failu
     settings.check().map_err(invalid)
 }
 
+/// Writes `settings` to the file and tells the clients, answering what they now say.
+fn save(daemon: &Daemon, settings: &Settings) -> Result<Value, Failure> {
+    let paths = &daemon.paths;
+    let text = settings.to_toml().map_err(invalid)?;
+    std::fs::create_dir_all(&paths.config)
+        .map_err(|e| Failure::new("unavailable", format!("{}: {e}", paths.config.display())))?;
+    providers::write_in_place(&paths.notifications(), &text)
+        .map_err(|e| Failure::new("unavailable", format!("notifications.toml: {e}")))?;
+    let answer = said(settings);
+    daemon
+        .emit("notifications.settings_changed", answer.clone())
+        .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+    Ok(answer)
+}
+
+/// A removed project takes its own levels with it: the project is its name, so a new one of that
+/// name would otherwise inherit them. A file that cannot be read is left as it is, the user's to
+/// fix; a removal is never failed for it.
+pub fn forget_project(daemon: &Daemon, name: &str) {
+    let _one = daemon
+        .rings
+        .settings_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Ok(mut settings) = read(&daemon.paths) else {
+        return;
+    };
+    if settings.projects.remove(name).is_none() {
+        return;
+    }
+    if let Err(failure) = save(daemon, &settings) {
+        eprintln!(
+            "flottille daemon: the levels of the removed project {name} stay: {}",
+            failure.message
+        );
+    }
+}
+
 /// Answers a `notifications.settings` or `notifications.set_settings` request of the user.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let paths = &daemon.paths;
@@ -294,17 +332,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut settings = read(paths).map_err(|e| Failure::new("invalid-config", e))?;
             apply(daemon, &mut settings, set)?;
-            let text = settings.to_toml().map_err(invalid)?;
-            std::fs::create_dir_all(&paths.config).map_err(|e| {
-                Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
-            })?;
-            providers::write_in_place(&paths.notifications(), &text)
-                .map_err(|e| Failure::new("unavailable", format!("notifications.toml: {e}")))?;
-            let answer = said(&settings);
-            daemon
-                .emit("notifications.settings_changed", answer.clone())
-                .map_err(|error| Failure::new("unavailable", error.to_string()))?;
-            Ok(answer)
+            save(daemon, &settings)
         }
         method => Err(Failure::new(
             "unknown-method",

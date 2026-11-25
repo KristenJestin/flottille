@@ -12,7 +12,6 @@
 //! is rung once whatever the number of events that tell of it.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use flottille_core::notification::Notification;
@@ -59,9 +58,6 @@ pub struct Rings {
     sounds: Sounds,
     /// By the server that shows each and its number there.
     shown: Mutex<HashMap<Shown, Showing>>,
-    /// How many notifications the quiet hours or Do not disturb held since the last that rang:
-    /// the next ring says it (`3 new while quiet`). The daemon forgets it when it stops.
-    held: AtomicUsize,
     /// One change of the settings at a time (`notification_settings.rs`).
     settings: Mutex<()>,
 }
@@ -72,7 +68,6 @@ impl Rings {
             desktop: Desktop::new(),
             sounds: Sounds::open(paths),
             shown: Mutex::new(HashMap::new()),
-            held: AtomicUsize::new(0),
             settings: Mutex::new(()),
         }
     }
@@ -176,10 +171,13 @@ async fn ring(daemon: &Arc<Daemon>, hears: &Hears, notification: &Notification, 
     // Inside the quiet hours, or with Do not disturb on, it waits in the centre and is counted:
     // the first ring after them says how many.
     if crate::notification_settings::muted(&settings) {
-        daemon.rings.held.fetch_add(1, Ordering::Relaxed);
+        // Kept in the store: the next ring says it, whether the daemon restarted meanwhile.
+        let _ = daemon.read(|store| store.hold_notification());
         return;
     }
-    let waited = daemon.rings.held.swap(0, Ordering::Relaxed);
+    let waited = daemon
+        .read(|store| store.take_held_notifications())
+        .unwrap_or(0);
     if settings.sounds(&notification.kind) && settings.sound.volume > 0 {
         let (sound, volume) = (sound_of(notification), settings.volume());
         let sounding = daemon.clone();

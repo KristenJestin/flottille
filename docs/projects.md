@@ -109,7 +109,9 @@ Removing a project cleans up what Flottille made for it and never loses the user
    files were read in) as `project.removal` gave them. One that changed after the preview (an
    agent wrote in it before it was stopped, a new file or more lines in a file already shown) is
    kept, and the result says it changed. A workspace whose state cannot be read is kept;
-4. the project's file is removed and `project.removed` is emitted.
+4. the project's file is removed, its own levels of what rings (`[projects.<name>.kinds]` of
+   `notifications.toml`) with it, so that a new project of the same name starts at the default, and
+   `project.removed` is emitted.
 
 The project is marked from the start: meanwhile no agent, workspace or command run starts in it
 and its file is not edited, each refused with "project <name> is being removed". The folder and the checkouts of its
