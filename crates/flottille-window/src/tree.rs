@@ -13,7 +13,7 @@ use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
     Button, Fold, Icon, Item, Listing, MachineMark, MarkSize, Menu, Modal, ReorderGroup,
     Reorderable, Tie, TreeRow, Type as _, changed, changing, fade, hoverable, meta, palette,
-    presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
+    presence, presence_of, section_label, space, tipped, tipped_when_cut, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -2258,21 +2258,30 @@ impl SessionRow {
                     .into_any_element(),
                 px(ROW_GAP),
             ),
-            // The second line is 16 px high, a tag is taller: there the key is its mono word.
-            true => (
-                div()
-                    .id(session_key_beside_id(&self.id))
-                    .aria_label(self.key_shown.clone())
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .mono(11.)
-                    .child(self.key_shown.clone())
-                    .test_support()
-                    .into_any_element(),
-                space::SM,
-            ),
+            // The second line is 16 px high, a tag is taller: there the key is its mono word,
+            // which fades to a new one as a tag's does and says itself whole when cut.
+            true => {
+                let id = session_key_beside_id(&self.id);
+                let opacity = changed(&id, &self.key_shown, window, cx);
+                (
+                    tipped_when_cut(
+                        div()
+                            .id(id)
+                            .aria_label(self.key_shown.clone())
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .mono(11.)
+                            .opacity(opacity)
+                            .child(self.key_shown.clone()),
+                        self.key_shown.clone(),
+                        window,
+                        cx,
+                    ),
+                    space::SM,
+                )
+            }
         };
         Some(
             div()
@@ -2720,6 +2729,8 @@ impl Render for SessionRow {
         let elsewhere = self.elsewhere.clone();
         let mut row = TreeLevel::Session
             .row(session_id(&self.id), self.first_line())
+            // Nothing in hand: its words have nothing to say.
+            .faint(self.first_line() == crate::model::FREE)
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
