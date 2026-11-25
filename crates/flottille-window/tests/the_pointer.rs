@@ -274,6 +274,16 @@ fn a_pointer_with_its_click_a_kits_component_and_a_swallowed_click_are_not() {
     assert!(without_a_cursor("src/a.rs", text).is_empty());
 }
 
+/// A `div()` handed to a kit component from inside a `.when(..)` is that component's child, not
+/// the element the click is wired on (the project row of the sidebar, #1471).
+#[test]
+fn a_div_inside_a_when_of_a_kits_row_does_not_make_it_drawn_here() {
+    let row = "let row = TreeLevel::Project\n    .row(id, title)\n    .when(!holds, |row| {\n        row.leading(div().flex_none())\n    })\n    .on_click(f);";
+    assert!(without_a_cursor("src/a.rs", row).is_empty());
+    let by_hand = "let row = div()\n    .id(\"row\")\n    .when(!holds, |row| row.child(x))\n    .on_click(f);";
+    assert_eq!(without_a_cursor("src/a.rs", by_hand).len(), 1);
+}
+
 #[test]
 fn a_cursor_on_a_child_is_not_the_elements() {
     let child = "div()\n    .id(\"row\")\n    .child(div().cursor_pointer())\n    .on_click(f)";
