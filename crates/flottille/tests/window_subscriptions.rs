@@ -1007,11 +1007,15 @@ fn a_following_says_what_its_session_waits_for_you_and_folds_it_away_once_answer
 
     user.call("vault.ask_dismiss", json!({"ask": number}))
         .unwrap();
+    eventually("the daemon says nothing waits", || {
+        let listed = user
+            .call("subscription.list", json!({"tree": lead}))
+            .unwrap();
+        listed["subscriptions"][0]["waits"] == json!([])
+    });
 
     until(&shell, cx, "the wait is over", |cx| {
-        rows(&page, cx)
-            .iter()
-            .all(|row| !present(cx, &format!("subscription-waits-{}", row.id)))
+        rows(&page, cx).iter().all(|row| row.waits.is_empty())
     });
     rest(&shell, cx);
     assert!(
