@@ -487,6 +487,16 @@ impl View {
                 },
             );
         }
+        // A request decided while the link was down never sends its event: what the fresh list no
+        // longer holds leaves, this machine's only.
+        let held: Vec<u64> = requests["requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|request| request["number"].as_u64())
+            .collect();
+        self.requests
+            .retain(|(of, number), _| of != machine || held.contains(number));
         let linked = now_millis();
         for request in requests["requests"].as_array().into_iter().flatten() {
             let at = request["created_at"].as_u64().unwrap_or(linked);
@@ -1618,6 +1628,111 @@ mod tests {
         assert_eq!(
             state.said,
             ["this phone was removed from the user's hub: pair it again"]
+        );
+    }
+
+    fn waiting(number: u64) -> Value {
+        serde_json::json!({"number": number, "agent": "a1", "tool": "run",
+            "call": {"line": "ls"}})
+    }
+
+    #[test]
+    fn a_request_decided_while_the_phone_was_off_leaves_at_the_next_load() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": []});
+        view.load(
+            "server",
+            &agents,
+            &serde_json::json!({"requests": [waiting(4), waiting(5)]}),
+        );
+        view.load(
+            "laptop",
+            &agents,
+            &serde_json::json!({"requests": [waiting(4)]}),
+        );
+
+        let first = view
+            .state()
+            .requests
+            .iter()
+            .find(|r| r.machine == "server" && r.number == 5)
+            .unwrap()
+            .at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // The server's request 4 was decided while the phone was off: its list holds 5 only.
+        view.load(
+            "server",
+            &agents,
+            &serde_json::json!({"requests": [waiting(5)]}),
+        );
+        let kept: Vec<(String, u64)> = view
+            .state()
+            .requests
+            .iter()
+            .map(|r| (r.machine.clone(), r.number))
+            .collect();
+        // Only that machine's: the laptop's 4 stays.
+        assert_eq!(
+            kept,
+            vec![("laptop".to_owned(), 4), ("server".to_owned(), 5)]
+        );
+
+        // The one it still holds keeps the time it came at.
+        let state = view.state();
+        let held = state
+            .requests
+            .iter()
+            .find(|r| r.machine == "server")
+            .unwrap();
+        assert_eq!(held.at, first);
+
+        // Nothing waits any more: a load with no request empties that machine's.
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        let left: Vec<String> = view
+            .state()
+            .requests
+            .iter()
+            .map(|r| r.machine.clone())
+            .collect();
+        assert_eq!(left, vec!["laptop".to_owned()]);
+    }
+
+    #[test]
+    fn a_question_answered_while_the_phone_was_off_leaves_at_the_next_tree() {
+        let mut view = View::default();
+        let tree = |questions: Value| {
+            serde_json::json!({"agents": [{"agent": {"id": "a1", "parent": null},
+                "questions": questions}]})
+        };
+        view.follow("server", "a1");
+        view.tree(
+            "server",
+            "a1",
+            &tree(serde_json::json!([
+                {"seq": 12, "question": "Which one?"},
+                {"seq": 13, "question": "Push?"},
+            ])),
+        );
+        view.apply(
+            "laptop",
+            &serde_json::json!({"name": "agent.asked", "seq": 3, "at": 1,
+                "data": {"agent": "b1", "to": "user", "question": "Ship?"}}),
+        );
+        view.tree(
+            "server",
+            "a1",
+            &tree(serde_json::json!([{"seq": 13, "question": "Push?"}])),
+        );
+        let kept: Vec<(String, u64)> = view
+            .state()
+            .asks
+            .iter()
+            .map(|a| (a.machine.clone(), a.asked))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![("laptop".to_owned(), 3), ("server".to_owned(), 13)]
         );
     }
 }
