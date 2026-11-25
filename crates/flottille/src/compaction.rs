@@ -462,9 +462,7 @@ pub fn settings(daemon: &Daemon) -> Result<Settings, Failure> {
     })?;
     if written {
         announce(daemon)?;
-    }
-    // The pick just written, unless all machines' compactor applies (`compaction.show`).
-    if written {
+        // The pick just written: all machines' compactor, ignored here, would stand over it.
         return Settings::own(&daemon.paths).map_err(|error| Failure::new("invalid-config", error));
     }
     Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))
