@@ -810,6 +810,46 @@ fn plain_turn_ends_kept_for_a_machine_never_push_out_a_report() {
     assert_eq!(prompts_with(&pc, PLAIN_END), 2, "{:#?}", pc.prompts());
 }
 
+#[test]
+fn a_plain_turn_end_waiting_for_a_full_outbox_is_not_lost() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([
+            {"when": "Finish the export.", "do": [{"say": "Started."}]},
+            {"when": "More.", "do": [{"say": "More done."}]},
+            {"when": "Again.", "do": [{"say": "Again done."}]}
+        ]),
+    );
+    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
+    prompted(&pc, "Started.");
+    off(&pc);
+    offline(&server, "pc");
+    server
+        .user
+        .call("agent.send", json!({"agent": session, "message": "More."}))
+        .unwrap();
+    eventually("the turn that waits", || turns_of(&server, &session) == 2);
+
+    // As many messages wait for pc as may: the next plain end replaces the one waiting.
+    let full = server.user.path("kept-full");
+    std::fs::write(&full, "").unwrap();
+    server
+        .user
+        .call("agent.send", json!({"agent": session, "message": "Again."}))
+        .unwrap();
+    eventually("the turn that replaces it", || {
+        turns_of(&server, &session) == 3
+    });
+    eventually("the full outbox played", || !full.exists());
+    on(&pc);
+
+    pc.wait_for("server");
+    prompted(&pc, "Again done.");
+    a_while();
+    assert_eq!(prompts_with(&pc, "More done."), 0, "{:#?}", pc.prompts());
+}
+
 /// A secret only pc knows, in a secret file of its project's folder: the place of its root.
 pub(crate) const PC_SECRET: &str = "pc-only-q8v3m1x7k2";
 
