@@ -275,6 +275,9 @@ fn the_judge_and_the_compaction_guidance_are_saved_for_all_machines(
     });
 
     click(&shell, "settings-tabs-features", cx);
+    // Review's checks come first: the compaction's guidance is far down the page.
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(8000.)));
+    settle(&shell, cx);
     let compaction = page(&shell, cx).read_with(cx, |page, _| page.compaction_guidance().clone());
     until(&shell, cx, "the compaction's guidance is read", |cx| {
         compaction.read_with(cx, |e, _| e.shown().is_some_and(|s| s.all.is_some()))
@@ -313,6 +316,11 @@ fn the_limits_of_tool_results_are_shared_and_a_machine_may_keep_its_own(
     eventually("the server cuts at the limit of all machines", || {
         show(&server, "tool_results.show", json!({}))["limit"] == 16_000
     });
+    // The window has the answer before the switch is asked.
+    until(&shell, cx, "the window shows the limit", |cx| {
+        settings.read_with(cx, |page, _| page.tool_results_limit() == Some(16_000))
+    });
+    settle(&shell, cx);
     click(&shell, "tool-results-unchanged-switch", cx);
     eventually("the server says a file is unchanged", || {
         show(&server, "tool_results.show", json!({}))["unchanged"] == true
@@ -365,21 +373,26 @@ fn the_shade_is_shared_and_a_machine_may_keep_its_own(cx: &mut gpui_kit::TestApp
         show(&server, "appearance.show", json!({}))["own"],
         json!([])
     );
+    settle(&shell, cx);
 
-    // The server's own shade wins there only.
-    show(&server, "appearance.set", json!({"shade": "dark"}));
-    choose(&shell, "server", cx);
-    until(&shell, cx, "the shade is the server's own", |cx| {
+    // This machine's own shade wins there only: the appearance is this window's, kept by the
+    // daemon of the machine it runs on.
+    show(&pc, "appearance.set", json!({"shade": "dark"}));
+    choose(&shell, "here", cx);
+    until(&shell, cx, "the shade is this machine's own", |cx| {
         present(cx, "appearance-shade-own-set")
     });
     assert_eq!(
         label(cx, "appearance-shade-own-set").as_deref(),
-        Some("Changed on server")
+        Some("Changed on pc")
     );
-    assert_eq!(show(&pc, "appearance.show", json!({}))["shade"], "light");
+    assert_eq!(
+        show(&server, "appearance.show", json!({}))["shade"],
+        "light"
+    );
     click(&shell, "appearance-shade-own-reset", cx);
-    eventually("the server follows all machines again", || {
-        show(&server, "appearance.show", json!({}))["shade"] == "light"
+    eventually("this machine follows all machines again", || {
+        show(&pc, "appearance.show", json!({}))["shade"] == "light"
     });
 }
 
@@ -415,6 +428,10 @@ fn specs_the_subscriptions_and_review_are_shared_and_overridden_by_a_machine(
 
     // On the server a setting it sets itself says so, and the way back restores all machines'.
     choose(&shell, "server", cx);
+    until(&shell, cx, "Specs is a row", |cx| {
+        present(cx, "features-specs")
+    });
+    click(&shell, "features-specs", cx);
     until(&shell, cx, "the server's page follows all machines", |cx| {
         present(cx, "specs-settings-shared")
     });
