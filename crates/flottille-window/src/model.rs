@@ -541,8 +541,7 @@ pub struct Subject {
     pub pull: Option<crate::session_link::PullRequest>,
 }
 
-/// What a free session's row says on its first line.
-pub const FREE: &str = "Free · nothing in hand";
+pub use flottille_protocol::words::FREE;
 
 impl Subject {
     pub fn of(subject: &Value) -> Option<Subject> {
@@ -568,14 +567,13 @@ impl Subject {
         })
     }
 
-    /// The words of its row's first line: its title, else its key, else that it holds nothing.
+    /// The words of its row's first line, the phone's too (`words::subject_line`).
     pub fn line(&self) -> String {
-        match (&self.title, &self.key) {
-            _ if self.kind == "free" => FREE.to_owned(),
-            (Some(title), _) if !title.is_empty() => title.clone(),
-            (_, Some(key)) => key.clone(),
-            _ => FREE.to_owned(),
-        }
+        flottille_protocol::words::subject_line(
+            &self.kind,
+            self.title.as_deref(),
+            self.key.as_deref(),
+        )
     }
 }
 
