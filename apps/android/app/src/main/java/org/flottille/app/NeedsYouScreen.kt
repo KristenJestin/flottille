@@ -1,6 +1,12 @@
 package org.flottille.app
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -14,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -91,6 +98,15 @@ fun NeedsYouScreen(
     val live = view.requests.map { Waiting.OfRequest(it) } + view.asks.map { Waiting.OfAsk(it) }
     val waiting = (live + refused.values.map { it.first }.filter { r -> live.none { it.key == r.key } })
         .filter { it.key !in folded }
+    // A card that no longer waits (answered here or elsewhere) stays while it folds away, then goes.
+    val last = remember { mutableMapOf<String, Waiting>() }
+    val leaving = remember { mutableStateMapOf<String, Waiting>() }
+    val waitingKeys = waiting.map { it.key }.toSet()
+    last.forEach { (key, item) -> if (key !in waitingKeys && key !in leaving) leaving[key] = item }
+    waitingKeys.forEach { if (it in leaving) leaving.remove(it) }
+    last.clear()
+    waiting.forEach { last[it.key] = it }
+    val shown = (waiting + leaving.values)
         .sortedWith(compareByDescending<Waiting> { it.at }.thenBy { it.machine }.thenByDescending { it.number })
 
     fun answer(item: Waiting, call: suspend () -> Unit) {
@@ -116,37 +132,45 @@ fun NeedsYouScreen(
     }
 
     Entrance(0, Modifier.fillMaxSize().testTag("needs-you")) {
-        if (waiting.isEmpty()) {
+        if (shown.isEmpty()) {
             Label("Nothing waits for you.", color = LocalPalette.current.mute, modifier = Modifier.padding(Space.Xl).testTag("needs-you-empty"))
         } else {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = Space.Lg, vertical = Space.Sm)) {
-                items(waiting, key = { it.key }) { item ->
-                    // A card that comes unfolds, one that leaves folds away, the others slide.
-                    WaitingCard(
-                        item = item,
-                        title = titles[item.machine to item.agent] ?: item.agent,
-                        onOpen = { onOpen(item.machine, item.agent) },
-                        modifier = Modifier.animateItem(
-                            fadeInSpec = Motion.spec(Motion.ENTER),
-                            placementSpec = Motion.spec(Motion.PANEL),
-                            fadeOutSpec = Motion.spec(Motion.HOVER),
-                        ),
+                items(shown, key = { it.key }) { item ->
+                    // A card that comes unfolds and fades in, one that leaves fades and folds away,
+                    // the others slide.
+                    val presence = remember { MutableTransitionState(false) }
+                    presence.targetState = item.key !in leaving
+                    if (presence.isIdle && !presence.currentState && !presence.targetState) {
+                        LaunchedEffect(item.key) { leaving.remove(item.key) }
+                    }
+                    AnimatedVisibility(
+                        visibleState = presence,
+                        modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = Motion.spec(Motion.PANEL), fadeOutSpec = null),
+                        enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.ENTER)),
+                        exit = fadeOut(Motion.spec(Motion.HOVER)) + shrinkVertically(Motion.spec(Motion.PANEL)),
                     ) {
-                        when (item) {
-                            is Waiting.OfRequest -> RequestCard(
-                                request = item.request,
-                                readOnly = readOnly,
-                                answering = item.key in answering,
-                                refusal = refused[item.key]?.second,
-                                onAnswer = { allow -> answer(item) { phone.answer(item.machine, item.request.number, allow) } },
-                            )
-                            is Waiting.OfAsk -> AskCard(
-                                ask = item.ask,
-                                readOnly = readOnly,
-                                answering = item.key in answering,
-                                refusal = refused[item.key]?.second,
-                                onAnswer = { replies -> answer(item) { phone.answerAsk(item.machine, item.agent, item.ask.asked, replies) } },
-                            )
+                        WaitingCard(
+                            item = item,
+                            title = titles[item.machine to item.agent] ?: item.agent,
+                            onOpen = { onOpen(item.machine, item.agent) },
+                        ) {
+                            when (item) {
+                                is Waiting.OfRequest -> RequestCard(
+                                    request = item.request,
+                                    readOnly = readOnly,
+                                    answering = item.key in answering,
+                                    refusal = refused[item.key]?.second,
+                                    onAnswer = { allow -> answer(item) { phone.answer(item.machine, item.request.number, allow) } },
+                                )
+                                is Waiting.OfAsk -> AskCard(
+                                    ask = item.ask,
+                                    readOnly = readOnly,
+                                    answering = item.key in answering,
+                                    refusal = refused[item.key]?.second,
+                                    onAnswer = { replies -> answer(item) { phone.answerAsk(item.machine, item.agent, item.ask.asked, replies) } },
+                                )
+                            }
                         }
                     }
                 }
@@ -160,13 +184,13 @@ fun NeedsYouScreen(
  * A tap outside its buttons opens the session; pressed, it sinks as a button does.
  */
 @Composable
-private fun WaitingCard(item: Waiting, title: String, onOpen: () -> Unit, modifier: Modifier, card: @Composable () -> Unit) {
+private fun WaitingCard(item: Waiting, title: String, onOpen: () -> Unit, card: @Composable () -> Unit) {
     val palette = LocalPalette.current
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val size by animateFloatAsState(if (pressed) PRESSED_CARD else 1f, Motion.spec(Motion.PRESS), label = "card size")
     Column(
-        modifier
+        Modifier
             .padding(vertical = Space.Xs)
             .fillMaxWidth()
             .graphicsLayer {

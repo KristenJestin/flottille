@@ -1654,8 +1654,8 @@ top bar).
   give it yet (0 for every item), so the order is then by machine and, on one machine, the newest
   number first. A question asked before the phone linked shows once the core reads it (see
   "Defaults taken, to confirm").
-- **Motion**: a card that comes unfolds and fades in, one that leaves fades away, the others slide
-  (`animateItem`); a card sinks a little while pressed (`PRESS`); the tab change cross-fades
+- **Motion**: a card that comes unfolds and fades in, one that leaves fades and folds away (kept on
+  screen until its fold ends), the others slide (`animateItem`); a card sinks a little while pressed (`PRESS`); the tab change cross-fades
   (`ENTER`, `HOVER`), and the selected tab's fill and ink, the icon's with them, move over `PANEL`.
 
 ## Notifications
