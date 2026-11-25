@@ -124,7 +124,7 @@ impl Request {
     }
 
     /// Whether the signature is the device's over the signed bytes; strict, as a member change's.
-    fn signed(&self) -> bool {
+    pub(crate) fn is_signed(&self) -> bool {
         let Some(bytes) = self.signed_bytes() else {
             return false;
         };
@@ -149,7 +149,7 @@ pub struct Accepted {
 
 /// Why a request is refused, in a sentence that starts with `refused:`.
 #[derive(Debug, PartialEq, Eq)]
-pub struct RequestError(String);
+pub struct RequestError(pub(crate) String);
 
 impl fmt::Display for RequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -218,7 +218,7 @@ impl Requests {
             ));
         }
         let signed = &request.signed;
-        let Some(member) = members.get(&signed.device).filter(|_| request.signed()) else {
+        let Some(member) = members.get(&signed.device).filter(|_| request.is_signed()) else {
             return refused("this request is not signed by a member".to_owned());
         };
         let window = REQUEST_WINDOW.as_millis() as u64;
@@ -343,7 +343,7 @@ pub fn full_switch(
     };
     let Some(member) = members
         .get(&request.signed.device)
-        .filter(|_| request.signed())
+        .filter(|_| request.is_signed())
     else {
         return refused("is not signed by a member");
     };
@@ -389,7 +389,7 @@ pub fn kept_close(
     let refused = |why: &str| Err(RequestError(format!("the close {why}")));
     let Some(member) = members
         .get(&request.signed.device)
-        .filter(|_| request.signed())
+        .filter(|_| request.is_signed())
     else {
         return refused("is not signed by a member");
     };

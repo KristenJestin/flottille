@@ -78,6 +78,33 @@ const GENERAL_BLOCKS: [&str; 7] = [
 /// machine's page (`SettingsPage::own_line`).
 const LEADING_CHILDREN: usize = 1;
 
+/// The blocks of a machine that are its own alone, with a hub: each says it once
+/// (`docs/remote.md`, "Settings for all machines").
+const MACHINE_ONLY: [&str; 6] = [
+    "providers",
+    "forges",
+    "vault",
+    "travelled",
+    "developer",
+    "check",
+];
+
+/// What a block of the machine alone says, above it, while the machine has a hub.
+pub const MACHINE_ONLY_LINE: &str = "This machine only.";
+
+/// Whether Settings shows All machines (`docs/remote.md`, "Settings for all machines"): the values
+/// every machine uses, which this machine's daemon keeps and shares. Chosen in the picker, it
+/// stays chosen while the window runs, until a machine is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SettingsOfAll(pub bool);
+
+impl gpui_kit::Global for SettingsOfAll {}
+
+/// Whether Settings shows All machines now.
+pub fn of_all(cx: &gpui_kit::App) -> bool {
+    cx.try_global::<SettingsOfAll>().is_some_and(|all| all.0)
+}
+
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
 
@@ -2683,11 +2710,35 @@ impl Render for SettingsPage {
         let pad = if self.narrow { space::LG } else { space::XXL };
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
+        // All machines is shown on this machine's page: it is what this machine's daemon keeps.
+        let all = self.of.is_none() && of_all(cx) && self.has_hub(cx);
+        // All machines shares General's sections only: its tab, whichever was shown.
+        let general = SECTIONS
+            .iter()
+            .position(|(key, _)| *key == "general")
+            .expect("Settings has a General tab");
+        let tab = if all { general } else { tab };
         let header = PageHeader::new("settings-header", "Settings");
         if SECTIONS[tab].0 == "general" {
             self.check.update(cx, |check, cx| check.ensure(cx));
         }
+        let this_machine = self
+            .of
+            .clone()
+            .or_else(|| {
+                self.machines
+                    .read(cx)
+                    .machines()
+                    .and_then(|read| read.this.clone())
+            })
+            .unwrap_or_else(|| "this machine".to_owned());
+        let hub = self.has_hub(cx);
+        self.about.update(cx, |about, cx| {
+            about.place(all, this_machine, hub, window, cx)
+        });
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
+            // Only what every machine may share: About you, for now.
+            _ if all => vec![("about", self.about.clone().into_any_element())],
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
                 ("forges", self.sign_in.clone().into_any_element()),
@@ -2722,10 +2773,20 @@ impl Render for SettingsPage {
         };
         let vault = self.vault.read(cx).entries().map(<[_]>::len);
         let this = cx.entity().downgrade();
-        let tabs = SECTIONS
+        // All machines has the tabs that hold a section every machine may share: General.
+        let shown_tabs: Vec<(&str, &str)> = SECTIONS
+            .iter()
+            .filter(|(key, _)| !all || *key == "general")
+            .copied()
+            .collect();
+        let at = shown_tabs
+            .iter()
+            .position(|(key, _)| *key == SECTIONS[tab].0)
+            .unwrap_or(0);
+        let tabs = shown_tabs
             .iter()
             .fold(
-                Tabs::new("settings-tabs", "Sections", tab),
+                Tabs::new("settings-tabs", "Sections", at),
                 |tabs, (key, label)| match *key {
                     "vault" if let Some(entries) = vault => {
                         tabs.counted(*key, *label, entries.to_string())
@@ -2734,7 +2795,14 @@ impl Render for SettingsPage {
                 },
             )
             .on_choose(move |at, _, cx| {
-                this.update(cx, |this, cx| this.choose(at, cx)).ok();
+                let Some(key) = shown_tabs.get(at).map(|(key, _)| *key) else {
+                    return;
+                };
+                let entry = SECTIONS
+                    .iter()
+                    .position(|(section, _)| *section == key)
+                    .unwrap_or(0);
+                this.update(cx, |this, cx| this.choose(entry, cx)).ok();
             });
         // The machine's picker sits on the title's line, at the header's right: the title is its
         // label. The kit's header has no place right after the title; beside it, the picker
@@ -2746,11 +2814,13 @@ impl Render for SettingsPage {
             .child(div().flex_1().min_w_0().child(header))
             .children(self.machine_chooser(window, cx))
             .test_support();
-        // Each machine's parts have their own: chosen, another machine's page enters.
+        // Each machine's parts have their own, and All machines its own: chosen, its page enters.
         let key = |part: &str| match &self.of {
+            None if all => ElementId::Name(format!("enter-settings-all-{part}").into()),
             None => ElementId::Name(format!("enter-settings-{part}").into()),
             Some(machine) => ElementId::Name(format!("enter-settings-{machine}-{part}").into()),
         };
+        let hub = !all && self.has_hub(cx);
         let column = |element: AnyElement| {
             div()
                 .w_full()
@@ -2790,6 +2860,10 @@ impl Render for SettingsPage {
             // with the sections, so that no text is ever drawn over it or under it (#1293).
             .child(column(self.own_line(cx).into_any_element()))
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
+                let section = match MACHINE_ONLY.contains(&part) {
+                    true => machine_only(part, hub, section, cx),
+                    false => section,
+                };
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
@@ -2805,7 +2879,42 @@ impl Render for SettingsPage {
     }
 }
 
+/// `section`, a block of the machine alone, under one line that says so while the machine has a
+/// hub: the line unfolds and folds away with it.
+fn machine_only(part: &str, hub: bool, section: AnyElement, cx: &gpui_kit::App) -> AnyElement {
+    let p = palette(cx);
+    // Its gap to the section is inside it, so that it folds away with it.
+    let line = div().pb(space::SM).child(
+        div()
+            .id(ElementId::Name(format!("settings-only-{part}").into()))
+            .aria_label(MACHINE_ONLY_LINE)
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .child(MACHINE_ONLY_LINE)
+            .test_support(),
+    );
+    div()
+        .flex()
+        .flex_col()
+        .child(presence(
+            ElementId::Name(format!("settings-only-{part}-block").into()),
+            hub,
+            line,
+        ))
+        .child(section)
+        .into_any_element()
+}
+
 impl SettingsPage {
+    /// Whether this machine has a hub, the member of a list with another machine: the picker
+    /// offers All machines, and a machine's own blocks say so.
+    fn has_hub(&self, cx: &gpui_kit::App) -> bool {
+        self.machines
+            .read(cx)
+            .machines()
+            .is_some_and(|read| crate::machines::choices(read).len() >= 2)
+    }
+
     /// Whose settings these are, on the title's line: this machine, then the other machines
     /// that run agents, each with its state; choosing one shows it (`Shell::choose_machine`), as
     /// opening one of its sessions does. None while this machine is in no member list or knows no
@@ -2828,12 +2937,31 @@ impl SettingsPage {
             .unwrap_or(0);
         let (page, shell) = (cx.entity().downgrade(), self.shell.clone());
         let toggle = page.clone();
+        let (all_page, all_shell) = (page.clone(), shell.clone());
+        let all = crate::machines::AllMachines {
+            chosen: of_all(cx),
+            on_choose: Box::new(move |window, cx| {
+                all_page
+                    .update(cx, |page, cx| {
+                        page.machine_menu = false;
+                        cx.notify();
+                    })
+                    .ok();
+                // This machine is brought at once (`Shell::reach_then`), which chooses no All
+                // machines: chosen after it.
+                all_shell
+                    .update(cx, |shell, cx| shell.choose_machine(None, window, cx))
+                    .ok();
+                cx.set_global(SettingsOfAll(true));
+            }),
+        };
         let picker = (!choices.is_empty()).then(|| {
-            crate::machines::picker(
+            crate::machines::picker_of(
                 "settings-machine",
                 "settings-machine",
                 &choices,
                 chosen,
+                Some(all),
                 self.machine_menu,
                 move |_, cx| {
                     toggle
@@ -2844,6 +2972,7 @@ impl SettingsPage {
                         .ok();
                 },
                 move |name, window, cx| {
+                    cx.set_global(SettingsOfAll(false));
                     page.update(cx, |page, cx| {
                         page.machine_menu = false;
                         cx.notify();

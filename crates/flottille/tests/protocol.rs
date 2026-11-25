@@ -81,6 +81,11 @@ fn every_method_the_sources_name_is_catalogued() {
         "rules.changed",
         // Another, said in the same place.
         "about.changed",
+        // The values of all machines, by their names (`docs/remote.md`, "Settings for all
+        // machines").
+        "about.name",
+        "about.pronouns",
+        "about.notes",
         // A git setting a push the gate let through keeps of the repository's (`push_folder`).
         "remote.pushdefault",
     ];
