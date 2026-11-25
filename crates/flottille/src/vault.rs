@@ -1312,6 +1312,35 @@ pub(crate) fn asking(store: &Store) -> flottille_core::Result<Vec<String>> {
     Ok(asks(store)?.open.into_iter().map(|ask| ask.agent).collect())
 }
 
+/// The requests for a vault entry of `agent` that wait for the user, oldest first: each one's
+/// number, when the agent asked it (its own ask, or its ask joined to another's), the entry's name
+/// and the agent's reason. Never a secret: an ask holds none.
+pub(crate) fn asked_by(
+    store: &Store,
+    agent: &str,
+) -> flottille_core::Result<Vec<(u64, u64, String, String)>> {
+    let mut open: Vec<(u64, u64, String, String)> = Vec::new();
+    for event in store.events_named(
+        &["vault.asked", "vault.ask_joined", "vault.ask_answered"],
+        0,
+    )? {
+        let data = &event.data;
+        let text = |key: &str| data[key].as_str().unwrap_or_default().to_owned();
+        let number = match event.name.as_str() {
+            "vault.asked" => Some(event.seq),
+            "vault.ask_joined" => data["ask"].as_u64(),
+            _ => {
+                open.retain(|(number, ..)| data["ask"] != *number);
+                None
+            }
+        };
+        if let Some(number) = number.filter(|_| data["agent"] == agent) {
+            open.push((number, event.at, text("name"), text("why")));
+        }
+    }
+    Ok(open)
+}
+
 fn asks(store: &Store) -> flottille_core::Result<Asks> {
     let events = store.events_named(
         &["vault.asked", "vault.ask_joined", "vault.ask_answered"],
@@ -1398,6 +1427,16 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, answer: Answer) {
         return;
     }
     let name = &request.name;
+    // The sessions that lead an agent that asked hear it too, with what wakes them next.
+    for agent in std::iter::once(&request.agent).chain(request.joined.iter().map(|(a, _)| a)) {
+        crate::subscriptions::request_answered(
+            daemon,
+            agent,
+            request.number,
+            &format!("a vault entry asked: {name}"),
+            &format!("{outcome} it"),
+        );
+    }
     let body = match (outcome, request.edit.is_some()) {
         ("set", false) => {
             format!(

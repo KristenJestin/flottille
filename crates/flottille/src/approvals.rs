@@ -332,6 +332,16 @@ async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: 
             .unwrap_or(request);
         return Err(already(&request));
     };
+    crate::subscriptions::request_answered(
+        daemon,
+        &request.agent,
+        number,
+        &crate::subscriptions::request_said(&request),
+        match decision {
+            Decision::Deny => "denied it",
+            _ => "allowed it",
+        },
+    );
     // Another machine's launch: its answer is for no agent of this machine.
     if let Some(launch) = crate::launches::held_by_request(daemon, number) {
         crate::launches::decided(daemon, launch, &request, decision != Decision::Deny);

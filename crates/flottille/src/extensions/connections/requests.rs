@@ -1311,7 +1311,7 @@ pub(super) fn saved_checked(
 /// The request the user answers by writing their own values, decided before it is written; one
 /// decided meanwhile (an Accept of it) is refused, and the Save writes nothing.
 pub(super) fn claimed(daemon: &Daemon, number: u64) -> Result<approval::Request, Failure> {
-    daemon
+    let request = daemon
         .write(|store| {
             Ok(
                 match store.decide(number, Decision::Once, approval::USER)? {
@@ -1324,7 +1324,15 @@ pub(super) fn claimed(daemon: &Daemon, number: u64) -> Result<approval::Request,
             Failure::refused(format!(
                 "request #{number} is already decided: nothing was written"
             ))
-        })
+        })?;
+    crate::subscriptions::request_answered(
+        daemon,
+        &request.agent,
+        number,
+        &crate::subscriptions::request_said(&request),
+        "wrote values of their own instead",
+    );
+    Ok(request)
 }
 
 /// The agent told what the user wrote instead of its request, or that their write failed.

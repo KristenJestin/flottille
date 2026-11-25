@@ -737,7 +737,7 @@ impl Link {
         }
         // The runs and the subscriptions never wait for the place, whose forge and tracker are
         // reads of seconds.
-        self.read_subscriptions(&mut conn)?;
+        let mut followed = self.read_subscriptions(&mut conn)?;
         self.read_leaves(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
         self.read_place(&mut conn, &mut resume.known)?;
@@ -767,7 +767,7 @@ impl Link {
                     self.read_place(&mut conn, &mut resume.known)?;
                 }
                 if stale.subscriptions {
-                    self.read_subscriptions(&mut conn)?;
+                    followed = self.read_subscriptions(&mut conn)?;
                 }
                 if stale.leaves {
                     self.read_leaves(&mut conn)?;
@@ -811,6 +811,18 @@ impl Link {
                 || matches!(name, "agent.ended" | "agent.failed")
             {
                 stale.leaves = true;
+                stale.since.get_or_insert_with(Instant::now);
+            }
+            // A request of a session the tree follows, asked or answered, changes what its
+            // following says the session waits for (#1305).
+            if followed.contains(agent)
+                && (name.starts_with("approval.")
+                    || matches!(
+                        name,
+                        "vault.asked" | "vault.ask_answered" | "vault.ask_joined"
+                    ))
+            {
+                stale.subscriptions = true;
                 stale.since.get_or_insert_with(Instant::now);
             }
             // A following that pauses or resumes is the follower's subscription.
@@ -946,17 +958,21 @@ impl Link {
         Ok(running)
     }
 
-    /// The subscriptions of the session's tree, sent.
-    fn read_subscriptions(&self, conn: &mut Conn) -> Result<(), String> {
+    /// The subscriptions of the session's tree, sent; the sessions its followings follow.
+    fn read_subscriptions(&self, conn: &mut Conn) -> Result<HashSet<String>, String> {
         let answer = conn.request("subscription.list", json!({"tree": self.root}))?;
-        let rows = answer["subscriptions"]
+        let listed = answer["subscriptions"]
             .as_array()
-            .into_iter()
-            .flatten()
-            .map(SubscriptionRow::of)
+            .cloned()
+            .unwrap_or_default();
+        let followed = listed
+            .iter()
+            .filter(|s| s["source"] == "session")
+            .filter_map(|s| s["target"]["session"].as_str().map(str::to_owned))
             .collect();
+        let rows = listed.iter().map(SubscriptionRow::of).collect();
         self.send(SessionUpdate::Subscriptions(rows));
-        Ok(())
+        Ok(followed)
     }
 
     /// The leaves that name the session's root, sent.
