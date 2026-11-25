@@ -1369,8 +1369,11 @@ pub fn picker(
 /// does.
 pub struct AllMachines {
     pub chosen: bool,
-    pub on_choose: Box<dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static>,
+    pub on_choose: OnAll,
 }
+
+/// What choosing All machines does.
+pub type OnAll = Box<dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static>;
 
 /// What the picker says of All machines, under its name.
 pub const ALL_MACHINES_DETAIL: &str = "What every machine uses, unless it changes it";
