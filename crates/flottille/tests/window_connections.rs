@@ -3385,6 +3385,69 @@ fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn edit_entry_from_a_connection_s_review_keeps_the_secret_left_empty(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippo-token", "secret": SECRET, "description": "Hippo's token"}),
+    )
+    .unwrap();
+    let (mut server, url) = protected_server(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "headers": {"Authorization": {"vault": "hippo-token"}}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-edit-entry") || present(cx, "connection-review-sign-in")
+    });
+    settle(cx);
+    click(cx, "connection-review-edit-entry");
+    let vault = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .settings_page()
+            .map(|page| page.read(cx).vault().clone())
+            .unwrap()
+    });
+    until(&shell, cx, "the entry's dialog", |cx| {
+        vault.read_with(cx, |v, _| v.is_open())
+    });
+    settle(cx);
+    assert_eq!(
+        vault.read_with(cx, |v, _| v.form_title()).as_deref(),
+        Some("Edit hippo-token")
+    );
+    assert_eq!(
+        label(cx, "vault-secret-field-hint").as_deref(),
+        Some("Leave empty to keep the current secret")
+    );
+    // Only the description changes: the secret is not typed again.
+    let description = vault.read_with(cx, |v, _| v.description_field().unwrap().clone());
+    cx.update(|window, cx| {
+        description.update(cx, |f, cx| f.set_value("Hippo's new token", window, cx))
+    });
+    click(cx, "save-vault-entry");
+    assert_eq!(
+        vault.read_with(cx, |v, _| v.form_error().map(str::to_owned)),
+        None
+    );
+    until(&shell, cx, "the entry is saved", |cx| {
+        let entries = user.call("vault.list", json!({})).unwrap()["entries"].clone();
+        entries[0]["description"] == "Hippo's new token" && vault.read_with(cx, |v, _| !v.is_open())
+    });
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
 fn a_401_with_query_and_cookie_secrets_offers_to_edit_each_entry(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);

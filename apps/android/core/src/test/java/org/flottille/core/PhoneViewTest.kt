@@ -25,7 +25,7 @@ class PhoneViewTest {
         )
 
     private fun session(machine: String, agent: String) =
-        SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL)
+        SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL, created = 3uL, pilot = "")
 
     private fun state(
         machines: List<MachineView> = emptyList(),
@@ -103,8 +103,9 @@ class PhoneViewTest {
                 machine = "server", agent = "a1", title = "Fix the login", mode = "full", state = "working", working = true,
                 child = false, ended = false, more = true,
                 entries = listOf(
-                    org.flottille.core.ffi.Entry(seq = 3uL, kind = "user", text = "look [Image 1: shot.png]", images = listOf("shot.png"), link = ""),
-                    org.flottille.core.ffi.Entry(seq = 4uL, kind = "link", text = "The app", images = emptyList(), link = "http://localhost:5173/"),
+                    org.flottille.core.ffi.Entry(seq = 3uL, kind = "user", text = "look [Image 1: shot.png]", images = listOf("shot.png"), link = "", delivery = "", summary = ""),
+                    org.flottille.core.ffi.Entry(seq = 4uL, kind = "link", text = "The app", images = emptyList(), link = "http://localhost:5173/", delivery = "", summary = ""),
+                    org.flottille.core.ffi.Entry(seq = 5uL, kind = "delivery", text = "Done.", images = emptyList(), link = "", delivery = "report", summary = "Report from docs-pass"),
                 ),
                 children = listOf(
                     org.flottille.core.ffi.ChildView(agent = "c1", title = "Check", doing = "running", role = "worker", depth = 1u),
@@ -139,7 +140,8 @@ class PhoneViewTest {
             page,
         )
         assertEquals(Entry(3, "user", "look [Image 1: shot.png]", listOf("shot.png")), page.entries.first())
-        assertEquals(Entry(4, "link", "The app", emptyList(), "http://localhost:5173/"), page.entries.last())
+        assertEquals(Entry(4, "link", "The app", emptyList(), "http://localhost:5173/"), page.entries[1])
+        assertEquals(Entry(5, "delivery", "Done.", delivery = "report", summary = "Report from docs-pass"), page.entries.last())
         assertEquals(Child("c1", "Check", "running", "worker", 1), page.children.single())
         assertEquals(
             Request(

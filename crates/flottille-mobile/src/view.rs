@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flottille_link::{Members, PeerState, PublicKey, Role};
-use flottille_protocol::words::{self, THE_CONVERSATION};
+use flottille_protocol::prompt::{is_replay, sections};
+use flottille_protocol::words::{self, THE_CONVERSATION, woken_by};
 
 use crate::tunnel::{TunnelEnd, TunnelView};
 use serde_json::Value;
@@ -28,7 +29,8 @@ pub struct ViewState {
     /// The members of the user's list, in the order they were added: this device among them.
     pub members: Vec<MemberView>,
     /// The sessions of every machine, by project: a project of the same name on two machines is
-    /// one group. Projects by name, so that groups never move; sessions by last exchange.
+    /// one group. Projects by name, so that groups never move; sessions newest first, as the
+    /// window's sidebar lists them, so that a row never moves when its session reports.
     pub projects: Vec<ProjectView>,
     pub conversation: Option<ConversationView>,
     pub requests: Vec<RequestView>,
@@ -92,6 +94,11 @@ pub struct SessionView {
     pub state: String,
     /// When it last exchanged, in milliseconds since the Unix epoch.
     pub last: u64,
+    /// When it was made, in milliseconds since the Unix epoch: what orders the list.
+    pub created: u64,
+    /// The session of the agent that leads it, on the same machine (the root of that agent's
+    /// tree); empty for a session no agent leads.
+    pub pilot: String,
 }
 
 /// The conversation of the session the app follows (`Core::follow`): its latest page of events,
@@ -130,7 +137,8 @@ pub struct RunView {
     pub url: String,
 }
 
-/// One entry of a conversation: `user`, `agent`, `thought`, `tool` or `link`, and its text.
+/// One entry of a conversation: `user`, `agent`, `thought`, `tool`, `link` or `delivery`, and its
+/// text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Entry {
     /// The number of the event the entry starts at: stable, and what orders the page.
@@ -141,6 +149,11 @@ pub struct Entry {
     pub images: Vec<String>,
     /// A `link` entry's address, the one an agent showed (`agent.link_shown`); empty for the rest.
     pub link: String,
+    /// What a `delivery` entry is, as the window names it (`woken by`, `report`, `message`, or the
+    /// daemon's kind): something Flottille sent the agent, never the user's words. Its `text` is
+    /// the delivery's body, folded under `summary`, its one line. Empty for the rest.
+    pub delivery: String,
+    pub summary: String,
 }
 
 /// An agent of the session's tree, as `agent.tree` gives it.
@@ -225,6 +238,9 @@ pub(crate) struct View {
     members: Vec<MemberView>,
     /// The sessions by machine and agent.
     sessions: BTreeMap<(String, String), Session>,
+    /// The parent of each agent that has one, by machine and agent: what names a pilot's session
+    /// when a child of its tree leads.
+    parents: HashMap<(String, String), String>,
     requests: BTreeMap<(String, u64), Held>,
     asks: BTreeMap<(String, u64), AskView>,
     /// The followed session and its events by number: an event seen twice (loaded, then live) is
@@ -268,6 +284,9 @@ struct Session {
     title: String,
     state: String,
     last: u64,
+    created: u64,
+    /// The agent that leads it (`led_by`), of the same machine.
+    led_by: Option<String>,
 }
 
 /// The tunnels that ended kept in `tunnels_ended`, the newest.
@@ -356,6 +375,7 @@ impl View {
     pub(crate) fn forget(&mut self, machine: &str) {
         self.machines.retain(|view| view.name != machine);
         self.sessions.retain(|(of, _), _| of != machine);
+        self.parents.retain(|(of, _), _| of != machine);
         self.requests.retain(|(of, _), _| of != machine);
         self.asks.retain(|(of, _), _| of != machine);
         if self.followed.as_ref().is_some_and(|f| f.machine == machine) {
@@ -424,12 +444,16 @@ impl View {
     /// for the user (`approval.list`).
     pub(crate) fn load(&mut self, machine: &str, agents: &Value, requests: &Value) {
         for agent in agents["agents"].as_array().into_iter().flatten() {
-            if !is_session(agent) {
-                continue;
-            }
             let Some(id) = agent["id"].as_str() else {
                 continue;
             };
+            if let Some(parent) = agent["parent"].as_str() {
+                self.parents
+                    .insert((machine.to_owned(), id.to_owned()), parent.to_owned());
+            }
+            if !is_session(agent) {
+                continue;
+            }
             let last = ["exchanged_at", "active_at", "created_at"]
                 .iter()
                 .find_map(|field| agent[*field].as_u64())
@@ -441,6 +465,8 @@ impl View {
                     title: text(&agent["title"]),
                     state: text(&agent["state"]),
                     last,
+                    created: agent["created_at"].as_u64().unwrap_or(last),
+                    led_by: agent["led_by"].as_str().map(str::to_owned),
                 },
             );
         }
@@ -560,6 +586,11 @@ impl View {
             self.keep_followed(machine, &agent, event);
         }
         let key = (machine.to_owned(), agent.clone());
+        if name == "agent.created"
+            && let Some(parent) = data["parent"].as_str()
+        {
+            self.parents.insert(key.clone(), parent.to_owned());
+        }
         match name {
             "agent.created" if is_session(data) => {
                 self.sessions.insert(
@@ -569,8 +600,15 @@ impl View {
                         title: text(&data["title"]),
                         state: "starting".to_owned(),
                         last: at,
+                        created: at,
+                        led_by: data["led_by"].as_str().map(str::to_owned),
                     },
                 );
+            }
+            "agent.detached" => {
+                if let Some(session) = self.sessions.get_mut(&key) {
+                    session.led_by = None;
+                }
             }
             "agent.titled" => {
                 if let Some(session) = self.sessions.get_mut(&key) {
@@ -734,6 +772,19 @@ impl View {
         }
     }
 
+    /// The root of `agent`'s tree on `machine`: the session it belongs to.
+    fn root_of(&self, machine: &str, agent: &str) -> String {
+        let mut id = agent.to_owned();
+        // A tree is a few levels deep; the bound only guards against a loop in bad data.
+        for _ in 0..64 {
+            match self.parents.get(&(machine.to_owned(), id.clone())) {
+                Some(parent) => id = parent.clone(),
+                None => break,
+            }
+        }
+        id
+    }
+
     /// The state the app draws.
     pub(crate) fn state(&self) -> ViewState {
         let mut projects: BTreeMap<&str, Vec<SessionView>> = BTreeMap::new();
@@ -747,12 +798,18 @@ impl View {
                     title: session.title.clone(),
                     state: session.state.clone(),
                     last: session.last,
+                    created: session.created,
+                    pilot: session
+                        .led_by
+                        .as_deref()
+                        .map(|lead| self.root_of(machine, lead))
+                        .unwrap_or_default(),
                 });
         }
         let projects = projects
             .into_iter()
             .map(|(name, mut sessions)| {
-                sessions.sort_by(|a, b| b.last.cmp(&a.last).then(a.agent.cmp(&b.agent)));
+                sessions.sort_by(|a, b| b.created.cmp(&a.created).then(a.agent.cmp(&b.agent)));
                 ProjectView {
                     name: name.to_owned(),
                     sessions,
@@ -784,7 +841,11 @@ impl View {
                     ended: matches!(followed.state.as_str(), "ended" | "failed"),
                     state: followed.state.clone(),
                     more: followed.more,
-                    entries: entries(followed.events.values()),
+                    entries: entries(
+                        followed.events.values(),
+                        !followed.info["parent"].is_null(),
+                        &followed.children,
+                    ),
                     children: followed.children.clone(),
                     runs: runs(followed.events.values()),
                 }
@@ -803,14 +864,24 @@ impl View {
 }
 
 /// The entries of a conversation's events, oldest first: the pieces of one reply (or one thought)
-/// are one entry.
-fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
+/// are one entry, and a prompt is one entry per delivery it holds (`child`: the page is a child's,
+/// whose brief is its parent's words). `children` names the children a report comes from.
+fn entries<'a>(
+    events: impl Iterator<Item = &'a Value>,
+    child: bool,
+    children: &[ChildView],
+) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut message: Option<String> = None;
     for event in events {
         let data = &event["data"];
+        if event["name"] == "agent.prompted" {
+            entries.extend(delivered(event, child, children));
+            message = None;
+            continue;
+        }
         let (kind, piece) = match event["name"].as_str().unwrap_or_default() {
-            "agent.prompted" | "agent.user_message" => ("user", false),
+            "agent.user_message" => ("user", false),
             "agent.message" => ("agent", true),
             "agent.thought" => ("thought", true),
             // The card of the link is what the user sees of a `web` `show_link`, not the step.
@@ -849,11 +920,115 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
                 } else {
                     String::new()
                 },
+                delivery: String::new(),
+                summary: String::new(),
             }),
         }
         message = if piece { id } else { None };
     }
     entries
+}
+
+/// The entries of one prompt, a delivery each, as the window draws them: the user's words (and a
+/// root's brief, which the user wrote) are the user's message, with the prompt's pictures; any
+/// other delivery is said in one line, its body folded under it. What replays the conversation
+/// after a compaction is not news, and is left out.
+fn delivered(event: &Value, child: bool, children: &[ChildView]) -> Vec<Entry> {
+    let data = &event["data"];
+    let seq = event["seq"].as_u64().unwrap_or_default();
+    let found = sections(data["text"].as_str().unwrap_or_default());
+    let ids: Vec<&str> = data["deliveries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    // One id per delivery: when they do not line up, nothing is known of which is a replay.
+    let aligned = ids.len() == found.len();
+    let replays = |at: usize| aligned && is_replay(ids[at]);
+    let mut images: Vec<String> = data["images"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(text)
+        .collect();
+    let mut out = Vec::new();
+    for (at, (kind, body)) in found.into_iter().enumerate() {
+        if replays(at) {
+            continue;
+        }
+        let entry = |kind: &str, text: String, delivery: &str, summary: String| Entry {
+            seq,
+            kind: kind.to_owned(),
+            text,
+            images: Vec::new(),
+            link: String::new(),
+            delivery: delivery.to_owned(),
+            summary,
+        };
+        out.push(match kind.as_str() {
+            "" | "user" => entry("user", body, "", String::new()),
+            "brief" if !child => entry("user", body, "", String::new()),
+            "subscription" => {
+                let line = woken_by(&body);
+                entry("delivery", body, "woken by", line)
+            }
+            "child-report" => {
+                let from = children
+                    .iter()
+                    .find(|each| body.contains(each.agent.as_str()))
+                    .map(|each| each.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| "a sub-agent".into());
+                entry("delivery", body, "report", format!("Report from {from}"))
+            }
+            // Another agent's words: the line says who wrote, the body is what it wrote.
+            "session" | "launched" => {
+                let (first, rest) = body.split_once('\n').unwrap_or((&body, ""));
+                let said = first.trim().trim_end_matches(':').to_owned();
+                let label = if kind == "session" {
+                    "message"
+                } else {
+                    "started by"
+                };
+                entry("delivery", rest.trim().to_owned(), label, said)
+            }
+            _ => {
+                let label = if kind == "brief" || kind == "parent" {
+                    "brief"
+                } else {
+                    kind.as_str()
+                };
+                let line = first_line(&body);
+                entry("delivery", body, label, line)
+            }
+        });
+    }
+    // The pictures went with the user's words: a message of its own when they came alone.
+    if !images.is_empty() {
+        match out.iter_mut().find(|entry| entry.kind == "user") {
+            Some(mine) => mine.images = std::mem::take(&mut images),
+            None => out.push(Entry {
+                seq,
+                kind: "user".into(),
+                text: String::new(),
+                images,
+                link: String::new(),
+                delivery: String::new(),
+                summary: String::new(),
+            }),
+        }
+    }
+    out
+}
+
+/// A text's first line that says something, on one line.
+fn first_line(body: &str) -> String {
+    let line = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The commands of a session that run and have an address, oldest first: from `run.started`,
@@ -987,6 +1162,217 @@ mod tests {
         );
         let listed: Vec<&str> = view.sessions.keys().map(|(_, id)| id.as_str()).collect();
         assert_eq!(listed, vec!["a1"]);
+    }
+
+    fn prompted(seq: u64, data: Value) -> Value {
+        serde_json::json!({"name": "agent.prompted", "seq": seq, "data": data})
+    }
+
+    #[test]
+    fn a_subscription_s_news_is_a_folded_block_not_a_message() {
+        let news = "The checks ended: 3 passed, 1 failed.\nSubscribe again.";
+        let events = [
+            prompted(
+                1,
+                serde_json::json!({"text": "[flottille:user]\nFix the login"}),
+            ),
+            prompted(
+                2,
+                serde_json::json!({"text": format!("[flottille:subscription]\nNews of the pull request #12 of app:\n{news}")}),
+            ),
+        ];
+        let shown = entries(events.iter(), false, &[]);
+        let drawn: Vec<(&str, &str, &str, &str)> = shown
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind.as_str(),
+                    entry.delivery.as_str(),
+                    entry.summary.as_str(),
+                    entry.text.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("user", "", "", "Fix the login"),
+                (
+                    "delivery",
+                    "woken by",
+                    "checks of #12 ended, 1 failed",
+                    format!("News of the pull request #12 of app:\n{news}").as_str()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_delivery_is_never_the_user_s_message_and_a_replay_is_not_shown() {
+        let child = ChildView {
+            agent: "0123456789ab".into(),
+            title: "docs-pass".into(),
+            doing: "ended: it reported".into(),
+            role: String::new(),
+            depth: 1,
+        };
+        let events = [
+            prompted(
+                1,
+                serde_json::json!({"text": "[flottille:user]\nadd the page\n\n[flottille:resume]\nS",
+                    "deliveries": ["brief-a1-0-replay", "resume-a1-0-replay"]}),
+            ),
+            prompted(
+                2,
+                serde_json::json!({"text": "[flottille:child-report]\nYour child \"docs-pass\" (agent 0123456789ab) reported:\n\nDone.\n\n[flottille:user]\nThanks",
+                    "images": ["a-0.png"]}),
+            ),
+            prompted(
+                3,
+                serde_json::json!({"text": "[flottille:session]\n\"Lead\" (agent 0123456789ac) wrote to this session:\n\nThe tests pass now."}),
+            ),
+        ];
+        let shown = entries(events.iter(), false, std::slice::from_ref(&child));
+        let drawn: Vec<(u64, &str, &str, &str)> = shown
+            .iter()
+            .map(|entry| {
+                (
+                    entry.seq,
+                    entry.kind.as_str(),
+                    entry.delivery.as_str(),
+                    entry.summary.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (2, "delivery", "report", "Report from docs-pass"),
+                (2, "user", "", ""),
+                (
+                    3,
+                    "delivery",
+                    "message",
+                    "\"Lead\" (agent 0123456789ac) wrote to this session"
+                ),
+            ]
+        );
+        assert_eq!(shown[1].text, "Thanks");
+        assert_eq!(shown[1].images, ["a-0.png"]);
+        assert!(shown[0].images.is_empty());
+        assert_eq!(
+            shown[0].text,
+            "Your child \"docs-pass\" (agent 0123456789ab) reported:\n\nDone."
+        );
+        assert_eq!(shown[2].text, "The tests pass now.");
+
+        // A child's brief comes from its parent: a block of its own, never the user's words.
+        let brief = [prompted(
+            4,
+            serde_json::json!({"text": "[flottille:brief]\nFix the timer"}),
+        )];
+        let shown = entries(brief.iter(), true, &[]);
+        assert_eq!(
+            (
+                shown[0].kind.as_str(),
+                shown[0].delivery.as_str(),
+                shown[0].summary.as_str()
+            ),
+            ("delivery", "brief", "Fix the timer")
+        );
+    }
+
+    /// The ids of the sessions of the first project, from the top of the list down.
+    fn order(view: &View) -> Vec<String> {
+        view.state().projects[0]
+            .sessions
+            .iter()
+            .map(|session| session.agent.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_session_that_reports_keeps_its_place() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "a1", "parent": null, "depth": 0, "title": "Old", "project": "app",
+                "created_at": 100, "exchanged_at": 100},
+            {"id": "a2", "parent": null, "depth": 0, "title": "New", "project": "app",
+                "created_at": 200, "exchanged_at": 200},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        assert_eq!(order(&view), ["a2", "a1"]);
+
+        // The older one reports: its state and its last exchange change, its place does not.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.prompted", "at": 900, "data": {"agent": "a1"}}),
+        );
+        let state = view.state();
+        let a1 = &state.projects[0].sessions[1];
+        assert_eq!(
+            (a1.state.as_str(), a1.last, a1.created),
+            ("working", 900, 100)
+        );
+        assert_eq!(order(&view), ["a2", "a1"]);
+
+        // A new one is the newest: it comes first.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 1000, "data": {"agent": "a3",
+                "parent": null, "depth": 0, "title": "Newest", "project": "app"}}),
+        );
+        assert_eq!(order(&view), ["a3", "a2", "a1"]);
+    }
+
+    #[test]
+    fn a_led_session_names_the_session_of_its_pilot() {
+        let mut view = View::default();
+        let agents = serde_json::json!({"agents": [
+            {"id": "p1", "parent": null, "depth": 0, "title": "Ship", "project": "app",
+                "created_at": 1},
+            {"id": "c1", "parent": "p1", "depth": 1, "title": "Plan", "project": "app"},
+            // Led by a child of the pilot's tree: its row sits under that tree's root.
+            {"id": "l1", "parent": null, "depth": 0, "title": "Export", "project": "app",
+                "created_at": 2, "led_by": "c1"},
+            {"id": "l2", "parent": null, "depth": 0, "title": "Invoice", "project": "app",
+                "created_at": 3, "led_by": "p1"},
+            {"id": "u1", "parent": null, "depth": 0, "title": "Mine", "project": "app",
+                "created_at": 4, "led_by": null},
+        ]});
+        view.load("server", &agents, &serde_json::json!({"requests": []}));
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.created", "at": 5, "data": {"agent": "l3",
+                "parent": null, "depth": 0, "title": "Refunds", "project": "app",
+                "led_by": "p1"}}),
+        );
+        let pilots = |view: &View| -> Vec<(String, String)> {
+            view.state().projects[0]
+                .sessions
+                .iter()
+                .map(|session| (session.agent.clone(), session.pilot.clone()))
+                .collect()
+        };
+        let pair = |a: &str, p: &str| (a.to_owned(), p.to_owned());
+        assert_eq!(
+            pilots(&view),
+            [
+                pair("l3", "p1"),
+                pair("u1", ""),
+                pair("l2", "p1"),
+                pair("l1", "p1"),
+                pair("p1", ""),
+            ]
+        );
+
+        // Detached, it is the user's alone: under no pilot.
+        view.apply(
+            "server",
+            &serde_json::json!({"name": "agent.detached", "at": 6,
+                "data": {"agent": "l2", "from": "p1"}}),
+        );
+        assert_eq!(pilots(&view)[2], pair("l2", ""));
     }
 
     #[test]

@@ -1225,7 +1225,8 @@ pub(crate) fn resume_write(daemon: &Arc<Daemon>, agent: &Agent) -> Result<Agent,
 pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
     let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
         "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
-        "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
+        "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title,
+        "led_by": agent.launched_by.as_ref().filter(|_| agent.led)});
     // The pilot's room in its machine's cap is checked in this very write: one session that makes
     // it count again, and another caller, never pass the cap together.
     let refused = daemon.write(|store| {
