@@ -42,6 +42,9 @@ class SessionsTabTest {
         rule.setContent {
             FlottilleApp(phone = phone, deviceName = "pixel", zone = ZoneOffset.UTC, now = { now })
         }
+        // The app opens on Needs you (#1443): these are the Sessions tab's.
+        rule.waitForIdle()
+        rule.onNodeWithTag("tab:sessions").performClick()
     }
 
     private fun session(

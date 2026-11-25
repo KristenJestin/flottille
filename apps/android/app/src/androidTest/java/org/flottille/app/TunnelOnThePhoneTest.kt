@@ -79,6 +79,7 @@ class TunnelOnThePhoneTest {
     private fun start() {
         val host = SystemTunnelHost(rule.activity, launch = { launched += it; true })
         rule.setContent { FlottilleApp(phone = phone, deviceName = "pixel", zone = ZoneOffset.UTC, tunnels = host) }
+        rule.onNodeWithTag("tab:sessions").performClick()
         rule.onNodeWithTag("session:server:a1").performClick()
         rule.waitForIdle()
     }
@@ -192,5 +193,15 @@ class TunnelOnThePhoneTest {
         assertTrue(text, text.contains("run r1 ended"))
         assertFalse(phone.listening(tunnel))
         assertEquals(0, phone.holds)
+    }
+
+    @Test
+    fun the_service_s_notification_wears_the_app_s_own_icon() {
+        start()
+        rule.onNodeWithTag("run-browser:r1").performClick()
+        until("the service's notification") { kept() != null }
+        val icon = kept()!!.smallIcon
+        assertEquals(context.packageName, icon.resPackage)
+        assertEquals("ic_notification", context.resources.getResourceEntryName(icon.resId))
     }
 }

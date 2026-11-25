@@ -838,7 +838,8 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   the bare one ("Bare mode for Codex", above), and the bare command line.
 - **The session opens** in order: `initialize` (the client `flottille`, with the experimental
   API, which `environments` needs), `initialized`, `account/read` (not signed in, or signed in to a
-  workspace's plan: the open fails, saying why), `model/list`, then `thread/start` for
+  workspace's plan: the open fails, saying why; with no account it carries `data.code`
+  `unauthorized`, "A death", below), `model/list`, then `thread/start` for
   `session/new` or `thread/resume` for `session/resume`. The session id is Codex's thread id; there
   is no `session/load`. A `codex` that ends before fails the open; a `thread/resume` answered "no
   rollout found" fails it with "resource not found" (`-32002`).
@@ -1091,7 +1092,11 @@ A resume or a load that fails is read for what it says (`acp::not_reopened`):
   conversation found with session ID" on its error output (passed on to the bridge's), the Codex
   bridge when `thread/resume` answered "no rollout found";
 - its process died: a death, as above;
-- its login is gone (`turn_failures`): said as a turn's is, the session kept;
+- its login is gone (`turn_failures`): said as a turn's is, the session kept. The Codex bridge
+  tags with `unauthorized` an open refused because `account/read` answered no account
+  (`requiresOpenaiAuth`, as `codex` 0.166.0 does with no login), so that the agent says it must
+  sign in again, as for every other refused login; a ChatGPT plan it refuses carries no code and
+  fails the agent;
 - anything else (`claude` missing or broken, the network, an error of the service) fails the
   agent with its session kept, to be resumed once the cause is gone. Nothing else ever throws a
   session away.

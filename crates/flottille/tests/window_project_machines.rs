@@ -1405,8 +1405,9 @@ fn a_device_that_runs_nothing_is_no_group_of_the_projects_list(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
-fn a_project_with_nothing_under_it_shows_no_open_chevron(cx: &mut TestAppContext) {
+fn a_project_with_nothing_under_it_fades_its_chevron_where_it_stands(cx: &mut TestAppContext) {
     use gpui_design_system::rows::toggle_id;
+    use gpui_design_system::seen::seen;
     let (_hub, pc, server) = machines();
     add(&pc, "app", APP);
     add(&pc, "notes", "");
@@ -1419,10 +1420,9 @@ fn a_project_with_nothing_under_it_shows_no_open_chevron(cx: &mut TestAppContext
         present(cx, toggle_id(project_id("app")))
     });
     settle(&shell, cx);
-    assert!(
-        !present(cx, toggle_id(project_id("notes"))),
-        "a project with nothing under it has no chevron"
-    );
+    // The chevron keeps its place, faded out: the kit draws it, the title never moves.
+    assert_eq!(seen("project-notes-chevron"), Some(0.0));
+    assert_eq!(seen("project-app-chevron"), Some(1.0));
     // Its title starts where every other project's does.
     let title = |name: &str, cx: &mut VisualTestContext| {
         f32::from(bounds(cx, format!("project-{name}-title")).origin.x)
@@ -1435,21 +1435,47 @@ fn a_project_with_nothing_under_it_shows_no_open_chevron(cx: &mut TestAppContext
         present(cx, machine_id("pc")) && present(cx, machine_id("server"))
     });
     settle(&shell, cx);
-    assert!(present(
-        cx,
-        toggle_id(flottille_window::tree::project_on_id("app", "pc"))
-    ));
-    assert!(!present(
-        cx,
-        toggle_id(flottille_window::tree::project_on_id("app", "server"))
-    ));
+    assert_eq!(seen("project-app-on-pc-chevron"), Some(1.0));
+    assert_eq!(seen("project-app-on-server-chevron"), Some(0.0));
 
     // A session comes: its chevron comes with it.
     switch_grouping(&shell, cx);
     session(&pc, "notes", "Write the notes");
-    until(&shell, cx, "the chevron of notes", |cx| {
-        present(cx, toggle_id(project_id("notes")))
+    // Its chevron fades in where it stood, the title still in place.
+    until(&shell, cx, "the chevron of notes", |_| {
+        seen("project-notes-chevron") == Some(1.0)
     });
+    settle(&shell, cx);
+    assert!((title("notes", cx) - title("app", cx)).abs() < 0.5);
+}
+
+#[gpui_kit::test]
+fn a_machine_mark_cuts_its_badge_out_in_the_fill_of_a_hovered_row(cx: &mut TestAppContext) {
+    use gpui_design_system::seen::colour;
+    use gpui_design_system::theme::palette;
+    let (_hub, pc, server) = machines();
+    add(&pc, "app", APP);
+    add(&server, "app", APP);
+    told(&pc, &["app"]);
+
+    let (shell, cx) = with_row(&pc, "app", cx);
+    switch_grouping(&shell, cx);
+    until(&shell, cx, "the sections", |cx| {
+        present(cx, machine_id("pc")) && present(cx, machine_id("server"))
+    });
+    settle(&shell, cx);
+    let cutout = part_of(machine_mark_id("server"), "cutout");
+    let side = cx.update(|_, cx| palette(cx)).side;
+    let at_rest = colour(cutout.clone()).expect("the mark was drawn");
+    assert_eq!(at_rest, side, "at rest the row's fill is the tree's own");
+
+    cx.update(|window, cx| window.hover(machine_id("server"), cx));
+    settle(&shell, cx);
+    let hovered = colour(cutout).expect("the mark was drawn");
+    assert_ne!(
+        hovered, side,
+        "a hovered row's mark does not cut out in the tree's colour"
+    );
 }
 
 #[gpui_kit::test]

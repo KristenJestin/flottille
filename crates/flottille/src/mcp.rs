@@ -274,7 +274,8 @@ const SERVED: [Definition; 33] = [
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one: a program takes its folder as an argument. The place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
                 "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
-                "why": {"type": "string", "description": "One sentence: why this run."}
+                "why": {"type": "string", "description": "One sentence: why this run."},
+                "exception": {"type": "string", "description": "A forced push of your own branch held for good, its destination named (git push --force origin HEAD:refs/heads/<your branch>): ask the user to lift that rule for this session; say what it refuses and why it is wrong here."}
             }, "additionalProperties": false})
         },
     },
@@ -384,6 +385,7 @@ const SERVED: [Definition; 33] = [
                 "resolved": {"type": "boolean", "description": "resolve: true resolves the thread, false opens it again."},
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
+                "exception": {"type": "string", "description": "merge, close, reopen, edit labels, blocked for good: ask the user to lift that rule for this session; say in one line why it is wrong here: Flottille shows the pull request and what blocks it. That pull request then merges past its protection."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}, "description": "subscribe: what wakes you. approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer."},
@@ -443,6 +445,7 @@ const SERVED: [Definition; 33] = [
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
+                "exception": {"type": "string", "description": "close, reopen, edit labels, blocked for good: ask the user to lift that rule for this session; say why."},
                 "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
@@ -2608,9 +2611,11 @@ async fn played_whole(
     let started = Instant::now();
     let replaced = is_replaced(daemon, grant);
     let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
+    // An exception asked for rides on the call it is for: the tool never sees it.
+    let (args, asking) = crate::exceptions::split(args);
     // A line that only prints part of a file is the read it is, served and recorded as such, once
     // nothing refuses the call as the run it was sent as.
-    let read = if replaced || removed.is_some() {
+    let read = if replaced || removed.is_some() || !matches!(asking, Ok(None)) {
         None
     } else {
         crate::read_commands::as_read(daemon, grant, tool, &args).await
@@ -2689,6 +2694,11 @@ async fn played_whole(
         refused
     } else if let Some(why) = branch_refused {
         Outcome::Refused(why)
+    } else if let Err(why) = &asking {
+        Outcome::Refused(why.clone())
+    } else if shaped && matches!(asking, Ok(Some(_))) {
+        // Every call another machine answers, a read or a removal of a launch's included.
+        Outcome::Refused(crate::exceptions::ELSEWHERE.into())
     } else if let Some(away) = &away {
         // Judged by the machine it runs on, as a call of its own agents is: nothing of it here.
         crate::across::forward(daemon, grant, tool, &args, away).await
@@ -2704,7 +2714,7 @@ async fn played_whole(
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
-        let digest = match removes_a_workspace(tool, &args) {
+        let mut digest = match removes_a_workspace(tool, &args) {
             true => crate::actions::removal_digest(daemon, grant, &args).await,
             false => None,
         };
@@ -2714,6 +2724,17 @@ async fn played_whole(
             Err(refused) => refused,
             Ok(says) => {
                 let (decided, first) = judged_off(daemon, grant, tool, &args).await;
+                // An exception's request covers what Flottille read when it was asked.
+                let decided = match &asking {
+                    Ok(Some(why)) => {
+                        let (decided, scope) =
+                            crate::exceptions::asked(daemon, grant, tool, &args, decided, why)
+                                .await;
+                        digest = digest.or(scope);
+                        decided
+                    }
+                    _ => decided,
+                };
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => match stale(daemon, grant, tool) {
@@ -2779,6 +2800,7 @@ async fn played_whole(
                                     && removes_a_workspace(tool, &args)
                                     && crate::actions::removal_loses(&says))
                                 && !gate::asks_leave(&ask)
+                                && !crate::exceptions::asks(&ask)
                                 && !gate::asks_end(&ask)
                                 && !gate::asks_launch_elsewhere(&ask)
                                 && !crate::services::stops(tool, &args)
@@ -3073,7 +3095,11 @@ pub fn judged(
         "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
         _ => Vec::new(),
     };
-    (verdict_of(daemon, grant, tool, args, &first), first)
+    let verdict = verdict_of(daemon, grant, tool, args, &first);
+    (
+        crate::exceptions::lifted(daemon, grant, tool, args, verdict),
+        first,
+    )
 }
 
 fn verdict_of(
@@ -3213,8 +3239,13 @@ fn verdict_of(
         false => gate::Class::Base,
     };
     base.push(crate::actions::asked("workspace"));
+    let count = match class {
+        gate::Class::Base => base.len(),
+        gate::Class::Judge => 0,
+    };
     base.extend(judge);
     gate::Verdict::Ask(gate::Ask {
+        base: count,
         reasons: base,
         class,
         kind: Kind::Action,
@@ -3434,6 +3465,7 @@ fn with_services(
                 reasons: vec![format!(
                     "the service {name} is marked to ask before it runs"
                 )],
+                base: 0,
                 class: gate::Class::Judge,
                 kind: Kind::Call,
             };
@@ -3473,8 +3505,10 @@ fn with_services(
         }
     }
     let (mut base, mut judge, kind) = match verdict {
-        gate::Verdict::Ask(ask) if ask.class == gate::Class::Base => {
-            (ask.reasons, Vec::new(), ask.kind)
+        gate::Verdict::Ask(mut ask) if ask.class == gate::Class::Base => {
+            // Its reasons to judge stay apart: an exception lifts the base ones alone.
+            let judge = ask.reasons.split_off(ask.base.min(ask.reasons.len()));
+            (ask.reasons, judge, ask.kind)
         }
         gate::Verdict::Ask(ask) => (Vec::new(), ask.reasons, ask.kind),
         _ => (Vec::new(), Vec::new(), Kind::Call),
@@ -3500,9 +3534,11 @@ fn with_services(
         true => gate::Class::Judge,
         false => gate::Class::Base,
     };
+    let count = base.len();
     base.extend(judge);
     gate::Verdict::Ask(gate::Ask {
         reasons: base,
+        base: count,
         class,
         kind,
     })
