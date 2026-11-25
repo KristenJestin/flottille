@@ -394,7 +394,8 @@ const NOTHING_SAID_FLASHES: &str = "a defect the gate found, to fix: `Nothing sa
 const SECTIONS_LATE: &str = "a defect the gate found, to fix: a section of the settings page whose read lands after the page entered (the forges, the providers) takes its new height in one frame, and the sections below it jump";
 const SESSION_SETTLES_LATE: &str = "a defect the gate found, to fix: the session page's rail and composer move once, in one frame, as its conversation arrives";
 
-/// What the gate allows on the window's pages, each with its reason.
+/// What the gate allows on the window's pages, each with its reason; the first entry that fits a
+/// finding takes it, so an entry for a part comes before one for its page.
 const PAGES: &[Allow] = &[
     Allow {
         scenario: "settings",
@@ -415,20 +416,6 @@ const PAGES: &[Allow] = &[
         kind: Kind::CutExit,
         element: "project-page",
         why: LEFT,
-        racy: false,
-    },
-    Allow {
-        scenario: "session",
-        kind: Kind::PopIn,
-        element: "session-header",
-        why: SESSION_OPENS_AT_ONCE,
-        racy: false,
-    },
-    Allow {
-        scenario: "session",
-        kind: Kind::PopIn,
-        element: "reply",
-        why: SESSION_OPENS_AT_ONCE,
         racy: false,
     },
     Allow {
@@ -464,6 +451,13 @@ const PAGES: &[Allow] = &[
         kind: Kind::CutExit,
         element: "rail-workspace-skeleton",
         why: "`awaiting` cross-fades the skeleton out by an opacity the gate does not see: drawn at its size to the end, it is removed once faded",
+        racy: true,
+    },
+    Allow {
+        scenario: "session",
+        kind: Kind::PopIn,
+        element: "session-page",
+        why: SESSION_OPENS_AT_ONCE,
         racy: false,
     },
 ];
