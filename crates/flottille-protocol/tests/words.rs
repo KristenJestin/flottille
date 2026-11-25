@@ -2,7 +2,7 @@
 //! that the two never say different things of the same request.
 
 use flottille_protocol::words::{
-    BASE_SAYS, LEAVE_SAYS, always_says, forwarded, judged, sentences, source,
+    BASE_SAYS, EXCEPTION_SAYS, LEAVE_SAYS, always_says, forwarded, judged, sentences, source,
 };
 
 #[test]
@@ -26,6 +26,19 @@ fn the_first_message_to_another_session_says_what_it_leaves() {
     let why = "this session has not written to that one before: the user lets it";
     assert_eq!(always_says(why), LEAVE_SAYS);
     assert_eq!(always_says(&sentences([why])), LEAVE_SAYS);
+}
+
+#[test]
+fn an_exception_asked_for_says_it_holds_for_the_rest_of_the_session() {
+    let why = "it asks an exception for the rest of this session: force-push (force a push of \
+               its own branch): a check refuses an old commit";
+    assert_eq!(always_says(why), EXCEPTION_SAYS);
+    assert_eq!(always_says(&sentences([why])), EXCEPTION_SAYS);
+    assert_eq!(
+        EXCEPTION_SAYS,
+        "Flottille always asks you this, in every mode: allowing it lifts this rule for this \
+         session until it ends or you withdraw it. Other sessions and its sub-agents still ask."
+    );
 }
 
 #[test]

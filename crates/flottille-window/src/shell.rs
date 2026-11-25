@@ -3984,6 +3984,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.subscription_answered(refused, cx));
                 }
             }
+            Outcome::ExceptionWithdrawn { session, refused } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.exception_answered(refused, cx));
+                }
+            }
             Outcome::LeaveWithdrawn { session, refused } => {
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
@@ -5428,6 +5435,7 @@ impl Shell {
     fn session_rows<'a>(
         &mut self,
         listed: impl Iterator<Item = &'a crate::model::Session>,
+        homes: &[crate::model::Home],
         rows: &mut HashMap<String, Entity<SessionRow>>,
         marks: &mut Vec<AgentState>,
         now: u64,
@@ -5492,6 +5500,14 @@ impl Shell {
                 let closable = there.is_some_and(|there| there.listed && !there.here);
                 row.set_elsewhere(there, cx);
                 row.set_tag(session.tag.as_deref(), cx);
+                // Its machine's mark, when it is another machine's.
+                let machine = there
+                    .filter(|there| !there.here)
+                    .map(|there| there.machine.as_str())
+                    .or(session.tag.as_deref());
+                let home =
+                    machine.and_then(|machine| homes.iter().find(|home| home.machine == machine));
+                row.set_home(home, cx);
                 row.set_actions(
                     session.ended || (there.is_some() && !closable),
                     session.resumable && there.is_none(),
@@ -5531,7 +5547,14 @@ impl Shell {
                     machine.is_none_or(|machine| snapshot.machine_of(session) == machine)
                 })
                 .collect();
-            let rows = self.session_rows(live.iter().copied(), sessions, &mut marks, now, cx);
+            let rows = self.session_rows(
+                live.iter().copied(),
+                &snapshot.homes,
+                sessions,
+                &mut marks,
+                now,
+                cx,
+            );
             let rows = nested(&live, &rows, cx);
             let key = (gone.name.clone(), machine.map(str::to_owned));
             let node = self.gone.remove(&key).unwrap_or_else(|| {
@@ -5609,8 +5632,14 @@ impl Shell {
                         .into_iter()
                         .filter(|session| snapshot.machine_of(session) == home.machine)
                         .collect();
-                    let rows =
-                        self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+                    let rows = self.session_rows(
+                        live.iter().copied(),
+                        &snapshot.homes,
+                        &mut sessions,
+                        &mut marks,
+                        now,
+                        cx,
+                    );
                     let rows = nested(&live, &rows, cx);
                     let key = (project.name.clone(), home.machine.clone());
                     let node = self.machine_projects.remove(&key).unwrap_or_else(|| {
@@ -5689,8 +5718,14 @@ impl Shell {
             for project in &snapshot.projects {
                 let mut marks = Vec::new();
                 let live = snapshot.level_sessions(&project.name, false);
-                let rows =
-                    self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+                let rows = self.session_rows(
+                    live.iter().copied(),
+                    &snapshot.homes,
+                    &mut sessions,
+                    &mut marks,
+                    now,
+                    cx,
+                );
                 let rows = nested(&live, &rows, cx);
                 let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                     let name = project.name.clone();
@@ -5755,7 +5790,14 @@ impl Shell {
         // The ended sessions leave their places for one folded group below every project.
         let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
-        let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
+        let rows = self.session_rows(
+            ended.iter().copied(),
+            &snapshot.homes,
+            &mut sessions,
+            &mut marks,
+            now,
+            cx,
+        );
         // A machine whose ended sessions are not listed is said by the group, rows or none.
         let present = !rows.is_empty() || !self.unlisted.is_empty();
         if self.ended.is_none() && present {

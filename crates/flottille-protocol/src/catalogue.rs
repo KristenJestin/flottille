@@ -253,6 +253,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("subscription.resume", Drive),
     ("leave.list", Read),
     ("leave.withdraw", Drive),
+    ("exception.list", Read),
+    ("exception.withdraw", Drive),
     ("inbox.list", Read),
     ("notifications.list", Read),
     ("notifications.read", Drive),
