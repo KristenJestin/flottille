@@ -66,6 +66,7 @@ fn window<'a>(
 /// asked, what it started. How many animation frames were asked.
 fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> usize {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    common::unfold_pilots(shell, cx);
     cx.executor().advance_clock(by);
     cx.run_until_parked();
     let asked = cx.update(|window, cx| window.simulate_next_frame(cx));

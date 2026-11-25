@@ -1523,6 +1523,7 @@ impl ProjectNode {
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
+        self.chosen = true;
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         self.show_mark(cx);
@@ -2121,6 +2122,8 @@ pub struct SessionRow {
     /// How many led sessions sit under its row, and whether they are unfolded.
     leads: usize,
     open: bool,
+    /// The user chose its fold: unfolded or folded it, here or in a window before (kept).
+    chosen: bool,
     /// Where its row sits among the sessions its pilot leads, which the connector to the row
     /// above draws, and the last one it drew, which stays while it fades out.
     tie: Option<Tie>,
@@ -2190,6 +2193,7 @@ impl SessionRow {
             // A pilot's led rows are folded until the user unfolds them: its summary speaks for
             // them.
             open: false,
+            chosen: false,
             tie: None,
             tie_shown: Tie::default(),
             elsewhere: None,
@@ -2433,10 +2437,16 @@ impl SessionRow {
         self.open
     }
 
+    /// Its led rows are folded as they are by default, the user having chosen nothing.
+    pub fn folded_by_default(&self) -> bool {
+        self.leads > 0 && !self.open && !self.chosen
+    }
+
     /// Makes its led rows folded or unfolded as the user left them, before it is first listed:
     /// nothing animates.
     pub fn restore_open(&mut self, open: bool) {
         self.open = open;
+        self.chosen = true;
     }
 
     /// Folds or unfolds the led sessions under its row: the tree draws its level again.

@@ -109,6 +109,7 @@ fn until(
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        common::unfold_pilots(shell, cx);
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();

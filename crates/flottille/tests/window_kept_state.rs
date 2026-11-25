@@ -262,6 +262,7 @@ fn until(
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        common::unfold_pilots(shell, cx);
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
@@ -1056,6 +1057,7 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
     let (mut seen, mut ended) = (0, 0);
     while seen < 40 || ended < 40 {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        common::unfold_pilots(shell, cx);
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));

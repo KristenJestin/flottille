@@ -5435,6 +5435,11 @@ impl Shell {
         }
     }
 
+    /// The rows of the sidebar's sessions, every one it holds.
+    pub fn session_rows(&self) -> Vec<Entity<SessionRow>> {
+        self.sessions.values().cloned().collect()
+    }
+
     /// The rows of the Leads section of the session `id`: the sessions it leads, here and on
     /// other machines, and its launches held for the user.
     fn led_lines_of(&self, id: &str) -> Vec<crate::leads::LedLine> {

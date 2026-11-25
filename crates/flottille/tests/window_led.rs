@@ -16,7 +16,7 @@ use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::{
     session_detach_id, session_end_id, session_id, session_mark_id, session_menu_id,
-    session_waits_id,
+    session_summary_id, session_waits_id,
 };
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
@@ -95,6 +95,7 @@ fn until(
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        common::unfold_pilots(shell, cx);
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
@@ -688,7 +689,7 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_pilot_that_waits_for_its_led_session_says_which_on_its_row(cx: &mut TestAppContext) {
+fn a_pilot_that_waits_for_its_led_session_sums_it_up_on_its_row(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
@@ -698,19 +699,16 @@ fn a_pilot_that_waits_for_its_led_session_says_which_on_its_row(cx: &mut TestApp
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let (lead, _led) = lead_and_led(&user);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the pilot says what it waits for", |cx| {
-        cx.update(|window, _| {
-            window
-                .try_find(session_waits_id(&lead))
-                .and_then(|found| found.label().map(str::to_owned))
-                .as_deref()
-                == Some("waits for Docs")
-        })
+    // Its summary takes the place of what it waits for (#1452), which its tooltip still says.
+    until(&shell, cx, "the pilot sums up what it leads", |cx| {
+        label(cx, session_summary_id(&lead)).as_deref() == Some("leads 1")
     });
+    settle(cx);
+    assert_eq!(label(cx, session_waits_id(&lead)), None);
 }
 
 #[gpui_kit::test]
-fn a_long_wait_stays_inside_its_row_at_one_line_high(cx: &mut TestAppContext) {
+fn a_pilot_s_summary_stays_inside_its_row_at_one_line_high(cx: &mut TestAppContext) {
     let title = "Documentation of the authentication and authorisation subsystem internals";
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
@@ -721,77 +719,32 @@ fn a_long_wait_stays_inside_its_row_at_one_line_high(cx: &mut TestAppContext) {
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let (lead, led) = lead_and_led(&user);
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the pilot says what it waits for", |cx| {
-        label(cx, session_waits_id(&lead)).is_some()
+    until(&shell, cx, "the pilot's summary", |cx| {
+        label(cx, session_summary_id(&lead)).is_some()
+    });
+    until(&shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(&led)).is_some()
     });
     settle(cx);
 
     let bounds = |id: gpui_kit::ElementId, cx: &mut VisualTestContext| {
         cx.update(|window, _| window.find(id).bounds())
     };
-    let (row, waits) = (
+    let (row, summary) = (
         bounds(session_id(&lead), cx),
-        bounds(session_waits_id(&lead), cx),
-    );
-    assert_eq!(
-        label(cx, session_waits_id(&lead)),
-        Some(format!("waits for {title}")),
-        "the whole words are there, the row cuts them"
+        bounds(session_summary_id(&lead), cx),
     );
     assert!(
-        waits.right() <= row.right() && waits.bottom() <= row.bottom(),
-        "inside the row: {waits:?} in {row:?}"
+        summary.right() <= row.right() && summary.bottom() <= row.bottom(),
+        "inside the row: {summary:?} in {row:?}"
     );
-    assert!(waits.size.height <= px(17.), "one line high: {waits:?}");
-    // The row is as high as one that waits for nothing: the led session's, on its own line.
+    assert!(summary.size.height <= px(17.), "one line high: {summary:?}");
+    // The row is as high as one that sums up nothing: the led session's, on its own line.
     assert_eq!(
         row.size.height,
         bounds(session_id(&led), cx).size.height,
         "the second line keeps its height"
     );
-}
-
-#[gpui_kit::test]
-fn a_pilot_s_row_follows_the_led_session_when_it_is_renamed_and_the_words_fade(
-    cx: &mut TestAppContext,
-) {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [
-        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}}]},
-        {"when": "Write the docs", "do": [{"hang": true}]}
-    ]}));
-    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
-    let (lead, led) = lead_and_led(&user);
-    let (shell, cx) = window(&user, cx);
-    let says = |cx: &mut VisualTestContext| label(cx, session_waits_id(&lead));
-    until(&shell, cx, "the pilot says what it waits for", |cx| {
-        says(cx).as_deref() == Some("waits for Docs")
-    });
-    settle(cx);
-    assert_eq!(
-        cx.update(|window, cx| window.simulate_next_frame(cx)),
-        0,
-        "nothing asks for a frame while the words rest"
-    );
-
-    user.call("agent.rename", json!({"agent": led, "title": "Handbook"}))
-        .unwrap();
-    until(&shell, cx, "the row follows the new title", |cx| {
-        says(cx).as_deref() == Some("waits for Handbook")
-    });
-    // The words do not swap at once: they fade back in over a few frames, then rest.
-    let mut frames = 0;
-    for _ in 0..60 {
-        cx.executor().advance_clock(Duration::from_millis(16));
-        cx.run_until_parked();
-        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
-            break;
-        }
-        frames += 1;
-    }
-    eprintln!("FRAMES {frames}");
-    assert!(frames >= 4, "the words fade over HOVER, {frames} frames");
 }
 
 const QUESTION: &str = "Cover the logout too?";

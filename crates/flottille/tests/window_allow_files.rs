@@ -209,6 +209,7 @@ fn signing(machine: &Machine) -> Sign {
 /// One step of the window as the platform would run it.
 fn step(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    common::unfold_pilots(shell, cx);
     cx.executor().advance_clock(Duration::from_millis(16));
     cx.run_until_parked();
     cx.update(|window, cx| window.simulate_next_frame(cx));
