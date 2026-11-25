@@ -1302,8 +1302,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `reopen`, `status`, `log_time`) or subscribed to; a pull request it opened (`forge create`) is
   the subject when it holds no ticket, and beside the ticket when it does; a ticket it only read
   (`tickets show`) counts only while nothing it holds is open, and a search never moves it. Once
-  all it held is closed or merged it is free: `Free · nothing in hand`, its page saying what it
-  last held (`#5 done · #12 merged`). A session that never held anything has no subject and shows
+  all it held is closed or merged it is free: `Free · nothing in hand`, in faint ink, its page
+  saying what it last held (`#5 done · #12 merged`). An ended session keeps the subject it had
+  when it ended. A session that never held anything has no subject and shows
   its title. The row's first line says the ticket's key as a chip, then its title (else `#12` and
   the pull request's title, else `Free · nothing in hand`); the session's own title stays in the
   line's tooltip and the page's header. A title the user gave (Rename…) wins: it keeps the first

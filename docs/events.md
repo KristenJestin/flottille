@@ -1144,8 +1144,9 @@ notifications follow it.
 What the session is about changed (`docs/design.md` §10, "What a session is about"): it took
 another ticket in hand, opened a pull request, or what it held was closed or merged; also when
 only the title of its ticket or pull request changed, or the checks of its pull request. Told once
-per change, against what was last said; a session's first subject is one too. A round of the
-items is one change: each session it concerns is told at most once for it.
+per change, against what was last said; a session's first subject is one too. A burst of
+events of the items is one change: each session it concerns is told at most once for it. An
+ended session is told no more: it keeps the subject it had when it ended.
 
 | Field | |
 |---|---|

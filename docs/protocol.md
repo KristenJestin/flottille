@@ -2244,7 +2244,8 @@ last held`); `last`, only when free, what it last held (`#5 done · #12 merged`)
 the pull request it opened or its branch's, from the items the daemon keeps (`details.head`),
 `{"key", "repository", "title", "state", "url", "checks"}`, `checks` one mark (`passing`,
 `failing`, `pending`) or `null`, never read from the forge for this; `null` when there is none.
-A change of it is an `agent.updated` event (`docs/events.md`).
+A change of it is an `agent.updated` event (`docs/events.md`). An ended session keeps the subject
+it had when it ended.
 
 Each method answers `not-found` when the agent does not exist.
 
