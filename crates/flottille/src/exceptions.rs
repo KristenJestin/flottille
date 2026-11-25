@@ -884,7 +884,7 @@ mod tests {
         let scope = |repository: &str| Scope {
             repository: repository.into(),
             branch: "app/login".into(),
-            pull: None,
+            ..Scope::default()
         };
         let line = "git push -f origin HEAD:refs/heads/app/login";
         assert_eq!(
