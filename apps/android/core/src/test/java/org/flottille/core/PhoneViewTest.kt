@@ -6,6 +6,7 @@ import org.flottille.core.ffi.MemberView
 import org.flottille.core.ffi.ProjectView
 import org.flottille.core.ffi.RequestView
 import org.flottille.core.ffi.SessionView
+import org.flottille.core.ffi.SubjectView
 import org.flottille.core.ffi.TunnelView
 import org.flottille.core.ffi.ViewState
 import org.junit.Assert.assertEquals
@@ -25,7 +26,7 @@ class PhoneViewTest {
         )
 
     private fun session(machine: String, agent: String) =
-        SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL, created = 3uL, pilot = "")
+        SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL, created = 3uL, pilot = "", subject = null, renamed = false)
 
     private fun state(
         machines: List<MachineView> = emptyList(),
@@ -86,6 +87,21 @@ class PhoneViewTest {
         assertEquals(
             listOf(Triple("server", "a1", true), Triple("server", "a2", true), Triple("laptop", "a1", false)),
             waiting,
+        )
+    }
+
+    @Test
+    fun a_session_s_subject_reaches_the_screens() {
+        val said = session("server", "a1").copy(subject = SubjectView("ticket", "SHOP-60", "Refunds in the export"), renamed = true)
+        val free = session("server", "a2").copy(subject = SubjectView("free", "", "Free · nothing in hand"))
+        val view = state(projects = listOf(ProjectView("alpha", listOf(said, free, session("server", "a3"))))).toPhoneView()
+        assertEquals(
+            listOf(
+                Subject("SHOP-60", "Refunds in the export") to true,
+                Subject("", "Free · nothing in hand", free = true) to false,
+                null to false,
+            ),
+            view.projects[0].sessions.map { it.subject to it.renamed },
         )
     }
 

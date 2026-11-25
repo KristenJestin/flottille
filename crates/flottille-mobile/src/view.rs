@@ -99,6 +99,23 @@ pub struct SessionView {
     /// The session of the agent that leads it, on the same machine (the root of that agent's
     /// tree); empty for a session no agent leads.
     pub pilot: String,
+    /// What it is about, as its machine derives it (`docs/design.md` §10, "What a session is
+    /// about"); none while it never held anything: its row then says its title.
+    pub subject: Option<SubjectView>,
+    /// Whether the user named it: their title keeps the row's first line, the key goes to the
+    /// second.
+    pub renamed: bool,
+}
+
+/// What a session is about, as its row says it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SubjectView {
+    /// `ticket`, `pull_request` or `free`.
+    pub kind: String,
+    /// `SHOP-60`, `#12`; empty when free.
+    pub key: String,
+    /// The words of the row's first line, the window's.
+    pub line: String,
 }
 
 /// The conversation of the session the app follows (`Core::follow`): its latest page of events,
@@ -893,6 +910,8 @@ impl View {
                         .as_deref()
                         .map(|lead| self.root_of(machine, lead))
                         .unwrap_or_default(),
+                    subject: None,
+                    renamed: false,
                 });
         }
         let projects = projects

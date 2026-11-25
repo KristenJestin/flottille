@@ -3210,3 +3210,95 @@ async fn the_app_and_the_browser_never_share_a_tunnel() {
     assert!(still_held(&phone, &browser.tunnel.tunnel, Duration::from_millis(200)).await);
     place.served.stop().await;
 }
+
+/// A session as `agent.list` gives it, about `subject`, named by `titled_by`.
+fn about(id: &str, titled_by: Value, subject: Value) -> Value {
+    json!({"id": id, "project": "app", "title": "Fix the login", "state": "idle",
+        "created_at": 1, "titled_by": titled_by, "subject": subject})
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mobile_view_carries_a_session_s_subject() {
+    let ticket = json!({"kind": "ticket", "key": "SHOP-60", "title": "Refunds in the export",
+        "from": "a ticket it changed", "last": null, "pull_request": null});
+    let untitled = json!({"kind": "pull_request", "key": "#12", "title": null,
+        "from": "a pull request it opened", "last": null, "pull_request": null});
+    let free = json!({"kind": "free", "key": null, "title": null, "from": "what it last held",
+        "last": "SHOP-60 done", "pull_request": null});
+    let place = Place::new().await;
+    place.runner.answer(
+        "agent.list",
+        json!({"agents": [
+            about("a1", Value::Null, ticket.clone()),
+            about("a2", json!("agent"), untitled),
+            about("a3", Value::Null, free.clone()),
+            about("a4", json!("user"), ticket.clone()),
+            about("a5", Value::Null, Value::Null),
+        ]}),
+    );
+    let (phone, _taken) = place.linked().await;
+
+    /// What each session's row is given: its subject's kind, key and words, and `renamed`.
+    fn said(view: &ViewState) -> Vec<(String, Option<(String, String, String)>, bool)> {
+        let mut said: Vec<_> = view
+            .projects
+            .iter()
+            .flat_map(|project| &project.sessions)
+            .map(|session| {
+                let subject = session.subject.as_ref().map(|subject| {
+                    (
+                        subject.kind.clone(),
+                        subject.key.clone(),
+                        subject.line.clone(),
+                    )
+                });
+                (session.agent.clone(), subject, session.renamed)
+            })
+            .collect();
+        said.sort();
+        said
+    }
+    let row = |agent: &str, subject: Option<(&str, &str, &str)>, renamed: bool| {
+        let subject =
+            subject.map(|(kind, key, line)| (kind.to_owned(), key.to_owned(), line.to_owned()));
+        (agent.to_owned(), subject, renamed)
+    };
+    let refunds = Some(("ticket", "SHOP-60", "Refunds in the export"));
+    let nothing = Some(("free", "", "Free · nothing in hand"));
+    let listed = vec![
+        row("a1", refunds, false),
+        row("a2", Some(("pull_request", "#12", "#12")), false),
+        row("a3", nothing, false),
+        row("a4", refunds, true),
+        row("a5", None, false),
+    ];
+    until(&phone, "the subjects listed", |view| said(view) == listed).await;
+
+    // It follows the events: a change of subject, one that leaves none, a rename by the user; an
+    // update that says nothing of the subject, and an agent's own title, leave the row as it was.
+    let runner = &place.runner;
+    runner.emit("agent.updated", json!({"agent": "a1", "subject": free}));
+    runner.emit("agent.updated", json!({"agent": "a2", "tools": []}));
+    runner.emit("agent.updated", json!({"agent": "a3", "subject": null}));
+    runner.emit("agent.updated", json!({"agent": "a5", "subject": ticket}));
+    runner.emit(
+        "agent.titled",
+        json!({"agent": "a2", "title": "Named by it", "by": "agent"}),
+    );
+    runner.emit(
+        "agent.titled",
+        json!({"agent": "a5", "title": "Mine", "by": "user"}),
+    );
+    let followed = vec![
+        row("a1", nothing, false),
+        row("a2", Some(("pull_request", "#12", "#12")), false),
+        row("a3", None, false),
+        row("a4", refunds, true),
+        row("a5", refunds, true),
+    ];
+    until(&phone, "the subjects followed", |view| {
+        said(view) == followed
+    })
+    .await;
+    place.served.stop().await;
+}

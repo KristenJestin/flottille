@@ -22,7 +22,17 @@ data class SessionRow(
     val waiting: Boolean = false,
     val created: Long = 0,
     val pilot: String = "",
+    /** What it is about, as its machine derives it; none while it never held anything. */
+    val subject: Subject? = null,
+    /** The user named it: their title keeps the first line, the key goes to the second. */
+    val renamed: Boolean = false,
 )
+
+/**
+ * What a session is about, as its row says it: [key] (`SHOP-60`, `#12`; empty when free) and
+ * [line], the words of the first line; [free] once it holds nothing in hand.
+ */
+data class Subject(val key: String, val line: String, val free: Boolean = false)
 
 /**
  * One entry of a conversation: `user`, `agent`, `thought`, `tool`, `link` or `delivery`. [seq] orders and names

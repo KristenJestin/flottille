@@ -27,7 +27,7 @@ pub use panic::{PANIC_FILE, keep_panics, last_panic};
 pub use tunnel::{Opened, TunnelEnd, TunnelView};
 pub use view::{
     AskOption, AskQuestion, AskView, ChildView, ConversationView, Entry, MachineView, MemberView,
-    ProjectView, RequestView, RunView, SessionView, ViewState,
+    ProjectView, RequestView, RunView, SessionView, SubjectView, ViewState,
 };
 
 /// Why the core could not do what it was asked: a sentence for the user.
